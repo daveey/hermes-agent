@@ -693,9 +693,13 @@ def test_synthetic_success_without_version_keeps_custody_not_a_fresh_parent(live
                 verdict.pop('version')
                 self.slot['last_verdict'] = json.dumps(verdict)
             return result
+
+        def row_evidence(self, board, table, uid):
+            return dict(board=board, table=table, uid=uid, state='unknown', row=None, head=10)
+
     receiver = MissingVersion()
     for _ in range(2):
-        with pytest.raises(ValueError, match='^synthetic parent authoritative version unavailable$'):
+        with pytest.raises(ValueError, match='^synthetic parent current row unavailable$'):
             client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
         assert journal.snapshot(live)['pending'] is not None
         assert receiver.slot['a'] == '0'

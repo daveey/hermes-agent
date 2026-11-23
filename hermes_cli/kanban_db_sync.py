@@ -1340,6 +1340,7 @@ def apply_remote_changes(
     conn: sqlite3.Connection, changes: Sequence[RemoteChange], *, new_cursor: int, board: Optional[str] = None,
     observers: bool = True, local_pending_wins: bool = False,
     keep: Optional[Callable[[sqlite3.Connection, RemoteChange], bool]] = None,
+    allow_nested: bool = False,
 ) -> ApplyResult:
     """Apply one feed page in ONE transaction, then fire local observers.
 
@@ -1352,14 +1353,18 @@ def apply_remote_changes(
     ``observers=False`` (a shadow copy) applies the rows and fires nothing. ``local_pending_wins`` (the feed
     pull and the snapshot rebuild) keeps every task field that has an unanswered local edit in the outbox, read
     in the same transaction as the apply. ``keep`` (the live-file rebuild sweep) is asked about each change inside
-    that transaction; a change it refuses is skipped. [daveey]"""
+    that transaction; a change it refuses is skipped. ``allow_nested`` is only for
+    observer-free projection inside an owning settlement transaction; its savepoint
+    is not durable until that caller commits. [daveey]"""
+    if allow_nested and observers:
+        raise ValueError('nested remote projection requires observers=False')
     from hermes_cli.kanban_sync_apply_schema import page_writer
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     from hermes_cli import kanban_containment_replica as containment
     from hermes_cli.kanban_sync_apply_budget import check_budget, transaction_budget
     containment.prepare_apply(conn, changes)
     with page_writer(conn, (*SYNCED_TABLES, "kanban_sync_outbox", "kanban_sync_state"),
-                     cache=bool(changes) and keep is None), transaction_budget(conn):
+                     cache=bool(changes) and keep is None, allow_nested=allow_nested), transaction_budget(conn):
         result.revision_before = _repair_revision(conn)
         # Serialize with set_mode(off): a feed fetched before detach must not
         # overwrite locally held custody after the detach transaction commits.

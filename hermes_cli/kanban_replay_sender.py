@@ -79,6 +79,29 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         return dict(row)
 
     membership = None
+    current_row = None
+
+    def refresh_current_row():
+        """Read current state separately; never enrich the historical slot verdict."""
+        decision = reconcile(journal.snapshot(conn), remote)
+        if decision['action'] != 'record':
+            return None
+        verdict = decision['verdict']
+        if verdict['status'] not in ('applied', 'merged') or verdict.get('version'):
+            return None
+        row = source()
+        if not row.get('_parent'):
+            return None
+        evidence = hub.row_evidence(board, 'tasks', row['row_uid'])
+        state = evidence.get('row')
+        if (evidence.get('board') != board or evidence.get('table') != 'tasks' or
+                evidence.get('uid') != row['row_uid'] or evidence.get('state') != 'live' or
+                type(evidence.get('head')) is not int or evidence['head'] < 0 or
+                not isinstance(state, dict) or state.get('uid') != row['row_uid'] or
+                type(state.get('version')) is not int or state['version'] <= 0 or
+                state.get('deleted_at') is not None):
+            raise ValueError('synthetic parent current row unavailable')
+        return client._row_change('tasks', state)
 
     def refresh_capacity():
         from hermes_cli import kanban_replay_deferred as deferred
@@ -138,7 +161,16 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         if status not in ('applied', 'merged'):
             raise ValueError('tracer final disposition requires custody integration')
         if row.get('_parent') and not verdict.get('version'):
-            raise ValueError('synthetic parent authoritative version unavailable')
+            if current_row is None or current_row.uid != row['row_uid']:
+                raise ValueError('synthetic parent authoritative version unavailable')
+            # Project the separately read current image with normal pending-wins
+            # and version guards. Do not pretend its version was the old result's.
+            cursor = (sync.sync_state(conn) or {}).get('cursor', 0)
+            if conn.execute("SELECT 1 FROM kanban_sync_tombstones WHERE table_name='tasks' AND row_uid=?",
+                            (row['row_uid'],)).fetchone():
+                raise ValueError('synthetic parent current projection held by local deletion')
+            sync.apply_remote_changes(conn, [current_row], new_cursor=cursor, board=board,
+                                      observers=False, local_pending_wins=True, allow_nested=True)
         if verdict.get('version') and row['table_name'] == 'tasks':
             conn.execute('UPDATE tasks SET sync_version=MAX(COALESCE(sync_version,0),?) WHERE id=?',
                          (verdict['version'], row['row_uid']))
@@ -161,6 +193,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
                                         hold_rejected=True)
 
         membership = refresh_capacity()
+        current_row = refresh_current_row()
         with write_txn(conn):
             decision = journal.recover(conn, remote, record)
             if decision['action'] == 'record':
@@ -204,6 +237,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         out.sent += 1
         remote = hub._call('GET', root + 'inspect')['slot']
         membership = refresh_capacity()
+        current_row = refresh_current_row()
         with write_txn(conn):
             decision = journal.recover(conn, remote, record)
         if decision['action'] != 'record':

@@ -31,7 +31,7 @@ def _prepare(conn, tables):
 
 
 @contextmanager
-def page_writer(conn, tables, *, cache):
+def page_writer(conn, tables, *, cache, allow_nested=False):
     """Keep the existing atomic page; cache only immutable schema, never outbox/row state.
 
     A rare concurrent migration refreshes the fixed-size schema snapshot under the
@@ -42,7 +42,7 @@ def page_writer(conn, tables, *, cache):
     prepared = _prepare(conn, tables) if cache else None
     token = _SCHEMA.set(prepared)
     try:
-        with write_txn(conn):
+        with write_txn(conn, allow_nested=allow_nested):
             if prepared is not None and conn.execute('PRAGMA schema_version').fetchone()[0] != prepared.version:
                 prepared = _prepare(conn, tables)
                 _SCHEMA.set(prepared)
