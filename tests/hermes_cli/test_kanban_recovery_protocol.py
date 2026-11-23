@@ -9,6 +9,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_replay_deferred as deferred
 from hermes_cli import kanban_replay_observation as observation
 from hermes_cli import kanban_replay_episodes as episodes
+from hermes_cli import kanban_replay_diagnostics as diagnostics
 from hermes_cli import kanban_replay_journal as journal
 from hermes_cli import kanban_replay_existence as existence
 from hermes_cli import kanban_actionability_transport as actionability
@@ -22,6 +23,7 @@ CASES = [
     ('kanban_replay_observation1', 'evidence_sha256'),
     ('kanban_replay_observation_reads1', 'token'),
     ('kanban_replay_episode1', 'sample_token'),
+    ('kanban_replay_diagnostic1', 'receipt_json'),
     ('kanban_failure_commands', 'canonical_receipt_json'),
     ('kanban_actionability_commands', 'canonical_receipt_json'),
     ('kanban_sync_omissions', 'restore_op_id'),
@@ -35,7 +37,7 @@ CASES = [
 def install(conn):
     conn.executescript(sync.SYNC_SCHEMA_SQL)
     for sql in (journal._SCHEMA, observation._SCHEMA, observation._CURSOR, observation._READS,
-                episodes._SCHEMA, episodes._CLOCK, existence._SCHEMA):
+                episodes._SCHEMA, episodes._CLOCK, existence._SCHEMA, diagnostics._SCHEMA):
         conn.execute(sql)
     deferred.install(conn)
     failure._ensure_commands(conn)

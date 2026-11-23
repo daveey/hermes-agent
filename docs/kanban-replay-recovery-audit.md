@@ -120,6 +120,16 @@ Lost command/deferred/omission/lineage rows remain explicitly reported LOSS, not
 absent work that can be silently retired or reconstructed. Never-bound,
 unrecovered legacy databases retain their existing transport.
 
+## C diagnostic custody addendum
+
+The B4 inventory/counts above describe that gate's historical schema. C adds
+`kanban_replay_diagnostic1`, indexed by episode identity and unique notice key.
+It stores owner binding and delivery readback and is also prohibited from older
+backup refill. The existing actual page-damage matrix now covers this additional
+table: absent the new exclusion it refilled four stale receipt rows; with the
+exclusion it reports loss while preserving complete readable current tuples.
+This is not evidence of actual notice delivery or external migration readiness.
+
 ## Remaining recovery and rollout boundaries
 
 - Authoritative reconciliation tooling for incomplete/lost journals is not

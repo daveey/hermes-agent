@@ -71,6 +71,8 @@ def replace(conn, board, task, entries, started, finished, previous):
         conn.execute('INSERT INTO kanban_replay_episode1 VALUES (?,?,?,?,?,?,?)',
                      (board, task, entry['origin'], entry['evidence_sha256'], elapsed,
                       finished[0], finished[1]))
+    from hermes_cli.kanban_replay_diagnostics import synchronize
+    synchronize(conn, board, task)
 
 
 def diagnostics(conn):
