@@ -133,8 +133,28 @@ def main():
             subprocess.Popen = spawn
             dispatch._set_worker_pid = set_pid
             try:
-                with closing(connect(board='owned')) as conn:
-                    from contextlib import nullcontext
+                from contextlib import nullcontext
+                from hermes_cli.kanban_db_connect import _dispatch_tick_lock
+                # A concurrent native opener may hold the tick lock at initial open.
+                with _dispatch_tick_lock(kb.kanban_db_path(board='owned')) if crash_contended else nullcontext():
+                    initial_conn = connect(board='owned')
+                if crash_contended:
+                    assert getattr(initial_conn, '_dispatch_open_contended', False)
+                    receipt['initial_open_deferred'] = True
+                if getattr(initial_conn, '_dispatch_open_contended', False):
+                    # Contended handles permanently lack native inode provenance.
+                    # Retrying ticks on that same handle can never recover.
+                    initial_conn.close()
+                    from tests.waiting import wait_until
+                    def reopen_when_uncontended():
+                        candidate = connect(board='owned')
+                        if getattr(candidate, '_dispatch_open_contended', False):
+                            candidate.close()
+                            return None
+                        return candidate
+                    initial_conn = wait_until(reopen_when_uncontended, timeout=60,
+                                              what='uncontended native dispatcher connection')
+                with closing(initial_conn) as conn:
                     from hermes_cli.admission_fence import admission_lock
                     from hermes_constants import get_default_hermes_root
                     # A descheduled reservation publisher can own this flock when the first tick runs.
@@ -170,8 +190,19 @@ def main():
                         # Deterministically elapse this owned attempt; keep real timeout/kill logic.
                         conn.execute('UPDATE task_runs SET started_at=? WHERE id=?', (int(time.time()) - 3601, task.current_run_id))
                         conn.commit()
-                        swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
+                        with _dispatch_tick_lock(kb.kanban_db_path(board='owned')) if contended else nullcontext():
+                            swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
+                        if contended:
+                            assert swept.skipped_locked, swept
+                            receipt['timeout_tick_deferred'] = True
+                        def timeout_when_unlocked():
+                            nonlocal swept
+                            if swept.skipped_locked:
+                                swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
+                            return None if swept.skipped_locked else swept
+                        swept = wait_until(timeout_when_unlocked, timeout=60, what='dispatcher timeout tick lock')
                         receipt['timed_out'] = swept.timed_out
+                        assert swept.timed_out == [tid], swept
                         wait_for(lambda: not kb._pid_alive(receipt['managed_pid']))
                         receipt['managed_dead'] = True
                         assert receipt['pid_preserved'] and receipt['managed_dead'], receipt

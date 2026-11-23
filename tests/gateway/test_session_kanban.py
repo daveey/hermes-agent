@@ -90,10 +90,12 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     policy = Path(receipt['policy_root'])
     assert policy.is_relative_to(tmp_path) and any(policy.glob('child-*')), policy
     if mode == 'crash_contended':
+        assert receipt['initial_open_deferred']
         assert receipt['first_sweep_deferred']
         assert receipt['run_outcome'] == 'crashed' and receipt['failures'] == 1
     if mode == 'timeout_contended':
         assert receipt['initial_claim_deferred']
+        assert receipt['timeout_tick_deferred']
         assert receipt['run_outcome'] == 'timed_out' and receipt['failures'] == 1
         assert receipt['pid_preserved'] and receipt['managed_dead']
     if mode != 'complete':
