@@ -87,8 +87,14 @@ class SessionsSource:
             wake()
 
     def refresh_at(self, wall_deadline):
+        # A capture already observes elapsed boundaries. Rearming one at now
+        # feeds its own publication straight back into capture forever when a
+        # canonical row still carries an active annotation after that boundary.
+        delay = wall_deadline - time.time()
+        if delay <= 0:
+            return
         with self._lock:
-            self._refresh = min(self._refresh, time.monotonic() + max(0, wall_deadline - time.time()))
+            self._refresh = min(self._refresh, time.monotonic() + delay)
 
     def _deadline(self):
         deadlines = [max(self._next_capture, self._retry.get(key, 0)) for key in self._dirty]

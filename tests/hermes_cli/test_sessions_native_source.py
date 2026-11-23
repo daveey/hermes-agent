@@ -118,6 +118,26 @@ def test_time_boundary_and_total_bytes(source):
     assert owner.store._fact_bytes <= owner.store._fact_limit
 
 
+def test_elapsed_display_deadline_does_not_spin_idle_minute(source):
+    owner, clock, calls = source
+    original = owner.reader
+    def read(name, selector):
+        owner.refresh_at(clock[0] - 1)  # canonical annotation can still say active after its boundary
+        return original(name, selector)
+    owner.reader = read
+    owner.demand('sessions', {'id': 'one'})
+    captures = 0
+    end = clock[0] + 60
+    while clock[0] <= end:
+        capture = owner.capture(None, CaptureBudget())
+        owner.commit(capture)
+        captures += 1
+        assert capture.next_deadline > clock[0], 'expired display boundary must not rearm itself'
+        clock[0] = capture.next_deadline
+    assert captures <= 3
+    assert len(calls) == captures
+
+
 def test_expiry_watch_failure_and_close(source):
     owner, clock, _ = source
     owner.demand('sessions', {'id': 'one'})
