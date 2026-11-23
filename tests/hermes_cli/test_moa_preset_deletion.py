@@ -274,8 +274,18 @@ def test_moa_save_refuses_transient_read_failure_without_losing_config(tmp_path,
     real_load = utils.fast_safe_load
     failed_reads = []
 
+    def in_moa_save():
+        # Only the PUT handler's own read: a background config reader (watchers,
+        # app startup) must not consume the single injected failure first.
+        frame = sys._getframe(1)
+        while frame is not None:
+            if frame.f_code.co_name == "set_moa_models":
+                return True
+            frame = frame.f_back
+        return False
+
     def fail_once(stream):
-        if getattr(stream, "name", None) == str(config_path) and not failed_reads:
+        if getattr(stream, "name", None) == str(config_path) and not failed_reads and in_moa_save():
             failed_reads.append(str(config_path))
             raise OSError(errno.EMFILE, "Too many open files")
         return real_load(stream)
