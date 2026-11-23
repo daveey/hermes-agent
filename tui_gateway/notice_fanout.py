@@ -391,6 +391,10 @@ def _remote_boards_quiet(base: tuple, polled: dict, known: dict) -> bool:
 def _remote_change_pass(session_db: Callable) -> FanoutResult:
     """Observe the same remote projection as outcomes; failed reads never mean cards finished."""
     global _remote_memo
+    from hermes_cli import kanban_session_activity as activity
+    from hermes_cli import fact_links_health
+    origin = activity._origin_scope()
+    health_generation = fact_links_health.pending(origin)
     out = FanoutResult()
     try:
         inputs = _remote_inputs_key()
@@ -410,12 +414,11 @@ def _remote_change_pass(session_db: Callable) -> FanoutResult:
             out.retry()
             inputs = None
     memo = _remote_memo
-    if inputs is not None and memo is not None and memo[0] == inputs[0] and memo[1] == _ledger_content_key(inputs[1]) \
+    if health_generation is None and inputs is not None and memo is not None and memo[0] == inputs[0] and memo[1] == _ledger_content_key(inputs[1]) \
             and _remote_boards_quiet(inputs[0], polled, memo[3]):
         _remote_memo = (memo[0], memo[1], {slug: polled[slug][1] for slug in polled}, memo[3])
         return out
     _remote_memo = None
-    from hermes_cli import kanban_session_activity as activity
     from hermes_state_outcome import refresh_outcomes_quietly
     from tui_gateway import notice_fanout_state as state
     from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
@@ -433,10 +436,13 @@ def _remote_change_pass(session_db: Callable) -> FanoutResult:
     if previous is None:
         if not state.seed_remote(snapshot):
             out.retry()
-        return out
+            return out
+        if health_generation is None:
+            return out
+        previous = {}  # first source publication must also repair retained unknown outcomes
     acked: dict[str, Optional[frozenset[tuple[str, str]]]] = {}
     for chat in sorted(previous.keys() | snapshot.keys()):
-        if previous.get(chat) == snapshot.get(chat):
+        if health_generation is None and previous.get(chat) == snapshot.get(chat):
             continue
         try:
             with session_db(chat) as (db, tip):
@@ -465,6 +471,8 @@ def _remote_change_pass(session_db: Callable) -> FanoutResult:
         after = _poll_boards(inputs[0], {slug: polled[slug][1] for slug in polled})
         if prints is not None and after is not None and all(after[slug][1] == polled[slug][1] for slug in polled):
             _remote_memo = (inputs[0], _ledger_content_key(inputs[1]), {slug: polled[slug][1] for slug in polled}, prints)
+    fact_links_health.acknowledge(origin, health_generation,
+                                  complete=committed and (previous.keys() | snapshot.keys()) <= acked.keys())
     return out
 
 

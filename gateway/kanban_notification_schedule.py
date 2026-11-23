@@ -22,9 +22,12 @@ class BoundActions:
         self.retry_at = float("inf")
         self.retry_floor = False
         self.watch = observe_bindings(wake)
+        from hermes_cli.fact_links_health import HealthWatch
+        self.links_health = HealthWatch(wake)
 
     def due(self, now: float, *, legacy_due: bool) -> bool:
-        owners = {owner for _home, owner in self.watch.snapshot()}
+        bindings = self.watch.snapshot()
+        owners = {owner for _home, owner in bindings}
         self.was_bound = self.was_bound or bool(owners)
         for owner in self.actions.keys() - owners:
             self.actions.pop(owner).close()
@@ -45,7 +48,8 @@ class BoundActions:
             return False  # bursts must not spend refusal attempts faster than legacy
         # Consume every pending bit, not just the first true action.
         changed = [action.due(legacy_due=legacy_due) for action in self.actions.values()]
-        return any(changed) or now >= self.retry_at
+        health_changed = self.links_health.due({str(home) for home, _owner in bindings})
+        return any(changed) or health_changed or now >= self.retry_at
 
     def settled(self, report, now: float, interval: float) -> None:
         self.retry_at = report.next_due(now, interval)
@@ -53,6 +57,7 @@ class BoundActions:
 
     def close(self) -> None:
         self.watch.close()
+        self.links_health.close()
         for action in self.actions.values():
             action.close()
         self.actions.clear()

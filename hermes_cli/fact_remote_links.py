@@ -190,6 +190,8 @@ class RemoteLinksSource:
             self.engine.publish([Fact(self.key, capture.value, source_vector=((self.source, capture.after),),
                                       observed_at=capture.observed_at, valid_until=capture.observed_at + 90,
                                       health='fresh')], now=time.time())
+            from hermes_cli.fact_links_health import changed
+            changed(self._origin_scope, True)
         with self._lock:
             if self._result is capture:
                 self._result = None
@@ -199,6 +201,8 @@ class RemoteLinksSource:
         fact = (replace(old, health='stale', error_code=error_code) if old is not None
                 and old.health != 'unknown' else Fact(self.key, {}, error_code=error_code))
         self.engine.publish([fact], now=time.time())
+        from hermes_cli.fact_links_health import changed
+        changed(self._origin_scope, False)
 
     def close(self, timeout=5):
         with self._lock:

@@ -150,6 +150,24 @@ def test_real_running_card_wins_over_another_unavailable_card(db, monkeypatch):
     assert [w["state"] for w in value["on"]] == ["source_unknown", "running"]
 
 
+@pytest.mark.parametrize('failed_read', [False, True])
+def test_own_live_turn_is_independent_of_unknown_remote_cards(db, monkeypatch, failed_read):
+    turn(db)
+    record_turn_start(db.db_path.parent, 'chat', 'working locally')
+    def cards(*a, **kw):
+        if failed_read:
+            raise TimeoutError('remote unavailable')
+        return [{'id': 't_remote', 'status': 'running', 'remote': True, 'stale': True}]
+    monkeypatch.setattr(ksa, 'session_outcome_tasks', cards)
+    try:
+        value = refresh(db, 'card_change')
+        assert value['kind'] == 'running'
+        assert value['presentation']['reason_codes'] == ['own_turn_active']
+        assert value['coverage']['state'] == 'unknown'
+    finally:
+        clear_turn_marker(db.db_path.parent, 'chat')
+
+
 @pytest.mark.parametrize("error", [TimeoutError, RuntimeError])
 def test_card_read_failure_is_neutral_and_recovers(db, monkeypatch, error):
     turn(db)
@@ -164,6 +182,48 @@ def test_card_read_failure_is_neutral_and_recovers(db, monkeypatch, error):
     assert value["reason"] == "source_unknown"
     assert value["presentation"]["stripe"] == "none"
     assert_done(refresh(db, "card_change"))
+
+
+def test_links_health_recomputes_unchanged_remote_outcome_without_task_event(db, monkeypatch):
+    from contextlib import contextmanager
+    from hermes_cli import fact_links_health as health
+    from tui_gateway import notice_fanout as fanout
+    from tui_gateway import notice_fanout_state as state
+    turn(db)
+    health.reset_for_tests()
+    fanout._reset_for_tests()
+    origin = ksa._origin_scope()
+    row = dict(id='t_remote', key='edge/default/build/t_remote', title='remote work',
+               session='chat', status='running', remote=True, board='build', gateway='edge')
+    available = [False]
+    monkeypatch.setattr(ksa, '_remote_cards', lambda *a, **kw: [row])
+    def display(*a, **kw):
+        if not available[0]:
+            from hermes_cli.fact_remote_links import LinksUnavailable
+            raise LinksUnavailable('source unavailable')
+        return [row]
+    monkeypatch.setattr(ksa, 'session_outcome_tasks', display)
+    monkeypatch.setattr(fanout, '_remote_inputs_key', lambda: (('root', 'home', ()), ()))
+    @contextmanager
+    def owner(chat):
+        assert chat == 'chat'
+        yield db, chat
+    try:
+        # The retained strict snapshot is unchanged throughout. Only display-source health moves.
+        assert state.seed_remote({'chat': frozenset({(row['key'], 'running')})})
+        health.changed(origin, False)
+        assert len(fanout._remote_change_pass(owner)) == 1
+        assert so.get_outcome('chat', db=db)['status']['reason'] == 'source_unknown'
+        assert health.pending(origin) is None
+        available[0] = True
+        health.changed(origin, True)
+        assert len(fanout._remote_change_pass(owner)) == 1
+        assert so.get_outcome('chat', db=db)['status']['kind'] == 'running'
+        assert health.pending(origin) is None
+        assert not fanout._remote_change_pass(owner)
+    finally:
+        health.reset_for_tests()
+        fanout._reset_for_tests()
 
 
 def assert_done(status):
