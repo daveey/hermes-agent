@@ -379,3 +379,80 @@ def test_busy_board_during_owner_recheck_refuses_without_aborting_gc(board, monk
         assert path.exists() and os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
     finally:
         _cleanup(path)
+
+
+# --- the custody caller (evicted foreign-board scratch) -------------------------------------
+
+from tests.hermes_cli import test_kanban_scratch_custody as custody_tests
+
+env = custody_tests.env
+
+
+def _custody_tree(env):
+    _tid, path, _run = custody_tests.evicted(env)
+    (path / "link").symlink_to("notes")  # not removable as-is -> archive path
+    _root_owned_locked_tree(path)
+    return path
+
+
+def _from_owner_unchanged():
+    import inspect
+    return any(f.function == "owner_unchanged" for f in inspect.stack()[2:5])
+
+
+@real_sudo
+def test_custody_root_owned_tree_is_adopted_archived_and_removed(env):
+    from hermes_cli import kanban_worktree_gc as gc
+
+    path = _custody_tree(env)
+    try:
+        assert gc.gc_task_scratch(env.conn, older_than_days=7) == 1
+        assert not path.exists()
+    finally:
+        _cleanup(path)
+
+
+@real_sudo
+def test_custody_owner_changed_before_adoption_leaves_tree_untouched(env, monkeypatch):
+    from hermes_cli import kanban_scratch_custody as custody
+    from hermes_cli import kanban_worktree_gc as gc
+
+    path = _custody_tree(env)
+    real = custody._safe
+    reached = []
+
+    def safe(*args, **kwargs):
+        if _from_owner_unchanged():
+            reached.append(True)
+            return False
+        return real(*args, **kwargs)
+    monkeypatch.setattr(custody, "_safe", safe)
+    try:
+        assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
+        assert reached
+        assert path.exists() and not (path / own.RECORD_NAME).exists()
+        assert os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
+    finally:
+        _cleanup(path)
+
+
+@real_sudo
+def test_custody_busy_board_during_owner_recheck_refuses(env, monkeypatch):
+    import sqlite3
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_worktree_gc as gc
+
+    path = _custody_tree(env)
+    real_txn = kb.write_txn
+
+    def txn(conn):
+        if _from_owner_unchanged():
+            raise sqlite3.OperationalError("database is locked")
+        return real_txn(conn)
+    monkeypatch.setattr(kb, "write_txn", txn)
+    try:
+        assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
+        assert path.exists() and os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
+    finally:
+        _cleanup(path)
