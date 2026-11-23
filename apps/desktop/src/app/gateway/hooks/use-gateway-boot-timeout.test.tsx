@@ -188,6 +188,24 @@ it.each([false, true])('recovers timeout without reload (cross-window reset: %s)
   view.unmount()
 })
 
+it('keeps recovery alive after the canonical ensure deadline verdict', async () => {
+  const desktop = fakeDesktop()
+  const pending = deferred<typeof primaryConn>()
+  desktop.getConnection.mockImplementationOnce(() => pending.promise)
+  desktop.getConnection.mockRejectedValueOnce(new Error('Gateway starting (deadline). Use hermes gateway status for recovery.'))
+  ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+  const refreshSessions = vi.fn(async () => undefined)
+  render(<Harness refreshSessions={refreshSessions} />)
+  await act(async () => { await vi.advanceTimersByTimeAsync(BACKEND_BOOT_WAIT_TIMEOUT_MS) })
+  expect($desktopBoot.get().error).toMatch(/Timed out connecting/)
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_001) })
+  expect($desktopBoot.get().error).toMatch(/Gateway starting \(deadline\)/)
+  await act(async () => { await vi.advanceTimersByTimeAsync(4_001) })
+  expect.soft(desktop.getConnection.mock.calls.length).toBe(3)
+  expect.soft(refreshSessions).toHaveBeenCalledOnce()
+  expect.soft($desktopBoot.get().error).toBeNull()
+})
+
 it('stops queued recovery on unmount and ignores a late original readiness reply', async () => {
   const desktop = fakeDesktop()
   const pending = deferred<typeof primaryConn>()
