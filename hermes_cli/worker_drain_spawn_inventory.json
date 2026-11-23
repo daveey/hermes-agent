@@ -590,6 +590,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/kanban_source_refs.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/kanban_sync_schema_alert.py": {
    "direct": 1,
    "routed": 0,
