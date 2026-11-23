@@ -317,7 +317,7 @@ class PluginLoaderMixin:
         from hermes_cli.plugins_discovery import gate_manifest
 
         for manifest in manifests:
-            if (manifest.source != "entrypoint" and manifest.path
+            if (manifest.source in {"user", "project", "bundled"} and not manifest.portable and manifest.path
                     and gate_manifest(manifest, disabled, enabled).action in {"load", "load_now", "defer"}):
                 register_directory(manifest_key(manifest), Path(manifest.path))
 

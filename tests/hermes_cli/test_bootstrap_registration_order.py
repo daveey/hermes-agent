@@ -29,7 +29,7 @@ def test_discovery_registers_reviewed_sibling_before_first_alias(tmp_path, monke
     ledger = ca.Attestation(core, '0' * 40)
     ledger._blobs[records.REGISTRY] = blob
     monkeypatch.setattr(ca, '_installed', ledger)
-    manifests = [SimpleNamespace(key=key, name=key, path=str(path), source='user', kind='plugin', requires_plugins=[])
+    manifests = [SimpleNamespace(key=key, name=key, path=str(path), source='user', kind='plugin', portable=False, requires_plugins=[])
                  for key, path in [('first', tmp_path / 'first'), ('sibling', sibling),
                                    ('disabled', tmp_path / 'disabled')]]
     manager = PluginManager()
@@ -60,6 +60,52 @@ def test_discovery_registers_reviewed_sibling_before_first_alias(tmp_path, monke
     reasons = ledger.latched_unknowns()
     assert not any(r.startswith('pre-registration-module:') for r in reasons)
     assert ('plugin-review-unverified:sibling' in reasons) is not reviewed
+
+
+@pytest.mark.parametrize('source,portable,kind,enabled,disabled,expected', [
+    ('user', False, 'plugin', {'sibling'}, set(), True),
+    ('project', False, 'plugin', {'sibling'}, set(), True),
+    ('bundled', False, 'backend', set(), set(), True),
+    ('bundled', False, 'platform', set(), set(), True),
+    ('user', False, 'plugin', set(), set(), False),
+    ('user', False, 'plugin', {'sibling'}, {'sibling'}, False),
+    ('entrypoint', False, 'plugin', {'sibling'}, set(), False),
+    ('user', True, 'plugin', {'sibling'}, set(), False),
+    ('user', False, 'exclusive', {'sibling'}, set(), False),
+])
+def test_closure_keeps_existing_enablement_and_source_gates(
+        tmp_path, monkeypatch, source, portable, kind, enabled, disabled, expected):
+    from hermes_cli.plugins_loader import PluginLoaderMixin
+    manifest = SimpleNamespace(key='sibling', name='sibling', path=str(tmp_path),
+                               source=source, portable=portable, kind=kind)
+    calls = []
+    monkeypatch.setattr(records, 'register_directory', lambda *args: calls.append(args))
+    PluginLoaderMixin()._register_reviewed_directory_closure([manifest], disabled, enabled)
+    assert bool(calls) is expected
+
+
+def test_closure_cannot_overwrite_another_profile_root(tmp_path, monkeypatch):
+    from hermes_cli.plugins_loader import PluginLoaderMixin
+    from threading import RLock
+    root = tmp_path / 'new-profile'
+    root.mkdir()
+    (root / '__init__.py').write_text('')
+    digest = hashlib.sha256(b'').hexdigest()
+    digests = {'__init__.py': digest}
+    unknowns = []
+    foreign = (tmp_path / 'other-profile', 'plugin', digests)
+    ledger = SimpleNamespace(core_root=tmp_path / 'core', _blobs={}, _lock=RLock(),
+                             _components={'plugin:sibling': foreign}, mark_unknown=unknowns.append)
+    ledger.register_component_root = lambda *args, **kwargs: ca.Attestation.register_component_root(
+        ledger, *args, **kwargs)
+    monkeypatch.setattr(ca, '_installed', ledger)
+    monkeypatch.setattr(records, 'read_records', lambda *args: {'sibling': digests})
+    manifest = SimpleNamespace(key='sibling', name='sibling', path=str(root),
+                               source='user', portable=False, kind='plugin')
+    PluginLoaderMixin()._register_reviewed_directory_closure([manifest], set(), {'sibling'})
+    assert ledger._components == {'plugin:sibling': foreign}
+    assert unknowns == ['component-root-conflict:plugin:sibling']
+    assert not getattr(ledger, '_reviewed_plugins', {})
 
 
 @pytest.mark.parametrize('loaded_attestation', [True, False])
