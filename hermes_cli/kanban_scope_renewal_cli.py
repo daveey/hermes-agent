@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import ExitStack
 from typing import Mapping, Optional, Sequence
 
 from hermes_cli import kanban_scope_renewal as renewal
@@ -102,7 +103,8 @@ def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, envi
     return Actor("agent", session, "chat", f"@session:{profile}@{gateway}/{session}", gateway, profile)
 
 
-def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict, mode: str) -> dict:
+def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict, mode: str,
+               *, evidence: Optional[sqlite3.Connection] = None) -> dict:
     """Ask the canonical Board to revalidate and write the event; project its exact row into this replica."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_sync_client as client
@@ -114,7 +116,8 @@ def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict
                                  "nothing was changed. Retry after the Board deployment")
         if mode == "primary":
             client.push(conn, hub, board, hub.ident.gateway, primary=True)  # the mandate comment must be canonical
-        body = conn.execute("SELECT body FROM task_comments WHERE id=?", (payload["mandate_comment_id"],)).fetchone()[0]
+        body = (evidence if evidence is not None else conn).execute(
+            "SELECT body FROM task_comments WHERE id=?", (payload["mandate_comment_id"],)).fetchone()[0]
         event_uid = sync.uuid7()
         audit = {k: payload[k] for k in ("actor_kind", "actor_session", "actor_profile", "authority_kind",
                                          "authority_ref", "reason")}
@@ -132,8 +135,10 @@ def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict
         if not isinstance(row, dict) or row.get("kind") != renewal.EVENT or row.get("task_id") != task_id:
             raise RenewalRefused("board_unconfirmed", "the Board applied the renewal but its event could not be "
                                  "read back; rerun `hermes kanban show` after the next sync")
-        sync.apply_remote_changes(conn, [client._row_change("task_events", row)],
-                                  new_cursor=sync.sync_state(conn)["cursor"], board=board)
+        if evidence is None or evidence is conn:
+            sync.apply_remote_changes(conn, [client._row_change("task_events", row)],
+                                      new_cursor=sync.sync_state(conn)["cursor"], board=board)
+        # Shadow-only targets stay absent from primary; normal sync delivers the canonical event to home.
         return json.loads(row["payload"])
     finally:
         hub.close()
@@ -144,7 +149,6 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
           env: Optional[Mapping[str, str]] = None,
           ancestry: Optional[Sequence[Mapping[str, str]]] = None) -> dict:
     """``writer``/``env``/``ancestry`` are test seams; the command passes none and each is read from the process."""
-    from hermes_cli import kanban_db_sync as sync
     from hermes_cli.kanban_comment_writer import Inconclusive, ancestry_environs, cli_comment_writer
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.profiles import get_active_profile_name
@@ -155,15 +159,23 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
             ancestry = ancestry_environs()
         except Inconclusive as exc:
             raise RenewalRefused("identity_unavailable", f"the caller's process ancestry could not be read ({exc})")
-    actor = resolve_actor(conn, task_id, writer=writer, environs=[*(ancestry or ()), env],
-                          gateway=gateway_names()[0], profile=get_active_profile_name() or "default")
+    with ExitStack() as scope:
+        from hermes_cli.kanban_shadow_view import open_card
+        _, evidence, _ = open_card(conn, scope, task_id)
+        actor = resolve_actor(evidence, task_id, writer=writer, environs=[*(ancestry or ()), env],
+                              gateway=gateway_names()[0], profile=get_active_profile_name() or "default")
+        return _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor)
+
+
+def _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor):
+    from hermes_cli import kanban_db_sync as sync
     mode = sync.board_mode(conn)
     if mode == "off" and not sync.sync_state(conn):
         return renewal.renew_local(conn, task_id, episode=episode, comment_id=comment_id, reason=reason, actor=actor)
     if mode == "off":
         raise RenewalRefused("board_unavailable", "this board is synced but sync is not active in this process")
-    payload = renewal.prepare(conn, task_id, episode=episode, comment_id=comment_id, reason=reason, actor=actor)
-    return _canonical(conn, board or sync.sync_state(conn)["board_id"], task_id, payload, mode)
+    payload = renewal.prepare(evidence, task_id, episode=episode, comment_id=comment_id, reason=reason, actor=actor)
+    return _canonical(conn, board or sync.sync_state(conn)["board_id"], task_id, payload, mode, evidence=evidence)
 
 
 def command(args: argparse.Namespace) -> int:
