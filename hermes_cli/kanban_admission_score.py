@@ -189,7 +189,8 @@ def _source_snapshot(conn, candidate_ids, *, include_ids=()):
     try:
         # Minimal/older replicas can lack producer identity. Absence gives no
         # urgency floor; never infer an alarm from user-editable title prose.
-        columns = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        from hermes_cli.kanban_queue_read_rows import column_names
+        columns = column_names(conn, "tasks")
         key_column = "idempotency_key" if "idempotency_key" in columns else "NULL"
         select = f"SELECT id, priority, status, {key_column} FROM tasks"
         rows = {r[0]: tuple(r) for r in conn.execute(f"{select} WHERE {OPEN_STATUS}")}
