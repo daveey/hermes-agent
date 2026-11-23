@@ -116,22 +116,30 @@ class RemoteLinksSource:
     def _build(self, budget):
         from hermes_cli import kanban_session_activity as activity
         started = time.monotonic()
-        observed_at = time.time()
         try:
             if activity._origin_scope() != self._origin_scope:
                 raise ValueError('remote links capture scope changed')
-            activity._origin_rows_sink.rows = []
+            # Strict readers project under _links_lock and share its row sink and board reads: serialize
+            # with them. The wait spends this capture's budget; once spent, never start the projection.
+            remaining = budget.max_seconds - (time.monotonic() - started)
+            if remaining <= 0 or not activity._links_lock.acquire(timeout=remaining):
+                raise CaptureBudgetExceeded('remote links capture budget exceeded waiting for the projection')
             try:
-                cards = activity._project_remote_links()
-                rows = activity._origin_rows_sink.rows
-                value = {'cards': cards, 'origin_rows': rows}
-                encoded = json.dumps(value, separators=(',', ':'), allow_nan=False).encode()
-                if (len(cards) + len(rows) > budget.max_keys or len(encoded) > budget.max_bytes
-                        or time.monotonic() - started > budget.max_seconds):
-                    raise CaptureBudgetExceeded('remote links capture budget exceeded')
-                result = LinksCapture(freeze(value), hashlib.sha256(encoded).hexdigest(), observed_at)
+                observed_at = time.time()  # the projection observes stores from here, not from launch
+                activity._origin_rows_sink.rows = []
+                try:
+                    cards = activity._project_remote_links()
+                    rows = activity._origin_rows_sink.rows
+                finally:
+                    activity._origin_rows_sink.rows = None
             finally:
-                activity._origin_rows_sink.rows = None
+                activity._links_lock.release()
+            value = {'cards': cards, 'origin_rows': rows}
+            encoded = json.dumps(value, separators=(',', ':'), allow_nan=False).encode()
+            if (len(cards) + len(rows) > budget.max_keys or len(encoded) > budget.max_bytes
+                    or time.monotonic() - started > budget.max_seconds):
+                raise CaptureBudgetExceeded('remote links capture budget exceeded')
+            result = LinksCapture(freeze(value), hashlib.sha256(encoded).hexdigest(), observed_at)
         except Exception:  # health: allow BLE001 -- source failure publishes stale without exception text or empty success
             result = LinksCapture(failed=True, observed_at=time.time())
         with self._lock:

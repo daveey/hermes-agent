@@ -943,8 +943,12 @@ def _remote_links(stale_ok: bool = False) -> list[dict[str, Any]]:
 def _links_entry(stale_ok: bool, *, with_rows: bool = False):
     from hermes_cli.fact_remote_links import _current
     binding = _current.get()
-    if stale_ok and binding is not None:
-        return binding.read(with_rows)
+    if stale_ok:
+        if binding is None:
+            from hermes_cli.fact_links_startup import binding_for
+            binding = binding_for(_origin_scope())
+        if binding is not None:
+            return binding.read(with_rows)
 
     def out(entry):
         return (list(entry[3]), list(entry[4])) if with_rows else list(entry[3])
