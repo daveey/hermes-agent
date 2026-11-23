@@ -114,6 +114,13 @@ def select_unpushed(repo: Path, env: dict, git, head: str | None, *, partial: bo
     tips, remote, nested = _commit_tips(repo, env, git, head)
     local = _rev_list(repo, env, git, ["--exclude-promisor-objects"], sorted(set(tips.values())), remote)
     unpushed = {line[:40] for line in local.stdout.decode("ascii", "replace").split()}
+    # --exclude-promisor-objects also drops promisor remote tips from the negative side, so local commits
+    # a fetched tip already contains still list here; `bundle create ... --not --remotes` then finds nothing
+    # and refuses ("empty bundle") forever. Keep only commits the plain walk agrees are not on a remote.
+    if unpushed:
+        plain = _rev_list(repo, env, git, [], sorted(set(tips.values())), remote, ok=(0, 128))
+        if not plain.returncode:  # a walk that cannot finish (missing commit) keeps the stricter set
+            unpushed &= {line[:40] for line in plain.stdout.decode("ascii", "replace").split()}
     refs = [r for r, oid in tips.items() if oid in unpushed]
     for ref in nested:
         walk = git(repo, env, "rev-list", "-n1", "--exclude-promisor-objects", ref, "--not", "--remotes")

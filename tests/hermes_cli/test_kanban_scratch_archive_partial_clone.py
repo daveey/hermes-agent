@@ -211,3 +211,68 @@ def test_archive_git_never_reaches_the_network(board, tmp_path):
     probe = subprocess.run(["git", "-C", str(repo), "config", "--get", "protocol.allow"],
                            env=env, capture_output=True, text=True, check=True)
     assert probe.stdout.strip() == "never"
+
+
+def _git_243(sa, monkeypatch, extra: str):
+    """git 2.43's ``--exclude-promisor-objects`` walk: it also lists *extra* (see the test below)."""
+    real = sa._git
+
+    def git(repo, env, *args, **kwargs):
+        proc = real(repo, env, *args, **kwargs)
+        if args[:1] == ("rev-list",) and "--exclude-promisor-objects" in args and "--stdin" in args:
+            proc = subprocess.CompletedProcess(proc.args, proc.returncode, proc.stdout + f"{extra}\n".encode(),
+                                               proc.stderr)
+        return proc
+    monkeypatch.setattr(sa, "_git", git)
+
+
+def test_head_a_promisor_walk_wrongly_lists_needs_no_bundle(board, promisor, tmp_path, monkeypatch):
+    """worker-a2, 2026-11-23 (t_01a1fb485b17a490): refused 6 times with "Refusing to create empty bundle".
+
+    That clone borrowed its history from the host checkout through ``objects/info/alternates``; the
+    remote tip sat in its promisor pack too. git 2.43 drops such a tip from the ``--not`` side of an
+    ``--exclude-promisor-objects`` walk, so 3348 commits of origin/main, HEAD among them, read as
+    unpushed (git 2.55 on the hub does not, hence the injected walk). ``bundle create HEAD --not
+    --remotes`` then had nothing to write and the tree was kept forever.
+    """
+    from hermes_cli import kanban_scratch_archive as sa
+
+    repo = tmp_path / "w" / "repo"
+    _clone(promisor, repo)
+    head = _run("rev-parse", "HEAD", cwd=repo)
+    _git_243(sa, monkeypatch, head)
+    dest = tmp_path / "out"
+    meta = sa.archive_repo(repo, dest, task_id="t_x", completed_at=None)
+    assert not (dest / "commits.bundle").exists()
+    assert meta["unpushed_refs"] == []
+
+
+def test_local_commit_is_bundled_even_with_the_243_walk(board, promisor, tmp_path, monkeypatch):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    repo = tmp_path / "w" / "repo"
+    _clone(promisor, repo)
+    pushed = _run("rev-parse", "HEAD", cwd=repo)
+    (repo / "mine.txt").write_text("mine\n")
+    _run("add", ".", cwd=repo)
+    _run("commit", "-q", "-m", "mine", cwd=repo)
+    _git_243(sa, monkeypatch, pushed)
+    dest = tmp_path / "out"
+    meta = sa.archive_repo(repo, dest, task_id="t_x", completed_at=None)
+    assert meta["unpushed_refs"] == ["HEAD", "refs/heads/main"]
+    heads = _run("bundle", "list-heads", str(dest / "commits.bundle"), cwd=repo)
+    assert _run("rev-parse", "HEAD", cwd=repo) in heads
+
+
+def test_a_truly_local_commit_in_a_partial_clone_is_still_bundled(board, promisor, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    repo = tmp_path / "w" / "repo"
+    _clone(promisor, repo)
+    (repo / "mine.txt").write_text("mine\\n")
+    _run("add", ".", cwd=repo)
+    _run("commit", "-q", "-m", "mine", cwd=repo)
+    dest = tmp_path / "out"
+    sa.archive_repo(repo, dest, task_id="t_x", completed_at=None)
+    heads = _run("bundle", "list-heads", str(dest / "commits.bundle"), cwd=repo)
+    assert _run("rev-parse", "HEAD", cwd=repo) in heads
