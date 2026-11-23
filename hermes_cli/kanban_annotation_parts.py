@@ -10,7 +10,12 @@ A wake says only that some watched file moved. Before the read, the holder takes
 inputs that part reads, and forces a part only when its key differs from the one its last forced read answered:
 
 - ``counts``: the boards' and sync shadows' content revisions, the origin ledger, and the plain inputs below;
-- ``links``: the boards' content revisions, the origin ledger and the plain inputs;
+- ``links``: the inputs the links cache keys on (``kanban_session_activity._links_fingerprint``): the boards'
+  content revisions (the hub's tasks/gateway content signature among them) and the origin ledger. The plain inputs
+  are left out on purpose: state.db (alias tips), config and the hub database's raw stat/WAL churn move every few
+  seconds and that cache bounds them by its TTL instead. Keying links on them forced a
+  full ledger projection under ``_links_lock`` on nearly every wake (91% of a hub backend's uptime in annotation
+  refreshes, 2026-11-23), and every strict links reader, the Desktop action queue among them, queued behind it;
 - ``attention``: the boards' content revisions and the files the done checks declared (a declared board or sync
   replica by its content revision, never its stat).
 
@@ -109,7 +114,7 @@ def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
         return None
     ledger = ksa._origin_ledger_fingerprint()
     plain = _plain_key(scope)
-    return {COUNTS: (local, shadows, ledger, plain), LINKS: (local, ledger, plain),
+    return {COUNTS: (local, shadows, ledger, plain), LINKS: (local, ledger),
             ATTENTION: (local, _done_key(scope, wall))}
 
 

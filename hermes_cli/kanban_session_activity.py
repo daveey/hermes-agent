@@ -968,8 +968,9 @@ def _links_entry(stale_ok: bool, *, with_rows: bool = False):
 
 def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
     with diag.source("links_display" if stale_ok else "links_strict"):
-        # Native source/clock invalidation must cross the inner TTL cache too:
-        # state/config inputs and wall-time verdicts can move without this key.
+        # The holder forces this past the inner TTL cache when a provider clock deadline came due (wall-time
+        # verdicts move without any key), no key can vouch for the inputs, or the links part key moved
+        # (``kanban_annotation_parts``); state/config churn alone is left to ``_LINKS_MAX_AGE_S``.
         if _revalidate.forced(scope, 'links'):
             with _links_lock:
                 fingerprint = diag.timed("fingerprint", _links_fingerprint)

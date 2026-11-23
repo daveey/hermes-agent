@@ -117,22 +117,22 @@ def test_a_write_to_one_source_rereads_only_the_parts_that_read_it(world):
     _refresh()
     assert _reads(world) == before, 'a bookkeeping write reread a part'
 
-    # the plain input (state.db, config): counts and links read it, the done checks do not
+    # the plain input (state.db, config): the counts read it; the links cache bounds it by its TTL, not a key
     world.plain.write_text('moved')
     _refresh()
-    assert _reads(world) == (before[0] + 1, before[1] + 1, before[2])
+    assert _reads(world) == (before[0] + 1, before[1], before[2]), 'a plain input forced the links projection'
 
     # a file only the done checks declared: neither the counts nor the links read it
     world.flagged = False
     world.declared.write_text('moved')
     _refresh()
-    assert _reads(world) == (before[0] + 1, before[1] + 1, before[2] + 1)
+    assert _reads(world) == (before[0] + 1, before[1], before[2] + 1)
     assert _published()[10] == {}, 'the done check verdict was not re-evaluated'
 
     # board content: every part reads the boards
     world.conn.execute("UPDATE tasks SET status = 'done' WHERE id = 't1'")
     _refresh()
-    assert _reads(world) == (before[0] + 2, before[1] + 2, before[2] + 2)
+    assert _reads(world) == (before[0] + 2, before[1] + 1, before[2] + 2)
     assert _published()[0] == {}
 
 
@@ -442,3 +442,31 @@ def test_a_scope_whose_counts_sit_in_a_saved_slot_is_not_renewed_before_its_age(
     monkeypatch.setattr(ksa, '_origin_scope', lambda: SCOPE)
     _refresh()
     assert world.counts == 2, 'fresh counts in a saved slot were read again'
+
+
+def test_links_key_is_the_links_cache_fingerprint(world, tmp_path, monkeypatch):
+    """2026-11-23: the links part keyed on state.db and the hub database (written every few seconds), so the
+    holder re-projected the origin ledger under ``_links_lock`` on nearly every wake and the Desktop action queue
+    (a strict links reader) timed out behind it. The key is the links cache's own fingerprint: a plain-input
+    write leaves the projection to that cache's TTL; a board or origin-ledger move still forces it."""
+    ledger = tmp_path / 'kanban' / 'origin-ledger.db'
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text('0')
+    monkeypatch.setattr(ksa, '_origin_ledger_fingerprint', lambda: ((str(ledger), ledger.stat().st_mtime_ns,
+                                                                     ledger.stat().st_size),))
+    _refresh()
+    _refresh()
+    links = world.links
+    for i in range(5):  # state.db churn: chats writing, sync stamps
+        world.plain.write_text(f'churn {i}')
+        _refresh()
+    assert world.links == links, 'plain-input churn re-projected the links'
+
+    ledger.write_text('released')  # origin custody moved: read-your-writes needs a new projection
+    _refresh()
+    assert world.links == links + 1, 'an origin-ledger write did not force the links projection'
+
+    world.conn.execute("UPDATE tasks SET status = 'done' WHERE id = 't1'")
+    _refresh()
+    assert world.links == links + 2, 'a board content write did not force the links projection'
+    assert _published() == _full_read(), 'the gated refresh diverged from a read with no caches'
