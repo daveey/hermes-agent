@@ -226,6 +226,102 @@ def test_links_health_recomputes_unchanged_remote_outcome_without_task_event(db,
         fanout._reset_for_tests()
 
 
+def _health_setup(db, monkeypatch, tmp_path):
+    """No remote card rows at all: only the stored unknown outcome can be recovered."""
+    from contextlib import contextmanager
+    from hermes_cli import fact_links_health as health
+    from hermes_cli.fact_remote_links import LinksUnavailable
+    from tui_gateway import notice_fanout as fanout
+    from tui_gateway import notice_fanout_state as state
+    turn(db)
+    health.reset_for_tests()
+    fanout._reset_for_tests()
+    origin = ksa._origin_scope()
+    monkeypatch.setattr(ksa, '_remote_cards', lambda *a, **kw: [])
+    monkeypatch.setattr(fanout, '_remote_inputs_key', lambda: (('root', 'home', ()), ()))
+    available = [False]
+    def display(*a, **kw):
+        if not available[0]:
+            raise LinksUnavailable('source unavailable')
+        return []
+    monkeypatch.setattr(ksa, 'session_outcome_tasks', display)
+    assert refresh(db, 'card_change')['reason'] == 'source_unknown'
+    assert state.seed_remote({})
+    @contextmanager
+    def nowhere(chat):  # the snapshot path must never be used: there are no remote rows
+        raise AssertionError('no snapshot chat expected')
+        yield
+    @contextmanager
+    def exact(_origin):
+        yield db
+    return health, fanout, origin, available, nowhere, exact
+
+
+def test_links_health_recovers_unknown_outcome_with_no_remote_rows(db, monkeypatch, tmp_path):
+    health, fanout, origin, available, nowhere, exact = _health_setup(db, monkeypatch, tmp_path)
+    try:
+        health.changed(origin, False)
+        fanout._remote_change_pass(nowhere, exact)
+        assert health.pending(origin) is None
+        assert so.get_outcome('chat', db=db)['status']['reason'] == 'source_unknown'
+        available[0] = True
+        health.changed(origin, True)
+        result = fanout._remote_change_pass(nowhere, exact)
+        assert [r['chat_id'] for r in result] == ['chat']
+        assert_done(so.get_outcome('chat', db=db)['status'])
+        assert health.pending(origin) is None
+        assert not fanout._remote_change_pass(nowhere, exact)  # no polling: nothing pending, nothing to do
+    finally:
+        health.reset_for_tests()
+        fanout._reset_for_tests()
+
+
+def test_links_health_never_touches_a_foreign_profile_with_the_same_chat_id(db, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    from hermes_state import SessionDB
+    health, fanout, origin, available, nowhere, exact = _health_setup(db, monkeypatch, tmp_path)
+    foreign = SessionDB(db_path=tmp_path / 'other' / 'state.db')
+    try:
+        foreign.create_session('chat', source='desktop')
+        foreign.append_message('chat', role='user', content='other profile work')
+        foreign.append_message('chat', role='assistant', content='ok')
+        so.refresh_outcome('chat', 'card_change', db=foreign)
+        before = foreign._read_one('SELECT outcome_json FROM sessions WHERE id = ?', ('chat',))['outcome_json']
+        available[0] = True
+        health.changed(origin, True)
+        fanout._remote_change_pass(nowhere, exact)
+        assert_done(so.get_outcome('chat', db=db)['status'])
+        assert foreign._read_one('SELECT outcome_json FROM sessions WHERE id = ?', ('chat',))['outcome_json'] == before
+    finally:
+        foreign.close()
+        health.reset_for_tests()
+        fanout._reset_for_tests()
+
+
+def test_links_health_failed_recovery_keeps_generation_and_retries(db, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    health, fanout, origin, available, nowhere, exact = _health_setup(db, monkeypatch, tmp_path)
+    try:
+        available[0] = True
+        health.changed(origin, True)
+        @contextmanager
+        def broken(_origin):
+            raise OSError('store unavailable')
+            yield
+        result = fanout._remote_change_pass(nowhere, broken)
+        assert result.incomplete and health.pending(origin) is not None
+        generation = health.pending(origin)
+        health.changed(origin, False)  # a newer transition during recovery supersedes the old generation
+        assert health.pending(origin) > generation
+        health.changed(origin, True)
+        fanout._remote_change_pass(nowhere, exact)
+        assert_done(so.get_outcome('chat', db=db)['status'])
+        assert health.pending(origin) is None
+    finally:
+        health.reset_for_tests()
+        fanout._reset_for_tests()
+
+
 def assert_done(status):
     assert (status["kind"], status["presentation"]["stripe"], status["coverage"]["state"]) == ("done", "done", "complete")
 
