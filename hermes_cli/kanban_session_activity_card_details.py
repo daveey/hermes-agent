@@ -281,7 +281,16 @@ def _walk(conn: sqlite3.Connection, task_id: str,
 
 def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, Any]], *, replica: Any = LEGACY_REPLICA) -> None:
     """Optional presentation evidence; old schemas remain readable. Replica fills foreign parents."""
-    if not found:
+    # Clear stale presentation on every card, but only acquire/read graph evidence
+    # for statuses the walk can annotate. Owner observations often contain one
+    # terminal card: opening its shadow was all cost and could not affect output.
+    pending = {}
+    for task_id, card in found.items():
+        card.pop("blocked_upstream", None)
+        card.pop("upstream", None)
+        if card.get("status") not in {"done", "archived", "blocked", "triage"}:
+            pending[task_id] = card
+    if not pending:
         return
     owned = replica is LEGACY_REPLICA
     if owned:
@@ -291,15 +300,11 @@ def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, A
     memo: dict = {}
     try:
         try:
-            root_parents = _root_parents(conn, replica, list(found))
+            root_parents = _root_parents(conn, replica, list(pending))
         except sqlite3.Error:
             logging.getLogger(__name__).debug("Could not read blocked upstream roots", exc_info=True)
-            root_parents = {task_id: [] for task_id in found}
-        for task_id, card in found.items():
-            card.pop("blocked_upstream", None)
-            card.pop("upstream", None)
-            if card.get("status") in {"done", "archived", "blocked", "triage"}:
-                continue
+            root_parents = {task_id: [] for task_id in pending}
+        for task_id, card in pending.items():
             try:
                 blocked, upstream = _walk(conn, task_id, replica, root_parents=root_parents, memo=memo)
             except sqlite3.Error:
