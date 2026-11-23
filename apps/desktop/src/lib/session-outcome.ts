@@ -9,7 +9,7 @@ import type { Translations } from '@/i18n'
 import type { SessionStatusStripe } from '@/store/session-dot-state'
 import type { SessionOutcome, SessionOutcomeWaitingOn, SessionStatusEnvelope } from '@/types/session-outcome'
 
-const CANONICAL_STRIPES: readonly string[] = ['attention', 'blocked', 'done', 'none', 'stuck', 'waiting']
+const CANONICAL_STRIPES: readonly string[] = ['attention', 'blocked', 'done', 'external', 'none', 'stuck', 'waiting']
 const IDENTITY_KEYS = ['gateway', 'profile', 'session_id', 'owner_epoch'] as const
 
 const isCount = (value: unknown): value is number =>

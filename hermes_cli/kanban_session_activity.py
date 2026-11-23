@@ -1252,6 +1252,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo", *PENDING_RELEASE_STATUSES)
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
+            if _external_activity.replica_bucket(card):
+                remote_keys.setdefault(sid, set()).add((str(card.get("key")), "external_unknown", False))
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
         _replica_exec.collect(card, execution)
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
@@ -1918,7 +1920,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = Fals
         from hermes_cli.kanban_execution_observations import count_snapshot
         count_snapshot(row, [key for sid in ids for key in remote_keys.get(sid, ())],
                        evidence={key: value for sid in ids for key, value in execution.get(sid, {}).items()})
-    return _external_activity.stamp_boards(rows, _board_db_paths, _open_ro, _parked_pairs, _identity.row_ids)
+    _external_activity.stamp_boards(rows, _board_db_paths, _open_ro, _parked_pairs, _identity.row_ids)
+    return _external_activity.stamp_replica_counts(rows, remote_keys, _identity.row_ids)
 
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:

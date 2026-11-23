@@ -99,6 +99,23 @@ def refresh(db, trigger="turn_end", **kw):
     return so.refresh_outcome("chat", trigger, db=db, **kw)["status"]
 
 
+@pytest.mark.parametrize("kind", ["ci", "deploy", "card", "clock"])
+@pytest.mark.parametrize("remote", [True, False])
+def test_replica_ci_deploy_wait_publishes_external_stripe(db, monkeypatch, kind, remote):
+    turn(db)
+    card = {"id": "t_ci", "key": "edge/default/default/t_ci", "session": "chat", "status": "scheduled",
+            "gateway": "edge", "board": "default", "profile": "default", "remote": remote,
+            "awaiting": {"kind": kind, "ref": "vendor-job"},
+            "park": {"wake_at": 9_999_999_999, "outcome": None}}
+    monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: [card])
+    status = refresh(db, "card_change")
+    assert status["kind"] == "waiting"
+    assert status["presentation"]["stripe"] == ("external" if remote and kind in ("ci", "deploy") else "waiting")
+    assert status["on"][0]["state"] == ("external_unknown" if remote and kind in ("ci", "deploy") else "scheduled")
+    published = so.get_outcome("chat", db=db)
+    assert published is not None and published["status"] == status
+
+
 def assert_done(status):
     assert (status["kind"], status["presentation"]["stripe"], status["coverage"]["state"]) == ("done", "done", "complete")
 

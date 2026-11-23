@@ -5,6 +5,29 @@ import pytest
 from hermes_cli import kanban_session_activity as ksa
 
 
+@pytest.mark.parametrize("kind,external", [("ci", 1), ("deploy", 1), ("card", 0), ("clock", 0), ("external", 0), (None, 0)])
+@pytest.mark.parametrize("status", ["scheduled", "running", "unknown", "done"])
+def test_replica_external_wait_uses_the_parked_snapshot(remote_projection, monkeypatch, kind, external, status):
+    key = "edge/default/default/t_ci"
+    cards = [{
+        "key": key, "id": "t_ci", "session": sid, "status": status,
+        "gateway": "edge", "board": "default", "profile": "default", "unfinished": status != "done",
+        "awaiting": {"kind": kind, "ref": "vendor-job"} if kind is not None else None,
+        "park": {"wake_at": 9_999_999_999, "outcome": None},
+    } for sid in ("s_root", "s_tip")]
+    monkeypatch.setattr(ksa, "_remote_cards", lambda *args: cards)
+    for _ in range(2):
+        row = ksa.annotate_kanban_activity([{
+            "id": "s_tip", "_lineage_ids": ["s_root", "s_tip"],
+        }])[0]
+        expected = external if status == "scheduled" else 0
+        assert row.get("kanban_external", 0) == expected
+        assert row.get("kanban_external_unknown", 0) == expected
+        assert row.get("kanban_external_down", 0) == 0
+        assert expected <= row.get("kanban_parked", 0)
+        assert row.get("kanban_blocked", 0) == 0
+
+
 @pytest.fixture
 def remote_projection(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))

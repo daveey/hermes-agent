@@ -347,6 +347,7 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
 def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
+    from hermes_cli.kanban_external_activity import replica_bucket
     from hermes_cli.kanban_open_asks import card_is_open_human_ask
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_outcome_tasks
 
@@ -375,7 +376,8 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
             decisions.append({"id": f"card:{tid}", "question": _str(req.get("action")) or _str(card.get("title")),
                               "choices": _choices(req.get("choices")), "card_id": tid, "state": "open"})
             continue
-        item = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid, "state": status}
+        display_state = "external_unknown" if card.get("remote") and replica_bucket(card) else status
+        item = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid, "state": display_state}
         if explained:
             item["waiting_on"] = explained  # retained scope stop: an open parent or recorded wait, agent work
         eta = wait.get("until") or wait.get("eta")

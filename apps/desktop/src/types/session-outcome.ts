@@ -44,7 +44,7 @@ export interface CompletionReceipt {
 export type CompletionReceiptSource = Record<string, unknown>
 
 /** Presentation stripes the backend reducer may select (`presentation.stripe`). `none` paints nothing. */
-export type CanonicalStripe = 'attention' | 'blocked' | 'done' | 'none' | 'stuck' | 'waiting'
+export type CanonicalStripe = 'attention' | 'blocked' | 'done' | 'external' | 'none' | 'stuck' | 'waiting'
 
 /** [daveey] Canonical status envelope (`outcome.status`, `status_version` 1), reduced by the backend from work
  *  evidence only. `presentation.stripe` is the status every surface paints; nothing else on the row selects it. */

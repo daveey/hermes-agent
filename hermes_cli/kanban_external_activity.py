@@ -3,8 +3,8 @@
 ``overlay_waits`` adds ``wait_state`` (external_running / external_unknown / external_down) and the ``external``
 dict to a parked card's wait info (interface.md); ``session_external`` stamps the three counts and the capped
 ``kanban_external_cards`` list on session rows (interface-hover.md). Counts are subsets of ``kanban_parked`` and
-are never added to ``kanban_blocked``. Local boards only: a card replicated from another gateway keeps today's
-grey wait info.
+are never added to ``kanban_blocked``. Replica CI/deploy parks contribute unknown external counts from the
+same parked snapshot; absent owner watch records never establish service failure.
 """
 from __future__ import annotations
 
@@ -184,6 +184,28 @@ def stamp_boards(rows: list[dict[str, Any]], board_paths, open_ro, parked_pairs,
         stamp_rows(rows, by_session, row_ids)
     except (sqlite3.Error, OSError, ImportError, KeyError, TypeError, ValueError, AttributeError):
         logger.debug("kanban external stamping failed", exc_info=True)
+    return rows
+
+
+def replica_bucket(card: dict[str, Any]) -> bool:
+    """A replica's declared CI/deploy park, not inferred progress or service health."""
+    awaiting = card.get("awaiting")
+    return (card.get("status") == "scheduled" and isinstance(awaiting, dict)
+            and awaiting.get("kind") in ("ci", "deploy"))
+
+
+def stamp_replica_counts(rows, card_keys, row_ids):
+    """Merge replica markers from the exact parked-count snapshot, once per lineage/card.
+
+    Replica rows carry no fresh external-watch record. Unknown (hollow blue), never down, is the honest
+    display state. Do not reopen a replica here: a second snapshot could count a card no longer parked.
+    """
+    for row in rows:
+        keys = {key for sid in row_ids(row) for key, bucket, _ in card_keys.get(sid, ())
+                if bucket == "external_unknown"}
+        if keys:
+            for field in ("kanban_external", "kanban_external_unknown"):
+                row[field] = int(row.get(field) or 0) + len(keys)
     return rows
 
 

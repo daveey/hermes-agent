@@ -17,6 +17,26 @@ import { SessionRowStatusStripe, useSessionRowStripe } from './session-row-strip
 const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 4, source: 'desktop', started_at: 0, title: id, ...extra }) as SessionInfo
 
+it.each(['ci', 'deploy'])('a replica %s park paints the canonical light-blue hollow cloud', () => {
+  const session = row('replica-wait', {
+    kanban_active: 1, kanban_parked: 1, kanban_external: 1, kanban_external_unknown: 1,
+    outcome: canonicalOutcome('external')
+  })
+
+  setSessions([session])
+  const { result } = renderHook(() => useSessionRowStripe(session, 'background', true))
+  expect(result.current.statusStripe).toBe('external')
+
+  const { container } = render(
+    <SessionRowStatusStripe outcomePainted={result.current.outcomePainted} session={session}
+      statusStripe={result.current.statusStripe} />
+  )
+
+  expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('external')
+  expect(stripe(container)?.getAttribute('data-external-unknown')).toBe('true')
+  expect(stripe(container)?.className).toContain('--color-sky-400')
+})
+
 const stripe = (container: HTMLElement) => container.querySelector('[data-slot="session-status-stripe"]')
 
 afterEach(() => {
