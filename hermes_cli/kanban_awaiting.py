@@ -1211,9 +1211,21 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
     if with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
         return None
     key = f"{ESCALATION_PREFIX}{task_id}:{record['premise']}"
-    existing = conn.execute("SELECT id, status FROM tasks WHERE idempotency_key = ?", (key,)).fetchone()
+    # The first owner keeps the legacy key after completion. Later owners used to be keyless,
+    # so retries never found an OPEN successor. The source ledger binds target, premise and episode
+    # without title matching; its latest matching owner is authoritative, including terminal owners.
+    existing = conn.execute(
+        "SELECT t.id, t.status FROM task_events e JOIN tasks t "
+        "ON t.id = json_extract(e.payload, '$.owner_task_id') "
+        "WHERE e.task_id = ? AND e.kind = ? "
+        "AND json_extract(e.payload, '$.awaiting.premise') = ? ORDER BY e.id DESC LIMIT 1",
+        (task_id, ESCALATED_EVENT, record['premise'])).fetchone()
+    if existing is None:
+        existing = conn.execute("SELECT id, status FROM tasks WHERE idempotency_key = ?", (key,)).fetchone()
     owner = existing[0] if existing and existing[1] not in ("done", "archived") else None
     if owner is None:
+        if existing:
+            key += f":after:{existing[0]}"
         supervisor = _supervisor_profile(task) or task.assignee or "default"
         fired = record.get("fired_reparks")
         title = (f"Unstick {task_id}: probe fired {fired}x, re-parked each time" if fired
@@ -1233,7 +1245,7 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
                   "profile/gateway that can, or prove the premise false. Then complete this card with the "
                   f"evidence; {task_id} waits on it and resumes when it is done."),
             assignee=supervisor, created_by=task.assignee, workspace_kind="scratch", triage=False,
-            idempotency_key=None if existing else key, creator_task_id=task.id, session_id=task.session_id,
+            idempotency_key=key, creator_task_id=task.id, session_id=task.session_id,
             tenant=task.tenant, priority=task.priority,
         )
     kb._link(conn, owner, task_id)
