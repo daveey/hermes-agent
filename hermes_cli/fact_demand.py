@@ -92,7 +92,7 @@ class DemandChannel:
     def deliver(self, command):
         with connect(self.endpoint.path) as sock:
             sock.settimeout(1)
-            send(sock, {"version": 1, "token": self.endpoint.token, "after": None})
+            send(sock, {"version": 1, "token": self.endpoint.token, "channel": "demand"})
             hello = receive(sock)
             if hello["scope"] != self.scope:
                 raise ValueError("unauthorized_scope")

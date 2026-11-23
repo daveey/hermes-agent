@@ -48,18 +48,28 @@ class _Handler(socketserver.BaseRequestHandler):
         pins = set()
         owner = self.server.owner
         scope = None
+        stream_slot = False
         try:
             hello = receive(self.request)
             if hello.get("version") != 1:
                 raise ValueError("unsupported_contract")
             scope = owner.authorize(hello["token"])
-            subscription = owner.store.subscribe(scope, (), None, hello.get("after"), lambda _: None)
+            channel = hello.get("channel", "stream")
+            if channel not in ("stream", "demand"):
+                raise ValueError("unknown_channel")
+            if channel == "stream":
+                stream_slot = self.server.stream_slots.acquire(blocking=False)
+                if not stream_slot:
+                    raise ValueError("stream_capacity_exceeded")
+                subscription = owner.store.subscribe(scope, (), None, hello.get("after"), lambda _: None)
             self.request.settimeout(60)
             send(self.request, {"scope": scope, "epoch": owner.store.snapshot(scope).epoch})
             while not owner.closed.is_set():
                 command = receive(self.request)
                 if owner.closed.is_set():
                     return
+                if channel == "demand" and command["op"] != "demand":
+                    raise ValueError("demand_channel_only")
                 handlers = {"next": self._next, "page": self._page,
                             "release": self._release, "demand": self._demand}
                 handler = handlers.get(command["op"])
@@ -72,6 +82,8 @@ class _Handler(socketserver.BaseRequestHandler):
         finally:
             if subscription is not None:
                 subscription.close()
+            if stream_slot:
+                self.server.stream_slots.release()
             for token in pins:
                 owner.pages.release(token, scope)
 
@@ -159,7 +171,10 @@ class FactHost:
             self._server = _Server(str(path), _Handler)
             path.chmod(0o600)
             self._server.owner = self
-            self._server.slots = threading.BoundedSemaphore(8)
+            # At most eight streaming clients; keep bounded handshake/control
+            # capacity available even when every stream is in a long poll.
+            self._server.slots = threading.BoundedSemaphore(16)
+            self._server.stream_slots = threading.BoundedSemaphore(8)
             self._thread = threading.Thread(target=self._server.serve_forever, name="fact-host-ipc", daemon=True)
             self._thread.start()
             self._expiry = ExpiryWorker(self.store)
