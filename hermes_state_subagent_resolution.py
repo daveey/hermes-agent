@@ -4,6 +4,27 @@ from __future__ import annotations
 import json
 
 
+def _child_tip_row(db, conn, sid: str) -> dict:
+    """Follow child compression, not the conversation-only tip filter, on one snapshot.
+
+    Inherited delegate markers do not make a continuation a new delegated fork. Use the
+    canonical explicit-fork predicate so branch/reset/tool children cannot lend terminal proof.
+    The writer uses this same walk before acknowledging, fencing concurrent rotations.
+    """
+    row = dict(conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone() or {})
+    seen = {sid}
+    while row.get("end_reason") == "compression":
+        children = conn.execute("SELECT * FROM sessions WHERE parent_session_id=?"
+                                " ORDER BY started_at DESC, id DESC", (row["id"],)).fetchall()
+        tip = next((dict(child) for child in children if child["source"] == "subagent"
+                    and not db._is_explicit_fork_child_row(dict(child), include_reset=True)), None)
+        if not tip or tip["id"] in seen:
+            break
+        seen.add(tip["id"])
+        row = tip
+    return row
+
+
 def resolved_subagents(db, ids: list[str], retained: list[dict]) -> set[str]:
     """Only terminal transcript proof or a delivered unit covering this child's last activity resolves loss.
 
@@ -27,9 +48,9 @@ def resolved_subagents(db, ids: list[str], retained: list[dict]) -> set[str]:
     by_id = {}
     for row in rows:
         sid = str(row["id"])
-        tip = so._tip(db, sid)
-        terminal = dict(db._read_one(
-            "SELECT ended_at, end_reason, last_activity_at, started_at FROM sessions WHERE id=?", (tip,)) or {})
+        with db._read_ctx() as conn:
+            terminal = _child_tip_row(db, conn, sid)
+        tip = terminal.get("id", sid)
         by_id[sid] = terminal
         receipt = db._read_one("SELECT value FROM state_meta WHERE key=?", (f"subagent_ack:{sid}",))
         if receipt is not None:
@@ -78,8 +99,9 @@ def acknowledge_subagents(db, parent: str, children: list[str], evidence: str) -
                                " FROM sessions WHERE id=?", (sid,)).fetchone()
             if row is None or row[0] not in ids or row[1] != "subagent":
                 raise ValueError(f"not an owned subagent: {sid}")
-            last = float(row[3] or row[4] or 0)
-            if row[2] is None and last >= time.time() - so.SUBAGENT_LIVE_WINDOW_S:
+            terminal = _child_tip_row(db, conn, sid)
+            last = float(terminal.get("last_activity_at") or terminal.get("started_at") or 0)
+            if terminal.get("ended_at") is None and last >= time.time() - so.SUBAGENT_LIVE_WINDOW_S:
                 raise ValueError(f"subagent is still live: {sid}")
             receipts.append((f"subagent_ack:{sid}", json.dumps({"parent": row[0], "at": last,
                              "evidence": evidence.strip(), "acknowledged_at": time.time()})))
