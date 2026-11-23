@@ -261,6 +261,7 @@ def write_config(home: Path, provider_url: str, *, port: int | None = None, extr
     for k, v in (extra or {}).items():
         cfg[k] = {**cfg.get(k, {}), **v} if isinstance(v, dict) and isinstance(cfg.get(k), dict) else v
     (home / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    I.configure_kanban_routing(home, provider_url)
     (home / ".env").write_text(f"OPENAI_API_KEY={I.FAKE_KEY}\nAPI_SERVER_KEY={API_KEY}\n", encoding="utf-8")
 
 

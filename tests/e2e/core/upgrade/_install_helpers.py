@@ -290,6 +290,27 @@ def provider_config(base_url: str, version: int | None, extra: str = "") -> str:
     )
 
 
+def configure_kanban_routing(home: Path, base_url: str) -> None:
+    """Enable real class allocation only against this disposable loopback provider."""
+    from urllib.parse import urlsplit
+
+    assert urlsplit(base_url).hostname == "127.0.0.1", base_url
+    route = {
+        "provider": "custom", "model": "fake-model", "billing": "metered",
+        "weight": 1, "eligible": True, "funding_verified": True,
+        "capabilities": {"tools": True, "streaming": True, "context_tokens": 200000},
+    }
+    policy = {"enabled": True, "allow_metered": True, "policy_version": 1,
+              "routes": {level: [route] for level in ("fast", "standard", "deep")}}
+    with (home / "config.yaml").open("a", encoding="utf-8") as config:
+        config.write("\nmodel_routing: " + json.dumps(policy) + "\n")
+    (home / "auth.json").write_text(json.dumps({
+        "version": 1, "credential_pool": {"custom": [{
+            "id": "loopback", "source": "manual", "auth_type": "api_key",
+            "access_token": "loopback-only", "base_url": base_url,
+        }]}}), encoding="utf-8")
+
+
 def tree_digest(path: Path) -> dict[str, str]:
     """{relative path: sha256} of every regular file / symlink target under ``path``.
     ``__pycache__`` is skipped: Python writes it whenever the code is imported (a plugin the
