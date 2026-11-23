@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import socket
 import threading
 import logging
+import time
 
 from hermes_cli.fact_contract import Delta, Fact, FactKey, Position, Ready, Pending, Unavailable
 from hermes_cli.fact_ipc import connect, receive, send
@@ -90,14 +91,37 @@ class ReplicaHandle:
         self._demands.put(view, selector)
 
     def _dispatch(self):
+        retries = {}
+        timeout = None
         while not self._stop.is_set():
-            self._deliver.wait()
+            self._deliver.wait(timeout)
             self._deliver.clear()
-            try:
-                self._store.drain()
-            except (RuntimeError, ValueError, TypeError, OSError):
-                # The failing subscription retains reset_pending for the next publication.
-                continue
+            if self._stop.is_set():
+                break
+            with self._store._condition:
+                subscriptions = set(self._store._subscribers)
+                pending = [s for s in subscriptions if s.queue or s.reset_pending]
+            retries = {s: retry for s, retry in retries.items() if s in pending}
+            for sub in pending:
+                due, count = retries.get(sub, (0, 0))
+                if due > time.monotonic():
+                    continue
+                if not sub.delivery_lock.acquire(blocking=False):
+                    retries[sub] = (time.monotonic() + .1, count)
+                    continue
+                try:
+                    sub._deliver()
+                    retries.pop(sub, None)
+                except Exception:  # health: allow BLE001 -- isolate subscribers and retry retained reset
+                    delay = (.1, .2, .4, 1., 2., 5.)[min(count, 5)]
+                    retries[sub] = (time.monotonic() + delay, min(count + 1, 5))
+                    logging.getLogger(__name__).exception('replica callback failed; reset retained')
+                finally:
+                    sub.delivery_lock.release()
+            # Publication wakes healthy peers immediately, but cannot bypass a
+            # failing subscriber's backoff. Quiet owners still get a retry.
+            timeout = (max(0, min(due for due, _ in retries.values()) - time.monotonic())
+                       if retries else None)
 
     def _apply(self, delta):
         if not isinstance(delta, Delta) or type(delta.rev) is not int or type(delta.prev) is not int:
