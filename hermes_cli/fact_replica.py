@@ -177,8 +177,10 @@ class ReplicaHandle:
             result = receive(sock)
             if "pin" in result:
                 self._reset(sock, result["pin"])
+                self._demands.owner_epoch(result["pin"]["epoch"])
             elif "delta" in result:
                 self._apply(result["delta"])
+                self._demands.owner_epoch(result["delta"].epoch)
             elif result.get("idle"):
                 with self._store._condition:
                     if not self._online:

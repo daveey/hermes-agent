@@ -91,6 +91,7 @@ class Action:
             self.pending.clear()
         self.session.pop('_notif_remote_batch', None)
         self.session.pop('_notif_local_boards', None)
+        self.session.pop('_notif_local_incomplete', None)
         self.scheduler.event.set()
 
 
@@ -104,6 +105,10 @@ class Scheduler:
         self.dirty = set()
         self.catchup = set()
         self.known_keys = {}
+        # scope -> {board slug: reason} whose local discovery failed. An explicit
+        # incomplete/retry obligation, repaid only by the next unchanged 30s
+        # reconciliation (never an accelerated census); cleared on recovery.
+        self.local_incomplete = {}
         self.next_reconcile = 0.0
         self.stop = threading.Event()
         self.thread = None
@@ -218,10 +223,13 @@ class Scheduler:
                 local = {}
                 if reconcile:
                     from tui_gateway.notification_loaded_local import capture
+                    failed = {}
                     try:
-                        local = first.context.run(capture, group)
+                        local, failed = first.context.run(capture, group)
                     except (OSError, ValueError, RuntimeError, sqlite3.Error):
                         log.warning('local notification discovery failed; retry next reconciliation', exc_info=True)
+                        failed = {'*': 'board inventory unavailable'}
+                    self._local_obligation(scope, group, failed)
                 try:
                     source = first.context.run(self._source_identity)
                     if source in batches:
@@ -261,6 +269,25 @@ class Scheduler:
                         action.pending.append((batch, tuple(local.get(action, ()))))
                 for action in live:
                     action.wake()
+
+    def _local_obligation(self, scope, group, failed):
+        """Record or clear failed-board discovery; healthy boards were already delivered."""
+        marker = tuple(sorted(failed))
+        with self.lock:
+            if failed:
+                self.local_incomplete[scope] = dict(failed)
+            elif self.local_incomplete.pop(scope, None) is not None:
+                log.info('local notification discovery recovered for %s', scope)
+            for action in group:
+                if action.closed:
+                    continue
+                if marker:
+                    action.session['_notif_local_incomplete'] = marker
+                else:
+                    action.session.pop('_notif_local_incomplete', None)
+        if failed:
+            log.warning('local notification discovery incomplete for %s: %s; retry next reconciliation',
+                        scope, ', '.join(marker))
 
     @staticmethod
     def _source_identity():
