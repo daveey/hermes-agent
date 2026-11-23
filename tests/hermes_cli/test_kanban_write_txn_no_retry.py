@@ -252,6 +252,7 @@ def test_failed_boundary_discards_real_pending_lease_queue(two, monkeypatch, fai
     a, b = two
     leases = kbc._run_end_lease
     monkeypatch.setattr(sync, "board_mode", lambda conn: "primary")
+    monkeypatch.setattr(sync, "sync_state", lambda conn: {"gateway_id": "test-gateway", "board_id": "test-board"})
     monkeypatch.setattr(sync, "run_uid", lambda conn, run_id: "queued-run")
     released = []
     monkeypatch.setattr(leases, "_release", lambda *args: released.append(args))
@@ -289,6 +290,11 @@ def test_failed_boundary_discards_real_pending_lease_queue(two, monkeypatch, fai
         assert not a.in_transaction
         committed = failure in {"callback", "restore"}
         assert b.execute("SELECT count(*) FROM tasks WHERE id='tqueue'").fetchone()[0] == int(committed)
+        retry_table = b.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_run_end_retries'"
+        ).fetchone()
+        retry_rows = b.execute("SELECT run_uid FROM kanban_run_end_retries").fetchall() if retry_table else []
+        assert [row[0] for row in retry_rows] == (["queued-run"] if committed else [])
         # A later unrelated commit must not inherit a stranded release.
         monkeypatch.setattr(a, "execute", raw)
         with kbc.write_txn(a):
