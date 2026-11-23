@@ -117,3 +117,12 @@ def test_reassert_never_adds_a_card_the_rebuild_did_not_write(synced_conn):
     assert snapshot_tasks.reassert(synced_conn, hub, "fixture", partition="worker") == 1
     assert _card(synced_conn, "t_foreign") is None
     assert _card(synced_conn, target) == ("done", DONE_AT, 40)
+
+
+def test_reassert_skips_rows_that_already_match(synced_conn):
+    """An untouched card at the Board version is not written again (most of a real board)."""
+    target, _, stop, release, proofs = fixture.scenario(synced_conn)
+    hub = SnapshotHub(proofs, _board(synced_conn, target, stop, release, proofs))
+    _rebuild(synced_conn, hub)
+    assert _card(synced_conn, target) == ("done", DONE_AT, 40)
+    assert snapshot_tasks.reassert(synced_conn, hub, "fixture") == 0

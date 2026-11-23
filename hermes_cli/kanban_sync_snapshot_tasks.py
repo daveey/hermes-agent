@@ -43,7 +43,7 @@ def reassert(conn: sqlite3.Connection, hub: Any, board: str, *, partition: Optio
     while True:
         checkpoint()
         page = hub.snapshot_page(board, "tasks", after)
-        changes = [ksc._row_change("tasks", r) for r in page.get("rows", [])]
+        changes = [_change(r) for r in page.get("rows", [])]
         if partition is not None:
             changes = ksc.own_partition(conn, changes, partition)
         changes = _unmoved(conn, changes)
@@ -58,10 +58,34 @@ def reassert(conn: sqlite3.Connection, hub: Any, board: str, *, partition: Optio
         after = str(page["next"])
 
 
+def _change(row: dict) -> sync.RemoteChange:
+    """A snapshot row as the upsert the first pass applied."""
+    return sync.RemoteChange(seq=0, table="tasks", uid=str(row["uid"]), op="upsert", fields=row,
+                             version=int(row.get("version") or 0), hlc=str(row.get("hlc") or ""),
+                             origin_gateway=str(row.get("origin_gateway") or ""))
+
+
+_CHUNK = 500  # bound values per IN (...) read, as elsewhere in kanban sync
+
+
 def _unmoved(conn: sqlite3.Connection, changes: list) -> list:
-    """The changes whose card holds exactly that Board version here (a newer row waits for the feed)."""
-    if not changes:
-        return []
-    ids = [ch.uid for ch in changes]
-    held = dict(conn.execute(f"SELECT id, sync_version FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids))
-    return [ch for ch in changes if ch.version and held.get(ch.uid) == ch.version]
+    """The changes whose card holds exactly that Board version here and differs from it in a synced column.
+
+    A newer row waits for the feed; an identical one needs no write (most of a 22k-card board). A reference
+    column (a local run id against the Board's run uid) is not compared."""
+    refs = {column for table, column in sync.REF_COLUMNS if table == "tasks"}
+    compared = sync.SYNCED_COLUMNS["tasks"] - refs
+    out = []
+    for index in range(0, len(changes), _CHUNK):
+        part = changes[index:index + _CHUNK]
+        ids = [ch.uid for ch in part]
+        local = {r["id"]: r for r in conn.execute(
+            f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        for ch in part:
+            row = local.get(ch.uid)
+            if row is None or not ch.version or row["sync_version"] != ch.version:
+                continue
+            keys = compared & set(ch.fields) & set(row.keys())
+            if any(row[k] != ch.fields[k] for k in keys):
+                out.append(ch)
+    return out
