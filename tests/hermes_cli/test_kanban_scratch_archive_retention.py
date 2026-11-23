@@ -39,7 +39,8 @@ def _make(root, name, age_s, board_slug="default", now=NOW):
     path = root / board_slug / name
     (path / "repo").mkdir(parents=True)
     (path / "repo" / "meta.json").write_text("{}")
-    os.utime(path, (now - age_s, now - age_s))
+    for p in (path / "repo" / "meta.json", path / "repo", path):
+        os.utime(p, (now - age_s, now - age_s))
     return path
 
 
@@ -58,9 +59,26 @@ def test_configured_days_and_zero(root, monkeypatch):
     _cfg(monkeypatch, scratch_archive_retention_days=0)
     assert ret.prune_scratch_archives(root=root, now=NOW) == 0
     assert a.is_dir()
-    _cfg(monkeypatch, scratch_archive_retention_days=2)
+    _cfg(monkeypatch, scratch_archive_retention_days=2.0)  # YAML 2.0 is two whole days
     assert ret.prune_scratch_archives(root=root, now=NOW) == 1
     assert not a.exists()
+
+
+def test_age_runs_from_the_newest_entry_two_levels_down(root, monkeypatch):
+    """A build still writing its payload, or an archive whose detach intent just landed, is not old."""
+    _cfg(monkeypatch, admission={"disk_free_floor_bytes": GIB})
+    monkeypatch.setattr(ret, "_free_bytes", lambda _p: 0)
+    writing = _make(root, "t_w", 30 * DAY)
+    os.utime(writing / "repo" / "meta.json", (NOW - 60, NOW - 60))  # grandchild written a minute ago
+    building = _make(root, "t_b.partial-999999997", 30 * DAY)
+    os.utime(building / "repo", (NOW - 60, NOW - 60))
+    deep = _make(root, "t_d", 30 * DAY)
+    (deep / "repo" / "sub").mkdir()
+    (deep / "repo" / "sub" / "f").write_text("x")  # three levels down: not looked at
+    for p in (deep / "repo" / "sub", deep / "repo", deep):
+        os.utime(p, (NOW - 30 * DAY,) * 2)
+    assert ret.prune_scratch_archives(root=root, now=NOW) == 1
+    assert writing.is_dir() and building.is_dir() and not deep.exists()
 
 
 @pytest.mark.parametrize("bad", [{"scratch_archive_retention_days": -1},
@@ -255,6 +273,9 @@ def test_kanban_gc_prunes_an_expired_archive_it_made_earlier(board, remote, caps
     assert archive.is_dir() and not path.exists()
     assert capsys.readouterr().out.splitlines()[-1].endswith(", 0 scratch archive(s) removed")
     old = time.time() - 8 * DAY
+    for top, dirs, files in os.walk(archive, topdown=False):
+        for name in files + dirs:
+            os.utime(os.path.join(top, name), (old, old), follow_symlinks=False)
     os.utime(archive, (old, old))
     assert _gc() == 0
     assert not archive.exists()
