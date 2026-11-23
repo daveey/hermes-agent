@@ -62,6 +62,7 @@ import logging
 import os
 import sqlite3
 import threading
+from collections import OrderedDict
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
@@ -844,6 +845,45 @@ def _board_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TAB
     return _revision.content_key(path, tables, lambda p: cached_ro(p, busy_budget=0))
 
 
+# [daveey] Last good association task ids per (board, alias) for the links dedup. The batched read's busy memo is
+# keyed by the whole alias set, which moves whenever a receipt is added or released; this per-alias memo keeps the
+# old tolerance: a busy board is answered stale when every alias it is asked about has been read before.
+_ASSOCIATION_MEMO_MAX = 4096
+_association_memo: OrderedDict[tuple[str, str], frozenset[str]] = OrderedDict()
+_association_memo_lock = threading.Lock()
+
+
+def _association_pairs(path: Path, sids: set[str]) -> set[tuple[str, str]]:
+    """Every listed ``(alias, task)`` association of ``sids`` on ``path``: one read per board. On a busy board with
+    no memo for this exact alias set, answered from each alias's last good read (stale) when every alias has one;
+    otherwise the busy error propagates (fail fast: the caller holds ``_links_lock``, failures are not cached)."""
+    from hermes_cli.kanban_links_associations import pairs
+    ordered = sorted(sids)
+    try:
+        # no deadline: never wait out a busy board while the caller holds _links_lock
+        found = {(p['session'], p['id']) for p in _busy.session_tasks(
+            path, ordered, LISTED_STATUSES, pairs, memo_namespace="links")}
+    except sqlite3.OperationalError as exc:
+        if not _busy.is_busy(exc):
+            raise
+        with _association_memo_lock:
+            last = [_association_memo.get((str(path), sid)) for sid in ordered]
+        if any(entry is None for entry in last):
+            raise
+        return {(sid, tid) for sid, tids in zip(ordered, last) for tid in tids}
+    by_sid: dict[str, set[str]] = {sid: set() for sid in ordered}
+    for sid, tid in found:
+        by_sid.setdefault(sid, set()).add(tid)
+    with _association_memo_lock:
+        for sid, tids in by_sid.items():
+            key = (str(path), sid)
+            _association_memo.pop(key, None)
+            _association_memo[key] = frozenset(tids)
+        while len(_association_memo) > _ASSOCIATION_MEMO_MAX:
+            _association_memo.popitem(last=False)
+    return found
+
+
 def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
                                    profile: str) -> list[dict[str, Any]]:
     """Prefer exact local open associations, without inferring receipt release.
@@ -856,17 +896,15 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
         return rows
     boards = {_board_slug(p): p for p in _board_db_paths()}
     represented = set()
-    # Receipt fan-out often repeats the same board/session. Read each alias once
-    # per projection, without extending freshness or sharing across profiles.
-    task_ids: dict[tuple[Path, str], set[str]] = {}
-
-    def contains(path: Path, sid: str, task_id: str) -> bool:
-        key = (path, sid)
-        if key not in task_ids:  # no deadline: never wait out a busy board while the caller holds _links_lock
-            from hermes_cli.kanban_links_associations import read
-            task_ids[key] = {t['id'] for t in _busy.session_tasks(
-                path, [sid], LISTED_STATUSES, read, memo_namespace="links")}
-        return task_id in task_ids[key]
+    # [daveey] One association read per board for every alias the local receipts name (it was one guarded
+    # connection per board/alias: a third of each projection, under _links_lock). Request-local: never extends
+    # freshness or shares evidence across profiles.
+    wanted: dict[Path, set[str]] = {}
+    for row in local:
+        path = boards.get(row['board'])
+        if path is not None:
+            wanted.setdefault(path, set()).update((row['session'], row['origin_session']))
+    members = {path: _association_pairs(path, sids) for path, sids in wanted.items()}
 
     for row in local:
         path = boards.get(row['board'])
@@ -874,7 +912,7 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
             continue
         aliases = {row['session'], row['origin_session']}
         # Require coverage of every receipt alias, not just a matching task id.
-        if all(contains(path, sid, row['id']) for sid in aliases):
+        if all((sid, row['id']) in members[path] for sid in aliases):
             represented.add((row['key'], row['session'], row['origin_session']))
     return [row for row in rows
             if (row['key'], row['session'], row['origin_session']) not in represented]
@@ -1908,6 +1946,8 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     with _pairs_lock:
         _board_memo.clear()
     _busy.reset()
+    with _association_memo_lock:
+        _association_memo.clear()
     with _links_lock:
         _links_cache.clear()
         _links_tickets.reset()

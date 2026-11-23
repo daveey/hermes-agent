@@ -103,3 +103,89 @@ def test_busy_associations_never_poison_sidebar_or_outcome_memos(tmp_path):
             busy.session_tasks(board, ['tip'], ('running',), unavailable, memo_namespace='links')
     finally:
         busy.reset()
+
+
+def test_pairs_match_the_per_session_read_for_every_alias(tmp_path):
+    """One batched read answers exactly what ``read(path, [sid])`` answers for each sid: creator and counted
+    subscriber per session, listed statuses only."""
+    from hermes_cli.kanban_links_associations import pairs, read
+
+    board = tmp_path / 'kanban.db'
+    conn = fixtures._connect(board)
+    for tid, status, sid in [('open', 'running', 'tip'), ('done', 'done', 'tip'), ('sub', 'blocked', 'elsewhere'),
+                             ('other', 'ready', 'elsewhere'), ('third', 'ready', 'old'),
+                             ('watch', 'scheduled', 'tip'), ('sched', 'scheduled', 'tip')]:
+        fixtures._insert_task(conn, tid, status, sid)
+    fixtures._sub(conn, 'sub', 'tip', 'created')
+    fixtures._sub(conn, 'open', 'old', 'created')
+    fixtures._sub(conn, 'other', 'tip', 'touch')  # notice-only provenance: not the chat's work
+    conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES "
+                 "('watch', 'scheduled', '{\"watch\": 1}', 1.0), ('sched', 'scheduled', '{}', 1.0)")
+    conn.commit()
+    conn.close()
+    sids = ['tip', 'elsewhere', 'old', 'nobody']
+    got = {(p['session'], p['id']) for p in pairs(board, sids, activity.LISTED_STATUSES)}
+    expected = {(sid, t['id']) for sid in sids for t in read(board, [sid], activity.LISTED_STATUSES)}
+    assert got == expected
+    assert ('tip', 'sub') in got and ('old', 'open') in got and ('tip', 'done') not in got
+    assert ('tip', 'other') not in got, 'an uncounted (touch) subscription was listed'
+    if 'scheduled' in activity.LISTED_STATUSES:
+        assert ('tip', 'sched') in got and ('tip', 'watch') not in got, 'a watch park was listed'
+
+
+def test_pairs_reader_closes_its_connection_even_on_failure(tmp_path, monkeypatch):
+    from hermes_cli import kanban_links_associations as associations
+    from hermes_cli import kanban_session_outcome_tasks as selection
+
+    board = tmp_path / 'kanban.db'
+    fixtures._connect(board).close()
+    readers = []
+    real_open = activity._open_ro
+
+    def capture(*args, **kwargs):
+        conn = real_open(*args, **kwargs)
+        readers.append(conn)
+        return conn
+
+    monkeypatch.setattr(activity, '_open_ro', capture)
+    assert associations.pairs(board, ['tip'], activity.LISTED_STATUSES) == []
+
+    def fail(*args, **kwargs):
+        raise ValueError('selection failed')
+
+    monkeypatch.setattr(selection, 'select_listed_local_task_set', fail)
+    with pytest.raises(ValueError, match='selection failed'):
+        associations.pairs(board, ['tip'], activity.LISTED_STATUSES)
+    assert len(readers) == 2
+    for conn in readers:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            conn.execute('SELECT 1')
+
+
+def test_busy_board_answers_a_new_alias_set_from_each_aliases_last_read(tmp_path, monkeypatch):
+    """The batched read's memo is keyed by the whole alias set; a receipt released (smaller set) on a busy board
+    must still be answered from the per-alias last reads, as the per-alias reader was. An alias never read raises."""
+    from hermes_cli import kanban_links_associations as associations
+    from hermes_cli import kanban_generation as gen
+
+    board = tmp_path / 'kanban.db'
+    monkeypatch.setattr(activity, '_board_db_paths', lambda: [board])
+    activity._reset_cache_for_tests()
+    try:
+        monkeypatch.setattr(associations, 'pairs', lambda path, ids, statuses: [
+            {'session': 'tip', 'id': 'open'}, {'session': 'old', 'id': 'open'}])
+        row = dict(gateway='gw', profile='default', board='default', id='open',
+                   key='gw/default/default/open', session='tip', origin_session='old')
+        assert activity._without_local_open_duplicates([row], gateway='gw', profile='default') == []
+
+        def busy(*args):
+            raise gen.BoardLifecycleBusy()
+
+        monkeypatch.setattr(associations, 'pairs', busy)
+        released = {**row, 'origin_session': 'tip'}  # alias set {'tip'}: no memo for this exact key
+        assert activity._without_local_open_duplicates([released], gateway='gw', profile='default') == []
+        unseen = {**row, 'origin_session': 'never-read'}
+        with pytest.raises(sqlite3.OperationalError):
+            activity._without_local_open_duplicates([unseen], gateway='gw', profile='default')
+    finally:
+        activity._reset_cache_for_tests()
