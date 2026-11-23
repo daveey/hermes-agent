@@ -604,6 +604,7 @@ class Attestation:
         self._dep_units = {}  # executed/loaded receipts only, never audited units
         self._native_loads = []
         self._unknown_detail = {}
+        self._unknown_sources = {}  # diagnostic producer receipts, never generated-code trust
         self.interpreter_identity = {
             "executable": str(Path(sys.executable).resolve()),
             "version": sys.version, "cache_tag": sys.implementation.cache_tag,
@@ -1204,6 +1205,7 @@ class Attestation:
                 # Diagnosis only (which code produced it); the unknown stays latched.
                 self._unknown_detail.setdefault("unrooted-exec:" + filename, set()).add(
                     f"{producer.f_code.co_filename}:{producer.f_code.co_qualname}")
+                self._unknown_producer_source("unrooted-exec:" + filename, producer.f_code)
             return
         if not self._dep_ready():
             return
@@ -1290,6 +1292,27 @@ class Attestation:
         if len(self._native_loads) < MAX_DEP_REPORT:
             self._native_loads.append({"name": name, "caller_component": caller})
 
+    def _unknown_producer_source(self, reason, code):
+        """Bind diagnostic attribution to observed source, not a synthetic filename.
+
+        An installer receipt for the producer does not attest its output. Keep
+        every unknown and the closed generator table unchanged.
+        """
+        known = self._known.get(id(code))
+        if known is None or known[0] is not code:
+            return
+        source = self._dep_units.get((code.co_filename, "source", None))
+        if source is None or source["component"] != known[1]:
+            return
+        if len(self._unknown_sources) >= MAX_DEP_REPORT and reason not in self._unknown_sources:
+            return
+        receipts = self._unknown_sources.setdefault(reason, [])
+        receipt = {"filename": code.co_filename, "qualname": code.co_qualname,
+                   "component": source["component"], "source_sha256": source["sha256"],
+                   "trust": "producer source only; generated code remains unknown"}
+        if receipt not in receipts and len(receipts) < 8:
+            receipts.append(receipt)
+
     def dependency_receipts(self):
         """Receipts actually used: trusted by installer receipt, not audited, no coverage."""
         with self._lock:
@@ -1299,6 +1322,8 @@ class Attestation:
                     "units": [dict(u) for u in self._dep_units.values()],
                     "native_loads": [dict(n) for n in self._native_loads],
                     "unknown_producers": {k: sorted(v) for k, v in self._unknown_detail.items()},
+                    "unknown_producer_sources": {k: [dict(r) for r in v]
+                                                 for k, v in self._unknown_sources.items()},
                     "generated_trust": {"annotationlib.ForwardRef.evaluate": FORWARDREF_TRUST},
                     "residual_risks": [
                         "RECORD itself is not receipted",

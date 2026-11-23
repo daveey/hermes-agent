@@ -62,6 +62,21 @@ site-packages environment, verify installer RECORD custody, then call
 Plugin-controlled search-path additions are not automatically registered. An
 unrooted dependency or unsupported generated code still withholds the capability.
 
+`dependency_receipts().unknown_producer_sources` attributes an unsupported
+execution to its producer's previously observed installer-receipted source, when
+that exact live producer code object is known. Each diagnostic contains the
+producer filename, qualname, component and source SHA256. It does **not** attest
+the generated code, add a generator to the closed producer table, or remove or
+reclassify an unknown. A synthetic filename (including an attrs filename) is not
+evidence of source custody. Unobserved, modified or filename-spoofed producers do
+not acquire these receipts. Reports bound this attribution to 4096 reasons and
+8 source receipts per reason; truncating diagnostics never grants trust.
+
+Install attestation through the supported bootstrap before importing the plugin
+loader. Constructing a diagnostic ledger after importing the loader correctly
+latches `prehook-module` refusals; these cannot be repaired by late registration
+or treated as equivalent to a supported-bootstrap observation.
+
 Identify uses one in-flight verifier with no cached positive. Its 0.4-second
 absolute deadline includes thread setup and leaves headroom within a 0.5-second
 identify budget. Late positives are discarded. Slow storage withdraws v2 rather
