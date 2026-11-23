@@ -87,7 +87,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         if decision['action'] != 'record':
             return None
         verdict = decision['verdict']
-        if verdict['status'] not in ('applied', 'merged') or verdict.get('version'):
+        if verdict['status'] not in ('applied', 'merged', 'deferred'):
+            return None
+        if verdict['status'] != 'deferred' and verdict.get('version'):
             return None
         row = source()
         if not row.get('_parent'):
@@ -120,6 +122,18 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         reply = hub._call('GET', root + 'deferred?task=' + quote(wire['uid'], safe=''))
         return deferred.validate_membership(reply, current, wire['uid']), active
 
+    def project_parent(row):
+        if current_row is None or current_row.uid != row['row_uid']:
+            raise ValueError('synthetic parent authoritative version unavailable')
+        # Current existence is independent of whether the requested status applied.
+        # Pending fields and newer feed images still win under ordinary projection.
+        cursor = (sync.sync_state(conn) or {}).get('cursor', 0)
+        if conn.execute("SELECT 1 FROM kanban_sync_tombstones WHERE table_name='tasks' AND row_uid=?",
+                        (row['row_uid'],)).fetchone():
+            raise ValueError('synthetic parent current projection held by local deletion')
+        sync.apply_remote_changes(conn, [current_row], new_cursor=cursor, board=board,
+                                  observers=False, local_pending_wins=True, allow_nested=True)
+
     def record(verdict):
         pending = journal.snapshot(conn)['pending']
         if verdict['client_op_id'] != pending['op_id']:
@@ -150,27 +164,23 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
             setattr(out, status, getattr(out, status) + 1)
             return  # Keep the semantic obligation visible; no sync success or identity rotation.
         if status == 'deferred':
-            if cap.get('deferred_observation') != 'origin_pending1' or row.get('_parent'):
+            if cap.get('deferred_observation') != 'origin_pending1':
                 raise ValueError('tracer final disposition requires custody integration')
             from hermes_cli.kanban_replay_deferred import handoff
             handoff(conn, json.loads(journal.pending_wire(conn)), verdict, local['board_incarnation'],
                     membership=membership)
-            conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
+            if row.get('_parent'):
+                project_parent(row)
+                from hermes_cli.kanban_sync_envelope import retire_parent
+                retire_parent(conn, row['row_uid'], remote=remote)
+            else:
+                conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
             out.deferred += 1
             return  # Transport handoff is not authoritative row success.
         if status not in ('applied', 'merged'):
             raise ValueError('tracer final disposition requires custody integration')
         if row.get('_parent') and not verdict.get('version'):
-            if current_row is None or current_row.uid != row['row_uid']:
-                raise ValueError('synthetic parent authoritative version unavailable')
-            # Project the separately read current image with normal pending-wins
-            # and version guards. Do not pretend its version was the old result's.
-            cursor = (sync.sync_state(conn) or {}).get('cursor', 0)
-            if conn.execute("SELECT 1 FROM kanban_sync_tombstones WHERE table_name='tasks' AND row_uid=?",
-                            (row['row_uid'],)).fetchone():
-                raise ValueError('synthetic parent current projection held by local deletion')
-            sync.apply_remote_changes(conn, [current_row], new_cursor=cursor, board=board,
-                                      observers=False, local_pending_wins=True, allow_nested=True)
+            project_parent(row)
         if verdict.get('version') and row['table_name'] == 'tasks':
             conn.execute('UPDATE tasks SET sync_version=MAX(COALESCE(sync_version,0),?) WHERE id=?',
                          (verdict['version'], row['row_uid']))
