@@ -18,6 +18,7 @@ import sys
 import threading
 from collections import deque
 from pathlib import Path
+from time import monotonic as _pread_sweep_now
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -430,6 +431,11 @@ def offline_file_access(path: Path | str, *, what: str = "read"):
 _PREAD_LOCK = threading.Lock()
 _PREAD_FDS: dict[str, tuple[int, int, int]] = {}  # path -> (fd, st_dev, st_ino)
 _RETIRED_PREAD_FDS: list[int] = []  # superseded inodes: closed only once unlinked (see sweep)
+# Header-heavy session captures must not fstat the entire process inventory on
+# every read. Reclaim on the next read after this monotonic deadline; explicit
+# release/inventory calls still sweep immediately. Linked inodes are never closed.
+_PREAD_NEXT_SWEEP = 0.0
+_PREAD_SWEEP_SECONDS = .25
 
 
 def _fd_is_unlinked(fd: int) -> bool:
@@ -480,13 +486,17 @@ def lock_safe_fds() -> frozenset[int]:
 
 
 def _pread_fd(path: Path | str) -> Optional[tuple[int, os.stat_result]]:
+    global _PREAD_NEXT_SWEEP
     key = str(path)
     try:
         st = os.stat(key)
     except OSError:
         return None
     with _PREAD_LOCK:
-        _release_unlinked_locked()
+        now = _pread_sweep_now()
+        if now >= _PREAD_NEXT_SWEEP:
+            _release_unlinked_locked()
+            _PREAD_NEXT_SWEEP = _pread_sweep_now() + _PREAD_SWEEP_SECONDS
         cached = _PREAD_FDS.get(key)
         if cached is not None and (cached[1], cached[2]) != (st.st_dev, st.st_ino):
             _RETIRED_PREAD_FDS.append(_PREAD_FDS.pop(key)[0])  # closed by the sweep once unlinked
