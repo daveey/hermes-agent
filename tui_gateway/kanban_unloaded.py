@@ -878,6 +878,10 @@ def _loop(stop: threading.Event) -> None:
                     schedule.gate.retry_at = time.monotonic() + interval
                     logger.warning("kanban unloaded pass failed", exc_info=True)
                 maintenance = time.monotonic() + interval
+                if not schedule.gate.was_bound and schedule.role != "retired":
+                    # An early report wake may not admit legacy work. Keep its
+                    # outstanding deadline rather than postponing it a full interval.
+                    maintenance = min(maintenance, schedule.next_legacy)
             # Stop observation is memory-only. Lease custody still gets its
             # normal maintenance cadence even with no admitted source pass.
             wake.wait(min(1.0, max(0.01, min(maintenance, schedule.gate.retry_at) - time.monotonic())))

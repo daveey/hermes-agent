@@ -1,6 +1,8 @@
 """f-only loaded notification acceptance, with real replica and claim ledgers."""
 import time
 
+import pytest
+
 from tests.tui_gateway import test_kanban_remote_notices_keyed as fixtures
 from tui_gateway import kanban_remote_notices as krn
 
@@ -16,6 +18,14 @@ def _hub(tmp_path, cards):
 def test_remote_delivered_by_shared_reconcile_with_pollers_off(tmp_path, monkeypatch):
     from tui_gateway import notification_loaded_f as loaded
     from tui_gateway import server
+    from hermes_cli import fact_host, fact_replica, fact_demand
+
+    def no_ipc(*args, **kwargs):
+        pytest.fail('first-ship f must not start replica IPC or a demand channel')
+
+    monkeypatch.setattr(fact_host.FactHost, 'start', no_ipc)
+    monkeypatch.setattr(fact_replica.ReplicaHandle, '__init__', no_ipc)
+    monkeypatch.setattr(fact_demand.DemandChannel, '__init__', no_ipc)
     old = fixtures._card('t_history', fixtures.CHAT, status='done', at=time.time() - krn.FRESH_S - 60)
     alias = fixtures._card('t_history', fixtures.CHAT, status='done', at=time.time())
     alias['key'] = 'default/t_history'
@@ -97,6 +107,62 @@ def test_remote_delivered_by_shared_reconcile_with_pollers_off(tmp_path, monkeyp
     action.tick('ui', retry_at, retry_at - 1, None, lambda *_: None)
     assert scheduler.dirty == {('hub', card['key'])}  # shared keyed retry, not another census
     action.close()
+
+
+@pytest.mark.parametrize('linked', [False, True])
+def test_incomplete_reconciliation_retries_only_positive_chat_keys(tmp_path, monkeypatch, linked):
+    import sqlite3
+    from tui_gateway import notification_loaded_f as loaded, server
+    from tui_gateway import kanban_remote_notices_keyed as keyed, notification_loaded_local
+
+    cards = [fixtures._card(f't_foreign_{i}', 'unrelated-chat', status='done', at=time.time())
+             for i in range(1200)]
+    relevant = fixtures._card('t_relevant', 'ancestor-chat', status='done', at=time.time())
+    if linked:
+        cards.append(relevant)
+    # A legacy replica has no incremental metadata index: unknown recovery
+    # must stay on reconciliation, independently of native key hints.
+    replica = fixtures._hub(tmp_path, cards)
+    with sqlite3.connect(replica) as conn:
+        conn.execute("UPDATE meta SET v='99' WHERE k='cursor'")
+    monkeypatch.setattr(krn, 'hub_db_path', lambda: replica)
+    monkeypatch.setattr(krn, 'ledger_path', lambda: tmp_path / 'ledger.db')
+    monkeypatch.setattr(server, '_session_lineage', lambda *_: ('ancestor-chat',))
+    monkeypatch.setattr(server, '_forwarded_locally', lambda *_: False)
+    monkeypatch.setattr(server, '_remote_transcript_has', lambda *_: lambda *_: False)
+    monkeypatch.setattr(notification_loaded_local, 'capture', lambda *_: ({}, {}))
+    clock = [100.0]
+    scheduler = loaded.Scheduler(clock=lambda: clock[0])
+    session = {'session_key': fixtures.CHAT, 'profile_home': None}
+    action = scheduler.add(session, 'default', lambda: None)
+    reads = []
+    read_rows = keyed.read_rows
+
+    def read(path, keys):
+        reads.append(keys)
+        return read_rows(path, keys)
+
+    monkeypatch.setattr(keyed, 'read_rows', read)
+    try:
+        scheduler.step()
+        assert action.due(legacy_due=False)
+        texts = server._collect_remote_kanban_notifications(fixtures.CHAT, [], session=session)
+        assert len(texts) == int(linked)
+        retry_at = session['_kanban_remote_retry_at']
+        action.tick('ui', retry_at, retry_at - 1, None, lambda *_: None)
+        expected = {('hub', relevant['key'])} if linked else set()
+        assert scheduler.dirty == expected
+        clock[0] = 101
+        scheduler.step()
+        assert reads == ([None, list(expected)] if linked else [None])
+        clock[0] = 129.999
+        scheduler.step()
+        assert sum(keys is None for keys in reads) == 1
+        clock[0] = 130
+        scheduler.step()
+        assert sum(keys is None for keys in reads) == 2
+    finally:
+        action.close()
 
 
 def test_wake_reaches_loaded_executor_under_two_seconds(tmp_path, monkeypatch):

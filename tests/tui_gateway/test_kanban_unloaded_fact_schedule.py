@@ -177,6 +177,66 @@ def test_actual_loop_keeps_lease_cadence_while_sources_are_quiet(monkeypatch):
         owner.close()
 
 
+@pytest.mark.parametrize("bound", [False, True])
+def test_early_report_deadline_does_not_postpone_legacy_work(monkeypatch, bound):
+    import threading
+    from types import SimpleNamespace
+
+    owner = None
+    if bound:
+        store = FakeStore()
+        helpers.ready_siblings(store)
+        owner = notification_facts.bind(store, helpers.SCOPE, "/canonical/early-deadline")
+        owner.report_ready()
+        store.activate(helpers.SCOPE)
+        store.drain()
+    now = [0.0]
+    calls, released = [], []
+    stop = threading.Event()
+
+    class Wake:
+        def set(self):
+            pass
+
+        def clear(self):
+            pass
+
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            now[0] += timeout
+            if now[0] >= 6.1:
+                stop.set()
+
+    def host(*args, **kwargs):
+        calls.append(now[0])
+        result = FanoutResult()
+        result.next_deadline = now[0] + 0.5
+        gates.run("card_change_pass", lambda: result, live=set())
+
+    time_wall = [1000.0]
+    lease = Lease()
+    monkeypatch.setattr(lease, "release", lambda: released.append(True), raising=False)
+    monkeypatch.setattr(unloaded, "make_lease", lambda: lease)
+    monkeypatch.setattr(unloaded, "threading", SimpleNamespace(Event=Wake))
+    monkeypatch.setattr(scheduling.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(gates.time, "time", lambda: time_wall[0] + now[0])
+    monkeypatch.setenv("HERMES_KANBAN_UNLOADED_SWEEP_S", "2")
+    monkeypatch.setenv("HERMES_KANBAN_UNLOADED_FIRST_S", "0")
+    monkeypatch.setattr(unloaded.wake_slots, "set_holder", lambda _: None)
+    monkeypatch.setattr(unloaded, "host_pass", host)
+    try:
+        unloaded._loop(stop)
+        # Both the bound action and the unbound legacy executor run each 0.5 s
+        # reported deadline, not just the 2 s interval.
+        assert calls == [i / 2 for i in range(13)]
+        assert released == [True]
+    finally:
+        if owner:
+            owner.close()
+
+
 def test_empty_fanout_result_is_not_a_quiet_certificate():
     from gateway.kanban_notification_schedule import PassReport
     result = FanoutResult()

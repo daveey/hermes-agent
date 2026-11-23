@@ -44,12 +44,23 @@ class Action:
             return True
 
     def retry(self):
-        import json
+        from tui_gateway import server
+        from tui_gateway.kanban_remote_notices import _linked_chats
+
         batch = self.session.get('_notif_remote_batch')
-        if hasattr(batch, 'rows'):
-            self.scheduler.invalidate([(gw, key) for gw, key, _ in json.loads(batch.rows)])
-        else:
-            self.scheduler.source_changed()
+        if not hasattr(batch, 'rows'):
+            return  # Unknown recovery belongs to the unchanged 30s clock.
+        chat = self.session.get('session_key')
+        if not chat:
+            return
+        chats = {chat, *server._session_lineage(chat)}
+        keys = [(gw, key) for gw, key, task in json.loads(batch.rows)
+                if any(profile == self.profile and sid in chats
+                       for profile, sid in _linked_chats(task, batch.me))]
+        if keys:
+            # Full captures contain other chats/profiles too. Incompleteness
+            # cannot turn their population into a one-second keyed census.
+            self.scheduler.invalidate(keys)
 
     def deadline(self, now, last_poll):
         with self.scheduler.lock:

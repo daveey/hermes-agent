@@ -15,7 +15,13 @@ class UnloadedSchedule:
         now = time.monotonic()
         changed = role != self.role
         self.role = role
+        # Read before due(): an empty membership resets retry_at.
+        report_due = now >= self.gate.retry_at
         due = self.gate.due(now, legacy_due=now >= self.next_legacy)
+        if not due and report_due and not self.gate.was_bound and not self.gate.actions:
+            # Never-bound work is the legacy executor; its reported deadline is
+            # due work. A detached binding still waits for a fresh membership.
+            due = True
         # Ownership changes require catch-up, but a detached facts registry is
         # never permission to resume scans using the launch profile instead.
         if not due and not (changed and (self.gate.actions or not self.gate.was_bound)):
