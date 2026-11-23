@@ -4,9 +4,12 @@
          + age * ready_minutes - failure * consecutive_failures``
 
 Effective priority and open descendants come from the same graph as
-:func:`kanban_dispatch_priority.order_with_remote_waiters`: the full replica, with local rows and a local child's
-edge set overriding it. Readiness age is the current ready/review interval (the stranded-ready diagnostic's floor:
-latest ready-entry event, latest run end, else creation), not card age. One call is one snapshot: nothing is cached
+:func:`kanban_dispatch_priority.order_with_remote_waiters`: the replica, with local rows and a local child's
+edge set overriding it. Each source contributes only its open rows, edges into open (or unknown) children, and the
+rows named by the caller or needed for local custody. Done/archived rows never change a score, and reading all of
+them made every dispatcher pass crawl in a busy gateway (each fetched row re-takes the GIL). Readiness age is the
+current ready/review interval (the stranded-ready diagnostic's floor: latest ready-entry event, latest run end, else
+creation), not card age. One call is one snapshot: nothing is cached
 or written (stored priority included), so completion, unlink or archive take effect on the next call.
 
 Turn owners rank first. A card the local turn-urgency observation (:mod:`kanban_turn_urgency`) names as holding the
@@ -99,7 +102,7 @@ def configured_weights() -> dict:
     return validate_weights(admission_policy().get("weights"))
 
 
-def _graph(conn: sqlite3.Connection, candidate_ids, *, now_s=None):
+def _graph(conn: sqlite3.Connection, candidate_ids, *, include_ids=(), now_s=None):
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_worker_node as wn
 
@@ -115,14 +118,16 @@ def _graph(conn: sqlite3.Connection, candidate_ids, *, now_s=None):
                 # do not swallow RuntimeError from graph/history implementation.
                 replica = None
             if replica is not None:
-                remote, edges, metadata, since = _source_snapshot(replica, candidate_ids)
+                remote, edges, metadata, since = _source_snapshot(replica, candidate_ids, include_ids=include_ids)
         except (sqlite3.Error, OSError):
             # Never retain graph fragments after a failed history/edge read.
             remote, edges, metadata, since = [], [], {}, {}
         finally:
             if replica is not None:
                 replica.close()
-    local, local_edges, local_metadata, local_since = _source_snapshot(conn, candidate_ids)
+    # Remote open rows are looked up locally too, so a local done/archived row still overrides them (custody).
+    local, local_edges, local_metadata, local_since = _source_snapshot(
+        conn, candidate_ids, include_ids=[*include_ids, *(r[0] for r in remote)])
     local_ids = {r[0] for r in local}
     tasks = {r[0]: (r[1] or 0, r[2]) for r in remote}
     tasks.update((r[0], (r[1] or 0, r[2])) for r in local)
@@ -166,11 +171,19 @@ def _alarm_key(key) -> bool:
     return isinstance(key, str) and key.startswith(ALARM_KEY_PREFIXES)
 
 
-def _source_snapshot(conn, candidate_ids):
+OPEN_STATUS = "status NOT IN ('done', 'archived')"
+
+
+def _source_snapshot(conn, candidate_ids, *, include_ids=()):
     """One consistent source view without committing a caller-owned transaction.
 
     The two databases cannot share an atomic snapshot; local custody wins when
     merging them. A savepoint pins each source's graph and history together.
+
+    Rows are the open tasks plus any task named in ``candidate_ids`` or ``include_ids`` whatever its status; edges
+    are those whose child is open here or absent here. Other done/archived rows cannot affect a score (descendants
+    count only open children), so they are not read: on the hub (2026-11-23) that is ~16.5k of ~16.7k local rows, per
+    lane, per dispatcher pass.
     """
     conn.execute("SAVEPOINT admission_score_read")
     try:
@@ -178,10 +191,18 @@ def _source_snapshot(conn, candidate_ids):
         # urgency floor; never infer an alarm from user-editable title prose.
         columns = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
         key_column = "idempotency_key" if "idempotency_key" in columns else "NULL"
+        select = f"SELECT id, priority, status, {key_column} FROM tasks"
+        rows = {r[0]: tuple(r) for r in conn.execute(f"{select} WHERE {OPEN_STATUS}")}
+        named = [tid for tid in dict.fromkeys((*candidate_ids, *include_ids)) if tid not in rows]
+        for offset in range(0, len(named), 400):
+            batch = named[offset:offset + 400]
+            marks = ",".join("?" for _ in batch)
+            rows.update((r[0], tuple(r)) for r in conn.execute(f"{select} WHERE id IN ({marks})", batch))
         tasks = [(tid, max(priority or 0, 900) if _alarm_key(key) else priority, status)
-                 for tid, priority, status, key in conn.execute(
-                     f"SELECT id, priority, status, {key_column} FROM tasks")]
-        edges = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+                 for tid, priority, status, key in rows.values()]
+        edges = conn.execute(
+            "SELECT l.parent_id, l.child_id FROM task_links l LEFT JOIN tasks t ON t.id = l.child_id "
+            f"WHERE t.id IS NULL OR t.{OPEN_STATUS}").fetchall()
         metadata, since = _candidate_state(conn, candidate_ids)
         return tasks, edges, metadata, since
     finally:
@@ -240,7 +261,7 @@ def effective_priorities(conn: sqlite3.Connection, task_ids: list[str]) -> dict[
 
     Return only extant task identities. Stored values are never changed.
     """
-    tasks, children, _metadata, _since, _owners = _graph(conn, [])
+    tasks, children, _metadata, _since, _owners = _graph(conn, [], include_ids=list(task_ids))
     return {tid: min(PRIORITY_CAP, max([tasks[tid][0], *(tasks[c][0] for c in _descendants(tid, children))]))
             for tid in task_ids if tid in tasks}
 

@@ -204,10 +204,10 @@ def test_snapshot_runtime_bug_is_not_misclassified_as_unavailable(sources, monke
 
     original = score._source_snapshot
 
-    def broken_snapshot(conn, ids):
+    def broken_snapshot(conn, ids, **kwargs):
         if conn is not local:
             raise RuntimeError("implementation bug")
-        return original(conn, ids)
+        return original(conn, ids, **kwargs)
 
     monkeypatch.setattr(score, "_source_snapshot", broken_snapshot)
     with pytest.raises(RuntimeError, match="implementation bug"):
