@@ -15,5 +15,5 @@ import hermes_cli.kanban_spend_decision
 assert 'hermes_cli.kanban_model_neutral' not in sys.modules
 assert 'requests' not in sys.modules
 '''
-    result = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
