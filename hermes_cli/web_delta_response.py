@@ -17,6 +17,10 @@ apps/desktop/electron/delta-reads.ts).
   again without a base.
 - Everything else (no ask, other methods and statuses, streams, small or huge bodies, Python without
   ``compression.zstd``) passes through untouched.
+- ``X-Hermes-Delta-Accept: zstd-gzip-v1`` additionally permits bounded gzip JSON entities. Hashes and bases
+  name their exact compressed bytes, without server decompression or another store. A whole answer keeps gzip;
+  a delta removes outer Content-Encoding and records ``X-Hermes-Delta-Content-Encoding: gzip`` so the client
+  verifies reconstructed entity bytes before gunzip. Plain ``zstd`` never opts into this representation.
 - Every hashed or delta answer says ``Vary: X-Hermes-Delta-Accept, X-Hermes-Delta-Base`` (merged into the
   handler's own Vary), and a delta drops the handler's ``ETag``: its bytes are a frame, not that entity. A caching
   proxy in front of the gateway then cannot replay a delta to a client that did not ask for one. A delta also
@@ -68,6 +72,8 @@ BASE_HEADER = "x-hermes-delta-base"
 HASH_HEADER = "x-hermes-body-hash"
 DELTA_HEADER = "x-hermes-delta"
 ENCODING = "zstd"
+GZIP_CAPABILITY = "zstd-gzip-v1"
+CONTENT_ENCODING_HEADER = "x-hermes-delta-content-encoding"
 DELTA_MEDIA_TYPE = "application/vnd.hermes.delta+zstd"
 MIN_BYTES = 16 * 1024
 MAX_BYTES = 8 * 1024 * 1024
@@ -293,15 +299,17 @@ def default_disk_dir() -> Path:
     return get_hermes_home() / "cache" / "delta-bodies"
 
 
-def _eligible(message: Message) -> bool:
-    """A complete, plain JSON 200 of a size worth encoding (a stream has no Content-Length)."""
+def _eligible(message: Message, allow_gzip: bool = False) -> bool:
+    """Bounded JSON entity bytes; gzip requires the explicit compressed-entity capability."""
     if message["status"] != 200:
         return False
     headers = Headers(raw=message["headers"])
     length = headers.get("content-length", "")
     return (
         headers.get("content-type", "").split(";", 1)[0].strip().lower() == "application/json"
-        and "content-encoding" not in headers
+        and ("content-encoding" not in headers or (
+            allow_gzip and headers.get("content-encoding", "").strip().lower() == "gzip"
+        ))
         and length.isascii()
         and length.isdecimal()
         and MIN_BYTES <= int(length) <= MAX_BYTES
@@ -354,26 +362,30 @@ class DeltaResponseMiddleware:
             await self.app(scope, receive, send)
             return
         request = Headers(scope=scope)
-        if request.get(ACCEPT_HEADER, "").strip().lower() != ENCODING:
+        capability = request.get(ACCEPT_HEADER, "").strip().lower()
+        if capability not in (ENCODING, GZIP_CAPABILITY):
             await self.app(scope, receive, send)
             return
-        held = _DeltaSend(send, request.get(BASE_HEADER, "").strip(), credential_namespace(request), self.store)
+        held = _DeltaSend(send, request.get(BASE_HEADER, "").strip(), credential_namespace(request), self.store,
+                          allow_gzip=capability == GZIP_CAPABILITY)
         await self.app(scope, receive, held)
 
 
 class _DeltaSend:
     """The ``send`` of one asked request: holds an eligible response until its body is complete."""
 
-    def __init__(self, send: Send, base_digest: str, namespace: str, store: BodyStore):
+    def __init__(self, send: Send, base_digest: str, namespace: str, store: BodyStore, *, allow_gzip: bool = False):
         self._send = send
         self._base_digest = base_digest
         self._namespace = namespace
         self._store = store
         self._start: Optional[Message] = None
         self._chunks: list[bytes] = []
+        self._allow_gzip = allow_gzip
+        self._size = 0
 
     async def __call__(self, message: Message) -> None:
-        if message["type"] == "http.response.start" and _eligible(message):
+        if message["type"] == "http.response.start" and _eligible(message, self._allow_gzip):
             self._start = message
             return
         if self._start is None:
@@ -390,6 +402,14 @@ class _DeltaSend:
             await self._send(message)
             return
         self._chunks.append(message.get("body", b""))
+        self._size += len(message.get("body", b""))
+        if self._size > int(Headers(raw=self._start["headers"])["content-length"]):
+            # A dishonest length must not turn a bounded entity into an unbounded stream buffer.
+            start, chunks = self._start, self._chunks
+            self._start, self._chunks = None, []
+            await self._send(start)
+            await self._send({**message, "body": b"".join(chunks)})
+            return
         if not message.get("more_body", False):
             await self._finish(b"".join(self._chunks))
 
@@ -413,6 +433,9 @@ class _DeltaSend:
         headers[HASH_HEADER] = digest
         _merge_vary(headers)
         if frame is not None:
+            if "content-encoding" in headers:
+                headers[CONTENT_ENCODING_HEADER] = headers["content-encoding"].strip().lower()
+                del headers["content-encoding"]  # the outer zstd frame is not a gzip entity
             del headers["etag"]  # the handler's validator names the whole body, not this frame
             # Only the client holding this base can use it, and Cloudflare ignores the Vary names above.
             del headers["cache-control"]

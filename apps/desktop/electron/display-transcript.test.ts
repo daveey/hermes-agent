@@ -26,6 +26,18 @@ describe('display transcript reads', () => {
     expect(displayTranscriptHeaders('GET', 'http://h/api/sessions')).toEqual({})
   })
 
+  it('matches one exact gzip coding, not a substring or a stacked encoding', () => {
+    const body = Buffer.from('{"ok":true}')
+    expect(decodeResponseBody(gzipSync(body), ' GZip ')).toBe(body.toString())
+    expect(decodeResponseBody(body, 'not-gzip')).toBe(body.toString())
+    expect(decodeResponseBody(body, 'gzip, br')).toBe(body.toString())
+  })
+
+  it('bounds gunzip output even for ordinary cold gzip responses', () => {
+    const bomb = gzipSync(Buffer.alloc(16 * 1024 * 1024 + 1, 65))
+    expect(() => decodeResponseBody(bomb, 'gzip')).toThrow()
+  })
+
   it('decodes a gzipped page and passes an uncompressed one through (an older backend)', () => {
     const json = JSON.stringify({ messages: [{ content: 'héllo', role: 'assistant' }] })
 

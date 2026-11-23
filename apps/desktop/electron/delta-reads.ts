@@ -29,11 +29,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
-import { decodeResponseBody, displayTranscriptHeaders } from './display-transcript'
+import { decodeResponseBody, displayTranscriptHeaders, isDisplayTranscriptRead } from './display-transcript'
 
 export const DELTA_ACCEPT_HEADER = 'X-Hermes-Delta-Accept'
 export const DELTA_BASE_HEADER = 'X-Hermes-Delta-Base'
 export const DELTA_ENCODING = 'zstd'
+export const DELTA_GZIP_CAPABILITY = 'zstd-gzip-v1'
+export const DELTA_MAX_ENTITY_BYTES = 8 * 1024 * 1024
 export const DELTA_RETRY_CODE = 'HERMES_DELTA_RETRY'
 export const DELTA_STORE_MAX_BYTES = 48 * 1024 * 1024
 export const DELTA_STORE_MAX_ENTRIES = 96
@@ -547,7 +549,7 @@ export function deltaRequestHeaders(
 
 /**
  * Every "how to encode the answer" request header fetchJson sends: the transcript slim/gzip ask and the delta ask.
- * A transcript page read asks for gzip, which the gateway never delta-encodes, so the two do not combine.
+ * Only bound remote transcript reads negotiate compressed-entity deltas; local reads retain slim+gzip alone.
  */
 export function readEncodingHeaders(
   method: string | undefined,
@@ -556,7 +558,46 @@ export function readEncodingHeaders(
 ): Record<string, string> {
   const transcript = displayTranscriptHeaders(method, url)
 
-  return Object.keys(transcript).length > 0 ? transcript : deltaRequestHeaders(method, url, store)
+  const delta = deltaRequestHeaders(method, url, store)
+
+  return Object.keys(transcript).length > 0
+    ? { ...transcript, ...delta, ...(delta[DELTA_ACCEPT_HEADER] ? { [DELTA_ACCEPT_HEADER]: DELTA_GZIP_CAPABILITY } : {}) }
+    : delta
+}
+
+/** A whole entity can seed a base only after both byte verification and entity decoding succeed. */
+function decodeWholeEntity(
+  response: { headers: Record<string, HeaderValue>; statusCode?: number },
+  body: Buffer,
+  store: DeltaBodyStore,
+  key: null | string,
+  gzipTranscript: boolean,
+  fail: (why: string) => never
+): string {
+  const { headers } = response
+  const hash = header(headers, 'x-hermes-body-hash')
+  const encoding = header(headers, 'content-encoding').toLowerCase()
+  // Hashes name entity bytes, before gunzip. Old servers supply no hash and remain usable.
+  const compressedBase = gzipTranscript && encoding === 'gzip' && hash && response.statusCode === 200
+
+  if (compressedBase && (body.length > DELTA_MAX_ENTITY_BYTES || bodyHash(body) !== hash)) {
+    return fail('whole gzip entity exceeds the budget or does not match its hash')
+  }
+
+  let text: string
+
+  try {
+    text = decodeResponseBody(body, headers['content-encoding'])
+  } catch (error) {
+    if (compressedBase) { return fail(`bad gzip entity: ${String(error).slice(0, 80)}`) }
+    throw error
+  }
+
+  if (key && hash && response.statusCode === 200 && (!encoding || compressedBase) && bodyHash(body) === hash) {
+    store.put(key, hash, body)
+  }
+
+  return text
 }
 
 /**
@@ -573,38 +614,41 @@ export function decodeDeltaBody(
   const hash = header(headers, 'x-hermes-body-hash')
   const key = store.keyFor(url)
 
-  if (header(headers, 'x-hermes-delta') !== DELTA_ENCODING) {
-    // Whole body. Keep it as the next base only when the bytes we hold are exactly the bytes that were hashed.
-    if (key && hash && response.statusCode === 200 && !header(headers, 'content-encoding') && bodyHash(body) === hash) {
-      store.put(key, hash, body)
-    }
+  const gzipTranscript = key !== null && isDisplayTranscriptRead('GET', url)
+  const encoding = header(headers, 'content-encoding').toLowerCase()
+  const originalEncoding = header(headers, 'x-hermes-delta-content-encoding').toLowerCase()
 
-    return decodeResponseBody(body, headers['content-encoding'])
+  // Every failure drops this read's copies, so the bounded transport retry names no base.
+  const fail = (why: string): never => {
+    if (key) { store.delete(key) }
+    throw new DeltaRetryError(url, why)
   }
 
-  // Every failure drops this read's copies, so the retry names no base and cannot fail the same way again.
-  const fail = (why: string): never => {
-    if (key) {
-      store.delete(key)
-    }
-
-    throw new DeltaRetryError(url, why)
+  if (header(headers, 'x-hermes-delta') !== DELTA_ENCODING) {
+    return decodeWholeEntity(response, body, store, key, gzipTranscript, fail)
   }
 
   if (!key || !hash || response.statusCode !== 200) {
     return fail('not a 200 with a hash from a bound remote backend')
   }
 
+  if (encoding || (originalEncoding && (originalEncoding !== 'gzip' || !gzipTranscript))) {
+    return fail('unexpected outer or original content encoding')
+  }
+
   const base = store.find(key, header(headers, 'x-hermes-delta-base'))
 
-  if (!base) {
+  if (!base || bodyHash(base.body) !== base.hash) {
     return fail('the base it was encoded against is not held')
   }
 
   let decoded: Buffer
 
   try {
-    decoded = zstdDecompressSync(body, { dictionary: base.body, maxOutputLength: DELTA_MAX_DECODED_BYTES })
+    decoded = zstdDecompressSync(body, {
+      dictionary: base.body,
+      maxOutputLength: originalEncoding ? DELTA_MAX_ENTITY_BYTES : DELTA_MAX_DECODED_BYTES
+    })
   } catch (error) {
     return fail(`bad frame: ${String((error as Error)?.message ?? error).slice(0, 80)}`)
   }
@@ -613,7 +657,15 @@ export function decodeDeltaBody(
     return fail('decoded body does not match its hash')
   }
 
+  let text: string
+
+  try {
+    text = decodeResponseBody(decoded, originalEncoding)
+  } catch (error) {
+    return fail(`bad reconstructed entity: ${String(error).slice(0, 80)}`)
+  }
+
   store.put(key, hash, decoded)
 
-  return decoded.toString('utf8')
+  return text
 }

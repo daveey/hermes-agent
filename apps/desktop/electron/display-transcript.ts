@@ -31,7 +31,7 @@ export function displayTranscriptHeaders(method: string | undefined, url: string
 
 /** The response body as text, gunzipped when the server compressed it. */
 export function decodeResponseBody(body: Buffer, contentEncoding: string | string[] | undefined): string {
-  const encoding = String(Array.isArray(contentEncoding) ? contentEncoding[0] : contentEncoding || '').toLowerCase()
+  const encoding = String(Array.isArray(contentEncoding) ? contentEncoding[0] : contentEncoding || '').trim().toLowerCase()
 
-  return (encoding.includes('gzip') ? gunzipSync(body) : body).toString('utf8')
+  return (encoding === 'gzip' ? gunzipSync(body, { maxOutputLength: 16 * 1024 * 1024 }) : body).toString('utf8')
 }

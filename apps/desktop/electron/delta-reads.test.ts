@@ -81,12 +81,12 @@ describe('asking for a delta', () => {
     expect(deltaRequestHeaders('GET', `${HUB}/api/plugins/kanban/board?board=runners`, store)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
   })
 
-  it('a transcript page read keeps its own slim+gzip ask and does not also ask for a delta', () => {
+  it('a remote transcript page retains slim+gzip and negotiates compressed-entity deltas', () => {
     const store = bound()
     const transcript = `${HUB}/api/sessions/20261112_185653_5ff5dc/messages?limit=120&order=latest`
 
     expect(readEncodingHeaders('GET', transcript, store)).toMatchObject({ 'Accept-Encoding': 'gzip' })
-    expect(readEncodingHeaders('GET', transcript, store)).not.toHaveProperty(DELTA_ACCEPT_HEADER)
+    expect(readEncodingHeaders('GET', transcript, store)[DELTA_ACCEPT_HEADER]).toBe('zstd-gzip-v1')
     expect(readEncodingHeaders('GET', BOARD, store)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
   })
 
