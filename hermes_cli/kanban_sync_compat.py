@@ -83,6 +83,9 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
     match = re.fullmatch(r"not writable on ([a-z0-9_]+): ([a-z0-9_]+(?:, [a-z0-9_]+)*)", str(result.get("detail") or ""))
     if match is None or match[1] != row["table_name"]:
         return False
+    from hermes_cli.kanban_replay_journal import issued_operation
+    if row["op_id"] == issued_operation(conn):
+        raise ValueError("issued schema repair requires final verdict")
     fields = wire.get("fields", {})
     named = match[2].split(", ")
     # A wire-only field (any Board too old to know it), or a source-fenced column (R4c: only a custody/manifest
