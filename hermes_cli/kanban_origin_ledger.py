@@ -348,14 +348,13 @@ def _stuck_unreleased(task_raw: str, released: int) -> bool:
         return False
 
 
-def _advanced_observation(binding_raw: str, observed: int, source: sqlite3.Connection) -> tuple | None:
+def _advanced_observation(binding_raw: str, observed: int, source: sqlite3.Connection, rows=None) -> tuple | None:
     """``(task, version, released)`` when the replica holds a newer, exactly bound record for this obligation."""
     from hermes_cli.kanban_origin_structure import binding as read_binding
+    from hermes_cli.kanban_origin_batch import lookup
 
     binding = read_binding(binding_raw)
-    row = source.execute(
-        "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
-        (binding['owner']['gateway'], binding['task_record_key'])).fetchone()
+    row = lookup(source, binding, rows)
     if not row or type(row[0]) is not int or row[0] <= observed:
         return None
     task = json.loads(row[1])
@@ -388,26 +387,30 @@ def refresh_observations(path: Path, replica: Path, *, timeout: float = 5) -> No
         return
     from hermes_cli.kanban_origin import _ro
 
+    from hermes_cli.kanban_origin_batch import task_rows
+    from hermes_cli.kanban_origin_structure import binding as read_binding
     source = _ro(replica)
     try:
         try:
             with closing(_ro(path)) as ledger:
-                pending = any(
-                    _stuck_unreleased(task_raw, released)
-                    or _advanced_observation(raw, observed, source) is not None
-                    for raw, observed, task_raw, released in ledger.execute(
-                        "SELECT binding_json,observation_version,task_json,released FROM origin_obligations"
-                    ).fetchall())
+                obligations = ledger.execute(
+                    "SELECT binding_json,observation_version,task_json,released FROM origin_obligations").fetchall()
+                rows = task_rows(source, (read_binding(row[0]) for row in obligations))
+                pending = any(_stuck_unreleased(task_raw, released)
+                              or _advanced_observation(raw, observed, source, rows) is not None
+                              for raw, observed, task_raw, released in obligations)
         except sqlite3.OperationalError:
             pending = True  # no table yet (or unreadable read-only): the locked path below decides
         if not pending:
             return
         with _db(path, timeout=timeout) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            for key, raw, observed, task_raw, stored_released in conn.execute(
-                    "SELECT binding_id,binding_json,observation_version,task_json,released"
-                    " FROM origin_obligations").fetchall():
-                advanced = _advanced_observation(raw, observed, source)
+            obligations = conn.execute(
+                "SELECT binding_id,binding_json,observation_version,task_json,released"
+                " FROM origin_obligations").fetchall()
+            rows = task_rows(source, (read_binding(row[1]) for row in obligations))
+            for key, raw, observed, task_raw, stored_released in obligations:
+                advanced = _advanced_observation(raw, observed, source, rows)
                 if advanced is None:
                     if _stuck_unreleased(task_raw, stored_released):
                         conn.execute("UPDATE origin_obligations SET released=1 WHERE binding_id=?", (key,))
@@ -619,6 +622,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
             elsewhere = _Publications(source, listed, wanted={
                 (b['owner']['board'], b['owner']['task_id']) for _, b, *_ in obligations
                 if (b['origin']['gateway'], b['origin']['profile']) == (gateway, profile)})
+            from hermes_cli.kanban_origin_batch import task_rows, lookup
+            task_snapshot = task_rows(source, (b for _, b, *_ in obligations
+                                               if (b['origin']['gateway'], b['origin']['profile']) == (gateway, profile))) if fresh else {}
             for raw, binding, resolved, payload, version, released in obligations:
                 origin, owner = binding['origin'], binding['owner']
                 if (origin['gateway'], origin['profile']) != (gateway, profile):
@@ -630,9 +636,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 current = settled = False
                 absent = scope_live = False
                 if fresh and source is not None:
-                    row = source.execute(
-                        "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
-                        (owner['gateway'], binding['task_record_key'])).fetchone()
+                    row = lookup(source, binding, task_snapshot)
                     current = bool(row and row[0] == version and json.loads(row[1]) == task)
                     # [daveey] A verified completion that is still the owner's latest published record is settled:
                     # the owner going quiet afterwards does not reopen it, only a newer record does. Without this
