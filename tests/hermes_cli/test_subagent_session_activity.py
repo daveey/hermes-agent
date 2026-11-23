@@ -189,7 +189,19 @@ def test_profile_lists_http_entry_paths(stored, monkeypatch, endpoint):
     monkeypatch.setattr(profiles, "_SIDEBAR_CACHE_TTL_SECONDS", 0.0)
     with TestClient(app) as client:
         client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+        from tests.waiting import wait_until
+
+        def ready():
+            nonlocal response
+            response = client.get(endpoint, params={"profile": "default", "recents_profile": "default"})
+            # A new selector is built off-request; never accept another failure.
+            assert response.status_code in (200, 503), response.text
+            if response.status_code == 503:
+                assert response.json() == {"detail": "sessions projection unavailable"}
+            return response.status_code == 200
+
         response = client.get(endpoint, params={"profile": "default", "recents_profile": "default"})
+        assert wait_until(ready, timeout=10), response.text
         assert response.status_code == 200, response.text
         data = response.json()
         rows = data["recents"]["sessions"] if endpoint.endswith("sidebar") else data["sessions"]

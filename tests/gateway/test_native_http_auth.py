@@ -127,8 +127,18 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
         assert sibling_config.read_bytes() == sibling_before
         assert client.get('/api/config?profile=default',
                           headers=headers(ticket(home, descriptor))).status_code == 200
-        assert client.get('/api/profiles/sessions/sidebar?recents_profile=default',
-                          headers=headers(ticket(home, descriptor))).status_code == 200
+        from tests.waiting import wait_until
+
+        def sidebar_ready():
+            # Every attempt redeems a NEW single-use grant, including cold 503s.
+            response = client.get('/api/profiles/sessions/sidebar?recents_profile=default',
+                                  headers=headers(ticket(home, descriptor)))
+            assert response.status_code in (200, 503), response.text
+            if response.status_code == 503:
+                assert response.json() == {'detail': 'sessions projection unavailable'}
+            return response.status_code == 200
+
+        assert wait_until(sidebar_ready, timeout=10)
         # The cross-profile project tree and PR scan answer one grant for its own profile only.
         assert client.get('/api/profiles/projects/tree?profile=default',
                           headers=headers(ticket(home, descriptor))).status_code == 200
