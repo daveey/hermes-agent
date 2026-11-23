@@ -35,12 +35,21 @@ def notice_text(payload: dict) -> str:
     ask = str(payload.get("why") or payload.get("reason") or "")
     if len(ask) > 6000:
         ask = ask[:4500] + "\n[... full text in the card comments ...]\n" + ask[-1500:]
+    reconcile = (
+        "\nBefore acting, read the card's current status and newer owner decisions. "
+        "If already answered or superseded, do not post another waking comment or reopen the decision. "
+        "A running agent turn or administrative run is not product progress; report the changed acceptance "
+        "gate, or say it is unchanged. Preserve safety stops, dependencies and admission limits."
+    )
     if isinstance(payload.get("actionability"), dict) and payload["actionability"].get("kind") == "administrative_only":
         return ("Administrative reconsideration for the accountable owner (not a request for the user):\n" + ask
+                + reconcile
                 + "\nComments record a decision only; they never release or rerun the root scope. "
                 "Use the existing supported authority and admission gates; a notice grants neither.")
-    return ("Decision for the creator agent (not a request for the user). This card is parked until you decide:\n" + ask
-            + "\nAnswer with a comment on the card (kanban_comment); the comment wakes it. "
+    return ("Decision notice for the creator agent (not a request for the user):\n" + ask
+            + reconcile
+            + "\nAnswer with a comment on the card (kanban_comment) only if the decision is still outstanding; "
+            "a comment may wake the card, but grants no release authority. "
             "Retain agent recovery on quota/offline failures. Escalate to the user only for a concrete human-only "
             "action, after try-to-unblock and generate-unblock-card, with a meaningful scope and evidence.")
 

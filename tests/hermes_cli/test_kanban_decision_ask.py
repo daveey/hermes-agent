@@ -551,7 +551,7 @@ def test_an_ask_that_cannot_wake_now_is_retried_never_written_passively(kanban_h
     assert not wakes and not rows  # handed back, not written passively
     later = now + (60 if busy_slots else 3600)  # a slot frees / the budget's hour slides
     wakes, rows = _sweep(chat, later)
-    assert len(wakes) == 1 and "parked until you decide" in wakes[0] and not rows, (wakes, rows)
+    assert len(wakes) == 1 and "current status and newer owner decisions" in wakes[0] and not rows, (wakes, rows)
     ku._reset_wake_budget_for_tests()
 
 
