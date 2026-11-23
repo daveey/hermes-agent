@@ -3,7 +3,7 @@ import { runInNewContext } from 'node:vm'
 
 import { describe, expect, it, vi } from 'vitest'
 
-import { BootTimeoutRecovery } from '../src/app/gateway/hooks/boot-timeout-recovery'
+import { BootTimeoutRecovery } from '../../shared/src/boot-timeout-recovery'
 
 import { broadcastBootstrapReset } from './bootstrap-reset-windows'
 

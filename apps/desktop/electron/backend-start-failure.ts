@@ -22,7 +22,7 @@
  * without booting Electron or reading main.ts source text.
  */
 
-import { isBackendReadinessTimeout } from '@hermes/shared'
+import { isBackendReadinessTimeout } from '../../shared/src/backend-readiness-timeout'
 
 export interface BackendStartFailureContext {
   error?: unknown
