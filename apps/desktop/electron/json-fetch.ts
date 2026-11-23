@@ -20,7 +20,16 @@ import {
   withRetry
 } from './api-transport'
 import { decodeDeltaBody, readEncodingHeaders } from './delta-reads'
+import { displayTranscriptHeaders, GzipExpansionError, isDisplayTranscriptRead } from './display-transcript'
 import { DEFAULT_FETCH_TIMEOUT_MS, resolveTimeoutMs } from './hardening'
+
+// Oversized gzip pages retry as identity, bounded by actual received bytes rather than Content-Length.
+export const TRANSCRIPT_IDENTITY_MAX_BYTES = 64 * 1024 * 1024
+
+function identityHeaders(headers: Record<string, string>): Record<string, string> {
+  return { ...Object.fromEntries(Object.entries(headers).filter(([name]) =>
+    !['accept-encoding', 'x-hermes-delta-accept', 'x-hermes-delta-base'].includes(name.toLowerCase()))), 'Accept-Encoding': 'identity' }
+}
 
 /** What main.ts supplies: headers configured for remote gateways, and one-use native gateway grants. */
 export interface JsonFetchDeps {
@@ -29,6 +38,8 @@ export interface JsonFetchDeps {
 }
 
 export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | string, options: any = {}) {
+  let identityTranscript = false
+
   // Retry policy lives in api-transport.ts: idempotent verbs retry on any
   // transient transport error; POST/PUT/DELETE only when the request provably
   // never reached the server (see shouldRetryRequest) — never double-submit.
@@ -71,6 +82,12 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
         // On the wire from here (api-transport sendWithRequestDeadline): the deadline is armed with the body's size,
         // and requestState.bodySent is set, so a later transport error no longer proves the server didn't process it
         // and non-idempotent verbs are not retried.
+        const encodingHeaders = {
+          ...deps.remoteHeaders(url),
+          ...(identityTranscript ? displayTranscriptHeaders(options.method, url) : readEncodingHeaders(options.method, url)),
+          ...(options.headers || {})
+        }
+
         sendWithRequestDeadline(
           deadline,
           () =>
@@ -80,10 +97,7 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
                 agent,
                 method: options.method || 'GET',
                 headers: {
-                  ...deps.remoteHeaders(url),
-                  // [daveey] Transcript pages slim + gzip (display-transcript.ts); large reads as deltas (delta-reads.ts).
-                  ...readEncodingHeaders(options.method, url),
-                  ...(options.headers || {}),
+                  ...(identityTranscript ? identityHeaders(encodingHeaders) : encodingHeaders),
                   'Content-Type': contentType,
                   ...(nativeHeaders || { 'X-Hermes-Session-Token': token }),
                   // RFC 8252 native flow authenticates the gated gateway with a bearer
@@ -97,14 +111,35 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
               },
               res => {
                 const chunks: Buffer[] = []
+                let bytes = 0
                 res.on('error', reject)
-                res.on('data', chunk => chunks.push(chunk))
+                res.on('data', chunk => {
+                  bytes += chunk.length
+
+                  if (identityTranscript && bytes > TRANSCRIPT_IDENTITY_MAX_BYTES) {
+                    res.destroy(new Error('Identity transcript exceeds the 64 MiB recovery budget'))
+
+                    return
+                  }
+
+                  chunks.push(chunk)
+                })
                 res.on('end', () => {
                   let text: string
 
                   try {
                     text = decodeDeltaBody(url, res, Buffer.concat(chunks))
                   } catch (error) {
+                    if (error instanceof GzipExpansionError && isDisplayTranscriptRead(options.method, url)) {
+                      if (identityTranscript) {
+                        reject(new Error(error.message, { cause: error }))
+
+                        return
+                      }
+
+                      identityTranscript = true
+                    }
+
                     reject(error)
 
                     return

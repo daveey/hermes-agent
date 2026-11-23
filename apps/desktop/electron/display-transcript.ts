@@ -29,9 +29,22 @@ export function displayTranscriptHeaders(method: string | undefined, url: string
   return isDisplayTranscriptRead(method, url) ? { [DISPLAY_TRANSCRIPT_HEADER]: '1', 'Accept-Encoding': 'gzip' } : {}
 }
 
+/** Spend the existing GET retry on identity rather than inflate an oversized gzip entity. */
+export class GzipExpansionError extends Error {
+  readonly code = 'HERMES_DELTA_RETRY'
+}
+
 /** The response body as text, gunzipped when the server compressed it. */
 export function decodeResponseBody(body: Buffer, contentEncoding: string | string[] | undefined): string {
   const encoding = String(Array.isArray(contentEncoding) ? contentEncoding[0] : contentEncoding || '').trim().toLowerCase()
 
-  return (encoding === 'gzip' ? gunzipSync(body, { maxOutputLength: 16 * 1024 * 1024 }) : body).toString('utf8')
+  try {
+    return (encoding === 'gzip' ? gunzipSync(body, { maxOutputLength: 16 * 1024 * 1024 }) : body).toString('utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') {
+      throw new GzipExpansionError('Gzip transcript exceeds the decode budget; retry with identity encoding')
+    }
+
+    throw error
+  }
 }

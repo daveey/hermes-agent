@@ -29,7 +29,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
-import { decodeResponseBody, displayTranscriptHeaders, isDisplayTranscriptRead } from './display-transcript'
+import { decodeResponseBody, displayTranscriptHeaders, GzipExpansionError, isDisplayTranscriptRead } from './display-transcript'
 
 export const DELTA_ACCEPT_HEADER = 'X-Hermes-Delta-Accept'
 export const DELTA_BASE_HEADER = 'X-Hermes-Delta-Base'
@@ -589,6 +589,11 @@ function decodeWholeEntity(
   try {
     text = decodeResponseBody(body, headers['content-encoding'])
   } catch (error) {
+    if (error instanceof GzipExpansionError) {
+      if (key) { store.delete(key) }
+      throw error
+    }
+
     if (compressedBase) { return fail(`bad gzip entity: ${String(error).slice(0, 80)}`) }
     throw error
   }
@@ -662,6 +667,11 @@ export function decodeDeltaBody(
   try {
     text = decodeResponseBody(decoded, originalEncoding)
   } catch (error) {
+    if (error instanceof GzipExpansionError) {
+      store.delete(key)
+      throw error
+    }
+
     return fail(`bad reconstructed entity: ${String(error).slice(0, 80)}`)
   }
 

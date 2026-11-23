@@ -5,6 +5,8 @@ A long hub session's 120-row page was 1.4 MB, mostly ``reasoning_details`` (prov
 drops what a transcript never shows and is gzipped when the client accepts it; without it, nothing changes.
 """
 
+import gzip
+import json
 from pathlib import Path
 
 import pytest
@@ -75,3 +77,20 @@ def test_display_page_is_gzipped_when_accepted(client):
     page = resp.json()  # the test client decodes it
     assert page["session_id"] == "long-chat" and page["pagination"]["returned"] == 3
     assert "reasoning_details" not in _assistants(page)[0]
+
+
+def test_large_valid_page_has_exact_identity_recovery():
+    from starlette.requests import Request
+
+    from hermes_cli.web_routers.sessions import _display_transcript_response
+
+    page = {"messages": [{"role": "assistant", "content": "x" * 90_000} for _ in range(200)]}
+    def request(encoding):
+        return Request({"type": "http", "headers": [(b"accept-encoding", encoding)]})
+
+    zipped = _display_transcript_response(request(b"gzip"), page)
+    raw = gzip.decompress(zipped.body)
+    assert len(raw) > 16 * 1024 * 1024
+    assert json.loads(raw) == page
+    assert _display_transcript_response(request(b"identity"), page) == page
+

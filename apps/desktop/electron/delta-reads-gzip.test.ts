@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { destroyKeepaliveAgents, withRetry } from './api-transport'
 import { bodyHash, decodeDeltaBody, deltaBodyStore, DeltaBodyStore, DeltaRetryError, readEncodingHeaders } from './delta-reads'
+import { GzipExpansionError } from './display-transcript'
 import { fetchJsonWith } from './json-fetch'
 
 const HUB = 'http://127.0.0.1:49921'
@@ -148,7 +149,7 @@ describe('negotiated gzip transcript deltas', () => {
     decodeDeltaBody(URL, whole(base), base, store)
     const bomb = gzipSync(Buffer.alloc(16 * 1024 * 1024 + 1, 65))
     const encoded = delta(base, bomb)
-    expect(() => decodeDeltaBody(URL, encoded.response, encoded.body, store)).toThrow(DeltaRetryError)
+    expect(() => decodeDeltaBody(URL, encoded.response, encoded.body, store)).toThrow(GzipExpansionError)
     expect(store.size).toBe(0)
   })
 
@@ -169,6 +170,87 @@ describe('negotiated gzip transcript deltas', () => {
     const encoded = delta(base, entity(1))
     expect(() => decodeDeltaBody(url, encoded.response, encoded.body, store)).toThrow('unexpected outer or original')
     expect(store.size).toBe(0)
+  })
+
+  it.each(['local', 'old remote', 'whole', 'delta'])('recovers an oversized valid gzip page from %s with one identity retry', async mode => {
+    const page = { messages: Array.from({ length: 200 }, () => ({ role: 'assistant', content: 'x'.repeat(90_000) })) }
+    const text = JSON.stringify(page)
+    const zipped = gzipSync(text)
+    const base = entity()
+    const requests: http.IncomingHttpHeaders[] = []
+
+    const server = http.createServer((req, res) => {
+      requests.push(req.headers)
+
+      if (req.headers['accept-encoding'] === 'identity') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(text)
+      } else if (mode === 'delta') {
+        const frame = delta(base, zipped)
+        res.writeHead(200, frame.response.headers)
+        res.end(frame.body)
+      } else {
+        res.writeHead(200, mode === 'whole' ? whole(zipped).headers : { 'content-encoding': 'gzip' })
+        res.end(zipped)
+      }
+    })
+
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const url = `${origin}/api/sessions/example/messages?limit=200&order=latest`
+    const scope = `large-page-${mode}`
+
+    if (mode !== 'local') { deltaBodyStore.bindRemote(origin, scope) }
+
+    if (mode === 'delta') { deltaBodyStore.put(deltaBodyStore.keyFor(url)!, bodyHash(base), base) }
+
+    try {
+      expect(await fetchJsonWith({ remoteHeaders: () => ({}), nativeHeaders: async () => null }, url, 'test')).toEqual(page)
+      expect(requests).toHaveLength(2)
+      expect(requests[1]['accept-encoding']).toBe('identity')
+      expect(requests[1]['x-hermes-display-transcript']).toBe('1')
+      expect(requests[1]['x-hermes-delta-accept']).toBeUndefined()
+      expect(requests[1]['x-hermes-delta-base']).toBeUndefined()
+
+      if (mode !== 'local') { expect(deltaBodyStore.get(deltaBodyStore.keyFor(url)!)).toBeUndefined() }
+    } finally {
+      deltaBodyStore.unbindScope(scope)
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it.each(['oversized identity', 'ignores identity'])('bounds recovery when the server %s', async mode => {
+    const zipped = gzipSync(Buffer.alloc(16 * 1024 * 1024 + 1, 65))
+    let requests = 0
+
+    const server = http.createServer((req, res) => {
+      requests += 1
+
+      if (req.headers['accept-encoding'] !== 'identity' || mode === 'ignores identity') {
+        res.writeHead(200, { 'content-encoding': 'gzip' })
+        res.end(zipped)
+      } else {
+        // Chunked: no Content-Length to trust, and no single huge fixture allocation.
+        res.writeHead(200, { 'content-type': 'application/json' })
+        const chunk = Buffer.alloc(1024 * 1024, 65)
+
+        for (let i = 0; i < 65; i += 1) { res.write(chunk) }
+        res.end()
+      }
+    })
+
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/sessions/example/messages?limit=200`
+
+    try {
+      await expect(fetchJsonWith({ remoteHeaders: () => ({}), nativeHeaders: async () => null }, url, 'test'))
+        .rejects.toThrow(mode === 'oversized identity' ? '64 MiB recovery budget' : 'Gzip transcript exceeds')
+      expect(requests).toBe(2)
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('fetchJson negotiates over real HTTP, decodes gzip/deltas, and retries a bad delta without a base', async () => {
