@@ -107,12 +107,15 @@ def test_unproven_existence_cannot_release_synthetic_deferred_or_child(live, def
     with pytest.raises(ValueError):
         handoffs.push(live, receiver)
     assert journal.pending_wire(live) == frozen and receiver.slot['a'] == '0'
-    assert journal.snapshot(live)['settled'] == '0' and deferred.pending(live) == []
+    assert journal.snapshot(live)['settled'] == '0'
+    wire = json.loads(frozen)
+    assert deferred.pending(live) == [dict(board_incarnation=receiver.slot['board_incarnation'],
+        task=tid, origin=wire['status_origin'], status='done', hlc=wire['hlc'])]
     assert live.execute('SELECT 1 FROM kanban_sync_parent_envelopes WHERE task_id=?', (tid,)).fetchone()
     assert len(receiver.sent) == 1
 
 
-def test_projection_failure_rolls_back_handoff_and_parent_retirement(live, monkeypatch):
+def test_projection_failure_preserves_known_handoff_but_rolls_back_parent_retirement(live, monkeypatch):
     from hermes_cli import kanban_db_sync as sync
     tid, receiver = issue(live)
     frozen = journal.pending_wire(live)
@@ -125,7 +128,10 @@ def test_projection_failure_rolls_back_handoff_and_parent_retirement(live, monke
     monkeypatch.setattr(sync, 'apply_remote_changes', fail_after_projection)
     with pytest.raises(OSError, match='after synthetic deferred projection'):
         handoffs.push(live, receiver)
-    assert deferred.pending(live) == [] and journal.pending_wire(live) == frozen
+    wire = json.loads(frozen)
+    assert deferred.pending(live) == [dict(board_incarnation=receiver.slot['board_incarnation'],
+        task=tid, origin=wire['status_origin'], status='done', hlc=wire['hlc'])]
+    assert journal.pending_wire(live) == frozen
     assert receiver.slot['a'] == journal.snapshot(live)['settled'] == '0'
     row = live.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()
     assert row['title'] == 'synthetic original' and row['sync_version'] is None

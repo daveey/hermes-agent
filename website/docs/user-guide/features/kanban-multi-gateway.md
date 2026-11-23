@@ -5,6 +5,9 @@ description: "Running one kanban board across several per-profile gateways: sing
 
 # Multi-gateway deployment
 
+For an already-bound journal paused on an unknown/deleted current row, see
+[replay current-row recovery](./kanban-replay-recovery.md). This does not activate replay.
+
 Hermes supports multiple gateway processes running concurrently — one per profile
 (default, writer, admin, coder, researcher). Each gateway opens its own connection
 to platform APIs and delivers messages for its profile's subscribers.

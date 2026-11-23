@@ -351,8 +351,23 @@ def _history_residue(args: argparse.Namespace) -> int:
     return 0
 
 
+def _replay_resume(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_replay_existence import resume
+    conn = kbc.connect(_path(_board(args)))
+    try:
+        report = resume(conn, args.expect, args.reason)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    finally:
+        conn.close()
+    _print(report, args.json)
+    return 0
+
+
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
             "history-residue": _history_residue,
+            "replay-resume": _replay_resume,
             "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links,
             "refill-history": _refill_history, "reserved-key": _reserved_key, "dependency-delete": _dependency_delete,
             "quarantine": _quarantine}

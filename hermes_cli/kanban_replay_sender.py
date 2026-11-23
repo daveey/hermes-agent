@@ -30,9 +30,16 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
     from hermes_cli import kanban_sync_client as client
     client.refuse_if_schema_ahead(conn)
     if (sync.sync_state(conn) or {}).get('journal_id') is not None:
+        from hermes_cli import kanban_replay_existence as existence
+        existence.guard(conn)
         try:
             return _push_strict(conn, hub, board, gateway, max_batches=max_batches,
                                 primary=primary, before_head=before_head, seen={} if seen is None else seen)
+        except existence.CurrentRowHold as exc:
+            from hermes_cli.kanban_replay_episodes import interrupt
+            interrupt(conn)
+            existence.pause(conn, board, exc)
+            raise
         except (OSError, ValueError, client.HubError):
             from hermes_cli.kanban_replay_episodes import interrupt
             interrupt(conn)
@@ -88,25 +95,43 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         # This process-local receipt protects dispatcher copy eviction. Never
         # publish it from record(): its owning transaction may still roll back.
         from hermes_cli import kanban_replica_lag as lag
+        from hermes_cli import kanban_replay_existence as existence
         with write_txn(conn):
+            existence.guard(conn)
             yield
             if projection is not None:
                 projection.finish()
+            existence.clear_settled(conn)
         if lagged:
             lag.acked(client.shadow_path(board), lagged)
             lagged.clear()
         if projection is not None:
             projection.after_commit()
 
-    def refresh_current_row():
+    def read_current_row():
         """Read current state separately; never enrich the historical slot verdict."""
         decision = reconcile(journal.snapshot(conn), remote)
         if decision['action'] != 'record':
             return None
         verdict = decision['verdict']
+        if (verdict['status'] == 'deferred' and cap.get('deferred_observation') == 'origin_pending1'
+                and (projection is not None or source().get('_parent'))):
+            # The authenticated final verdict establishes server status custody
+            # independently of the optional current-image read. A later read or
+            # projection failure must not erase that known semantic obligation.
+            from hermes_cli import kanban_replay_deferred as deferred
+            with write_txn(conn):
+                source()
+                reconcile(journal.snapshot(conn), remote)
+                wire = json.loads(journal.pending_wire(conn))
+                captured = deferred.captures(conn, local['board_incarnation'], wire['uid'])
+                if not any(item['origin'] == wire.get('status_origin') and
+                           item['status'] == wire.get('fields', {}).get('status') and
+                           item['hlc'] == wire['hlc'] for item in captured):
+                    deferred.handoff(conn, wire, verdict, local['board_incarnation'], membership=membership)
         if projection is not None:
             projection.read(source(), verdict)
-            return None
+            return client._row_change('tasks', projection.current) if source().get('_parent') else None
         if verdict['status'] not in ('applied', 'merged', 'deferred'):
             return None
         if verdict['status'] != 'deferred' and verdict.get('version'):
@@ -114,7 +139,11 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         row = source()
         if not row.get('_parent'):
             return None
-        evidence = hub.row_evidence(board, 'tasks', row['row_uid'])
+        from hermes_cli.kanban_replay_existence import CurrentRowHold
+        try:
+            evidence = hub.row_evidence(board, 'tasks', row['row_uid'])
+        except (OSError, client.HubError) as exc:
+            raise CurrentRowHold(f'synthetic parent current row unavailable: {exc}', transient=True) from exc
         state = evidence.get('row')
         if (evidence.get('board') != board or evidence.get('table') != 'tasks' or
                 evidence.get('uid') != row['row_uid'] or evidence.get('state') != 'live' or
@@ -122,8 +151,18 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                 not isinstance(state, dict) or state.get('uid') != row['row_uid'] or
                 type(state.get('version')) is not int or state['version'] <= 0 or
                 state.get('deleted_at') is not None):
-            raise ValueError('synthetic parent current row unavailable')
+            raise CurrentRowHold('synthetic parent current row unavailable: ' + str(evidence.get('state')))
         return client._row_change('tasks', state)
+
+    def refresh_current_row():
+        from hermes_cli.kanban_replay_existence import CurrentRowHold
+        state = journal.snapshot(conn)
+        pending = state['pending']
+        try:
+            return read_current_row()
+        except CurrentRowHold as exc:
+            exc.expected = (state['journal_id'], state['generation'], pending['sequence'], pending['op_id'])
+            raise
 
     def refresh_capacity():
         from hermes_cli import kanban_replay_deferred as deferred
@@ -150,7 +189,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         cursor = (sync.sync_state(conn) or {}).get('cursor', 0)
         if conn.execute("SELECT 1 FROM kanban_sync_tombstones WHERE table_name='tasks' AND row_uid=?",
                         (row['row_uid'],)).fetchone():
-            raise ValueError('synthetic parent current projection held by local deletion')
+            from hermes_cli.kanban_replay_existence import CurrentRowHold
+            raise CurrentRowHold('synthetic parent current projection held by local deletion')
         sync.apply_remote_changes(conn, [current_row], new_cursor=cursor, board=board,
                                   observers=False, local_pending_wins=True, allow_nested=True)
 

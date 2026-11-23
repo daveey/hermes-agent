@@ -16,9 +16,14 @@ class PrimarySettlement:
     def read(self, row, verdict):
         """Read separately authenticated live state, not a historical result."""
         self.current = None
-        if verdict['status'] not in ('applied', 'merged', 'rejected'):
+        if verdict['status'] not in ('applied', 'merged', 'rejected', 'deferred'):
             raise ValueError('primary replay disposition not integrated')
-        evidence = self.hub.row_evidence(self.board, row['table_name'], row['row_uid'])
+        from hermes_cli.kanban_replay_existence import CurrentRowHold
+        from hermes_cli.kanban_sync_client import HubError
+        try:
+            evidence = self.hub.row_evidence(self.board, row['table_name'], row['row_uid'])
+        except (OSError, HubError) as exc:
+            raise CurrentRowHold(f'primary replay live current row unavailable: {exc}', transient=True) from exc
         image = evidence.get('row')
         if (evidence.get('board') != self.board or evidence.get('table') != row['table_name'] or
                 evidence.get('uid') != row['row_uid'] or evidence.get('state') != 'live' or
@@ -26,7 +31,7 @@ class PrimarySettlement:
                 not isinstance(image, dict) or image.get('uid') != row['row_uid'] or
                 type(image.get('version')) is not int or image['version'] <= 0 or
                 image.get('deleted_at') is not None):
-            raise ValueError('primary replay live current row unavailable')
+            raise CurrentRowHold('primary replay live current row unavailable: ' + str(evidence.get('state')))
         self.current = image
 
     def stage(self, row, wire, verdict):

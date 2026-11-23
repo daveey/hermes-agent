@@ -888,6 +888,9 @@ _SPECS = [
         _cmd("history-residue", [_json_flag(), _arg("op_id"), _arg("--reason", required=True)],
              help="Record exact historical rejection custody without replay, deletion or execution release; retries are GET-only"),
         _cmd("run", [_json_flag()], help="Run one sync round for every synced board now"),
+        _cmd("replay-resume", [_json_flag(), _arg("--expect", required=True, metavar="OP_ID"),
+                               _arg("--reason", required=True, metavar="TEXT")],
+             help="Explicitly retry a paused current-row read for the exact retained replay operation; never skips work"),
         _cmd("links", help="Reconcile this gateway's chat links (which chats each card belongs to) now"),
         _cmd("links-diff", [_json_flag(), _arg("--settle", type=float, default=None, metavar="SECONDS",
                                                 help=f"Re-read for up to SECONDS (default {DEFAULT_SETTLE_S:g}); "
