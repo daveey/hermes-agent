@@ -5,7 +5,7 @@ import pytest
 from hermes_cli import kanban_session_activity as ksa
 
 
-@pytest.mark.parametrize("kind,external", [("ci", 1), ("deploy", 1), ("card", 0), ("clock", 0), ("external", 0), (None, 0)])
+@pytest.mark.parametrize("kind,external", [("ci", 1), ("deploy", 1), ("card", 0), ("clock", 1), ("external", 0), (None, 0)])
 @pytest.mark.parametrize("status", ["scheduled", "running", "unknown", "done"])
 def test_replica_external_wait_uses_the_parked_snapshot(remote_projection, monkeypatch, kind, external, status):
     key = "edge/default/default/t_ci"
@@ -22,7 +22,7 @@ def test_replica_external_wait_uses_the_parked_snapshot(remote_projection, monke
         }])[0]
         expected = external if status == "scheduled" else 0
         assert row.get("kanban_external", 0) == expected
-        assert row.get("kanban_external_unknown", 0) == expected
+        assert row.get("kanban_external_unknown", 0) == (expected if kind != "clock" else 0)
         assert row.get("kanban_external_down", 0) == 0
         assert expected <= row.get("kanban_parked", 0)
         assert row.get("kanban_blocked", 0) == 0

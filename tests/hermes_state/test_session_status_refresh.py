@@ -110,8 +110,11 @@ def test_replica_ci_deploy_wait_publishes_external_stripe(db, monkeypatch, kind,
     monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: [card])
     status = refresh(db, "card_change")
     assert status["kind"] == "waiting"
-    assert status["presentation"]["stripe"] == ("external" if remote and kind in ("ci", "deploy") else "waiting")
-    assert status["on"][0]["state"] == ("external_unknown" if remote and kind in ("ci", "deploy") else "scheduled")
+    assert status["presentation"]["stripe"] == ("external" if remote and kind in ("ci", "deploy", "clock") else "waiting")
+    expected_state = "scheduled"
+    if remote and kind in ("ci", "deploy", "clock"):
+        expected_state = "external_running" if kind == "clock" else "external_unknown"
+    assert status["on"][0]["state"] == expected_state
     published = so.get_outcome("chat", db=db)
     assert published is not None and published["status"] == status
 

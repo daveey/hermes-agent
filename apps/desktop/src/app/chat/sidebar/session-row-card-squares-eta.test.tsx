@@ -63,7 +63,7 @@ describe('the ETA readout on light-blue rows', () => {
     vi.useFakeTimers({ now: NOW * 1000 })
     const clock = kind === 'clock'
 
-    const projected = {
+    const projected: NonNullable<SessionInfo['kanban_external_cards']>[number] = {
       eta: {
         estimate_source: clock ? 'wakes 14:30' : 'no history yet',
         expected_s: clock ? 1500 : null,
@@ -74,7 +74,7 @@ describe('the ETA readout on light-blue rows', () => {
         adapter: kind,
         health: clock ? 'ok' : 'unknown',
         job: clock ? 'running' : 'unknown',
-        state: clock ? 'external_running' : 'external_unknown'
+        service: clock ? 'timer' : kind
       },
       task_id: 'edge/default/default/t_wait',
       title: 'Remote wait'

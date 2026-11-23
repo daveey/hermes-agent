@@ -384,8 +384,9 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
                               "choices": _choices(req.get("choices")), "card_id": tid, "state": "open"})
             continue
         wait_kind = wait.get("wait_kind")
-        display_state = "external_unknown" if card.get("remote") and replica_bucket(card) else (
-            "external_running" if wait_kind in ("ci", "deploy", "clock") and status == "scheduled" else status)
+        display_state = "external_running" if wait_kind in ("ci", "deploy", "clock") and status == "scheduled" else status
+        if card.get("remote") and replica_bucket(card):
+            display_state = "external_running" if card["awaiting"]["kind"] == "clock" else "external_unknown"
         item: dict[str, Any] = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid,
                                 "state": display_state}
         if explained:
