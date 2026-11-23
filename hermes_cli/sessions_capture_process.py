@@ -12,6 +12,7 @@ import threading
 import time
 
 from hermes_cli._launchers import runtime_command
+from hermes_cli._startup_fast import project_root_str
 from hermes_cli._subprocess_compat import kill_process_tree
 from hermes_cli.process_identity import spawn_owned, stop_owned_group_survivors
 from tools.environments.local import build_subprocess_env
@@ -63,7 +64,7 @@ class CaptureProcess:
         if len(request) > MAX_REQUEST:
             raise CaptureUnavailable('request_bytes')
         # Resolve installation-bound Python/dependencies, not ambient python/PYTHONPATH.
-        command = self.command or runtime_command(Path(__file__).resolve().parents[1],
+        command = self.command or runtime_command(Path(project_root_str()),
                                                    module='hermes_cli.sessions_capture_worker')
         with self._lock:
             if self._closed:
