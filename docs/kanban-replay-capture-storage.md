@@ -50,6 +50,22 @@ update, delete, replacement and lineage path before stamping any original.
 A future trigger-body change must version/replace these trigger definitions;
 `CREATE TRIGGER IF NOT EXISTS` is not a body-upgrade mechanism.
 
+## Backup-derived parent recovery
+
+A table index can prove the identity of an unreadable pending parent, but cannot
+prove that an older backup retains the current wire or its latest exposure/taint
+history. The supported database rebuild therefore preserves available backup wire
+and original ID/time columns while setting a refilled parent's `identity_state`
+to `ambiguous`. It does not certify the restored payload, settle the obligation,
+or authorize transmission or migration. Current readable salvage remains an exact
+copy; outbox backup refill remains prohibited. Older parent schemas without a
+provenance column remain UNKNOWN, not retroactively certified. The recreated
+immutable guards prevent promoting the recovered ambiguity back to `original`.
+
+`tests/hermes_cli/test_kanban_recovery_capture.py` covers real table-page damage
+through `_build`, backup refill, saved-envelope readback and sticky ambiguity,
+plus older backup/target schemas and unrelated business-row fill controls.
+
 ## Required subsequent gates — none is supplied here
 
 1. Drain old writers; persist/enforce minimum-writer admission at launcher/database

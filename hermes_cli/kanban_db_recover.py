@@ -540,8 +540,16 @@ def _fill_from_backup(dst: sqlite3.Connection, fill: Path, tables: list[tuple[st
                         name == "tasks" and id_at is not None and (name, str(row[1 + id_at])) in tomb) or (
                         name == "task_links" and (name, f"{values.get('parent_id')}>{values.get('child_id')}") in tomb):
                     continue
-                cur = dst.execute(f"INSERT OR IGNORE INTO {_q(name)} (rowid, {', '.join(_q(c) for c in common)}) "
-                                  f"VALUES ({', '.join('?' * (len(common) + 1))})", row)
+                # An index proves the parent key, not the backup's latest payload
+                # or exposure/taint history. Keep available custody, never restore
+                # its old originality claim. Readable current salvage is unchanged.
+                columns = common
+                if name == "kanban_sync_parent_envelopes" and "identity_state" in dcols:
+                    values["identity_state"] = "ambiguous"
+                    columns = [*common, "identity_state"] if "identity_state" not in common else common
+                    row = (rid, *(values[c] for c in columns))
+                cur = dst.execute(f"INSERT OR IGNORE INTO {_q(name)} (rowid, {', '.join(_q(c) for c in columns)}) "
+                                  f"VALUES ({', '.join('?' * (len(columns) + 1))})", row)
                 filled += cur.rowcount
             result.tables.setdefault(name, TableLoss()).filled_from_backup = filled
     finally:
