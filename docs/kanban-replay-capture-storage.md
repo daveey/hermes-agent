@@ -66,6 +66,11 @@ immutable guards prevent promoting the recovered ambiguity back to `original`.
 through `_build`, backup refill, saved-envelope readback and sticky ambiguity,
 plus older backup/target schemas and unrelated business-row fill controls.
 
+The later [protected recovery audit](kanban-replay-recovery-audit.md) lists each
+replay/custody table's actual index-based refill route and the exclusions needed
+for mutable protocol history. It does not establish lost-anchor admission or
+activate the dormant journal.
+
 ## Required subsequent gates — none is supplied here
 
 1. Drain old writers; persist/enforce minimum-writer admission at launcher/database

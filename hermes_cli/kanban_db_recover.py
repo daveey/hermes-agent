@@ -61,7 +61,17 @@ _log = logging.getLogger(__name__)
 # Rows of these tables are never filled from an older backup: a sent outbox op filled back in would
 # be re-sent with stale fields, and sync state/cursors must reflect the live file only.
 _NO_FILL_TABLES = frozenset({"kanban_sync_outbox", "kanban_sync_state", "sqlite_sequence",
-                             "kanban_creator_empty_events"})
+                             "kanban_creator_empty_events",
+                             # Indexed keys attest identity, not the latest custody,
+                             # capture origin, command receipt or observation epoch.
+                             # Preserve readable current rows; report lost rows rather
+                             # than resurrect mutable protocol history from a backup.
+                             "kanban_replay_deferred1", "kanban_replay_observation1",
+                             "kanban_replay_observation_reads1", "kanban_replay_episode1",
+                             "kanban_failure_commands", "kanban_actionability_commands",
+                             "kanban_sync_omissions", "kanban_sync_status_origins",
+                             "kanban_sync_key_supersessions", "kanban_sync_key_supersession_ops",
+                             "kanban_sync_key_supersession_children"})
 # Certificates are local/disposable: preserve DDL but never salvage their data.
 _DISPOSABLE_TABLES = frozenset({"kanban_creator_empty_events"})
 # Keys listed per table in the report (the counts are always complete).
