@@ -1396,6 +1396,12 @@ def _apply_one(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: App
     if ch.table not in SYNCED_COLUMNS:
         raise ValueError(f"apply_remote_changes: unknown table {ch.table!r}")
     if ch.client_op_id:
+        from hermes_cli.kanban_replay_journal import issued_operation
+        if ch.client_op_id == issued_operation(conn):
+            # Feed membership is not the exact final slot verdict. Keep source and
+            # omission custody until the sender records that verdict atomically.
+            result.skipped_echo += 1
+            return
         from hermes_cli.kanban_sync_omissions import acknowledge
         acknowledge(conn, ch.client_op_id, ch.fields)
     if ch.client_op_id and conn.execute(
