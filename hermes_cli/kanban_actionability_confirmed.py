@@ -95,19 +95,39 @@ def compose(reader, task, facts, row, *, now):
     ACK-only rows, arbitrary events, and stale lifecycle/graph premises never
     qualify. Only missing deadlines are filled; existing source policy is intact.
     """
-    if (row['status'] not in NONTERMINAL or row['escalation']['at'] or
-            row['escalation']['state'] != 'unavailable' or
-            'escalation_deadline_missing' not in row['violations'] or facts.get('pending_command')):
+    if (row['status'] not in NONTERMINAL or facts.get('pending_command')):
+        return row
+    needs_deadline = (not row['escalation']['at'] and row['escalation']['state'] == 'unavailable'
+                      and 'escalation_deadline_missing' in row['violations'])
+    needs_owner = row['owner']['kind'] == 'unavailable' and 'owner_missing' in row['violations']
+    if row['escalation']['state'] == 'not_applicable' or (
+            not needs_deadline and not needs_owner and 'escalation_overdue' not in row['violations']):
         return row
     contracts = sorted(_confirmed(reader, task, facts), key=lambda item: (item[1], item[0]['contract_uid']))
     if not contracts:
         return row
     wire, deadline = contracts[0]
-    row['escalation']['at'] = deadline
-    row['escalation']['state'] = 'pending'
-    row['violations'] = [v for v in row['violations'] if v != 'escalation_deadline_missing']
-    if row['blocker'] and now >= row['escalation']['at'] and 'escalation_overdue' not in row['violations']:
-        row['violations'].append('escalation_overdue')
+    if needs_owner and all(w['payload']['owner'] == wire['payload']['owner'] for w, _ in contracts):
+        candidate = wire['payload']['owner']
+        if candidate['kind'] == 'task' and len(candidate['refs']) == 1:
+            parent = reader.task(candidate['refs'][0])
+            linked = candidate['refs'][0] in {d['id'] for d in wire['payload']['facts']['dependencies']}
+            if parent and linked and parent['status'] in NONTERMINAL and parent['id'] != task['id']:
+                row['owner'] = candidate
+                row['violations'] = [v for v in row['violations'] if v != 'owner_missing']
+    if needs_deadline:
+        row['escalation']['at'] = deadline
+        row['escalation']['state'] = 'pending'
+        row['violations'] = [v for v in row['violations'] if v != 'escalation_deadline_missing']
+        if row['blocker'] and now >= deadline and 'escalation_overdue' not in row['violations']:
+            row['violations'].append('escalation_overdue')
+    if row['escalation']['at'] == deadline:
+        from hermes_cli.kanban_actionability_receipt import escalation
+        receipt = escalation(reader, task, wire)
+        if receipt:
+            row['escalation'].update(receipt)
+            if receipt['state'] == 'recorded' and row['owner'] == wire['payload']['owner']:
+                row['violations'] = [v for v in row['violations'] if v != 'escalation_overdue']
     row['source_refs'] = list(dict.fromkeys([*row['source_refs'], wire['contract_uid']]))
-    # Do not replace semantic identity, action, owner, blocker, release policy or UNKNOWN eligibility.
+    # Identity, action, blocker, release policy and UNKNOWN eligibility remain source-derived.
     return row

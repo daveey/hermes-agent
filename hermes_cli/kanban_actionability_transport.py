@@ -248,6 +248,14 @@ def confirm(conn, hub, board: str, op_id: str) -> dict:
         escalation_ready(hub, board, wire, cap)
     reply = hub.ops(board, [wire])
     results = reply.get('results', []) if isinstance(reply, dict) else []
+    if (isinstance(results, list) and len(results) == 1 and isinstance(results[0], dict)
+            and results[0].get('client_op_id') == op_id and results[0].get('status') == 'rejected'):
+        from hermes_cli.kanban_sync_compat import transient_rejection
+        if not transient_rejection(results[0]):
+            from hermes_cli.kanban_db_connect import write_txn
+            with write_txn(conn):
+                record_result(conn, {'op': KIND, 'op_id': op_id}, results[0])
+            raise ValueError('actionability canonical request rejected; preserve definitive custody')
     if (not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict)
             or results[0].get('client_op_id') != op_id or results[0].get('status') != 'applied'):
         raise ValueError('actionability delivery unknown; preserve exact request')

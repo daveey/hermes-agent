@@ -208,6 +208,10 @@ _SPECS = [
     _cmd("stranded", [_json_flag(), _arg("--limit", type=int, default=100),
                       _arg("--after", default='', metavar="TASK_ID")],
          help="Read-only actionability report; unknown evidence is not permission or invariant success"),
+    _cmd("record-actionability", [
+        _arg("--operation", choices=["preview", "apply", "escalate"], required=True),
+        _arg("--request-file", required=True, help="Explicit obligation JSON, or frozen op_id/digest JSON; '-' = stdin"),
+    ], help="Record an explicit frozen administrative obligation; never release or retry original scope"),
     _cmd("selfwork-producer", [
         _arg("--operation", choices=["capabilities", "prepare", "advance"], required=True),
         _arg("--request-file", default="-", help="Producer JSON snapshot ('-' = stdin)"),

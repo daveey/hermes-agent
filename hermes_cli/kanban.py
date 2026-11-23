@@ -211,8 +211,9 @@ def kanban_command(args: argparse.Namespace) -> int:
         board_scope = kb.scoped_current_board(normed)
 
     with board_scope:
-        if action == "stranded":
-            return importlib.import_module("hermes_cli.kanban_actionability_cli").command(args)
+        if module := {"stranded": "hermes_cli.kanban_actionability_cli",
+                      "record-actionability": "hermes_cli.kanban_actionability_recovery_cli"}.get(action):
+            return importlib.import_module(module).command(args)
         # Maintenance handlers skip init_db; their connections still run schema setup.
         if handler := {"repair": _cmd_repair, "recover": _cmd_recover,
                        "correct-diagnostics": _cmd_correct_diagnostics, "edit-text": _cmd_edit_text}.get(action):
@@ -273,6 +274,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",
     "gc", "origin-bind", "origin-forward", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget", "lanes",
+    "record-actionability",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
