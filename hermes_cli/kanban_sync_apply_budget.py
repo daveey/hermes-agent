@@ -18,6 +18,7 @@ from typing import Any
 MAX_ROWS = 32
 MAX_TRANSACTION_S = 0.25
 PUSH_INTERVAL_S = 5.0
+WRITER_YIELD_S = 0.1
 _SCHEMA: contextvars.ContextVar[Any] = contextvars.ContextVar("sync_apply_schema", default=None)
 _LIMIT: contextvars.ContextVar[Any] = contextvars.ContextVar("sync_apply_limit", default=None)
 _DEADLINE: contextvars.ContextVar[Any] = contextvars.ContextVar("sync_apply_deadline", default=None)
@@ -151,7 +152,7 @@ def _apply_page(conn, changes, *, new_cursor, **kwargs):
             if size == 1:
                 raise
             size = max(1, size // 2)
-            _YIELD.wait(0.005)
+            _YIELD.wait(WRITER_YIELD_S)
             continue
         finally:
             _LIMIT.reset(token)
@@ -164,6 +165,6 @@ def _apply_page(conn, changes, *, new_cursor, **kwargs):
             break
         # SQLite does not promise FIFO writer admission. Give an already-waiting
         # dispatcher a real scheduling window, not an immediate reacquisition.
-        _YIELD.wait(0.005)
+        _YIELD.wait(WRITER_YIELD_S)
     service_pushes()
     return result

@@ -16,8 +16,9 @@ SQLite opcode, rollback I/O, or COMMIT/fsync. No network I/O runs in a feed writ
 transaction. The atomic repair/snapshot API remains available unchanged.
 
 Schema columns are captured outside the reservation and reused for its page.
-A 5 ms scheduling opportunity after each reservation avoids immediately retaking
-the writer ahead of an already waiting dispatcher. SQLite has no FIFO guarantee;
+A 100 ms scheduling opportunity after each reservation avoids immediately retaking
+ the writer ahead of an already waiting dispatcher, including SQLite's busy-handler
+ backoff (a 5 ms gap can fall entirely between its retries). SQLite has no FIFO guarantee;
 the contention regression checks measured dispatcher acquisition, while the
 separate dispatcher-side timeout remains the ultimate admission-wait bound.
 

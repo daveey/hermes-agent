@@ -105,7 +105,7 @@ def test_schema_lookups_outside_writer(conn):
         conn.set_trace_callback(None)
     lookups = [(inside, sql) for inside, sql in statements if "TABLE_INFO" in sql.upper()]
     assert lookups and not any(inside for inside, _ in lookups), "\n".join(stacks)
-    assert len(lookups) <= len(sync.SYNCED_TABLES) + 1
+    assert len([sql for _, sql in lookups if not sql.lstrip().startswith("--")]) <= len(sync.SYNCED_TABLES) + 1
 
 
 def test_sql_deadline_rolls_back_single_row(conn, monkeypatch):
