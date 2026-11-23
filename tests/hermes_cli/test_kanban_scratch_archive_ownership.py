@@ -369,13 +369,17 @@ def test_busy_board_during_owner_recheck_refuses_without_aborting_gc(board, monk
     _tid, path = base._plain_task(_root_owned_locked_tree)
     real_txn = kb.write_txn
 
+    reached = []
+
     def txn(conn):
         if any(f.function == "owner_unchanged" for f in inspect.stack()[1:4]):
+            reached.append(True)
             raise sqlite3.OperationalError("database is locked")
         return real_txn(conn)
     monkeypatch.setattr(kb, "write_txn", txn)
     try:
         assert base._gc() == 0  # the pass completes
+        assert reached  # the GC re-check ran and its error became a refusal
         assert path.exists() and os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
     finally:
         _cleanup(path)
@@ -446,13 +450,17 @@ def test_custody_busy_board_during_owner_recheck_refuses(env, monkeypatch):
     path = _custody_tree(env)
     real_txn = kb.write_txn
 
+    reached = []
+
     def txn(conn):
         if _from_owner_unchanged():
+            reached.append(True)
             raise sqlite3.OperationalError("database is locked")
         return real_txn(conn)
     monkeypatch.setattr(kb, "write_txn", txn)
     try:
         assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
+        assert reached  # the custody re-check ran and its error became a refusal
         assert path.exists() and os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
     finally:
         _cleanup(path)
