@@ -66,6 +66,12 @@ class _Batch:
         }
 
     def run_child(self, i: int, task: dict[str, Any], child: Any) -> dict[str, Any]:
+        from tools.delegate_tool_refusal import refused, rerun
+        entry = self._run_once(i, task, child)
+        # A provider safety refusal re-runs the same task unchanged on the class's other providers.
+        return rerun(self, i, task, child, entry, self._run_once) if refused(entry) else entry
+
+    def _run_once(self, i: int, task: dict[str, Any], child: Any) -> dict[str, Any]:
         from tools.delegate_tool import _run_single_child
         return _run_single_child(task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
 

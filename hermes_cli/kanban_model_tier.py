@@ -37,6 +37,7 @@ FAILED_RUN_OUTCOMES = ("crashed", "oom_killed", "signaled", "timed_out", "gave_u
 # Events that mean "a reviewer rejected the previous attempt".
 REWORK_EVENT_KINDS = ("changes_requested", "review_reopened")
 REVIEW_SKILL = "sdlc-review"
+_REFUSAL_EXHAUSTED = "refusal_exhausted"  # kanban_refusal_fallback.EXHAUSTED
 
 
 def _str(value: Any) -> str:
@@ -331,12 +332,23 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
     plus the run's resolved ``run_route`` receipt (every spawn, tier off included).
     Returns the reason. Review resolution/receipt failures refuse admission rather than inventing a route."""
     reason = _apply_model_tier(conn, task, lane=lane, cfg=cfg)
+    if f"+{_REFUSAL_EXHAUSTED}:" in reason:
+        from agent.model_routing import ModelRoutingError
+        raise ModelRoutingError(f"Every eligible provider refused this card's work ({reason.rsplit(':', 1)[1]})")
     record_run_route(conn, task, lane=lane, reason=reason)
     return reason
 
 
 def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
-    """One read-only route decision for preview and actual admission."""
+    """One read-only route decision for preview and actual admission.
+
+    A card with a provider-refused set never starts on a refused provider (``kanban_refusal_fallback``)."""
+    route = _resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
+    from hermes_cli.kanban_refusal_fallback import reroute
+    return reroute(conn, task, route, lane=lane)
+
+
+def _resolve_dispatch_tier(conn, task, *, lane, cfg=None):
     base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
     from hermes_cli.kanban_model_neutral import routing_view
     task = routing_view(task)

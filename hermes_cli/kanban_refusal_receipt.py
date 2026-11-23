@@ -1,7 +1,9 @@
 """Credential-free, typed safety evidence for an attributable worker result.
 
-This is stop evidence, not provider clearance or a retry grant. Never classify a
-refusal from last_output: it can quote a refusal from an unrelated attempt.
+This is stop evidence for the refusing provider, not clearance of the work. The card is retried
+unchanged on another eligible provider (``kanban_refusal_fallback``) until every one has refused; only then is it
+held with the safety restriction below. Never classify a refusal from last_output: it can quote a refusal from an
+unrelated attempt.
 """
 from __future__ import annotations
 
@@ -45,8 +47,9 @@ def reclaim_admission(conn, row, *, failed_results_only=False):
 def stop_failed_refusal(conn, row, proof) -> bool:
     """Consume an exact dead-interpreter proof inside the reclaim transaction.
 
-    Primary closure belongs solely to the canonical release/feed. Local boards
-    end the run and retain the same decision kernel atomically, without retry.
+    Primary closure belongs solely to the canonical release/feed. Local boards end the run atomically and
+    either return the card to ``ready`` for an unchanged run on another eligible provider (no restriction), or,
+    when none is left or the refusing provider is unproven, retain the same decision kernel as before.
     """
     from hermes_cli.kanban_refusal_proof import select_refusal
     proof = select_refusal(conn, row, proof)
@@ -59,36 +62,43 @@ def stop_failed_refusal(conn, row, proof) -> bool:
         raise RuntimeError('refusal finalization requires the reclaim transaction')
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_failure_release as release
-    from hermes_cli import kanban_spend_decision as decision
 
     task, run = row['id'], row['current_run_id']
     diagnostic = {k: v for k, v in proof.items() if k != 'result'}
     diagnostic.update(refusal_fields(result))
+    from hermes_cli import kanban_refusal_fallback as fallback
+    plan = fallback.plan(conn, row, result)
+    if plan['refused_provider']:
+        diagnostic['refused_provider'] = plan['refused_provider']
+    if plan['refused_providers']:
+        diagnostic['refused_providers'] = plan['refused_providers']
+    if plan['next']:
+        # Board authority closes a primary run; this is the core side of the contract (see fallback docs).
+        diagnostic['safety_fallback'] = {'next_model': plan['next'][0], 'next_provider': plan['next'][1]}
     if release.queue(conn, task, run, outcome='crashed',
                      error='Provider safety refusal; execution release unavailable', diagnostic=diagnostic):
         return True
     # Revalidate the exact admitted run; no state from a later attempt is changed.
     from hermes_cli.kanban_source_receipt import with_source_receipt
+    # A fallback card is ready and unrestricted, so it carries no failure text (nothing was charged).
+    status, error = ('ready', None) if plan['next'] else ('triage', 'Provider safety refusal; execution release unavailable')
     changed = with_source_receipt(conn, task, lambda: conn.execute(
-        "UPDATE tasks SET status='triage', claim_lock=NULL, claim_expires=NULL, "
-        "worker_pid=NULL, worker_started_at=NULL, "
-        "last_failure_error='Provider safety refusal; execution release unavailable' "
+        "UPDATE tasks SET status=?, claim_lock=NULL, claim_expires=NULL, "
+        "worker_pid=NULL, worker_started_at=NULL, last_failure_error=? "
         "WHERE id=? AND status='running' AND current_run_id=? AND claim_lock IS ? "
         "AND worker_pid IS ? AND worker_started_at IS ?",
-        (task, run, row['claim_lock'], row['worker_pid'], row['worker_started_at'])), run_id=run)
+        (status, error, task, run, row['claim_lock'], row['worker_pid'], row['worker_started_at'])), run_id=run)
     if changed.rowcount != 1:
         return True  # lost CAS: never book a competing failure
+    if plan['next']:
+        fallback.requeue(conn, row, plan, diagnostic)
+        return True
+    diagnostic.pop('safety_fallback', None)
     payload = {**diagnostic, 'cause': 'safety_refusal', 'accounting_boundary': False,
                'reason': 'Provider safety refusal; execution release unavailable',
                'release_authority': 'unavailable',
                'next_step': 'Owning supervisor must resolve the scope/authority boundary; do not rerun refused work'}
     kb._end_run(conn, task, outcome='safety_refused', status='safety_refused',
                 error=payload['reason'], metadata=payload)
-    if (stop := decision.pending_episode(conn, task)) is not None:
-        payload['episode'] = stop.get('uid') or str(stop['id'])
-        kb._append_event(conn, task, 'decision_hold_restricted', payload, run_id=run)
-    else:
-        kb._append_event(conn, task, decision.EVENT, payload, run_id=run)
-    kb._append_event(conn, task, 'safety_refused', payload, run_id=run)
-    decision.safe_ensure_producer(conn, task)
+    fallback._triage(conn, task, run, payload)
     return True

@@ -170,7 +170,11 @@ def notice(payload: dict) -> str:
         return ('Scope stopped without execution authority. No generic promotion, comment, timer or review releases it. '
                 'Only an explicit scope renewal does: ' + ROUTE.format(task=payload.get('task_id') or '<task>') + '.')
     if payload.get('cause') == 'safety_refusal':
-        return ('Provider safety refusal retained. There is no supported execution release; '
+        retried = payload.get('refused_providers')
+        head = ('Provider safety refusal retained' if not retried else
+                'Provider safety refusal retained after the work was retried unchanged on other eligible providers '
+                f'until every one refused ({", ".join(str(p) for p in retried)})')
+        return (head + '. There is no supported execution release; '
                 'ordinary promotion, review, comments and timers are not clearance. '
                 'The owning supervisor may resolve the scope/authority boundary or withdraw '
                 'the work without declaring incomplete acceptance satisfied. Do not rerun the refused work.')
@@ -248,7 +252,11 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
     from hermes_cli.kanban_refusal_receipt import restricted
     safety = restricted(conn, task_id)
     stopped = execution_restricted(conn, task_id)
-    guidance = notice({'reason': note, **({'cause': 'safety_refusal' if safety else 'scope_stopped'} if stopped else {})})
+    import json as _json
+    stop = pending_episode(conn, task_id)
+    listed = _json.loads(stop['payload'] or '{}').get('refused_providers') if stop is not None and safety else None
+    guidance = notice({'reason': note, **({'cause': 'safety_refusal' if safety else 'scope_stopped'} if stopped else {}),
+                       **({'refused_providers': listed} if listed else {})})
     action = ('\n\nRecord the administrative scope/authority decision without execution release. '
               'Do not run the original work here. Administrative acceptance is decision recorded; authority unavailable, not root-work completion.' if stopped else
               f"\n\nRecord the decision on {task_id}; use `hermes kanban promote {task_id} --reason '<what changed>'` "
