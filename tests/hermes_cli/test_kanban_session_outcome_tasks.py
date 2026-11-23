@@ -242,7 +242,11 @@ def test_local_park_event_wait_is_derived(kanban_root):
     assert "clock" in cards["t_sched"]["wait"]["waiting_on"] or "slot" in cards["t_sched"]["wait"]["waiting_on"]
     decisions, waits = _items(["s1"])
     assert decisions == []
-    assert waits[0]["id"] == "t_sched" and waits[0]["state"] == "scheduled"
+    assert waits[0]["id"] == "t_sched" and waits[0]["state"] == "external_running"
+    assert waits[0]["wait_kind"] == "clock"
+    assert waits[0]["waited_since"] == 100.0
+    assert waits[0]["expected_s"] == 9_999_999_899.0
+    assert waits[0]["estimate_source"].startswith("wakes ")
 
 
 def test_fresh_and_stale_remote_waits_and_numeric_eta(kanban_root, monkeypatch):

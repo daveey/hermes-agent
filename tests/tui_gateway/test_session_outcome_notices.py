@@ -110,7 +110,8 @@ def test_card_status_change_refreshes_and_marks_its_blocked_notice_stale(db):
 
     assert [(c["task_id"], c["status"], c["skipped"]) for c in changed] == [(tid, "scheduled", None)]
     stored = so.get_outcome(CHAT, db=db)
-    assert stored["kind"] == "waiting" and stored["on"][0]["state"] == "scheduled"
+    assert stored["kind"] == "waiting" and stored["on"][0]["state"] == "external_running"
+    assert stored["on"][0]["wait_kind"] == "clock"
     [row] = _notices(db)
     assert row["display_metadata"]["stale"] is True and row["display_metadata"]["stale_tasks"] == [tid]
 
