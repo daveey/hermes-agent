@@ -861,7 +861,9 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
     def contains(path: Path, sid: str, task_id: str) -> bool:
         key = (path, sid)
         if key not in task_ids:  # no deadline: never wait out a busy board while the caller holds _links_lock
-            task_ids[key] = {t['id'] for t in _busy.session_tasks(path, [sid], LISTED_STATUSES, _read_session_tasks)}
+            from hermes_cli.kanban_links_associations import read
+            task_ids[key] = {t['id'] for t in _busy.session_tasks(
+                path, [sid], LISTED_STATUSES, read, memo_namespace="links")}
         return task_id in task_ids[key]
 
     for row in local:

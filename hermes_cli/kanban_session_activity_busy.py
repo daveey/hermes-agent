@@ -31,6 +31,7 @@ reuse_sink = threading.local()
 
 _tasks_memo: dict[tuple, list[dict[str, Any]]] = {}  # last good per-board task list, by (board, ids, statuses)
 _lean_tasks_memo: dict[tuple, list[dict[str, Any]]] = {}  # outcome lean reader; never the sidebar namespace
+_links_tasks_memo: dict[tuple, list[dict[str, Any]]] = {}  # association-only; never poison enriched readers
 _tasks_lock = threading.Lock()
 TASKS_MEMO_MAX = 512
 # One request's shared budget for re-reading busy boards that have no last good list for the query (well inside the
@@ -73,6 +74,8 @@ def board_reads(path: Path, key: tuple, hit: tuple | None, parked: bool, stalled
 
 
 def _memo(namespace: str) -> dict[tuple, list[dict[str, Any]]]:
+    if namespace == "links":
+        return _links_tasks_memo
     return _lean_tasks_memo if namespace == "lean" else _tasks_memo
 
 
@@ -132,3 +135,4 @@ def reset() -> None:
     with _tasks_lock:
         _tasks_memo.clear()
         _lean_tasks_memo.clear()
+        _links_tasks_memo.clear()

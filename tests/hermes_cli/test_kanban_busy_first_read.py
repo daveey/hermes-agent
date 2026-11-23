@@ -116,8 +116,9 @@ def test_links_projection_never_waits_on_a_busy_board(tmp_path, monkeypatch):
     db = tmp_path / "kanban.db"
     monkeypatch.setattr(ksa, "_board_db_paths", lambda: [db])
 
-    def fake(path, ids, statuses, read, *, deadline=None):
+    def fake(path, ids, statuses, read, *, deadline=None, memo_namespace=""):
         seen.append(deadline)
+        assert memo_namespace == "links"
         raise gen.BoardLifecycleBusy()
 
     monkeypatch.setattr(ksa._busy, "session_tasks", fake)
