@@ -32,7 +32,15 @@ def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: flo
     park events. Missing columns/tables degrade to status-only info."""
     rows = (_local_wait_rows(conn, task_ids) if replica is ...
             else _local_wait_rows(conn, task_ids, replica=replica))
-    return _external_overlay(conn, _describe_waits(*rows, now=now), now)
+    return _eta_overlay(conn, _external_overlay(conn, _describe_waits(*rows, now=now), now), now)
+
+
+def _eta_overlay(conn, info, now):
+    """CI / deploy waits expect the median of this board's earlier ones (``kanban_wait_history``)."""
+    from hermes_cli import kanban_wait_history
+
+    kanban_wait_history.overlay(conn, info, now)
+    return info
 
 
 def _external_overlay(conn, info, now):

@@ -28,6 +28,13 @@ export interface ExternalInfo {
 }
 
 export interface ExternalCard {
+  /** ETA readout of a CI / deploy / timer wait (`kanban_wait_info.eta_fields`). */
+  eta?: {
+    estimate_source?: null | string
+    expected_s?: null | number
+    wait_kind?: null | string
+    waited_since?: null | number
+  } | null
   external?: ExternalInfo | null
   task_id: string
   title?: string
@@ -250,6 +257,12 @@ export function formatExternalHover(
   }
 
   const service = external.service || 'external service'
+
+  if (external.adapter === 'clock') {
+    // A timer: nothing polls it, so there is no check to report, only what it waits for.
+    return hoverOf(`Waiting on a timer${external.reason?.trim() ? ` — ${external.reason.trim()}` : ''}`, '')
+  }
+
   const last = formatExternalRelative(external.observed_at, now, 'past')
   const nextRelative = formatExternalRelative(external.next_due_at, now, 'future')
   const next = nextRelative?.startsWith('overdue') ? `check ${nextRelative}` : `next check ${nextRelative ?? 'unknown'}`

@@ -130,6 +130,69 @@ def owner_device_step(wake_check: Any) -> Optional[str]:
     return None
 
 
+ETA_MIN_SAMPLES = 3
+ETA_HISTORY = 20
+ETA_KINDS = ("ci", "deploy", "clock")
+_GITHUB_REPO = re.compile(r"github\.com[/:]([\w.-]+/[\w.-]+?)(?:\.git)?(?:[/#?]|$)")
+_OWNER_REPO = re.compile(r"^([\w.-]+/[\w.-]+?)(?:[#@:/]|$)")
+
+
+def wait_target(kind: str, ref: Any) -> str:
+    """What a CI / deploy wait waits on, for matching it against earlier waits: the repo of a CI run (``owner/repo``
+    out of a run URL, ``owner/repo#123`` or ``owner/repo``), the host/service of a deploy (a URL's host and first
+    path segment, else the ref without a trailing run or job id). Empty when the ref names nothing comparable."""
+    text = str(ref or "").strip().lower()
+    if not text:
+        return ""
+    if kind == "ci":
+        m = _GITHUB_REPO.search(text) or _OWNER_REPO.match(text)
+        return m.group(1) if m else ""
+    if kind == "deploy":
+        bare = re.sub(r"^[a-z][a-z0-9+.-]*://", "", text).split("?", 1)[0].strip("/")
+        parts = bare.split("/")
+        head = "/".join(parts[:2]) if len(parts) > 1 and not parts[1].isdigit() else parts[0]
+        return re.sub(r"[#@:]\d+$", "", head)
+    return ""
+
+
+def median(values: Any) -> Optional[float]:
+    vals = sorted(float(v) for v in values)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def _wake_label(since: Optional[float], wake_at: float) -> str:
+    """``wakes 14:30`` (UTC), with the weekday when the wake is not on the day of the park."""
+    same_day = since is not None and time.gmtime(since)[:3] == time.gmtime(wake_at)[:3]
+    return "wakes " + time.strftime("%H:%M" if same_day else "%a %H:%M", time.gmtime(wake_at))
+
+
+def eta_fields(wait_kind: str, since: Optional[float], *, wake_at: Any = None, samples: Any = None,
+               target: str = "") -> dict[str, Any]:
+    """The ETA readout of one wait: ``wait_kind`` (ci|deploy|clock), ``waited_since`` (the park time, epoch s),
+    ``expected_s`` and ``estimate_source``. A clock wait expects exactly wake_at minus the park time. A CI / deploy
+    wait expects the median of ``samples`` (durations of the last ETA_HISTORY finished waits of the same kind and
+    target), or None with fewer than ETA_MIN_SAMPLES."""
+    out: dict[str, Any] = {"wait_kind": wait_kind, "waited_since": since, "expected_s": None,
+                           "estimate_source": "no history yet"}
+    if wait_kind == "clock":
+        wake = epoch_s(wake_at)
+        if wake is None or since is None:
+            out["estimate_source"] = "no wake time"
+        else:
+            out["expected_s"] = max(0.0, wake - since)
+            out["estimate_source"] = _wake_label(since, wake)
+        return out
+    vals = [float(v) for v in (samples or ()) if v is not None and float(v) > 0][:ETA_HISTORY]
+    if len(vals) >= ETA_MIN_SAMPLES:
+        noun = "CI runs" if wait_kind == "ci" else "deploys"
+        out["expected_s"] = median(vals)
+        out["estimate_source"] = f"median of last {len(vals)} {noun}" + (f" ({target})" if target else "")
+    return out
+
+
 def producer_from_wake_check(cmd: Any) -> Optional[tuple[str, str]]:
     """``(kind, ref)`` named by a legacy wake check: a wait-check on a card (or a probe that reads one card's
     status), a CI read, or an opaque probe."""
@@ -237,14 +300,20 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
     reason_code = payload.get("reason_code")
     awaited = parse_awaiting(awaiting) or parse_awaiting(payload.get("awaiting"))
     since_s = epoch_s(since)
+    wake_at = epoch_s(payload.get("wake_at"))
     exhausted = park_kind == "continuation_exhausted" or reason_code == "continuation_exhausted" or (
         status == "blocked" and str(reason).lstrip().startswith("continuation_exhausted"))
 
-    def out(state_kind: str, label: str, agent_owned: bool, certain: bool = True) -> dict[str, Any]:
+    def out(state_kind: str, label: str, agent_owned: bool, certain: bool = True,
+            eta: Optional[str] = None) -> dict[str, Any]:
         stalled = agent_owned and since_s is not None and now - since_s >= STALL_AFTER_S
-        return {"wait_state": "stalled" if stalled else "waiting", "waiting_on": label,
+        info = {"wait_state": "stalled" if stalled else "waiting", "waiting_on": label,
                 "waiting_since": since_s, "agent_owned": agent_owned, "agent_owned_certain": certain,
                 "premise": premise_key(state_kind, status, reason, awaited, reason_code) if agent_owned else None}
+        if eta:  # only a ci / deploy / clock park carries the ETA fields
+            target = wait_target(eta, (awaited or {}).get("ref"))
+            info.update(eta_fields(eta, since_s, wake_at=wake_at, target=target), wait_target=target)
+        return info
 
     attention = _human_attention(status, human, payload, since_s)
     if attention is not None:
@@ -270,7 +339,6 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
             # needs_input is agent-owned, handled above; a validated ask returns early as ``human``.)
             return out(f"blocked:{kind}", f"an unvalidated ask ({kind})", False)
     # scheduled, or blocked kind=time: a park. Who produces what it waits for?
-    wake_at = epoch_s(payload.get("wake_at"))
     if awaited and awaited["inferred"] and not (awaited["kind"] == "card" and awaited["ref"]):
         # Core's guess from the park text (every park on the "no producer, no park" core records one): an inferred
         # clock/external wait is just the legacy wake mechanism, judged below like a park with no ``awaiting``.
@@ -279,16 +347,18 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
         if awaited["kind"] == "human":
             # A human ask hidden in a park: nobody sees it, so no one will produce the answer.
             return out("scheduled:hidden_ask", "a hidden ask (not visible to you)", True)
+        eta = awaited["kind"] if awaited["kind"] in ETA_KINDS else None
         if awaited["kind"] in LIVE_PRODUCER_KINDS and awaited["ref"]:
-            return out("scheduled", _awaiting_label(awaited), False)
+            return out("scheduled", _awaiting_label(awaited), False, eta=eta)
         if awaited["kind"] == "clock":
             # A declared window (a soak, a cooldown, a release slot): the clock produces it.
             label = _clock_label(wake_at) if wake_at else "a declared window"
-            return out("scheduled", label + (f" ({awaited['why'][:80]})" if awaited["why"] else ""), False)
+            return out("scheduled", label + (f" ({awaited['why'][:80]})" if awaited["why"] else ""), False,
+                       eta="clock")
         return out("scheduled:no_producer", f"{awaited['kind'] or 'something'} with no named producer", True)
     found = producer_from_wake_check(payload.get("wake_check"))
     if found and found[0] in ("card", "ci"):
-        return out("scheduled", f"{found[0]} {found[1]}", False)
+        return out("scheduled", f"{found[0]} {found[1]}", False, eta="ci" if found[0] == "ci" else None)
     if found:
         # An opaque probe proves only that something polls, not that anything will make it true.
         return out("scheduled:probe", f"probe {found[1]}", True, certain=False)

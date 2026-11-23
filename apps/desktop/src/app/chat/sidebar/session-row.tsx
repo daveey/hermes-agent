@@ -268,7 +268,17 @@ function SidebarSessionRowImpl({
     trailing.push({ key: 'pr', node: <PrTag pr={pr} /> })
   }
 
-  const flatMarks = flatRowCardMarks(session, executionUnknown, gatewayIcon)
+  // The same resolved state the row's dot paints, so the arc and the dot cannot
+  // contradict each other. A selector, not a plain useStore: the map is rebuilt
+  // whenever any session's status changes, but a row only repaints on its own.
+  // [daveey] The row's own activity stamps count too: a project-tree row (older
+  // than the recents page) is not in $sessions, so the store can't see them.
+  const dotState = useSessionDotState(session.id, session)
+
+  const liveTurn = hasLiveTurn(dotState)
+  const { outcomePainted, statusStripe } = useSessionRowStripe(session, dotState, rowHasLiveStatus(session))
+  // [daveey] On a light-blue (CI / deploy / timer) row the ETA readout takes the squares' place.
+  const flatMarks = flatRowCardMarks(session, executionUnknown, gatewayIcon, statusStripe)
 
   if (card) {
     // The card's meta lines separate by spacing alone, so its header figures
@@ -316,16 +326,6 @@ function SidebarSessionRowImpl({
   // Telegram thread continued here still reads as Telegram.
   const handoffSource = handoffOriginSource(session.handoff_state, session.handoff_platform)
   const handoffLabel = handoffSource ? (sessionSourceLabel(handoffSource) ?? handoffSource) : null
-
-  // The same resolved state the row's dot paints, so the arc and the dot cannot
-  // contradict each other. A selector, not a plain useStore: the map is rebuilt
-  // whenever any session's status changes, but a row only repaints on its own.
-  // [daveey] The row's own activity stamps count too: a project-tree row (older
-  // than the recents page) is not in $sessions, so the store can't see them.
-  const dotState = useSessionDotState(session.id, session)
-
-  const liveTurn = hasLiveTurn(dotState)
-  const { outcomePainted, statusStripe } = useSessionRowStripe(session, dotState, rowHasLiveStatus(session))
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;

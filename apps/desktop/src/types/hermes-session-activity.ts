@@ -69,6 +69,13 @@ export interface SessionActivityFields {
   kanban_external_down?: number
   /** [daveey] Cap 10, newest first: cards behind kanban_external* so the sidebar stripe can name each service. */
   kanban_external_cards?: {
+    /** ETA readout of a CI / deploy / timer wait (`kanban_wait_info.eta_fields`). Absent on other cards. */
+    eta?: {
+      estimate_source?: null | string
+      expected_s?: null | number
+      wait_kind?: null | string
+      waited_since?: null | number
+    } | null
     external?: {
       adapter?: string
       health: string

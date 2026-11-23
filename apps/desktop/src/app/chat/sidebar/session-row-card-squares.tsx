@@ -1,9 +1,13 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { executionIdentityKey, selectExecutionObservation } from '@/lib/execution-observations'
+import { deriveExternalVisual } from '@/lib/external-run'
+import { cn } from '@/lib/utils'
+import { isWaitKind, ORANGE_OVER, type WaitEta, type WaitReadout, waitReadout } from '@/lib/wait-eta'
+import type { SessionStatusStripe } from '@/store/session-dot-state'
 
 const COLOURS = {
   red: 'bg-red-500',
@@ -110,16 +114,99 @@ export function SessionRowCardSquares({
   )
 }
 
-/** Keep the gateway marks last, and don't displace a slot-ending opt-in PR chip on empty rows. */
-export function flatRowCardMarks(session: SessionInfo, executionUnknown: number, gatewayIcon: ReactNode): ReactNode {
-  if (!gatewayIcon && !trailingColours(session, executionUnknown).length) {
+/** Keep the gateway marks last, and don't displace a slot-ending opt-in PR chip on empty rows. On a light-blue row
+ *  (CI / deploy / timer wait) the ETA readout replaces the squares. */
+export function flatRowCardMarks(
+  session: SessionInfo,
+  executionUnknown: number,
+  gatewayIcon: ReactNode,
+  statusStripe?: null | SessionStatusStripe
+): ReactNode {
+  const readouts = statusStripe === 'external' ? sessionWaitEtas(session, Date.now() / 1000) : []
+
+  if (!gatewayIcon && !readouts.length && !trailingColours(session, executionUnknown).length) {
     return null
   }
 
   return (
     <span className="pointer-events-none whitespace-nowrap text-[0.625rem] leading-none text-(--ui-text-tertiary)">
-      <SessionRowCardSquares executionUnknown={executionUnknown} session={session} />
+      {readouts.length ? (
+        <SessionRowEtaReadout etas={readouts} />
+      ) : (
+        <SessionRowCardSquares executionUnknown={executionUnknown} session={session} />
+      )}
       {gatewayIcon}
     </span>
+  )
+}
+
+/** Fast tick while a figure is in seconds, slow otherwise: a row is not worth a repaint per second for minutes. */
+function useWaitClock(fast: boolean): number {
+  const [now, setNow] = useState(() => Date.now() / 1000)
+
+  useEffect(() => {
+    setNow(Date.now() / 1000)
+    const id = window.setInterval(() => setNow(Date.now() / 1000), fast ? 1000 : 10_000)
+
+    return () => window.clearInterval(id)
+  }, [fast])
+
+  return now
+}
+
+/** `<waited> / <expected>  <left>` in aligned tabular columns; the soonest-ending wait leads, the rest are in the title. */
+export function SessionRowEtaReadout({ etas }: { etas: WaitEta[] }) {
+  const [fast, setFast] = useState(false)
+  const now = useWaitClock(fast)
+  const readouts = etas.map(eta => waitReadout(eta, now)).filter((r): r is WaitReadout => r !== null)
+  const [lead] = [...readouts].sort(byLeft)
+
+  const nearMinute = lead !== undefined && Math.min(lead.waitedS, Math.abs(lead.leftS ?? Infinity)) < 60
+
+  useEffect(() => {
+    setFast(nearMinute)
+  }, [nearMinute])
+
+  if (!lead) {
+    return null
+  }
+
+  const title = readouts.map(r => r.title).join('\n')
+
+  return (
+    <Tip label={<span className="whitespace-pre-line">{title}</span>} side="top">
+      <span
+        aria-label={title}
+        className="pointer-events-auto ml-1 inline-grid grid-cols-[1.75rem_2.125rem_2rem] items-baseline gap-x-[2px] text-right align-middle tabular-nums"
+        data-over={lead.over ? 'true' : undefined}
+        data-testid="session-row-eta"
+        role="img"
+      >
+        <span className="opacity-75 text-(--ui-text-secondary)" data-eta="waited">
+          {lead.waited}
+        </span>
+        <span className="pl-0.5 text-left" data-eta="expected">
+          / {lead.expected ?? '?'}
+        </span>
+        <span
+          className={lead.unknown ? undefined : cn('font-medium', !lead.over && 'text-sky-400')}
+          data-eta="left"
+          style={lead.over ? { color: ORANGE_OVER } : undefined}
+        >
+          {lead.left}
+        </span>
+      </span>
+    </Tip>
+  )
+}
+
+const byLeft = (a: WaitReadout, b: WaitReadout): number => (a.leftS ?? Infinity) - (b.leftS ?? Infinity)
+
+/** The ETA of every light-blue wait the row carries (CI / deploy / timer cards that are not down). */
+export function sessionWaitEtas(session: SessionInfo, now: number): WaitEta[] {
+  return (session.kanban_external_cards ?? []).flatMap(card =>
+    card.eta && isWaitKind(card.eta.wait_kind) && deriveExternalVisual(card.external, now) !== 'down'
+      ? [card.eta]
+      : []
   )
 }

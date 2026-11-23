@@ -91,7 +91,7 @@ def _verdict(snapshot: dict, coverage: dict, generation: int, failures: list[dic
     if any(item.get("kind") == "card" and item.get("state") == "running" for item in open_work):
         return {"kind": "running", "on": deepcopy(open_work),
                 "presentation": {"stripe": "waiting", "reason_codes": ["linked_work_running"]}}
-    if any(item.get("state") == "external_unknown" for item in open_work):
+    if any(item.get("state") in ("external_unknown", "external_running") for item in open_work):
         return {"kind": "waiting", "on": deepcopy(open_work),
                 "presentation": {"stripe": "external", "reason_codes": ["linked_ci_deploy_wait"]}}
     if open_work:

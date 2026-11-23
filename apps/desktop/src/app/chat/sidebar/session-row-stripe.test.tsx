@@ -419,3 +419,44 @@ it('missing external fields keep today: no Running-on claim on a waiting stripe'
   expect(stripe(container)?.getAttribute('aria-label')).toBeNull()
   expect(container.querySelector('.codicon-cloud')).toBeNull()
 })
+
+// [daveey] A timer (clock wait) joins CI and deploy as the canonical light-blue stripe, drawn as a plain bar: no cloud.
+it('a clock wait paints the canonical sky-400 stripe without a cloud', () => {
+  const session = row('clock-wait', {
+    kanban_active: 1, kanban_parked: 1, kanban_external: 1,
+    kanban_external_cards: [{
+      eta: { estimate_source: 'wakes 14:30', expected_s: 14_400, wait_kind: 'clock', waited_since: 1 },
+      external: { adapter: 'clock', health: 'ok', job: 'running', service: 'timer' },
+      task_id: 't_clock'
+    }],
+    outcome: canonicalOutcome('external')
+  })
+
+  setSessions([session])
+  const { result } = renderHook(() => useSessionRowStripe(session, 'background', true))
+  expect(result.current.statusStripe).toBe('external')
+
+  const { container } = render(
+    <SessionRowStatusStripe outcomePainted={result.current.outcomePainted} session={session}
+      statusStripe={result.current.statusStripe} />
+  )
+
+  expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('external')
+  expect(stripe(container)?.className).toContain('--color-sky-400')
+  expect(container.querySelector('[data-external-cloud]')).toBeNull()
+  expect(stripe(container)?.className).toContain('w-[3px]') // the plain bar, not the glyph
+})
+
+it('a CI wait still draws its cloud', () => {
+  const session = row('ci-wait', {
+    kanban_active: 1, kanban_parked: 1, kanban_external: 1,
+    kanban_external_cards: [{ external: { adapter: 'github_run', health: 'ok', job: 'running', service: 'GitHub Actions' }, task_id: 't_ci' }],
+    outcome: canonicalOutcome('external')
+  })
+
+  const { container } = render(
+    <SessionRowStatusStripe outcomePainted={true} session={session} statusStripe="external" />
+  )
+
+  expect(container.querySelector('[data-external-cloud]')).not.toBeNull()
+})

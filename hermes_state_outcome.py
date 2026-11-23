@@ -130,6 +130,13 @@ def _wait_item(raw: Any) -> Optional[dict[str, Any]]:
     eta = raw.get("eta")
     if isinstance(eta, (int, float)) and not isinstance(eta, bool):
         item["eta"] = float(eta)
+    # [daveey] The wait's ETA readout (kanban_wait_info.eta_fields): park time, expected seconds, and its basis.
+    for key in ("waited_since", "expected_s"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            item[key] = float(value)
+    if _str(raw.get("estimate_source")):
+        item["estimate_source"] = _str(raw.get("estimate_source"))[:120]
     return item
 
 
@@ -376,13 +383,19 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
             decisions.append({"id": f"card:{tid}", "question": _str(req.get("action")) or _str(card.get("title")),
                               "choices": _choices(req.get("choices")), "card_id": tid, "state": "open"})
             continue
-        display_state = "external_unknown" if card.get("remote") and replica_bucket(card) else status
-        item = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid, "state": display_state}
+        wait_kind = wait.get("wait_kind")
+        display_state = "external_unknown" if card.get("remote") and replica_bucket(card) else (
+            "external_running" if wait_kind in ("ci", "deploy", "clock") and status == "scheduled" else status)
+        item: dict[str, Any] = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid,
+                                "state": display_state}
         if explained:
             item["waiting_on"] = explained  # retained scope stop: an open parent or recorded wait, agent work
         eta = wait.get("until") or wait.get("eta")
         if isinstance(eta, (int, float)) and not isinstance(eta, bool):
             item["eta"] = float(eta)
+        if wait_kind in ("ci", "deploy", "clock"):  # [daveey] the ETA readout the sidebar row shows (kanban_wait_info)
+            item["wait_kind"] = wait_kind
+            item.update({k: wait.get(k) for k in ("waited_since", "expected_s", "estimate_source")})
         waits.append(item)
     return decisions, waits
 

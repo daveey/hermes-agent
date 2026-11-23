@@ -23,7 +23,7 @@ import {
   setStripeReasonReporter
 } from '@/store/session-dot-state'
 
-import { sessionExternalStripeTip, unknownExternalCloud } from './session-row-stripe-external'
+import { externalClockOnly, sessionExternalStripeTip, unknownExternalCloud } from './session-row-stripe-external'
 
 // [daveey] Every red edge (with its reasons) also goes to the session's own gateway, where the agent can read it.
 setStripeReasonReporter((row, stripe, previous, reasons) =>
@@ -93,11 +93,17 @@ interface SessionRowStatusStripeProps {
 }
 
 /** [daveey] Which glyphs the stripe draws: `sync` for a live cron or a done chat's owned cron, `project` for open
- *  cards, plus the eye for a done chat still watching a card (self-heal desktop-e6cce5965c). */
-function stripeGlyphs(statusStripe: SessionStatusStripe, painted: boolean, outcome: SessionInfo['outcome']) {
+ *  cards, plus the eye for a done chat still watching a card (self-heal desktop-e6cce5965c). A light-blue stripe
+ *  that only waits on a timer draws no cloud: it is a plain bar. */
+function stripeGlyphs(
+  statusStripe: SessionStatusStripe,
+  painted: boolean,
+  outcome: SessionInfo['outcome'],
+  clockOnly = false
+) {
   const doneCron = painted && outcomeHasCrons(outcome)
   const doneWatch = painted && outcomeHasWatches(outcome)
-  const listed = GLYPH_STRIPES.has(statusStripe)
+  const listed = GLYPH_STRIPES.has(statusStripe) && !(statusStripe === 'external' && clockOnly)
 
   const mainGlyph =
     statusStripe === 'periodic' || doneCron
@@ -133,7 +139,12 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
 
   const unknownCloud = unknownExternalCloud(session, statusStripe, nowSeconds)
 
-  const { doneWatch, glyph, mainGlyph } = stripeGlyphs(statusStripe, Boolean(outcomeKind), session.outcome)
+  const { doneWatch, glyph, mainGlyph } = stripeGlyphs(
+    statusStripe,
+    Boolean(outcomeKind),
+    session.outcome,
+    externalClockOnly(session)
+  )
 
   return (
     <Tip label={tipText ? <span className="whitespace-pre-line">{tipText}</span> : null}>
