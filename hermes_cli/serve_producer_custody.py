@@ -32,27 +32,32 @@ class FamilyCustody:
         """Nonblocking acquisition; caller deliberately pass_fds=(owner.fd,)."""
         if family not in _FAMILIES:
             raise ValueError('unknown producer family')
-        try:
-            import fcntl
-        except ImportError as exc:
-            raise CustodyUnsafe('no strict custody adapter for this platform') from exc
-        runtime = Path(runtime)
-        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            directory = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except OSError as exc:
-            raise CustodyUnsafe('private directory required') from exc
-        try:
-            _private(os.fstat(directory), directory=True)
-            return cls(_acquire_file(directory, family, fcntl))
-        finally:
-            os.close(directory)
+        return cls(_acquire_runtime(runtime, family))
 
     def close(self) -> None:
         """Close only this process's descriptor, preserving inherited custody."""
         if self.fd is not None:
             fd, self.fd = self.fd, None
             os.close(fd)
+
+
+def _acquire_runtime(runtime: Path, name: str) -> int:
+    """Shared stable-file mechanics for family fences and the admission gate."""
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise CustodyUnsafe('no strict custody adapter for this platform') from exc
+    runtime = Path(runtime)
+    runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        directory = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise CustodyUnsafe('private directory required') from exc
+    try:
+        _private(os.fstat(directory), directory=True)
+        return _acquire_file(directory, name, fcntl)
+    finally:
+        os.close(directory)
 
 
 def _private(info: os.stat_result, *, directory: bool) -> None:
