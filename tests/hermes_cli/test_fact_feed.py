@@ -1,4 +1,6 @@
 """Exercise the actual owner thread, publication and source-watch boundaries."""
+import logging
+import sqlite3
 import threading
 from types import SimpleNamespace
 import pytest
@@ -146,3 +148,39 @@ def test_retry_floor_not_bypassed_by_watch_storm():
         assert recovered.wait(3)
     finally:
         feed.close()
+
+
+def _failing_feed(error, attempts):
+    source = Adapter()
+    failures, done = [], threading.Event()
+    def capture(cursor):
+        raise error()
+    source.capture_hook = capture
+    def failure(adapter, exc):
+        failures.append(exc)
+        if len(failures) >= attempts:
+            done.set()
+    return source, done, ChangeFeed(lambda *args: None, failure)
+
+
+def _busy():
+    exc = sqlite3.OperationalError("database is locked: SQLite tracking registry is busy")
+    exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    return exc
+
+
+@pytest.mark.parametrize("error, tracebacks", [(_busy, 0), (lambda: RuntimeError("defect"), 1)])
+def test_retry_streak_logs_at_most_one_traceback(caplog, error, tracebacks):
+    # Each retry used to format a full traceback under the logging lock; at ~2/s
+    # across sources that stalled the gateway event loop past its watchdog.
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.fact_feed")
+    source, done, feed = _failing_feed(error, 3)
+    try:
+        feed.register(source)
+        assert done.wait(5)
+    finally:
+        feed.close()
+    records = [r for r in caplog.records if r.name == "hermes_cli.fact_feed"]
+    assert len(records) >= 3
+    assert sum(r.exc_info is not None for r in records) == tracebacks
+    assert sum(r.levelno >= logging.WARNING for r in records) <= 2

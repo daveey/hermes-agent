@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 
 from hermes_cli.fact_capture import CaptureBudget, CapturePending
+from hermes_cli.kanban_generation import is_busy
 
 log = logging.getLogger(__name__)
 _RETRY = (0.1, 0.2, 0.4, 1.0, 2.0, 5.0)
@@ -155,7 +156,16 @@ class ChangeFeed:
                     self._condition.notify_all()
         except Exception as exc:
             # Plugin isolation boundary: defects must not kill all sources.
-            log.exception("source capture/publication failed; retaining cursor")
+            # One traceback per failure streak, none for an expected busy open:
+            # formatting a traceback per retry under the shared logging lock
+            # starved the gateway event loop until its watchdog exited (75).
+            attempt, busy = source.failures + 1, is_busy(exc)
+            if attempt == 1 and not busy:
+                log.exception("source capture/publication failed; retaining cursor")
+            else:
+                log.log(logging.WARNING if attempt in (1, len(_RETRY)) else logging.DEBUG,
+                        "source capture/publication failed (attempt %d%s); retaining cursor: %s",
+                        attempt, ", busy" if busy else "", exc)
             with source.publication:
                 with self._condition:
                     if not source.active or self._stopping:
