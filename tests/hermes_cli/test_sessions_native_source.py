@@ -176,6 +176,26 @@ def test_capture_failure_reason_is_safe_bounded_and_recovers(source, caplog, rea
         assert len(messages) == 2
 
 
+def test_evicted_failed_selector_reports_new_failure_episode(source, caplog):
+    owner, clock, calls = source
+    owner.max_views = 1
+    selector = {'id': 'bad'}
+    key = view_key(owner.source.scope, 'sessions', selector)
+    with caplog.at_level('WARNING', logger='hermes_cli.sessions_native_source'):
+        owner.demand('sessions', selector)
+        step(owner, clock)
+        owner.demand('sessions', {'id': 'good'})
+        step(owner, clock)
+        assert owner.store.snapshot(owner.source.scope).get(key) is None
+        owner.demand('sessions', selector)
+        step(owner, clock)
+    messages = [r.getMessage() for r in caplog.records if r.name == 'hermes_cli.sessions_native_source']
+    assert calls == [('sessions', 'bad'), ('sessions', 'good'), ('sessions', 'bad')]
+    assert len(messages) == 2
+    assert all('reason=reader_error' in message for message in messages)
+    assert isinstance(owner.store.snapshot(owner.source.scope).view('sessions', selector), Unavailable)
+
+
 def test_expiry_watch_failure_and_close(source):
     owner, clock, _ = source
     owner.demand('sessions', {'id': 'one'})
