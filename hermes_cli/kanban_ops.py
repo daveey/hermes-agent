@@ -398,6 +398,9 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             removed_ws = gc_task_worktrees(conn, older_than_days=wt_days)
         with kbc.connect_closing() as conn:
             removed_ws += gc_task_scratch(conn, older_than_days=wt_days, budget=budget)
+        # After the scratch pass: archives it just made are young, so only older ones can go.
+        from hermes_cli.kanban_scratch_archive_retention import prune_scratch_archives
+        removed_archives = prune_scratch_archives()
 
     removed_events = 0
     if event_days:
@@ -405,7 +408,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             removed_events = kb.gc_events(conn, older_than_seconds=event_days * 24 * 3600)
     removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600) if log_days else 0
     print(f"GC complete: {removed_ws} workspace(s), "
-          f"{removed_events} event row(s), {removed_logs} log file(s) removed")
+          f"{removed_events} event row(s), {removed_logs} log file(s), "
+          f"{removed_archives} scratch archive(s) removed")
     return 0
 
 
