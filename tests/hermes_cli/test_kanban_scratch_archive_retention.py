@@ -7,10 +7,10 @@ worker-a2, 2026-11-23: `kanban gc` archived every aged scratch tree into
 import logging
 import os
 import time
+from pathlib import Path
 
 import pytest
 
-from hermes_cli import config as hconfig
 from hermes_cli import kanban_scratch_archive_retention as ret
 from tests.hermes_cli import test_kanban_scratch_gc_archive as helpers
 from tests.hermes_cli.test_kanban_scratch_gc_archive import _archive, _gc, _task
@@ -32,7 +32,7 @@ def root(tmp_path):
 
 
 def _cfg(monkeypatch, **kanban):
-    monkeypatch.setattr(hconfig, "load_config", lambda: {"kanban": kanban})
+    monkeypatch.setattr(ret, "_kanban_doc", lambda: kanban)
 
 
 def _make(root, name, age_s, board_slug="default", now=NOW):
@@ -66,6 +66,9 @@ def test_configured_days_and_zero(root, monkeypatch):
 @pytest.mark.parametrize("bad", [{"scratch_archive_retention_days": -1},
                                  {"scratch_archive_retention_days": "7"},
                                  {"scratch_archive_retention_days": True},
+                                 {"scratch_archive_retention_days": 0.01},
+                                 {"scratch_archive_pressure_min_age_hours": 0},
+                                 {"scratch_archive_pressure_min_age_hours": 0.5},
                                  {"scratch_archive_pressure_min_age_hours": float("nan")},
                                  {"admission": {"disk_free_floor_bytes": 0}},
                                  {"admission": {"disk_free_floor_bytes": 1.5}}])
@@ -78,26 +81,86 @@ def test_invalid_policy_removes_nothing(root, monkeypatch, caplog, bad):
     assert "keeping every archive" in caplog.text
 
 
-def test_partial_symlink_file_and_detach_intent_are_never_removed(root, monkeypatch, caplog):
+def test_policy_is_read_from_the_installation_root_config(monkeypatch, tmp_path):
+    from hermes_constants import get_default_hermes_root
+    profile = tmp_path / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))  # a profile's own home: its config must not decide
+    (profile / "config.yaml").write_text("kanban:\n  scratch_archive_retention_days: 99\n")
+    root_cfg = Path(get_default_hermes_root()) / "config.yaml"
+    assert root_cfg.parent != profile
+    root_cfg.write_text("kanban:\n  scratch_archive_retention_days: 3\n"
+                        "  scratch_archive_pressure_min_age_hours: 2\n"
+                        "  admission:\n    disk_free_floor_bytes: 1024\n")
+    assert ret.settings() == (3, 2.0, 1024)
+    root_cfg.unlink()
+    assert ret.settings() == (7, 24.0, None)
+
+
+def test_symlinks_files_and_detach_intent_are_never_removed(root, monkeypatch, caplog):
     _cfg(monkeypatch, scratch_archive_retention_days=1)
-    partial = _make(root, "t_p.partial-123", 30 * DAY)
     intent = _make(root, "t_i", 30 * DAY)
     (intent / "detach-abc.json").write_text("{}")
     os.utime(intent, (NOW - 30 * DAY,) * 2)
     target = root.parent / "outside"
-    target.mkdir()
-    (target / "keep.txt").write_text("x")
+    (target / "t_inner" / "repo").mkdir(parents=True)  # would be an old archive if links were followed
+    os.utime(target / "t_inner", (NOW - 30 * DAY,) * 2)
     link = root / "default" / "t_link"
     link.symlink_to(target)
     stray = root / "default" / "t_file"
     stray.write_text("x")
-    board_link = root / "linked-board"
-    board_link.symlink_to(target)
+    (root / "linked-board").symlink_to(target)
     caplog.set_level(logging.WARNING)
     assert ret.prune_scratch_archives(root=root, now=NOW) == 0
-    assert partial.is_dir() and intent.is_dir() and stray.is_file()
-    assert link.is_symlink() and (target / "keep.txt").is_file()
+    assert intent.is_dir() and stray.is_file()
+    assert link.is_symlink() and (target / "t_inner" / "repo").is_dir()
     assert "holds a detach recovery intent" in caplog.text
+
+
+def test_partial_builds_live_kept_dead_and_old_removed(root, monkeypatch):
+    _cfg(monkeypatch)
+    live = _make(root, f"t_l.partial-{os.getpid()}", 30 * DAY)
+    dead_old = _make(root, "t_d.partial-999999999", 25 * 3600)
+    dead_young = _make(root, "t_y.partial-999999998", 3600)
+    assert ret.prune_scratch_archives(root=root, now=NOW) == 1
+    assert live.is_dir() and dead_young.is_dir() and not dead_old.exists()
+
+
+@pytest.mark.parametrize("shape", ["unreadable", "file"])
+def test_unreadable_root_is_logged_and_gc_goes_on(root, monkeypatch, caplog, shape):
+    _cfg(monkeypatch, admission={"disk_free_floor_bytes": GIB})
+    _make(root, "t_a", 30 * DAY)
+    if shape == "file":
+        target = root.parent / "root-file"
+        target.write_text("x")
+    else:
+        target = root
+        monkeypatch.setattr(ret.os, "scandir", _denied(ret.os.scandir, target))
+    caplog.set_level(logging.WARNING)
+    assert ret.prune_scratch_archives(root=target, now=NOW) == 0
+    assert "removing nothing" in caplog.text
+
+
+def _denied(real, blocked):
+    def scandir(path="."):
+        if Path(path) == blocked:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+    return scandir
+
+
+def test_statvfs_failure_stops_only_the_pressure_rule(root, monkeypatch, caplog):
+    _cfg(monkeypatch, admission={"disk_free_floor_bytes": GIB})
+    old = _make(root, "t_old", 8 * DAY)
+    young = _make(root, "t_young", 2 * DAY)
+
+    def broken(_p):
+        raise OSError(5, "I/O error")
+    monkeypatch.setattr(ret, "_free_bytes", broken)
+    caplog.set_level(logging.WARNING)
+    assert ret.prune_scratch_archives(root=root, now=NOW) == 1
+    assert not old.exists() and young.is_dir()
+    assert "cannot measure free space" in caplog.text
 
 
 def test_missing_root_is_a_no_op(root, monkeypatch):
@@ -163,10 +226,15 @@ def test_no_floor_means_no_pressure_rule(root, monkeypatch):
     assert a.is_dir()
 
 
+def test_free_bytes_reads_the_real_filesystem(root):
+    st = os.statvfs(root)
+    assert ret._free_bytes(root) == st.f_bavail * st.f_frsize > 0
+
+
 def test_failed_removal_is_logged_and_the_pass_continues(root, monkeypatch, caplog):
     _cfg(monkeypatch)
-    a = _make(root, "t_a", 9 * DAY, now=NOW)
-    b = _make(root, "t_b", 8 * DAY, now=NOW)
+    a = _make(root, "t_a", 9 * DAY)
+    b = _make(root, "t_b", 8 * DAY)
     real = ret.shutil.rmtree
 
     def rmtree(path, *args, **kwargs):
@@ -180,7 +248,7 @@ def test_failed_removal_is_logged_and_the_pass_continues(root, monkeypatch, capl
     assert "could not remove" in caplog.text
 
 
-def test_kanban_gc_prunes_an_expired_archive_it_made_earlier(board, remote, capsys, monkeypatch):
+def test_kanban_gc_prunes_an_expired_archive_it_made_earlier(board, remote, capsys):
     tid, path = _task(remote=remote)
     assert _gc() == 0
     archive = _archive(tid)
