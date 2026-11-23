@@ -184,3 +184,37 @@ def test_rerank_steps_only_through_the_rows_a_write_touched(db, monkeypatch):
     assert rows == _exact(db, monkeypatch, limit=1000)
     assert [r["id"] for r in rows[:2]] == ["s01400", "s00010"]
     assert _rows(log, "chain_max AS") <= 4  # the two touched rows; was the whole 1000-row page
+
+
+def _chain_store(db):
+    """``s000000``..``s000019`` ranked by their own activity, plus ``s000000``'s compression continuation
+    ``kid`` (no messages, the freshest activity): ``s000000`` ranks first through its chain."""
+    _seed(db, 20, prefix="s0")
+    _write(db, "UPDATE sessions SET end_reason = 'compression', ended_at = ? WHERE id = 's000000'", (_BASE + 1,))
+    _write(db, "INSERT INTO sessions (id, source, started_at, last_activity_at, message_count, parent_session_id)"
+               " VALUES ('kid', 'cli', ?, ?, 1, 's000000')", (_BASE + 30, _BASE + 90_000))
+
+
+@pytest.mark.parametrize("tips", [True, False])
+@pytest.mark.parametrize("change", ["reparent", "detach", "delete"])
+def test_a_chain_member_leaving_lowers_its_old_root(db, monkeypatch, tips, change):
+    """The change triggers stamp only the moved or deleted row's own id (and deleting a messageless row
+    never bumps the lowered counter), so the root whose chain it left is no relative of it any more; that
+    root must still be re-ranked, not kept at its old key."""
+    _chain_store(db)
+    kwargs = dict(limit=5, project_compression_tips=tips)
+    before = _page(db, **kwargs)
+    assert before == _exact(db, monkeypatch, **kwargs)
+    assert {"s000000", "kid"} & {r["id"] for r in before[:1]}  # the chain (root or projected tip) leads
+    if change == "reparent":
+        _write(db, "UPDATE sessions SET end_reason = 'compression', ended_at = ? WHERE id = 's000019'",
+               (_BASE + 40,))
+        _write(db, "UPDATE sessions SET parent_session_id = 's000019' WHERE id = 'kid'")
+    elif change == "detach":
+        _write(db, "UPDATE sessions SET parent_session_id = NULL WHERE id = 'kid'")
+    else:
+        _write(db, "DELETE FROM sessions WHERE id = 'kid'")
+    after = _page(db, **kwargs)
+    assert after == _exact(db, monkeypatch, **kwargs), (change, tips)
+    assert "s000000" not in [r["id"] for r in after]  # its own activity is the oldest of the 20
+    assert memo.OUTCOMES["fallback/lowered"] == 0

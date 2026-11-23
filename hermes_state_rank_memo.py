@@ -23,8 +23,9 @@ on the previous page, so it was not admitted or ranked strictly below the previo
 its inputs moved (its own row, its parent, its chain's rows and messages); the previous page rows alone
 still fill the page at or above that boundary. Otherwise (a page row removed or lowered) the exact query
 runs. A params change is a different key, so a fresh entry from the exact query. SQLite ranks only
-dirty's relatives (``_rerank``): a page row outside them moved none of its inputs either, so the memo's sort
-key for it IS its exact one, and it is merged back in SQLite's order.
+dirty's relatives plus the page rows that had a child when the entry was put (``_rerank``; the triggers stamp
+a deleted or re-parented member's own id, never its old parent): any other page row moved none of its
+inputs, so the memo's sort key for it IS its exact one, and it is merged back in SQLite's order.
 
 Previews. ``_preview_raw`` (the first eligible user message, ~95% of the page projection on the hub) is
 cached per store as ``{session_id: (transcript_revision, raw)}`` and used in SQL only when the row's
@@ -189,6 +190,7 @@ class _Entry:
     keys: dict  # id -> sort key
     eff: dict  # id -> effective_last_active as SQLite returned it
     started: dict  # id -> started_at as SQLite returned it (rebuilds a kept row's sort key)
+    rooted: set  # page ids that had a child at put time (``_rerank`` always re-ranks them)
     dirty: set = field(default_factory=set)
 
 
@@ -266,9 +268,11 @@ class RankMemo:
                     del self.entries[key]
         return None
 
-    def put(self, key: tuple, rows: list) -> _Entry:
-        entry = _Entry([r[0] for r in rows], {r[0]: sort_key(r[3], r[1], r[0]) for r in rows},
-                       {r[0]: r[3] for r in rows}, {r[0]: r[1] for r in rows})
+    def put(self, conn: sqlite3.Connection, key: tuple, rows: list) -> _Entry:
+        ids = [r[0] for r in rows]
+        rooted = set(json.loads(conn.execute(_ROOTED_SQL, (json.dumps(ids),)).fetchone()[0] or "[]"))
+        entry = _Entry(ids, {r[0]: sort_key(r[3], r[1], r[0]) for r in rows},
+                       {r[0]: r[3] for r in rows}, {r[0]: r[1] for r in rows}, rooted)
         self.entries[key] = entry
         self.entries.move_to_end(key)
         while len(self.entries) > _MAX_ENTRIES:
@@ -310,6 +314,10 @@ _RELATIVES_SQL = """
     SELECT id FROM up
     UNION SELECT c.id FROM sessions c WHERE c.parent_session_id IN (SELECT value FROM json_each(?1))"""
 
+# The page ids with a child, as one JSON row: only these have chain members a write can take away.
+_ROOTED_SQL = ("SELECT json_group_array(DISTINCT parent_session_id) FROM sessions "
+               "WHERE parent_session_id IN (SELECT value FROM json_each(?))")
+
 _IDS_HEAD = "SELECT s.id, s.started_at, "  # + last_active, _effective_last_active from ranked_query
 
 
@@ -327,12 +335,16 @@ def _account(outcome: str) -> None:
 
 def _rerank(entry: _Entry, relatives: set, restricted_ids) -> list:
     """The exact ranking of ``R`` = previous page ∪ ``relatives``, best first, stepping SQLite only through
-    ``relatives``: a previous page row outside them moved none of its inputs (module doc), so its sort key
-    and effective_last_active are the memo's. Merged in SQLite's order (``sort_key``, a total order: ids are
-    unique). Re-ranking the whole previous page brought every row of a 2000-row tree page back to Python on
-    each refresh, under the store lock, for the few rows a write touched."""
-    fresh = list(restricted_ids(sorted(relatives))) if relatives else []
-    kept = [(sid, entry.started[sid], None, entry.eff[sid]) for sid in entry.ids if sid not in relatives]
+    ``relatives`` and the page rows that had a child (``entry.rooted``). Any other page row moved none of
+    its inputs (module doc), so its sort key and effective_last_active are the memo's. ``relatives`` alone
+    is not enough: the change triggers stamp only a row's own id, so a chain member deleted, re-parented or
+    detached no longer leads back to the page row whose chain it left (that row's key can drop); every such
+    row had a child when the entry was put, so it is in ``rooted``. Merged in SQLite's order (``sort_key``,
+    a total order: ids are unique). Re-ranking the whole previous page brought every row of a 2000-row tree
+    page back to Python on each refresh, under the store lock, for the few rows a write touched."""
+    touched = relatives | entry.rooted
+    fresh = list(restricted_ids(sorted(touched))) if touched else []
+    kept = [(sid, entry.started[sid], None, entry.eff[sid]) for sid in entry.ids if sid not in touched]
     return sorted(kept + fresh, key=lambda r: sort_key(r[3], r[1], r[0]), reverse=True)
 
 
@@ -345,7 +357,7 @@ def ranked_ids(conn, memo: RankMemo, key: tuple, need: int, exact_ids, restricte
     if entry is None:
         rows = exact_ids(invalidate_candidates=reason in ("lowered", "untrusted"))
         if memo.clock is not None:
-            memo.put(key, rows)
+            memo.put(conn, key, rows)
         _account(f"fallback/{reason or 'no_entry'}")
         return rows
     memo.entries.move_to_end(key)
@@ -369,11 +381,11 @@ def ranked_ids(conn, memo: RankMemo, key: tuple, need: int, exact_ids, restricte
     if reason is not None:
         del memo.entries[key]
         rows = exact_ids()
-        memo.put(key, rows)
+        memo.put(conn, key, rows)
         _account(f"fallback/{reason}")
         return rows
     rows = rows[:need]
-    memo.put(key, rows)
+    memo.put(conn, key, rows)
     _account("reranked")
     return rows
 
