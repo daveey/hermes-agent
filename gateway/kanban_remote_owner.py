@@ -232,7 +232,7 @@ def _collect(runner: Any, authority: Any, lives: list, report=None) -> list[tupl
                                 per_link=True)
             if not getattr(items, "quiet", False):
                 report.retry()
-            elif getattr(items, "next_deadline", None) is not None:
+            if getattr(items, "next_deadline", None) is not None:
                 report.due_at(items.next_deadline)
             items = [kept for item in items if (kept := _drop_written(item, has, ids, tip)) is not None]
             items = [kept for item in items if (kept := _adopt_pending(item, pending, ids, tip)) is not None]

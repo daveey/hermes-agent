@@ -129,6 +129,7 @@ class Scheduler:
         self.source_dirty = True
         self.last_seq = (0, '', '')
         self.source_identity = None
+        self.gateway_sources = None
 
     def start(self, *, native=True):
         if native:
@@ -148,6 +149,8 @@ class Scheduler:
             self.thread.join(5)
         if self.watch is not None:
             self.watch.close()
+        if self.gateway_sources is not None:
+            self.gateway_sources.close()
 
     def source_changed(self):
         with self.lock:
@@ -203,7 +206,11 @@ class Scheduler:
         # but retain their original serialized claim/delivery executors.
         with self.pass_lock:
             now = self.clock()
+            if self.gateway_sources is not None:
+                self.gateway_sources.step(now, reconcile=now >= self.next_reconcile)
             with self.lock:
+                if now >= self.next_reconcile and not self.actions and self.gateway_sources is not None:
+                    self.next_reconcile = now + RECONCILE_SECONDS
                 scan = bool(self.actions) and (self.source_dirty or now >= self.next_reconcile)
                 self.source_dirty = False
             if scan:
@@ -331,6 +338,19 @@ _owner_lock = threading.Lock()
 _owner = None
 
 
+def register_gateway(wake):
+    """Use this same process owner/clock; no generic FactStore activation."""
+    global _owner
+    from tui_gateway.notification_gateway_sources import Sources
+    with _owner_lock:
+        if _owner is None:
+            _owner = Scheduler()
+            _owner.start()
+        if _owner.gateway_sources is None:
+            _owner.gateway_sources = Sources(_owner.event)
+        return _owner.gateway_sources.add(wake)
+
+
 def register(session, wake):
     """Lazy process lifetime owner. No feed, lifecycle or other family activation."""
     global _owner
@@ -373,7 +393,11 @@ def _run(owner):
             owner.invalidate()
             continue
         with owner.lock:
-            delay = max(0.0, owner.next_reconcile - owner.clock()) if owner.actions else None
+            active = owner.actions or (owner.gateway_sources is not None and owner.gateway_sources.actions)
+            deadline = owner.next_reconcile
+            if owner.gateway_sources is not None and owner.gateway_sources.actions:
+                deadline = min(deadline, owner.gateway_sources.retry_at)
+            delay = max(0.0, deadline - owner.clock()) if active else None
             if delay is not None and (owner.dirty or owner.catchup):
                 delay = min(delay, 1.0)  # failed keyed capture/catch-up, not a full census
         owner.event.wait(delay)

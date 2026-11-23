@@ -887,7 +887,7 @@ def _loop(stop: threading.Event) -> None:
     lease = make_lease()
     from tui_gateway.kanban_unloaded_schedule import UnloadedSchedule
     wake = threading.Event()
-    schedule = UnloadedSchedule(wake.set, interval)
+    schedule = UnloadedSchedule(wake.set, interval, native=True)
     stop.wait(_env_float("HERMES_KANBAN_UNLOADED_FIRST_S", FIRST_RUN_DELAY_S))
     maintenance = 0.0
     try:

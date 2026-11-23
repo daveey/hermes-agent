@@ -5,8 +5,8 @@ import time
 
 
 class UnloadedSchedule:
-    def __init__(self, wake, interval: float):
-        self.gate = BoundActions(wake)
+    def __init__(self, wake, interval: float, *, native=False):
+        self.gate = BoundActions(wake, native=native)
         self.interval = interval
         self.role = None
         self.next_legacy = 0.0
@@ -24,7 +24,9 @@ class UnloadedSchedule:
             due = True
         # Ownership changes require catch-up, but a detached facts registry is
         # never permission to resume scans using the launch profile instead.
-        if not due and not (changed and (self.gate.actions or not self.gate.was_bound)):
+        native = self.gate.native_action
+        ready = native is not None and native.owner.ready
+        if not due and not (changed and (self.gate.actions or ready or not self.gate.was_bound)):
             return
         report = PassReport()
         try:

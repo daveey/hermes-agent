@@ -171,7 +171,7 @@ class GatewayKanbanWatchersMixin:
         from gateway.kanban_notification_schedule import BoundActions, PassReport
         event = asyncio.Event()
         loop = asyncio.get_running_loop()
-        gate = BoundActions(lambda: loop.call_soon_threadsafe(event.set))
+        gate = BoundActions(lambda: loop.call_soon_threadsafe(event.set), native=True)
         next_legacy = 0.0
         try:
             while self._running:
@@ -237,7 +237,7 @@ class GatewayKanbanWatchersMixin:
         from gateway.kanban_notification_schedule import BoundActions, PassReport
         event = asyncio.Event()
         loop = asyncio.get_running_loop()
-        gate = BoundActions(lambda: loop.call_soon_threadsafe(event.set))
+        gate = BoundActions(lambda: loop.call_soon_threadsafe(event.set), native=True)
         next_legacy = 0.0
         try:
             while self._running:

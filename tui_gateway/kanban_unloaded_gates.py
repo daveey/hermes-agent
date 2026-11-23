@@ -659,7 +659,7 @@ def run(kind: str, work, *args, live: set[str], every_store: bool = True, **kwar
                 raise
             if not getattr(result, 'quiet', False):
                 report.retry()
-            elif getattr(result, 'next_deadline', None) is not None:
+            if getattr(result, 'next_deadline', None) is not None:
                 report.due_at(result.next_deadline)
             return result
         inputs = probe(kind, every_store=every_store, live=live) if every_store else Inputs()
