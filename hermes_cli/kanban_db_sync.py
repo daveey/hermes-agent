@@ -561,7 +561,16 @@ def drop_triggers(conn: sqlite3.Connection) -> None:
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    """``PRAGMA table_info`` names, built inside SQLite as ONE row (see kanban_table_columns).
+
+    Order is the pragma scan order (cid) in practice, not a documented SQLite guarantee; ``ORDER BY`` inside the
+    aggregate needs SQLite 3.44. Only install_triggers compares order, and a difference there just rebuilds them.
+
+    apply_remote_changes holds the board write lock for a whole page and reads schemas several times per change;
+    one row per column (59 for tasks) re-taking the GIL in the hub gateway held the lock ~1 s per change and
+    starved the dispatcher (2026-11-23)."""
+    row = conn.execute("SELECT json_group_array(name) FROM pragma_table_info(?)", (table,)).fetchone()
+    return json.loads(row[0])
 
 
 def captured_columns(conn: sqlite3.Connection, table: str) -> list[str]:

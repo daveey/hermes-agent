@@ -77,7 +77,9 @@ def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable 
     from hermes_cli.kanban_sync_quarantine import held
     if held(conn, task_id):
         return True
-    columns = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
+    # One row for both schemas: this runs as a SQL function on every guarded write, inside sync page applies.
+    from hermes_cli.kanban_table_columns import tables_columns
+    columns, task_columns = tables_columns(conn, "task_events", "tasks")
     uid = "uid" if "uid" in columns else "NULL AS uid"
     cursor = conn.execute(f"SELECT {uid},task_id,kind,payload FROM task_events WHERE task_id=? "
                           "AND kind IN ('contained','containment_released','containment_closed')", (task_id,))
@@ -88,7 +90,7 @@ def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable 
     observed = set()
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='containment_observations'").fetchone():
         observed.update(r[0] for r in conn.execute("SELECT episode FROM containment_observations WHERE task_id=?", (task_id,)))
-    if "containment_episode" in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+    if "containment_episode" in task_columns:
         marker = conn.execute("SELECT containment_episode FROM tasks WHERE id=?", (task_id,)).fetchone()
         if marker and marker[0] is not None:
             observed.add(marker[0])
