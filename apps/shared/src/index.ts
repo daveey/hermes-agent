@@ -1,5 +1,6 @@
 export { hasAnsi, sanitizeAnsiForRender, stripAnsi } from './ansi'
-export { isBackendReadinessTimeout } from './backend-readiness-timeout'
+export { backendReadinessTimeout, isBackendReadinessTimeout, unwrapStartupConnection } from './backend-readiness-timeout'
+export type { StartupConnectionResult } from './backend-readiness-timeout'
 export { backendScopeKey, backendScopePrefix, LOCAL_CONNECTION_ID, registryBackendScopeKey } from './backend-scope'
 export {
   BILLING_REFUSAL_POLICY,

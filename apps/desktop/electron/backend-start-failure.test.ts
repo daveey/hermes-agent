@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
+import { backendReadinessTimeout } from '../../shared/src/backend-readiness-timeout'
+
 import { isReauthRequiredError, makeUnsignedOauthError } from './backend-health'
 import {
   isHostKeyChangedBootFailure,
@@ -27,7 +29,7 @@ test('readiness timeout does not latch a local backend that may answer later', (
     'Timed out connecting to Hermes backend after 180000ms',
     'Timed out waiting for Hermes backend port announcement (180000ms)'
   ]) {
-    assert.equal(shouldLatchBackendStartFailure({ attemptedRemote: false, error: new Error(message) }), false)
+    assert.equal(shouldLatchBackendStartFailure({ attemptedRemote: false, error: backendReadinessTimeout(message) }), false)
   }
 
   for (const message of ['EACCES', 'install missing', 'Timed out minting the gateway WebSocket URL']) {

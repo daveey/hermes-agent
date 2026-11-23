@@ -43,6 +43,8 @@ import {
 } from 'electron'
 import type { Session } from 'electron'
 
+import { backendReadinessTimeout, captureStartupDeadline } from '../../shared/src/backend-readiness-timeout'
+
 import { type ActiveRuntimeState, classifyActiveRuntime } from './active-runtime-state'
 import { hideAgentTestInstance, isHiddenAgentTestInstance } from './agent-test-instance'
 import { HERMES_API_EXPECTED_404, isExpectedPassiveMiss } from './api-expected-404'
@@ -7039,7 +7041,7 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
           // already finished
         }
 
-        reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+        reject(backendReadinessTimeout(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
       }, timeoutMs)
 
       request.on('response', (res: Electron.IncomingMessage): void => {
@@ -13636,14 +13638,12 @@ ipcMain.handle('hermes:connection', async (event, profile) => {
   const route = resolveDesktopConnectionRequest(profile, source, primaryProfileKey())
 
   // A profile-less request follows the primary even though the route carries its name.
-  return connectDesktopProfileRoute(route, event.sender, desktopConnectionRequestInheritsPrimary(profile, source))
+  return captureStartupDeadline(connectDesktopProfileRoute(route, event.sender, desktopConnectionRequestInheritsPrimary(profile, source)))
 })
 
 async function connectDesktopProfileRoute(route: DesktopProfileRoute, sender?: Electron.WebContents, inherits = false) {
-  // Coalesce concurrent renderer dials for one profile scope (#90812): the
-  // renderer-side reconnect lock is per-window, so two windows waking at once
-  // both land here. The claim key mirrors ensureBackend()'s own profile
-  // normalization so every spelling of the primary coalesces onto one dial.
+  // Coalesce concurrent per-window dials for one profile scope (#90812).
+  // Mirror ensureBackend() profile normalization so primary spellings share one dial.
   const inheritsPrimary = !route.connectionId && inherits
   // backendDialClaimKey: an explicit `local` connection must not alias an omitted one that may resolve remotely.
   const scopeKey = primaryDialClaimKey(backendDialClaimKey(route.connectionId, route.profile), inheritsPrimary)
@@ -13692,7 +13692,7 @@ ipcMain.handle('hermes:connection:for', async (event, payload) => {
   const registry = readDesktopConnectionsRegistry()
   const id = registryDialConnectionId(connectionId, registry.primary)
 
-  return connectDesktopProfileRoute({ connectionId: id, profile: String(profile ?? '').trim() || 'default' }, event.sender)
+  return captureStartupDeadline(connectDesktopProfileRoute({ connectionId: id, profile: String(profile ?? '').trim() || 'default' }, event.sender))
 })
 
 const windowConnectionRoutes = new WindowConnectionRouteRegistry()

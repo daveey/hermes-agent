@@ -7,6 +7,8 @@
  * probes still pass while /api/ws rejects the renderer's token.
  */
 
+import { backendReadinessTimeout } from '../../shared/src/backend-readiness-timeout'
+
 const DEFAULT_TOKEN_FETCH_TIMEOUT_MS = 3_000
 
 async function fetchPublicText(url, options: any = {}) {
@@ -20,7 +22,7 @@ async function fetchPublicText(url, options: any = {}) {
 
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) }).catch(error => {
     if (error.name === 'TimeoutError') {
-      throw new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`)
+      throw backendReadinessTimeout(`Timed out connecting to Hermes backend after ${timeoutMs}ms`)
     }
 
     throw error

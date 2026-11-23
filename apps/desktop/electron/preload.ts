@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
+import { isStartupDeadlineResult, unwrapConnectionDeadline } from '../../shared/src/backend-readiness-timeout'
+
 import type { DesktopProfileRoute } from './desktop-profile'
 import type { HudModifierApi, HudModifierStatus } from './hud-modifier-types'
 import { customWindowControlsEnabled } from './window-controls'
@@ -50,11 +52,18 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
       return () => ipcRenderer.removeListener('hermes:ui-preferences:changed', listener)
     }
   },
-  getConnection: (profile, opts) => ipcRenderer.invoke('hermes:connection', profile, opts),
+  getConnection: (profile, opts) => ipcRenderer.invoke('hermes:connection', profile, opts).then(unwrapConnectionDeadline),
+  getStartupConnection: async route => {
+    const result = await (route?.connectionId
+      ? ipcRenderer.invoke('hermes:connection:for', route)
+      : ipcRenderer.invoke('hermes:connection', route?.profile))
+
+    return isStartupDeadlineResult(result) ? result : { ok: true, connection: result }
+  },
   // Loopback origin that hosts YouTube's player for the file:// renderer.
   getEmbedHostOrigin: () => ipcRenderer.invoke('hermes:embed-host:origin'),
   // Registry-scoped backend resolution: { connectionId, profile } → descriptor.
-  getConnectionFor: payload => ipcRenderer.invoke('hermes:connection:for', payload),
+  getConnectionFor: payload => ipcRenderer.invoke('hermes:connection:for', payload).then(unwrapConnectionDeadline),
   // A user action (open, new chat, send) on a registry route: stamps the remote warm set (counts as use).
   noteRemoteUse: payload => ipcRenderer.invoke('hermes:remote:note-use', payload),
   getProfileRoutes: profiles => ipcRenderer.invoke('hermes:plugin-profile-routes', profiles),

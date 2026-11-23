@@ -1,3 +1,4 @@
+import { backendReadinessTimeout } from '@hermes/shared'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -11,6 +12,7 @@ import { $connection, $gatewayState, $selectedStoredSessionId, setSelectedStored
 
 import { deferred } from '../../../test/deferred'
 import { FakeWebSocket } from '../../../test/fake-gateway-socket'
+import { startupConnectionBridge } from '../../../test/startup-connection-bridge'
 
 import { takeGatewaySurvivor } from './gateway-hmr-survivor'
 import { useGatewayBoot } from './use-gateway-boot'
@@ -169,6 +171,7 @@ it.each([false, true])('recovers timeout without reload (cross-window reset: %s)
   if (reset) {
     act(() => desktop.emitBootProgress({ phase: 'bootstrap.reset' }))
   }
+
   await act(async () => {
     await vi.advanceTimersByTimeAsync(reset ? 1 : 2_001)
   })
@@ -188,22 +191,39 @@ it.each([false, true])('recovers timeout without reload (cross-window reset: %s)
   view.unmount()
 })
 
-it('keeps recovery alive after the canonical ensure deadline verdict', async () => {
+it.each([false, true])('keeps recovery alive across real IPC wiring (registry route: %s)', async registry => {
   const desktop = fakeDesktop()
   const pending = deferred<typeof primaryConn>()
-  desktop.getConnection.mockImplementationOnce(() => pending.promise)
-  desktop.getConnection.mockRejectedValueOnce(new Error('Gateway starting (deadline). Use hermes gateway status for recovery.'))
+  const connect = vi.fn(async (_route: unknown) => primaryConn)
+  connect.mockImplementationOnce(() => pending.promise)
+  connect.mockImplementationOnce(async () => {
+    throw backendReadinessTimeout('Gateway starting (deadline). arbitrary diagnostic')
+  })
+  const bridge = startupConnectionBridge(connect)
+  Object.assign(desktop, {
+    getStartupConnection: bridge.getStartupConnection,
+    profile: { ...desktop.profile, getDefault: async () => registry ? { connectionId: 'local', profile: 'worker' } : null },
+    getRecentLogs: async () => ({ lines: [] }), getBootstrapState: async () => null,
+    getConnectionConfig: async () => ({ mode: 'local' })
+  })
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
   const refreshSessions = vi.fn(async () => undefined)
-  render(<Harness refreshSessions={refreshSessions} />)
+  render(<><Harness refreshSessions={refreshSessions} /><BootFailureOverlay /></>)
+  setSelectedStoredSessionId('retained-through-ipc')
   await act(async () => { await vi.advanceTimersByTimeAsync(BACKEND_BOOT_WAIT_TIMEOUT_MS) })
   expect($desktopBoot.get().error).toMatch(/Timed out connecting/)
+  expect(screen.getByText(en.boot.failure.title)).toBeTruthy()
   await act(async () => { await vi.advanceTimersByTimeAsync(2_001) })
   expect($desktopBoot.get().error).toMatch(/Gateway starting \(deadline\)/)
+  expect(screen.getByText(en.boot.failure.title)).toBeTruthy()
   await act(async () => { await vi.advanceTimersByTimeAsync(4_001) })
-  expect.soft(desktop.getConnection.mock.calls.length).toBe(3)
-  expect.soft(refreshSessions).toHaveBeenCalledOnce()
-  expect.soft($desktopBoot.get().error).toBeNull()
+  expect(connect).toHaveBeenCalledTimes(3)
+  expect(refreshSessions).toHaveBeenCalledOnce()
+  expect($desktopBoot.get().error).toBeNull()
+  expect($desktopBoot.get().progress).toBe(100)
+  expect(screen.queryByText(en.boot.failure.title)).toBeNull()
+  expect($selectedStoredSessionId.get()).toBe('retained-through-ipc')
+  expect(connect.mock.calls[1]?.[0]).toMatchObject(registry ? { connectionId: 'local', profile: 'worker' } : { profile: 'default' })
 })
 
 it('stops queued recovery on unmount and ignores a late original readiness reply', async () => {

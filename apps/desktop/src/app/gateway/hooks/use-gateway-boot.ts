@@ -7,6 +7,7 @@ import {
   JsonRpcGatewayError,
   reconnectBackoffDelayMs
 } from '@hermes/shared'
+import { backendReadinessTimeout, unwrapStartupConnection } from '@hermes/shared'
 import { useEffect, useRef } from 'react'
 
 import { canonicalOwnerProfile } from '@/api/canonical-protocol'
@@ -788,6 +789,10 @@ export function useGatewayBoot({
 
       // Initial registry publication can precede boot. Resolve captured launch
       // intent explicitly rather than through that still-initializing mirror.
+      if (startup && desktop.getStartupConnection) {
+        return unwrapStartupConnection(await desktop.getStartupConnection(route))
+      }
+
       if (route?.connectionId && desktop.getConnectionFor) {
         return desktop.getConnectionFor(route)
       }
@@ -1617,12 +1622,14 @@ export function useGatewayBoot({
       const conn = await withTimeout(
         getWindowBackend(true),
         recovering ? RECONNECT_ATTEMPT_TIMEOUT_MS : BACKEND_BOOT_WAIT_TIMEOUT_MS,
-        'Timed out connecting to Hermes backend'
+        'Timed out connecting to Hermes backend',
+        error => { throw backendReadinessTimeout(error.message) }
       )
 
       if (!ownsBoot(revision)) {
         return null
       }
+
       timeoutRecovery.stop()
 
       if (recovering) {

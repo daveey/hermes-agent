@@ -7,6 +7,7 @@ import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import * as readiness from '../../../shared/src/backend-readiness-timeout'
 import { coalescedBackendRead, ReadCoalescer } from '../../electron/read-coalescing'
 
 import { HermesGateway } from './client'
@@ -66,6 +67,8 @@ function installBridge(coalescer: ReadCoalescer) {
       if (name === 'electron') { return electron }
 
       if (name === './window-controls') { return { customWindowControlsEnabled: () => false } }
+
+      if (name === '../../shared/src/backend-readiness-timeout') { return readiness }
 
       if (name === './api-expected-404') { return { unwrapExpectedNotFound: (value: unknown) => value } }
       throw new Error(`Unexpected preload dependency: ${name}`)

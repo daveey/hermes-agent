@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 
+import { backendReadinessTimeout } from '../../shared/src/backend-readiness-timeout'
+
 import { profileCollectionRoute, profileRouteSuffix } from './profile-routes'
 import { hiddenWindowsChildOptions, windowsShellCommand } from './windows-child-options'
 
@@ -280,7 +282,9 @@ export async function ensureLocalGateway(
     const detail = typeof payload.detail === 'string' && payload.detail.trim() ? ` ${payload.detail.trim().split(/\r?\n/)[0]}.` : ''
     const recovery = payload.reason_code === 'update_paused' ? 'restart' : 'status'
 
-    throw new Error(`Gateway ${payload.state || 'inaccessible'} (${payload.reason_code || 'ensure_failed'}).${detail} Use hermes gateway ${recovery} for recovery.`)
+    const message = `Gateway ${payload.state || 'inaccessible'} (${payload.reason_code || 'ensure_failed'}).${detail} Use hermes gateway ${recovery} for recovery.`
+
+    throw payload.state === 'starting' && payload.reason_code === 'deadline' ? backendReadinessTimeout(message) : new Error(message)
   }
 
   const endpoint: GatewayEndpoint = payload.endpoint

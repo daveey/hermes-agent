@@ -1,3 +1,4 @@
+import { backendReadinessTimeout } from '@hermes/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { BootTimeoutRecovery, isBackendReadinessTimeout } from './boot-timeout-recovery'
@@ -41,13 +42,15 @@ describe('boot timeout recovery', () => {
   })
 
   it('limits automatic recovery to readiness timeouts', () => {
-    expect(isBackendReadinessTimeout(new Error('Timed out connecting to Hermes backend'), 'connected')).toBe(false)
-    expect(isBackendReadinessTimeout(new Error('Timed out connecting to Hermes backend'))).toBe(true)
+    expect(isBackendReadinessTimeout(backendReadinessTimeout('diagnostic wording is not a contract'), 'connected')).toBe(false)
+    expect(isBackendReadinessTimeout(backendReadinessTimeout('diagnostic wording is not a contract'))).toBe(true)
     expect(
-      isBackendReadinessTimeout(new Error('Timed out waiting for Hermes backend port announcement (180000ms)'))
+      isBackendReadinessTimeout(backendReadinessTimeout('Timed out waiting for Hermes backend port announcement (180000ms)'))
     ).toBe(true)
 
     for (const error of [
+      new Error('Timed out connecting to Hermes backend'),
+      new Error('Gateway starting (deadline).'),
       new Error('Sign in again'),
       new Error('Timed out minting the gateway WebSocket URL'),
       null,

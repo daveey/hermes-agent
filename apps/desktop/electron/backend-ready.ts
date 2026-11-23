@@ -1,5 +1,7 @@
 import fs from 'node:fs'
 
+import { backendReadinessTimeout } from '../../shared/src/backend-readiness-timeout'
+
 // `hermes serve` announces HERMES_BACKEND_READY; the legacy `hermes dashboard`
 // backend announces HERMES_DASHBOARD_READY. Accept either so the desktop spawn
 // works against both the headless backend and old/dashboard runtimes.
@@ -132,7 +134,7 @@ function waitForDashboardPort(
         () => {
           cleanup()
           reject(
-            new Error(
+            backendReadinessTimeout(
               `Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)${deadline ? ' while an update completion was in progress' : ''}`
             )
           )
@@ -279,7 +281,7 @@ function waitForDashboardReadyFile(
 
     const timer = setTimeout(() => {
       cleanup()
-      reject(new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)`))
+      reject(backendReadinessTimeout(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)`))
     }, timeoutMs)
 
     child.on('exit', onExit)
