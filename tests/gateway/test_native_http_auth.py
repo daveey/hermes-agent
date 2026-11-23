@@ -140,8 +140,18 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
 
         assert wait_until(sidebar_ready, timeout=10)
         # The cross-profile project tree and PR scan answer one grant for its own profile only.
-        assert client.get('/api/profiles/projects/tree?profile=default',
-                          headers=headers(ticket(home, descriptor))).status_code == 200
+        def tree_ready():
+            # A scoped selector is demanded off-request; never replay a redeemed grant.
+            response = client.get('/api/profiles/projects/tree?profile=default',
+                                  headers=headers(ticket(home, descriptor)))
+            assert response.status_code in (200, 503), response.text
+            if response.status_code == 503:
+                detail = response.json()['detail']
+                assert detail['code'] == 'facts_unavailable', response.text
+                assert response.headers['Retry-After'] == '1'
+            return response.status_code == 200
+
+        assert wait_until(tree_ready, timeout=10)
         assert client.post('/api/profiles/sessions/pull-requests?profile=default', json={'ids': ['x']},
                            headers=headers(ticket(home, descriptor))).status_code == 200
         for scope in ('', '?profile=all', '?profile=other', '?profile=default&profile=other'):

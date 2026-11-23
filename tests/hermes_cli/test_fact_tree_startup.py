@@ -81,6 +81,28 @@ def test_tree_foreign_profile_never_falls_back(profiles_on_disk):
     runtime.close()
 
 
+def test_tree_provider_binds_authenticated_home_and_rejects_escape(profiles_on_disk, monkeypatch):
+    from hermes_cli import config
+    from hermes_cli.fact_tree_startup import TreeRuntime, TreeBinding
+    from hermes_cli.fact_contract import Unavailable
+    runtime = TreeRuntime(targets=tuple(profiles_on_disk.items()))
+    try:
+        assert isinstance(runtime.provider(None), TreeBinding)
+        assert runtime.provider(None).profile is None
+        monkeypatch.setattr(config, 'get_hermes_home', lambda: profiles_on_disk['worker'])
+        assert runtime.provider(None).profile == 'worker'
+        assert runtime.provider('worker').profile == 'worker'
+        assert isinstance(runtime.provider('default'), Unavailable)
+        monkeypatch.setattr(config, 'get_hermes_home', lambda: profiles_on_disk['worker'] / 'foreign')
+        assert isinstance(runtime.provider('worker'), Unavailable)
+        monkeypatch.setattr(config, 'get_hermes_home', lambda: profiles_on_disk['default'])
+        assert isinstance(runtime.provider('unknown'), Unavailable)
+        runtime.closed = True
+        assert isinstance(runtime.provider(None), Unavailable)
+    finally:
+        runtime.close()
+
+
 @pytest.mark.parametrize('flag,platform', [('off', 'linux'), ('1', 'darwin'), ('1', 'win32')])
 def test_rollback_and_unsupported_native_backend_skip_tree(monkeypatch, flag, platform):
     from types import SimpleNamespace

@@ -64,6 +64,23 @@ def test_current_selection_reads_published_catalog_only(shadow_board, monkeypatc
     assert isinstance(runtime.provider(None), Unavailable)
 
 
+def test_board_provider_rejects_foreign_home_and_closed_owner(shadow_board, monkeypatch):
+    from hermes_cli import config
+    from hermes_cli.fact_board_startup import BoardRuntime
+    from hermes_cli.fact_contract import Unavailable
+    from pathlib import Path
+    runtime = BoardRuntime(shadow_board['mod'], boards=('default',))
+    selected = object()
+    runtime.views = {'default': selected}
+    assert runtime.provider('default') is selected
+    monkeypatch.setattr(config, 'get_hermes_home', lambda: Path(runtime.home) / 'foreign')
+    assert isinstance(runtime.provider('default'), Unavailable)
+    monkeypatch.setattr(config, 'get_hermes_home', lambda: Path(runtime.home))
+    assert isinstance(runtime.provider('unknown'), Unavailable)
+    runtime._closed = True
+    assert isinstance(runtime.provider('default'), Unavailable)
+
+
 def test_actual_mount_entry_selects_native_runtime(shadow_board, monkeypatch):
     from hermes_cli import fact_board_startup as board_startup
     from hermes_cli.fact_plugin_mount import PluginLifecycles
