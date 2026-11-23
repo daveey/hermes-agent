@@ -231,8 +231,13 @@ def card_states(conn: sqlite3.Connection, task_ids: Iterable[str], *, now: Optio
     out: dict[str, dict] = {}
     try:
         hosts = hosts_seen(conn)
-        for tid in dict.fromkeys(str(t) for t in task_ids):
-            derived = card_state(conn, tid, now=now, hosts=hosts)
+        ids = list(dict.fromkeys(str(t) for t in task_ids))
+        statuses = dict(conn.execute("SELECT id,status FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
+                                     (json.dumps(ids),)))
+        for tid in ids:
+            if statuses.get(tid) != 'scheduled':
+                continue
+            derived = card_state(conn, tid, now=now, hosts=hosts, status=statuses[tid])
             if derived is not None:
                 out[tid] = derived
     except sqlite3.Error:

@@ -101,7 +101,7 @@ def _active_episode(conn: sqlite3.Connection, tid: str, marker: str) -> Optional
     return next((e for e in events if e["kind"] == "contained" and e["uid"] == marker), None)
 
 
-def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ...) -> dict[str, dict[str, Any]]:
+def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..., display: bool = False) -> dict[str, dict[str, Any]]:
     """``{task_id: contained facts}`` for the held triage cards among ``task_ids``::
 
         {episode, contained_at, authority: {id, status, at}, producer: {id, status, released} | None}
@@ -118,10 +118,13 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..
                             (json.dumps(ids),)).fetchall()
     except sqlite3.Error:
         return {}
+    from hermes_cli.kanban_contained_display import Capture, producer_runs
+    capture = Capture(conn, [str(tid) for tid, _ in rows]) if display and rows else None
     stops: dict[str, tuple[dict, dict]] = {}
     for tid, marker in rows:
         try:
-            stop = _active_episode(conn, str(tid), str(marker))
+            stop = (capture.active(str(tid), str(marker)) if capture is not None
+                    else _active_episode(conn, str(tid), str(marker)))
         except Exception:
             logger.debug("contained wait: episode read failed for %s", tid, exc_info=True)
             continue
@@ -133,6 +136,7 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..
     need = [spec["authority"]["task_id"] for _, spec in stops.values()]
     need += [spec["producer"]["task_id"] for _, spec in stops.values() if isinstance(spec.get("producer"), dict)]
     known = statuses(conn, need) if replica is ... else statuses(conn, need, replica=replica)
+    latest = producer_runs(conn, stops) if display else {}
     out: dict[str, dict[str, Any]] = {}
     for tid, (stop, spec) in stops.items():
         a_id = spec["authority"]["task_id"]
@@ -146,6 +150,7 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..
             p_id = producer["task_id"]
             p_status = known.get(p_id, ("unknown", None))[0]
             info["producer"] = {"id": p_id, "status": p_status,
-                                "released": _producer_released(conn, p_id, stop.get("created_at"))}
+                                "released": (bool(latest.get(tid))
+                                             if display else _producer_released(conn, p_id, stop.get("created_at")))}
         out[tid] = info
     return out

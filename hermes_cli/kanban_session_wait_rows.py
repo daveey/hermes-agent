@@ -62,29 +62,22 @@ def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str], *, repli
     pick = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in ("id", "status", "block_kind", "human_request",
                                                                           "awaiting"))
     parked: dict[str, tuple] = {}
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        ph = ",".join("?" for _ in chunk)
-        for tid, status, kind, request, awaiting in conn.execute(
-                f"SELECT {pick} FROM tasks t WHERE t.id IN ({ph}) AND t.status IN ('scheduled', 'blocked', 'triage')",
-                chunk):
-            parked[str(tid)] = (status, kind, request, awaiting)
+    for tid, status, kind, request, awaiting in conn.execute(
+            f"SELECT {pick} FROM tasks t WHERE t.id IN (SELECT value FROM json_each(?)) "
+            "AND t.status IN ('scheduled', 'blocked', 'triage')", (json.dumps(ids),)):
+        parked[str(tid)] = (status, kind, request, awaiting)
     if not parked:
         return {}, {}
     events: dict[str, tuple] = {}
-    keys = list(parked)
     kph = ",".join("?" for _ in kwi.PARK_EVENT_KINDS)
-    for i in range(0, len(keys), 500):
-        chunk = keys[i:i + 500]
-        ph = ",".join("?" for _ in chunk)
-        try:
-            for tid, kind, payload, at in conn.execute(
-                    f"SELECT e.task_id, e.kind, e.payload, e.created_at FROM task_events e WHERE e.id IN ("
-                    f"SELECT MAX(id) FROM task_events WHERE task_id IN ({ph}) AND kind IN ({kph}) GROUP BY task_id)",
-                    (*chunk, *kwi.PARK_EVENT_KINDS)):
-                events[str(tid)] = (kind, payload, at)
-        except sqlite3.Error:  # board predates task_events
-            break
+    try:
+        for tid, kind, payload, at in conn.execute(
+                "SELECT e.task_id, e.kind, e.payload, e.created_at FROM task_events e WHERE e.id IN ("
+                "SELECT MAX(id) FROM task_events WHERE task_id IN (SELECT value FROM json_each(?)) "
+                f"AND kind IN ({kph}) GROUP BY task_id)", (json.dumps(list(parked)), *kwi.PARK_EVENT_KINDS)):
+            events[str(tid)] = (kind, payload, at)
+    except sqlite3.Error:  # board predates task_events
+        pass
     if replica is ...:
         _overlay_contained(conn, parked, events)
     else:
@@ -98,9 +91,9 @@ def _overlay_contained(conn: sqlite3.Connection, parked: dict[str, tuple], event
     if not triage:
         return
     try:
-        from hermes_cli import kanban_contained_wait
-        rows = (kanban_contained_wait.read(conn, triage) if replica is ...
-                else kanban_contained_wait.read(conn, triage, replica=replica))
+        from hermes_cli import kanban_contained_display
+        rows = (kanban_contained_display.read(conn, triage) if replica is ...
+                else kanban_contained_display.read(conn, triage, replica=replica))
         for tid, info in rows.items():
             events[tid] = ("contained", {"contained": info}, info.get("contained_at"))
     except Exception:  # display-only: the card keeps its ordinary triage description

@@ -120,7 +120,14 @@ def _board(conn: sqlite3.Connection) -> str | None:
 
 def verified(conn: sqlite3.Connection, release: dict, stop: dict) -> bool:
     s, r = _cached(conn, stop.get("uid")), _cached(conn, release.get("uid"))
-    if s is None or r is None or s["board"] != r["board"] or s["board"] != _board(conn) or not _matches(stop, s) or not _matches(release, r):
+    if s is None or r is None or s["board"] != r["board"]:
+        return False
+    return verified_evidence(release, stop, s, r, _board(conn))
+
+
+def verified_evidence(release: dict, stop: dict, s: dict | None, r: dict | None, board: str | None) -> bool:
+    """The same canonical verifier over captured evidence; no SQL or authority cache."""
+    if s is None or r is None or s["board"] != r["board"] or s["board"] != board or not _matches(stop, s) or not _matches(release, r):
         return False
     try:
         certify = canonical.certified_closure if release.get("kind") == "containment_closed" else canonical.certified_release
