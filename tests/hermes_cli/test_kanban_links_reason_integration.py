@@ -2,7 +2,7 @@
 from hermes_cli import kanban_session_activity as activity
 from hermes_cli import kanban_sync_client as sync
 from hermes_cli import kanban_links_diagnostics as diag
-from tests.hermes_cli import test_kanban_publication_index as membership
+from tests.hermes_cli import test_kanban_origin_publications as membership
 from tests.hermes_cli import test_kanban_links_refresh_accounting as refresh
 from tests.hermes_cli import test_kanban_sync_links_chat_key as key_helpers
 

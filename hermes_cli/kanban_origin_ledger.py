@@ -478,41 +478,41 @@ def _removed_owner(elsewhere: _Publications, listed: frozenset, owner: dict, tas
 class _Publications:
     """Which gateways publish a card, for ``_removed_owner``. [daveey]
 
-    Built at most once per projection, and only when a removed owner's row asks: for every gateway the replica
-    lists, one read of its task keys through the ``(gw, coll, key)`` primary key, which covers the read (no row
-    data; 13 ms for 23,000 keys on the MacBook), then one keyed read per candidate record. A per-obligation
-    ``key GLOB`` scanned the whole table each time (review 5965756952). Discovery does not depend on a gateway's
-    announced scopes: a replacement whose owner announces no scope for the board is still found, so a re-homed
-    running card is never settled from its removed owner's old completion (review 5970563622).
+    A card's replica key is ``<profile>/<board>/<task id>`` on whichever gateway publishes it. Discovery does not
+    depend on a gateway's announced scopes: a replacement whose owner announces no scope for the board is still
+    found, so a re-homed running card is never settled from its removed owner's old completion (review 5970563622).
 
-    Every projection still reads the complete ordered membership. Only its pure index derivation is reused for
-    an exactly equal inventory; payloads, owner liveness and terminal evidence remain live. The bounded memo is
-    immutable and published as one generation (``kanban_publication_index``)."""
+    Only the projection's own cards (``wanted``: every obligation's (board, task id)) are looked up, in ONE query
+    on the first ask that SQLite filters in C; a card outside ``wanted`` gets one exact lookup of its own. Each
+    answer is then fixed for this projection; payloads stay live (one keyed read per candidate record).
+    [daveey] Hub 2026-11-22: the previous full index pulled every task key into Python (25,511 rows, past the
+    25,000-key memo bound, so on every projection) to answer ~18 removed-owner rows; inside the busy Desktop
+    backend that row loop dominated a ~8 s projection that the same read finishes in 43 ms standalone."""
 
-    def __init__(self, source: sqlite3.Connection | None, listed: frozenset):
+    _SUFFIX_MATCH = ("SELECT gw, key FROM replica WHERE coll='tasks'"
+                     " AND length(key) - length(replace(key, '/', '')) = 2 AND substr(key, instr(key, '/')) ")
+
+    def __init__(self, source: sqlite3.Connection | None, listed: frozenset, wanted=None):
         self.source = source
         self.listed = listed
-        self.keys = None
+        self.wanted = frozenset(wanted or ())
+        self.found: dict[tuple, tuple] | None = None  # (board, task id) -> ((gw, key), ...), filled on first ask
 
-    def _index(self):
-        if self.keys is None:
-            from hermes_cli import kanban_publication_index as membership
-
-            groups = []
-            scanned = False
-            try:
-                for gw in sorted(self.listed):
-                    keys = []
-                    groups.append((gw, keys))
-                    for (key,) in self.source.execute("SELECT key FROM replica WHERE gw=? AND coll='tasks'", (gw,)):
-                        keys.append(str(key))
-                scanned = True
-            finally:
-                if not scanned:
-                    # Preserve the old partial instance after a failed read; never publish it for reuse.
-                    self.keys = membership.build(groups)
-            self.keys = membership.derive(groups)
-        return self.keys
+    def _publishers(self, board: str, task_id: str) -> tuple:
+        """``(gw, key)`` of every listed gateway's record of this card, in (gw, key) order."""
+        pair = (board, task_id)
+        if self.found is None or pair not in self.found:
+            batch = self.wanted if self.found is None and pair in self.wanted else frozenset({pair})
+            suffixes = {f'/{b}/{t}': (b, t) for b, t in batch if '/' not in b and '/' not in t}
+            rows = self.source.execute(self._SUFFIX_MATCH + "IN (SELECT value FROM json_each(?))",
+                                       (json.dumps(sorted(suffixes)),)).fetchall() if suffixes else []
+            found = {p: [] for p in batch}
+            for gw, key in sorted((str(gw), str(key)) for gw, key in rows):
+                parts = key.split('/')
+                if gw in self.listed and (parts[1], parts[2]) in found:
+                    found[(parts[1], parts[2])].append((gw, key))
+            self.found = {**(self.found or {}), **{p: tuple(v) for p, v in found.items()}}
+        return self.found[pair]
 
     def has_other(self, owner: dict, task: dict) -> bool:
         """Another gateway's replica record of this card: same board and id, same non-null ``created_at`` (a re-home
@@ -521,7 +521,7 @@ class _Publications:
         if self.source is None or created is None or isinstance(created, bool) \
                 or not isinstance(created, (int, float, str)):
             return False
-        for gw, key in self._index().get((owner['board'], owner['task_id']), ()):
+        for gw, key in self._publishers(owner['board'], owner['task_id']):
             if gw == owner['gateway']:
                 continue
             row = self.source.execute("SELECT data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
@@ -605,19 +605,21 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
         # its info row; a machine removed from the Board has neither (``_removed_owner``). Read once per projection,
         # inside the try so a failed read still closes the replica connection (review 5965756952).
         listed = _listed_gateways(source if fresh else None)
-        elsewhere = _Publications(source, listed)
         with closing(_ro(path)) as conn:
             from hermes_cli.kanban_origin_legacy import aliases_for_projection
+            from hermes_cli import kanban_origin_structure as structure
+
             alias_receipts = {}
             for receipt_raw, in conn.execute('SELECT receipt_json FROM origin_receipts'):
                 ack = json.loads(receipt_raw)
                 if 'legacy_alias' in ack:
                     alias_receipts.setdefault(ack['binding_hash'], []).append(ack)
-            for raw, resolved, payload, version, released in conn.execute(
-                    "SELECT binding_json,resolved_session,task_json,observation_version,released FROM origin_obligations"):
-                from hermes_cli import kanban_origin_structure as structure
-
-                binding = structure.binding(raw)
+            obligations = [(raw, structure.binding(raw), *rest) for raw, *rest in conn.execute(
+                "SELECT binding_json,resolved_session,task_json,observation_version,released FROM origin_obligations")]
+            elsewhere = _Publications(source, listed, wanted={
+                (b['owner']['board'], b['owner']['task_id']) for _, b, *_ in obligations
+                if (b['origin']['gateway'], b['origin']['profile']) == (gateway, profile)})
+            for raw, binding, resolved, payload, version, released in obligations:
                 origin, owner = binding['origin'], binding['owner']
                 if (origin['gateway'], origin['profile']) != (gateway, profile):
                     continue
