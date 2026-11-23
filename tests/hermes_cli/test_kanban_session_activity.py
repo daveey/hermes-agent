@@ -245,12 +245,13 @@ def test_session_kanban_tasks_endpoint(kanban_root, _isolate_hermes_home):
         from starlette.testclient import TestClient
     except ImportError:
         pytest.skip("fastapi/starlette not installed")
-    from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
-
+    # Board first: a first import of web_server mounts the kanban plugin, which
+    # can create the board schema before the CREATE TABLE below runs.
     _make_full_board(kanban_root / "kanban.db", [
         ("t_run", "Run", "running", "default", "s_me", 100, 200, None),
         ("t_x", "Theirs", "running", "default", "s_them", 100, 200, None),
     ])
+    from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
     client = TestClient(app)
     client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
