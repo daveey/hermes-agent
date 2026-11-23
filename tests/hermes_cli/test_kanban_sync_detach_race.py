@@ -29,12 +29,12 @@ def test_detach_between_feed_precheck_and_write_preserves_custody(synced_conn, m
         real_txn = kbc.write_txn
 
         @contextmanager
-        def detach_before_writer(target):
+        def detach_before_writer(target, *, allow_nested=False):
             # Real second connection commits detach in the old check/lock gap.
             with monkeypatch.context() as m:
                 m.setattr(kbc, "write_txn", real_txn)
                 sync.set_mode(detacher, "off")
-            with real_txn(target):
+            with real_txn(target, allow_nested=allow_nested):
                 yield
 
         monkeypatch.setattr(kbc, "write_txn", detach_before_writer)

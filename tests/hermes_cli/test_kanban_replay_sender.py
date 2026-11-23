@@ -144,7 +144,9 @@ def test_production_hub_authenticates_and_drains_over_http(live):
         kb.create_task(live, title='HTTP tracer', assignee='worker')
         result = client.push(live, hub, 'default', 'macbook', primary=False, max_batches=1)
         assert result.applied == 1 and receiver.slot['a'] == '1'
-        assert len(authorizations) == 6 and set(authorizations) == {'Bearer fixture-key'}
+        # A second authenticated capability probe pins exposure to the mutation's
+        # own immutable credential snapshot, after issuance and before HTTP I/O.
+        assert len(authorizations) == 7 and set(authorizations) == {'Bearer fixture-key'}
     finally:
         server.shutdown()
         server.server_close()

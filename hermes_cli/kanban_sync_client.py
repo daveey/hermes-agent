@@ -418,7 +418,10 @@ class Hub(HubRoutesMixin):
                 raise
         raise AssertionError("unreachable")  # pragma: no cover
 
-    def ops(self, board: str, ops: list[dict]) -> dict:
+    def ops(self, board: str, ops: list[dict], *, custody=None) -> dict:
+        if custody is not None:
+            from hermes_cli.kanban_sync_exposure import send
+            return send(self, custody, board, ops)
         return self._call("POST", f"/v2/boards/{board}/ops", {"ops": ops})
 
     def changes(self, board: str, since: int, limit: int = FEED_PAGE) -> dict:
@@ -468,7 +471,7 @@ class Hub(HubRoutesMixin):
         return _bounded_call(self.ident, "POST", "/v2/machines/me/metrics", metrics, CPU_REPORT_BUDGET_S)
 
 
-# --- boards ---------------------------------------------------------------------------------------
+_HTTP_HUB = Hub  # Concrete transport identity survives a caller replacing the factory.
 
 def board_paths() -> list[tuple[str, Path]]:
     """``(slug, kanban.db)`` for every board on this host that ``kanban.sync.boards`` selects."""
@@ -673,7 +676,7 @@ def _push_legacy(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *
             parents = [(envelopes.parent(conn, tid, lambda op=op: op, supported=bool(origin_cap)), tid) for op, tid in parents]
             wire = [op for op, _tid in parents] + wire
         try:
-            resp = hub.ops(board, wire)
+            resp = hub.ops(board, wire, custody=conn) if isinstance(hub, _HTTP_HUB) else hub.ops(board, wire)
         except (HubError, OSError) as exc:
             with write_txn(conn):
                 conn.executemany("UPDATE kanban_sync_outbox SET attempts = attempts + 1, last_error = ? WHERE op_id = ?",

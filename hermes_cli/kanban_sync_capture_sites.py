@@ -30,6 +30,9 @@ _P = "kanban_sync_parent_envelopes"
 SITES: dict[tuple[str, str, str, str], str] = {
     ("kanban_db_sync.py", "_outbox_insert", "INSERT", _O): ORIGINAL_CANDIDATE,
     ("kanban_db_sync.py", "_insert_trigger", "INSERT", _O): ORIGINAL_CANDIDATE,
+    ("kanban_sync_exposure.py", "task_insert", "INSERT", _O): ORIGINAL_CANDIDATE,
+    ("kanban_sync_exposure.py", "_observe", "UPDATE", _O): STATE_ONLY,
+    ("kanban_sync_exposure.py", "_observe", "UPDATE", _P): STATE_ONLY,
     ("kanban_retain_transport.py", "reserve", "INSERT", _O): ORIGINAL_CANDIDATE,
     ("kanban_actionability_transport.py", "reserve", "INSERT", _O): ORIGINAL_CANDIDATE,
     ("kanban_failure_release.py", "queue", "INSERT", _O): ORIGINAL_CANDIDATE,

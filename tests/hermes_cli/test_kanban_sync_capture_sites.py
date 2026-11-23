@@ -17,6 +17,9 @@ from hermes_cli import kanban_sync_capture_sites as inventory
 EXPECTED_SITES = """
 hermes_cli.kanban_db_sync._outbox_insert|INSERT|kanban_sync_outbox|original_candidate
 hermes_cli.kanban_db_sync._insert_trigger|INSERT|kanban_sync_outbox|original_candidate
+hermes_cli.kanban_sync_exposure.task_insert|INSERT|kanban_sync_outbox|original_candidate
+hermes_cli.kanban_sync_exposure._observe|UPDATE|kanban_sync_outbox|state_only
+hermes_cli.kanban_sync_exposure._observe|UPDATE|kanban_sync_parent_envelopes|state_only
 hermes_cli.kanban_retain_transport.reserve|INSERT|kanban_sync_outbox|original_candidate
 hermes_cli.kanban_actionability_transport.reserve|INSERT|kanban_sync_outbox|original_candidate
 hermes_cli.kanban_failure_release.queue|INSERT|kanban_sync_outbox|original_candidate

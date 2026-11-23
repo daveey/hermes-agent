@@ -49,8 +49,8 @@ def original(conn, *, wire=None):
 
 def test_arbitrary_and_trigger_inserts_are_unknown_not_retroactively_certified(board):
     tid = kb.create_task(board, title="not yet certified", assignee="worker")
-    row = board.execute("SELECT op_id FROM kanban_sync_outbox WHERE row_uid=?", (tid,)).fetchone()
-    assert metadata(board, "kanban_sync_outbox", "op_id", row[0]) == (None, None, None, None)
+    row = board.execute("SELECT op_id,created_at FROM kanban_sync_outbox WHERE row_uid=?", (tid,)).fetchone()
+    assert metadata(board, "kanban_sync_outbox", "op_id", row[0]) == ('capture_candidate1', row[0], row[1], None)
     board.execute("INSERT INTO kanban_sync_parent_envelopes(task_id,wire) VALUES (?,?)", (tid, '{}'))
     assert metadata(board, "kanban_sync_parent_envelopes", "task_id", tid) == (None, None, None, None)
 

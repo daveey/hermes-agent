@@ -358,7 +358,11 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             if not allowed:
                 break
         wire['replay']['session'] = remote['session']
-        hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
+        if isinstance(hub, client._HTTP_HUB):
+            from hermes_cli.kanban_sync_exposure import send
+            send(hub, conn, board, [wire], replay=identity)
+        else:
+            hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
         out.sent += 1
         remote = hub._call('GET', root + 'inspect')['slot']
         membership = refresh_capacity()

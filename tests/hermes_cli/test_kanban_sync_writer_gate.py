@@ -82,13 +82,13 @@ def test_install_does_not_activate_or_certify(board):
     try:
         old.execute("INSERT INTO tasks(id,title,status,created_at) VALUES ('t_old','old','todo',1)")
         row = conn.execute("SELECT capture_protocol,identity_state FROM kanban_sync_outbox").fetchone()
-        assert tuple(row) == (None, None)
+        assert tuple(row) == ('capture_candidate1', None)
     finally:
         old.close()
 
 
 @pytest.mark.parametrize("sql", [
-    "INSERT INTO kanban_sync_parent_envelopes VALUES ('t_parent','{}',NULL,NULL,NULL,NULL)",
+    "INSERT INTO kanban_sync_parent_envelopes(task_id,wire) VALUES ('t_parent','{}')",
     "UPDATE kanban_sync_outbox SET op_id='replaced'",
     "DELETE FROM kanban_sync_outbox",
     "UPDATE kanban_sync_state SET applying=1",

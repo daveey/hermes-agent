@@ -28,6 +28,7 @@ def install(conn: sqlite3.Connection) -> None:
     UNKNOWN, and no certification may start before the writer-version gate.
     """
     for table in ("kanban_sync_outbox", "kanban_sync_parent_envelopes"):
+        add_column_if_missing(conn, table, 'exposure_history', 'exposure_history TEXT')
         for name, kind in _COLUMNS:
             add_column_if_missing(conn, table, name, f"{name} {kind}")
         unchanged = " AND ".join(f"NEW.{name} IS OLD.{name}" for name, _ in _COLUMNS[:3])
@@ -36,6 +37,16 @@ def install(conn: sqlite3.Connection) -> None:
             WHEN NOT ({unchanged}) OR
                 NOT (NEW.identity_state IS OLD.identity_state OR NEW.identity_state IS 'ambiguous')
             BEGIN SELECT RAISE(ABORT, 'capture provenance is immutable'); END""")
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS replay_exposure1_{table}_append
+            BEFORE UPDATE OF exposure_history ON {table}
+            WHEN OLD.exposure_history IS NOT NULL AND (
+                NEW.exposure_history IS NULL OR
+                json_extract(NEW.exposure_history,'$.protocol') IS NOT json_extract(OLD.exposure_history,'$.protocol') OR
+                json_extract(NEW.exposure_history,'$.coverage') IS NOT json_extract(OLD.exposure_history,'$.coverage') OR
+                json_extract(NEW.exposure_history,'$.certified') IS NOT json_extract(OLD.exposure_history,'$.certified') OR
+                EXISTS (SELECT 1 FROM json_each(OLD.exposure_history,'$.exposures') AS old
+                    WHERE old.value IS NOT json_extract(NEW.exposure_history,'$.exposures[' || old.key || ']')))
+            BEGIN SELECT RAISE(ABORT, 'exposure history is append-only'); END""")
     # Frozen wire is a conservative exposure indicator, NOT a certified attempt
     # journal. A pre-I/O freeze followed by edits may over-taint, never certify.
     changed = " OR ".join(f"NEW.{name} IS NOT OLD.{name}" for name in (
