@@ -239,7 +239,8 @@ class _KanbanDispatcher:
                 conn = _kbc().connect(board=slug)
                 profiles, lanes = self._receipt_scope()
                 result = _kbd().dispatch_once(conn, board=slug, **kwargs)
-                if not result.skipped_locked and result.scheduling_admitted:
+                if (not result.skipped_locked and not getattr(result, "storage_skip_reason", None)
+                        and result.scheduling_admitted):
                     after_profiles, after_lanes = self._receipt_scope()
                     path = conn.execute("PRAGMA database_list").fetchone()[2]
                     if path:
@@ -322,7 +323,7 @@ class _KanbanDispatcher:
         quarantined or lock-skipped board counts as a skip. [daveey]"""
         with _la.pass_(f"dispatcher.board/{slug}") as acct:
             result = self.tick_once_for_board(slug, **kwargs)
-            if result is None or getattr(result, "skipped_locked", False):
+            if result is None or getattr(result, "skipped_locked", False) or getattr(result, "storage_skip_reason", None):
                 acct.skip()
             return result
 

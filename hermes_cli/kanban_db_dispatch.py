@@ -243,6 +243,7 @@ class DispatchResult(QuietResultFields):
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
     a failure — a long quota window must never trip the circuit breaker."""
+    storage_skip_reason: Optional[str] = None  # bounded SQLite wait exhausted; not the dispatch flock
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; this alone does not establish the lock holder's progress."""

@@ -1645,6 +1645,9 @@ def _is_busy_error(exc: BaseException) -> bool:
 
 
 def _execute_boundary_with_retry(conn: sqlite3.Connection, sql: str) -> None:
+    from hermes_cli.kanban_dispatch_storage import execute_boundary
+    if execute_boundary(conn, sql):
+        return
     for attempt in range(_BUSY_MAX_RETRIES + 1):
         try:
             conn.execute(sql)

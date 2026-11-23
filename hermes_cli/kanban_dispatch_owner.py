@@ -142,22 +142,29 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
             return DispatchResult(skipped_owned=True, ownership_error=str(exc))
         if owner is not None and dispatcher_id != owner:
             return DispatchResult(skipped_owned=True, dispatch_owner=owner)
-        if not dry_run:
-            from hermes_cli.kanban_model_retirement import sweep as retire_model_policy
-            retire_model_policy(conn)
-        from hermes_cli import kanban_ratio_routing as ratio
-        try:
-            ratio.begin_tick(conn)  # ratio routing re-reads this board's start counts once per tick
-        except Exception:  # health: allow BLE001 -- a memo fault must not stop the tick; ratio routing fails open
-            ratio.off_this_tick()
-            logging.getLogger(__name__).warning("kanban dispatch: ratio routing tick start failed; default cards keep "
-                                                "today's route this tick", exc_info=True)
-        result = tick()
+        from hermes_cli.kanban_dispatch_storage import run
+        result = run(conn, lambda: _tick_work(conn, tick, dry_run), board=board)
         result.dispatch_owner = owner
+        if result.storage_skip_reason:
+            return result  # observers/checkpoints must not re-enter the contended writer
         kbc._maybe_checkpoint_wal(conn, db_path)
     # Denied ticks deliberately don't invoke observers, which may mutate state.
     kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
     return result
+
+
+def _tick_work(conn, tick, dry_run):
+    if not dry_run:
+        from hermes_cli.kanban_model_retirement import sweep as retire_model_policy
+        retire_model_policy(conn)
+    from hermes_cli import kanban_ratio_routing as ratio
+    try:
+        ratio.begin_tick(conn)  # ratio routing re-reads this board's start counts once per tick
+    except Exception:  # health: allow BLE001 -- a memo fault must not stop the tick; ratio routing fails open
+        ratio.off_this_tick()
+        logging.getLogger(__name__).warning("kanban dispatch: ratio routing tick start failed; default cards keep "
+                                            "today's route this tick", exc_info=True)
+    return tick()
 
 
 def set_dispatch_owner(db_path: Path, owner: str | None) -> str | None:

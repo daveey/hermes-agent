@@ -30,7 +30,7 @@ QUIET_HOLD_FIELDS = frozenset({
     "llm_paced",
     "auto_blocked", "respawn_guarded", "no_progress_held", "clock_held", "rate_limited",  # holds / guards
     "crashed", "timed_out", "stale", "reclaimed", "reconciled_orphans", "released_leftover_claims",
-    "ownership_error",                                    # worker or claim failures
+    "storage_skip_reason", "ownership_error",             # storage, worker or claim failures
     "at_capacity", "memory_pressure", "core_update_drain_hold",  # caps and host-wide holds
 })
 
@@ -78,6 +78,9 @@ def describe_suppression(results: Iterable[Optional[Any]]) -> str:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
         if getattr(res, "quiet_deferred", None):
             counts["quiet_claim"] = counts.get("quiet_claim", 0) + len(res.quiet_deferred)
+        storage_skip = getattr(res, "storage_skip_reason", None)
+        if storage_skip:
+            counts[storage_skip] = counts.get(storage_skip, 0) + 1
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.skipped_owned:
