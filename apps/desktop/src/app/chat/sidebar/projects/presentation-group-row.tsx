@@ -82,6 +82,9 @@ export function ProjectGroupRow({
   const activeId = useStore($activeConnectionId)
   const owner = projectPresentationOwner(primary, activeId ?? undefined)
 
+  const showMachineHeadings =
+    new Set(members.map(member => projectPresentationOwner(member, activeId ?? undefined))).size > 1
+
   const { onNewSession, onNewSessionSplit } = ownedNewSessionHandlers(
     { ...primary, connectionId: owner ?? undefined },
     onNewSessionIn,
@@ -170,7 +173,7 @@ export function ProjectGroupRow({
       <SidebarRowNest hidden={!open}>
         {members.map(member =>
           renderMember(member, {
-            heading: <MachineHeading project={member} />,
+            heading: showMachineHeadings ? <MachineHeading project={member} /> : member.label,
             hideActions: true
           })
         )}

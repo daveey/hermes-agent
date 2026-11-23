@@ -67,7 +67,7 @@ const registry = {
 
 const noop = vi.fn()
 
-function run(windowId: string) {
+function run(windowId: string, sameOwner = false) {
   // Same resolution as useSessionOwners: bare row = registry primary; foreign = not the window's.
   const foreign = (s: SessionInfo) => {
     const o = (s.connection_id ?? '').trim() || 'local'
@@ -76,7 +76,7 @@ function run(windowId: string) {
   }
 
   const studioRow = row('studio-app', {
-    connection_id: 'studio',
+    connection_id: sameOwner ? 'local' : 'studio',
     cwd: '/work/app',
     git_repo_root: '/work/app',
     last_active: 3
@@ -108,7 +108,18 @@ function run(windowId: string) {
   $connectionsRegistry.set(registry)
   $connection.set({ connectionId: windowId, mode: windowId === 'local' ? 'local' : 'remote' } as never)
 
-  const tree = withGatewayProjectRows(base, [studioRow, localRow], foreign)
+  const sameMachine: SidebarProjectTree[] = [localRow, studioRow].map(s => ({
+    id: s.cwd!,
+    label: 'app',
+    path: s.cwd!,
+    connectionId: 'local',
+    repos: [],
+    sessionCount: 1,
+    sessionIds: [s.id],
+    previewSessions: [s]
+  }))
+
+  const tree = withGatewayProjectRows(sameOwner ? sameMachine : base, [studioRow, localRow], foreign)
   const previews = overlayLivePreviews(tree, [studioRow, localRow], [], 10)
   const onNew = vi.fn()
 
@@ -156,6 +167,12 @@ afterEach(() => {
 })
 
 describe('presentation member machine labels', () => {
+  it.each(['local', 'studio'])('omits machine headings for same-owner members in the %s window', windowId => {
+    const result = run(windowId, true)
+    expect(result.heads).toEqual([])
+    expect(result.rows.sort()).toEqual(['local-app', 'studio-app'])
+  })
+
   it('control: local window labels each member with its own machine', () => {
     expect(run('local').heads.sort()).toEqual(['Studio', 'This Mac'])
   })

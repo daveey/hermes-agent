@@ -32,14 +32,18 @@ const profileOf = (session: SessionInfo): string => (session.profile || '').trim
 export const sessionIdentityKey = (owner: string, session: SessionInfo): string =>
   JSON.stringify([owner, profileOf(session), session.id])
 
-/** Add another gateway's rows to a window-gateway node. They never repeat the node's own rows
- *  (those belong to the window's gateway, even under the same id), only each other. */
+const projectRows = (node: SidebarProjectTree): SessionInfo[] => [
+  ...(node.previewSessions ?? []),
+  ...node.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))
+]
+
+/** Merge by owner, profile and durable id, including rows already in the project snapshot. */
 function addToNode(
   node: SidebarProjectTree,
   rows: SessionInfo[],
   ownerOf: (s: SessionInfo) => string
 ): SidebarProjectTree {
-  const seen = new Set<string>()
+  const seen = new Set(projectRows(node).map(session => sessionIdentityKey(ownerOf(session), session)))
 
   const fresh = rows.filter(session => {
     const key = sessionIdentityKey(ownerOf(session), session)
@@ -153,11 +157,38 @@ export function withGatewayProjectRows(
         ]
   }
 
-  const added = [...byFolder.values()].map(({ connectionId, path, rows }) =>
-    gatewayProjectNode(connectionId, path, rows)
+  // Merged nodes may retain authoritative rows but no usable folder path.
+  const claimed = new Set(
+    tree.flatMap(node => projectRows(node).map(session => sessionIdentityKey(ownerOf(session), session)))
   )
 
-  return [...next, ...added]
+  for (const { connectionId, path, rows } of byFolder.values()) {
+    const existing = next.find(node => {
+      const owner = node.connectionId ?? node.remoteProject?.connectionId
+
+      return (
+        owner === connectionId &&
+        (node.path === path ||
+          node.repos.some(repo => repo.path === path) ||
+          projectRows(node).some(session => rowAnchor(session) === path))
+      )
+    })
+
+    if (existing) {
+      next = next.map(node => (node === existing ? addToNode(node, rows, ownerOf) : node))
+
+      continue
+    }
+
+    const fresh = rows.filter(session => !claimed.has(sessionIdentityKey(connectionId, session)))
+    const unique = [...new Map(fresh.map(session => [sessionIdentityKey(connectionId, session), session])).values()]
+
+    if (unique.length) {
+      next = [...next, gatewayProjectNode(connectionId, path, unique)]
+    }
+  }
+
+  return next
 }
 
 /** The route a new chat in `project` is created on: the owning gateway profile of a project that

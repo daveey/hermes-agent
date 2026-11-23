@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { mergeGatewayProjectTrees } from '@/store/gateway-project-merge'
 import { makeSessionInfo } from '@/test/session-info'
 
 import { gatewayProjectId, withGatewayProjectRows } from './gateway-project-rows'
@@ -33,6 +34,101 @@ const foreign = (session: { connection_id?: null | string }) =>
 const label = (id: string) => ({ homelab: 'Homelab', studio: 'Studio' })[id] ?? id
 
 describe('withGatewayProjectRows', () => {
+  it.each(['local', 'studio'])(
+    'merges live rows into the declared %s owner folder without counting them twice',
+    owner => {
+      const existing = makeSessionInfo({ id: 'existing', cwd: '/work/app', connection_id: owner })
+      const fresh = makeSessionInfo({ id: 'fresh', cwd: '/work/app', connection_id: owner })
+
+      const declared: SidebarProjectTree = {
+        id: 'p_app',
+        label: 'app',
+        path: '/work/app',
+        sessionCount: 1,
+        sessionIds: [existing.id],
+        previewSessions: [existing],
+        repos: [
+          {
+            id: 'repo',
+            label: 'app',
+            path: '/work/app',
+            sessionCount: 1,
+            groups: [{ id: 'lane', label: 'app', path: '/work/app', sessions: [existing] }]
+          }
+        ]
+      }
+
+      const merged = mergeGatewayProjectTrees([], [{ connectionId: owner, projects: [declared] }], 10)
+      expect(merged[0].path).toBeNull()
+      const foreignOwner = (s: { connection_id?: null | string }) => s.connection_id ?? null
+      const result = withGatewayProjectRows(merged, [existing, fresh, fresh], foreignOwner)
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({
+        id: merged[0].id,
+        remoteProject: { connectionId: owner, id: 'p_app' },
+        sessionCount: 2,
+        sessionIds: ['existing', 'fresh']
+      })
+      expect(result[0].previewSessions?.map(s => s.id)).toEqual(['existing', 'fresh'])
+      expect(withGatewayProjectRows(result, [existing, fresh], foreignOwner)).toEqual(result)
+      expect(merged[0].sessionCount).toBe(1)
+    }
+  )
+
+  it('keeps equal paths and session ids on different owners and profiles distinct', () => {
+    const own = makeSessionInfo({ id: 'same', cwd: '/work/app', connection_id: 'studio' })
+
+    const project: SidebarProjectTree = {
+      ...localApp,
+      path: '/work/app',
+      connectionId: 'studio',
+      sessionCount: 1,
+      sessionIds: ['same'],
+      previewSessions: [own]
+    }
+
+    const other = makeSessionInfo({ ...own, connection_id: 'homelab' })
+    const profile = makeSessionInfo({ ...own, profile: 'other' })
+    const tree = withGatewayProjectRows([project], [own, other, profile, other], foreign)
+    expect(tree).toHaveLength(2)
+    expect(tree.map(n => n.sessionCount)).toEqual([2, 1])
+    expect(tree[0].previewSessions?.map(s => s.profile || 'default')).toEqual(['default', 'other'])
+  })
+
+  it('uses retained owner row folders when the remote node has no project or repo path', () => {
+    const existing = makeSessionInfo({ id: 'existing', connection_id: 'studio', cwd: '/work/app' })
+    const fresh = makeSessionInfo({ id: 'fresh', connection_id: 'studio', cwd: '/work/app' })
+
+    const node: SidebarProjectTree = {
+      ...localApp,
+      path: null,
+      repos: [],
+      remoteProject: { connectionId: 'studio', id: 'p_app' },
+      sessionCount: 1,
+      sessionIds: ['existing'],
+      previewSessions: [existing]
+    }
+
+    const result = withGatewayProjectRows([node], [existing, fresh], foreign)
+
+    expect(result).toHaveLength(1)
+    expect(result[0].sessionCount).toBe(2)
+    expect(result[0].previewSessions).toEqual([existing, fresh])
+  })
+
+  it('does not synthesize rows already claimed in a mixed-owner merged node', () => {
+    const remote = makeSessionInfo({ id: 'remote', connection_id: 'studio', cwd: '/work/app' })
+
+    const node = {
+      ...localApp,
+      sessionCount: 2,
+      sessionIds: ['own', 'remote'],
+      previewSessions: [makeSessionInfo({ id: 'own' }), remote]
+    }
+
+    expect(withGatewayProjectRows([node], [remote], foreign)).toEqual([node])
+  })
+
   it('files every row another gateway owns: folder-less to Home, the rest under their folder on that gateway', () => {
     const tree = withGatewayProjectRows([home, localApp], rows, foreign, label)
 
