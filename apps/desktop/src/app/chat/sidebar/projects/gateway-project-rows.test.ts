@@ -75,6 +75,46 @@ describe('withGatewayProjectRows', () => {
     }
   )
 
+  it.each([true, false])('retains unhydrated authoritative membership with folder path %s', hasPath => {
+    const previews = ['a', 'b', 'c'].map(id =>
+      makeSessionInfo({ id, connection_id: 'studio', cwd: hasPath ? '/work/app' : null })
+    )
+
+    const node: SidebarProjectTree = {
+      ...localApp,
+      path: hasPath ? '/work/app' : null,
+      remoteProject: { connectionId: 'studio', id: 'p_app' },
+      sessionCount: 4,
+      sessionIds: ['a', 'b', 'c', 'd'],
+      previewSessions: previews
+    }
+
+    const fourth = makeSessionInfo({ id: 'd', connection_id: 'studio', cwd: '/work/app' })
+    const result = withGatewayProjectRows([node], [fourth, fourth], foreign)
+    expect(result).toEqual([node])
+    expect(result[0].sessionIds).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('scopes unhydrated membership to the declared owner and profile', () => {
+    const node: SidebarProjectTree = {
+      ...localApp,
+      connectionId: 'studio',
+      profile: 'research',
+      path: '/work/app',
+      sessionCount: 1,
+      sessionIds: ['same']
+    }
+
+    const rows = ['research', 'default'].map(profile =>
+      makeSessionInfo({ id: 'same', connection_id: 'studio', profile, cwd: '/work/app' })
+    )
+
+    const other = makeSessionInfo({ ...rows[0], connection_id: 'homelab' })
+    const result = withGatewayProjectRows([node], [...rows, other], foreign)
+    expect(result.map(project => project.sessionCount)).toEqual([2, 1])
+    expect(result[0].previewSessions).toEqual([rows[1]])
+  })
+
   it('keeps equal paths and session ids on different owners and profiles distinct', () => {
     const own = makeSessionInfo({ id: 'same', cwd: '/work/app', connection_id: 'studio' })
 

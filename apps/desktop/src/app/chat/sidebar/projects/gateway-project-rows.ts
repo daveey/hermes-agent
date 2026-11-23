@@ -37,13 +37,26 @@ const projectRows = (node: SidebarProjectTree): SessionInfo[] => [
   ...node.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))
 ]
 
+/** Complete overview membership survives limited previews and unhydrated lanes. Bare ids belong
+ * to the node's declared owner/profile; mixed-owner nodes can only claim their stamped rows. */
+function projectMembership(node: SidebarProjectTree, ownerOf: (s: SessionInfo) => string): string[] {
+  const keys = projectRows(node).map(session => sessionIdentityKey(ownerOf(session), session))
+  const owner = node.connectionId ?? node.remoteProject?.connectionId
+
+  if (owner) {
+    keys.push(...(node.sessionIds ?? []).map(id => JSON.stringify([owner, node.profile || 'default', id])))
+  }
+
+  return keys
+}
+
 /** Merge by owner, profile and durable id, including rows already in the project snapshot. */
 function addToNode(
   node: SidebarProjectTree,
   rows: SessionInfo[],
   ownerOf: (s: SessionInfo) => string
 ): SidebarProjectTree {
-  const seen = new Set(projectRows(node).map(session => sessionIdentityKey(ownerOf(session), session)))
+  const seen = new Set(projectMembership(node, ownerOf))
 
   const fresh = rows.filter(session => {
     const key = sessionIdentityKey(ownerOf(session), session)
@@ -158,9 +171,7 @@ export function withGatewayProjectRows(
   }
 
   // Merged nodes may retain authoritative rows but no usable folder path.
-  const claimed = new Set(
-    tree.flatMap(node => projectRows(node).map(session => sessionIdentityKey(ownerOf(session), session)))
-  )
+  const claimed = new Set(tree.flatMap(node => projectMembership(node, ownerOf)))
 
   for (const { connectionId, path, rows } of byFolder.values()) {
     const existing = next.find(node => {
