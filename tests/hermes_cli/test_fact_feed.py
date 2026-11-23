@@ -221,9 +221,15 @@ def test_failing_health_callback_traced_once(caplog, fast_retry):
     assert sum(r.exc_info is not None for r in records) == 1
 
 
-def test_foreign_errorcode_is_not_busy_and_feed_survives():
+def test_foreign_errorcode_is_not_busy_and_feed_survives(caplog, fast_retry):
     from hermes_cli.fact_feed import _busy
-    exc = RuntimeError("x")
-    exc.sqlite_errorcode = "weird"
-    assert _busy(exc) is False
+    def foreign():
+        exc = RuntimeError("foreign")
+        exc.sqlite_errorcode = "weird"  # is_busy itself raises TypeError on this
+        return exc
+    assert _busy(foreign()) is False
     assert _busy(_sqlite_busy()) is True
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.fact_feed")
+    _run_failing([foreign], 3)  # owner thread keeps retrying instead of dying
+    traced = [r for r in _feed_records(caplog, "capture/publication failed") if r.exc_info]
+    assert [r.exc_info[0] for r in traced] == [RuntimeError]
