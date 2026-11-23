@@ -32,11 +32,11 @@ def large_shadow(shadow_board):
 
 @pytest.mark.parametrize('mode', ['p2', 'legacy', 'unobservable'])
 def test_changing_replica_history_reads_are_display_bounded(large_shadow, monkeypatch, mode):
-    from hermes_cli import kanban_task_change
     from plugins.kanban.dashboard import board_rows
     env = large_shadow
     if mode == 'legacy':
-        monkeypatch.setattr(kanban_task_change, 'changed_since', lambda *a: (None, None))
+        with closing(kbc.connect(env['shadow'])) as conn, conn:
+            conn.execute('DROP TRIGGER kanban_activity_rev_task_events_update')
     elif mode == 'unobservable':
         monkeypatch.setattr(board_rows, 'version', lambda path: None)
     original = board_read._rows_by_task

@@ -63,8 +63,9 @@ def test_payload_parity_with_legacy_reader(shadow_board, monkeypatch, cap, archi
     _compare(env, monkeypatch, done_limit=cap, archived=archived)
 
 
+@pytest.mark.parametrize('invalidation', ['missing_trigger', 'full_mark', 'revision_gap', 'schema_change'])
 @pytest.mark.parametrize('reader', ['head', 'base_oracle'])
-def test_legacy_cursor_same_id_history_edit(shadow_board, monkeypatch, reader):
+def test_legacy_cursor_same_id_history_edit(shadow_board, monkeypatch, reader, invalidation):
     """Count/max are not content evidence when the P2 cursor is unavailable."""
     from hermes_cli import kanban_task_change
 
@@ -72,7 +73,15 @@ def test_legacy_cursor_same_id_history_edit(shadow_board, monkeypatch, reader):
         oracle.clear()
         monkeypatch.setattr(board_shadow, 'merge', oracle.merge)
     env = shadow_board
-    monkeypatch.setattr(kanban_task_change, 'changed_since', lambda *args: (None, None))
+    observed = []
+    changed_since = kanban_task_change.changed_since
+
+    def observe(conn, cursor):
+        result = changed_since(conn, cursor)
+        observed.append(result)
+        return result
+
+    monkeypatch.setattr(kanban_task_change, 'changed_since', observe)
     captured = []
     original = env['mod']._diagnostics_from_inputs
 
@@ -85,9 +94,27 @@ def test_legacy_cursor_same_id_history_edit(shadow_board, monkeypatch, reader):
     _write(env, "INSERT INTO task_events(task_id,kind,payload,created_at) VALUES (?,'test','{}',1)", (tid,))
     _read(env)
     assert captured[-1][1][tid][-1]['payload'] == '{}'
-    _write(env, "UPDATE task_events SET payload=? WHERE task_id=? AND kind='test'", ('{"fresh":true}', tid))
+    with closing(kbc.connect(env['shadow'])) as conn, conn:
+        if invalidation == 'missing_trigger':
+            conn.execute('DROP TRIGGER kanban_activity_rev_task_events_update')
+        conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='test'", ('{"fresh":true}', tid))
+        if invalidation == 'full_mark':
+            conn.execute("INSERT INTO kanban_task_change(task_id,rev) SELECT '',revision "
+                         "FROM kanban_activity_revision WHERE id=1 ON CONFLICT(task_id) DO UPDATE SET rev=excluded.rev")
+        elif invalidation == 'revision_gap':
+            conn.execute('UPDATE kanban_activity_revision SET revision=revision+1 WHERE id=1')
+        elif invalidation == 'schema_change':
+            conn.execute('CREATE TABLE legacy_schema_change (id INTEGER)')
+    observed.clear()
     _read(env)
+    if reader == 'head':
+        assert observed[-1][0] is kanban_task_change.FULL
+        assert (observed[-1][1] is None) == (invalidation in ('missing_trigger', 'revision_gap'))
     assert captured[-1][1][tid][-1]['payload'] == '{"fresh":true}'
+    # A subsequent commit must also refresh, even while coverage remains unsupported.
+    _write(env, "UPDATE task_events SET payload=? WHERE task_id=? AND kind='test'", ('{"fresh":2}', tid))
+    _read(env)
+    assert captured[-1][1][tid][-1]['payload'] == '{"fresh":2}'
 
 
 def test_live_collision_changes_without_replica_commit(shadow_board):
@@ -152,12 +179,11 @@ def test_bookkeeping_and_exact_history_updates_stay_fresh(shadow_board, monkeypa
 
 @pytest.mark.parametrize('fallback', ['observer', 'cursor'])
 def test_untrusted_reader_is_bounded_and_current(shadow_board, monkeypatch, fallback):
-    from hermes_cli import kanban_task_change
     env = shadow_board
     if fallback == 'observer':
         monkeypatch.setattr(board_rows, 'version', lambda path: None)
     else:
-        monkeypatch.setattr(kanban_task_change, 'changed_since', lambda *a: (None, None))
+        _write(env, 'DROP TRIGGER kanban_activity_rev_task_events_update')
     assert env['ready'] in _cards(_read(env))
     _write(env, "UPDATE tasks SET title='fresh fallback' WHERE id=?", (env['ready'],))
     assert _cards(_read(env))[env['ready']]['title'] == 'fresh fallback'
