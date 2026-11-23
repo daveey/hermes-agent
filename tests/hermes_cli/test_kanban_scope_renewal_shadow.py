@@ -17,8 +17,8 @@ from tests.hermes_cli import test_kanban_scope_renewal_synced as support
 live = support.live
 
 
-@pytest.fixture
-def foreign(live, monkeypatch, tmp_path):
+@pytest.fixture(params=['shadow', 'primary'])
+def foreign(live, monkeypatch, tmp_path, request):
     hub = support.Hub({'scope_renewal': 1})
     tid, episode, comment = support.stopped(live, monkeypatch, hub)
     # The worker's home has a created link to the hub chat, not to a worker-local chat.
@@ -30,7 +30,7 @@ def foreign(live, monkeypatch, tmp_path):
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ('hub',))
     primary = kbc.connect(tmp_path / 'hub.db')
     client.ensure_identity(primary, 'default', 'hub')
-    sync.set_mode(primary, 'shadow')
+    sync.set_mode(primary, request.param)
     path = tmp_path / 'replica.db'
 
     def snapshot():

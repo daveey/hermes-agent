@@ -176,6 +176,22 @@ def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict
         hub.close()
 
 
+def _evidence_connection(conn: sqlite3.Connection, scope: ExitStack, task_id: str) -> sqlite3.Connection:
+    """Read foreign evidence on primary AND shadow boards; never import it into the live board.
+
+    Unlike show's shadow-only view, renewal is a canonical Board operation even when the caller's
+    primary database contains only its own cards. Ordinary local write paths remain unchanged.
+    """
+    from hermes_cli import kanban_foreign_card as foreign
+    from hermes_cli.kanban_db_connect import _main_db_file
+    if conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+        return conn
+    replica = scope.enter_context(foreign.open_replica(_main_db_file(conn)))
+    if replica is not None and replica.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+        return replica
+    return conn
+
+
 def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: int, reason: str,
           board: Optional[str] = None, writer: Optional[tuple] = None,
           env: Optional[Mapping[str, str]] = None,
@@ -192,8 +208,7 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
         except Inconclusive as exc:
             raise RenewalRefused("identity_unavailable", f"the caller's process ancestry could not be read ({exc})")
     with ExitStack() as scope:
-        from hermes_cli.kanban_shadow_view import open_card
-        _, evidence, _ = open_card(conn, scope, task_id)
+        evidence = _evidence_connection(conn, scope, task_id)
         gateway, profile = gateway_names()[0], get_active_profile_name() or "default"
         actor = resolve_actor(evidence, task_id, writer=writer, environs=[*(ancestry or ()), env],
                               gateway=gateway, profile=profile,
