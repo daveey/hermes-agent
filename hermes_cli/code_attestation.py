@@ -85,6 +85,12 @@ _DEPENDENCY_GENERATORS = {
 }
 # R4-D: the only process-image/system sonames a ctypes caller may load (measured).
 _NATIVE_SONAMES = (None, "libc.so.6")
+# Reviewed producer, not an attrs filename/package exemption. Output also needs
+# observed compile/exec custody and the exact internal generating caller below.
+_ATTRS_IDENTITY = ("attrs", "26.1.0", "attr/_make.py")
+_ATTRS_SOURCE = "1fb387d9e592e429c1ccb5233451355b299f3eb985d6bf1fbf644f76df4cb980"
+_ATTRS_DIRECT = frozenset({"_add_hash", "_add_eq", "_add_repr"})
+_ATTRS_CACHED = frozenset({"_ClassBuilder._eval_snippets", "_make_cached_property_getattr"})
 
 
 class _DependencyIndex:
@@ -883,6 +889,8 @@ class Attestation:
         descriptor = self._generators.get(id(frame.f_code))
         if descriptor is None or descriptor.code is not frame.f_code:
             return False
+        if descriptor.kind == "attrs":
+            return self._attrs_event(event, args, frame, descriptor)
         # f_lasti can point at a CALL inline-cache word rather than the opcode.
         # Resolve only the current instruction, never a nearby/ancestor call.
         site = descriptor.instruction_sites.get(frame.f_lasti, -1)
@@ -1226,6 +1234,102 @@ class Attestation:
         self._dep_unit(path, component, receipt[1], "source")
         self._remember(code, component)
         self._dependency_generators(path, code, source)
+        self._attrs_generator(path, code, source)
+
+    def _attrs_generator(self, path, code, source):
+        """A closed, source-pinned descriptor from the observed module code graph."""
+        if (self._deps.identity(path) != _ATTRS_IDENTITY or
+                code.co_qualname != "<module>" or _sha(source) != _ATTRS_SOURCE):
+            return
+        info = self._deps.dists[self._deps.rows[path][0]]
+        descriptor = GeneratorDescriptor.from_executed(
+            "attrs:_compile_and_eval", code, "_compile_and_eval", source,
+            {"dist": "attrs", "version": "26.1.0", "record_sha256": info["record_sha256"]})
+        descriptor.kind = "attrs"
+        descriptor.attrs_codes = {c.co_qualname: c for c in _codes(code)}
+        descriptor.record_path = Path(info["dir"]) / (self._deps.rows[path][0] + ".dist-info/RECORD")
+        # Bind compile as well as eval to exact AST instruction positions. Unlike
+        # exec(source), these are two different CALL sites in the SAME live frame.
+        instructions = tuple(dis.get_instructions(descriptor.code, show_caches=True))
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "compile":
+                position = (node.lineno, node.end_lineno, node.col_offset, node.end_col_offset)
+                for instruction in instructions:
+                    if instruction.opname == "CALL" and tuple(instruction.positions) == position:
+                        descriptor.sites[instruction.offset] = "compile"
+        self._generators[id(descriptor.code)] = descriptor
+
+    def _attrs_caller(self, frame, descriptor):
+        caller = frame.f_back
+        if caller is None:
+            return None
+        name = caller.f_code.co_qualname
+        if name == "_linecache_and_compile":
+            if caller.f_code is not descriptor.attrs_codes.get(name):
+                return None
+            caller = caller.f_back
+            allowed = _ATTRS_CACHED
+        else:
+            allowed = _ATTRS_DIRECT
+        if caller is None or caller.f_code.co_qualname not in allowed:
+            return None
+        code = caller.f_code
+        known = self._known.get(id(code))
+        if (code is not descriptor.attrs_codes.get(code.co_qualname) or
+                known is None or known[0] is not code):
+            return None
+        return known[1]
+
+    def _attrs_event(self, event, args, frame, descriptor):
+        """A producer receipt alone grants nothing: pair actual output observations."""
+        pending = getattr(self._tls, "attrs_output", None)
+        self._tls.attrs_output = None  # consume on every event, including failures
+        site = descriptor.instruction_sites.get(frame.f_lasti, -1)
+        expected = "compile" if event == "compile" else "eval"
+        origin = self._attrs_caller(frame, descriptor)
+        try:
+            path = Path(descriptor.code.co_filename).resolve()
+            source = _read_bounded(path, MAX_SOURCE)
+            record = _read_bounded(descriptor.record_path, MAX_RECORD_BYTES)
+        except (OSError, ValueError):
+            self.mark_unknown("attrs-provenance-unreadable")
+            return True
+        if (descriptor.sites.get(site) != expected or origin is None or
+                self._deps.identity(path) != _ATTRS_IDENTITY or
+                self._deps.verify(path, source) is None or _sha(source) != _ATTRS_SOURCE or
+                _sha(record) != descriptor.distribution["record_sha256"]):
+            self.mark_unknown("attrs-provenance-mismatch")
+            return True
+        script = frame.f_locals.get("script")
+        filename = frame.f_locals.get("filename")
+        if type(script) is not str or type(filename) is not str or len(script) > MAX_SOURCE:
+            self.mark_unknown("attrs-output-unreadable")
+            return True
+        output = script.encode()
+        if len(output) > MAX_SOURCE:
+            self.mark_unknown("attrs-output-overflow")
+            return True
+        if event == "compile":
+            if args[0] != output or args[1] != filename:
+                self.mark_unknown("attrs-compile-mismatch")
+                return True
+            self._tls.attrs_output = (frame, output, filename, origin)
+            return True
+        if pending is None or pending[0] is not frame or pending[1:] != (output, filename, origin):
+            self.mark_unknown("attrs-output-receipt-missing")
+            return True
+        code = args[0]
+        # The reviewed attrs module has future annotations; its builtin compile
+        # inherits that flag. Reconstruct that exact compilation, not flags=0.
+        expected_code = compile(output, filename, "exec", flags=descriptor.code.co_flags & 0x1000000,
+                                dont_inherit=True, optimize=sys.flags.optimize)
+        if code is not frame.f_locals.get("bytecode") or not _same(code, expected_code):
+            self.mark_unknown("attrs-output-code-mismatch")
+            return True
+        self._record(code, origin, _sha(output), filename=filename, generator=descriptor.name,
+                     producer_sha256=descriptor.source_sha256, producer_site=site,
+                     producer_distribution=dict(descriptor.distribution))
+        return True
 
     def _dependency_generators(self, path, code, source):
         """R5-1: descriptors for the finite producer table, from the receipted bytes (A1/A3)."""
