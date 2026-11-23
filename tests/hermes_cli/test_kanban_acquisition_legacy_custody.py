@@ -67,3 +67,36 @@ def test_legacy_details_without_replica_is_a_valid_local_read(tmp_path, monkeypa
         found = {'card': {'status': 'done'}}
         details._add_card_details(conn, found)
         assert found['card']['status'] == 'done'
+        details._add_blocked_upstream(conn, found)
+
+
+def test_explicit_none_never_attempts_status_lookup_on_absent_reader(tmp_path, monkeypatch):
+    with selection_fixtures._connect(tmp_path / 'board.db') as conn:
+        conn.execute('ALTER TABLE tasks ADD COLUMN completed_at REAL')
+        readers = []
+        original = contained._local_status
+
+        def local_status(reader, ids):
+            readers.append(reader)
+            return original(reader, ids)
+
+        monkeypatch.setattr(contained, '_local_status', local_status)
+        assert contained.statuses(conn, ['missing-authority'], replica=None) == {}
+        assert readers == [conn]
+
+
+def test_legacy_wait_age_uses_wall_clock_not_owned_observation(board, monkeypatch):
+    from hermes_cli import kanban_wait_info as waits
+
+    relay, authority, _ = containment_fixtures._contained(board)
+    now = containment_fixtures.NOW
+    containment_fixtures._finish(board, authority, at=now - 3600)
+    monkeypatch.setattr(waits.time, 'time', lambda: now)
+    monkeypatch.setattr(details, '_replica_for', lambda _conn: None)
+    legacy = {relay: {'status': 'triage'}}
+    owned = {relay: {'status': 'triage'}}
+    for rows, replica in [(legacy, ...), (owned, None)]:
+        acquisition.enrich_session_tasks(board, Path('board.db'), rows, observed_at=now - 3600,
+                                         scope=('fixture', 'default'), replica=replica)
+    assert legacy[relay]['wait']['wait_state'] == 'stalled'
+    assert owned[relay]['wait']['wait_state'] == 'waiting'
