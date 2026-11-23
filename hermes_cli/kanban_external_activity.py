@@ -8,6 +8,7 @@ same parked snapshot; absent owner watch records never establish service failure
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -220,24 +221,62 @@ def stamp_boards(rows: list[dict[str, Any]], board_paths, open_ro, parked_pairs,
 
 
 def replica_bucket(card: dict[str, Any]) -> bool:
-    """A replica's declared CI/deploy park, not inferred progress or service health."""
+    """A replica's declared CI/deploy/clock park, not inferred progress or service health."""
     awaiting = card.get("awaiting")
     return (card.get("status") == "scheduled" and isinstance(awaiting, dict)
-            and awaiting.get("kind") in ("ci", "deploy"))
+            and awaiting.get("kind") in ("ci", "deploy", "clock"))
+
+
+def replica_markers(card: dict[str, Any]) -> set[tuple[str, str, bool]]:
+    """Immutable external display evidence in the parked-count snapshot's marker channel.
+
+    Keep the qualified card key for lineage deduplication. The JSON bucket travels through the existing frozen
+    count/scoped-cache snapshots, so ETA fields and parked counts cannot come from different replica reads.
+    CI/deploy have no owner watch/history here: unknown health and no estimate, never invented progress.
+    """
+    if not replica_bucket(card):
+        return set()
+    from hermes_cli.kanban_session_activity_remote_wait import _remote_wait
+
+    key = str(card.get("key"))
+    wait = _remote_wait(card)
+    clock = bool(wait and wait.get("wait_kind") == "clock")
+    markers = {(key, "external_clock" if clock else "external_unknown", False)}
+    if wait and wait.get("wait_kind"):
+        external = (clock_state(wait)["external"] if clock else
+                    {"adapter": wait["wait_kind"], "service": "CI" if wait["wait_kind"] == "ci" else "deploy",
+                     "health": "unknown", "job": "unknown", "reason": "owner watch unavailable",
+                     "url": (card.get("awaiting") or {}).get("ref") or None,
+                     "observed_at": None, "next_due_at": None})
+        external = dict(external, state="external_running" if clock else "external_unknown")
+        payload = {"task_id": key, "title": str(card.get("title") or ""), "external": external,
+                   "eta": {k: wait.get(k) for k in ETA_KEYS}}
+        markers.add((key, "external_eta:" + json.dumps(payload, sort_keys=True), False))
+    return markers
 
 
 def stamp_replica_counts(rows, card_keys, row_ids):
     """Merge replica markers from the exact parked-count snapshot, once per lineage/card.
 
-    Replica rows carry no fresh external-watch record. Unknown (hollow blue), never down, is the honest
-    display state. Do not reopen a replica here: a second snapshot could count a card no longer parked.
+    Replica CI/deploy rows carry no fresh external-watch record: unknown, never down. A fresh declared timer
+    needs no watch. Stale rows retain unknown counts but no ETA. Do not reopen a replica here.
     """
     for row in rows:
-        keys = {key for sid in row_ids(row) for key, bucket, _ in card_keys.get(sid, ())
-                if bucket == "external_unknown"}
-        if keys:
-            for field in ("kanban_external", "kanban_external_unknown"):
-                row[field] = int(row.get(field) or 0) + len(keys)
+        markers = {marker for sid in row_ids(row) for marker in card_keys.get(sid, ())}
+        unknown = {key for key, bucket, _ in markers if bucket == "external_unknown"}
+        clocks = {key for key, bucket, _ in markers if bucket == "external_clock"}
+        if unknown or clocks:
+            row["kanban_external"] = int(row.get("kanban_external") or 0) + len(unknown | clocks)
+        if unknown:
+            row["kanban_external_unknown"] = int(row.get("kanban_external_unknown") or 0) + len(unknown)
+        cards = {c["task_id"]: c for c in row.get("kanban_external_cards", ())}
+        for _key, bucket, _ in sorted(markers):
+            if bucket.startswith("external_eta:"):
+                card = json.loads(bucket.removeprefix("external_eta:"))
+                cards[card["task_id"]] = card
+        if cards:
+            row["kanban_external_cards"] = sorted(cards.values(), key=lambda c: (
+                c["external"].get("observed_at") or 0, c["task_id"]), reverse=True)[:CARDS_CAP]
     return rows
 
 

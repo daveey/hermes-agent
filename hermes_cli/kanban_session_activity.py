@@ -1263,8 +1263,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo", *PENDING_RELEASE_STATUSES)
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
-            if _external_activity.replica_bucket(card):
-                remote_keys.setdefault(sid, set()).add((str(card.get("key")), "external_unknown", False))
+            remote_keys.setdefault(sid, set()).update(_external_activity.replica_markers(card))
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
         _replica_exec.collect(card, execution)
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is

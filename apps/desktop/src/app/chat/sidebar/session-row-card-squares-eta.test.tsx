@@ -16,7 +16,8 @@ const card = (adapter: string, eta: object | null, extra: object = {}) => ({
   ...extra
 })
 
-const row = (fields: Partial<SessionInfo>): SessionInfo => ({ kanban_parked: 1, kanban_stalled: 0, ...fields }) as SessionInfo
+const row = (fields: Partial<SessionInfo>): SessionInfo =>
+  ({ kanban_parked: 1, kanban_stalled: 0, ...fields }) as SessionInfo
 
 const draw = (session: SessionInfo, stripe: Parameters<typeof flatRowCardMarks>[3] = 'external') =>
   render(
@@ -49,16 +50,57 @@ describe('the ETA readout on light-blue rows', () => {
     const readout = getByTestId('session-row-eta')
 
     expect(text(readout)).toBe('12m / 25m 13m')
-    expect(readout.getAttribute('aria-label')).toBe(`Waiting on ${label} · waited 12m · expected 25m (basis) · 13m left`)
+    expect(readout.getAttribute('aria-label')).toBe(
+      `Waiting on ${label} · waited 12m · expected 25m (basis) · 13m left`
+    )
     expect(queryByTestId('session-row-card-squares')).toBeNull()
     // the cloud stays the last mark of the cluster
     expect(container.querySelector('[data-testid="gateway-cloud"]')?.previousElementSibling).toBe(readout)
     expect(container.querySelector('[data-testid="gateway-cloud"]')?.nextElementSibling).toBeNull()
   })
 
+  it.each(['ci', 'deploy', 'clock'])('renders the replica projection shape for %s', kind => {
+    vi.useFakeTimers({ now: NOW * 1000 })
+    const clock = kind === 'clock'
+
+    const projected = {
+      eta: {
+        estimate_source: clock ? 'wakes 14:30' : 'no history yet',
+        expected_s: clock ? 1500 : null,
+        wait_kind: kind,
+        waited_since: NOW - 720
+      },
+      external: {
+        adapter: kind,
+        health: clock ? 'ok' : 'unknown',
+        job: clock ? 'running' : 'unknown',
+        state: clock ? 'external_running' : 'external_unknown'
+      },
+      task_id: 'edge/default/default/t_wait',
+      title: 'Remote wait'
+    }
+
+    const { getByTestId, queryByTestId } = draw(
+      row({
+        kanban_external: 1,
+        kanban_external_cards: [projected],
+        kanban_external_unknown: clock ? 0 : 1
+      })
+    )
+
+    expect(text(getByTestId('session-row-eta'))).toBe(clock ? '12m / 25m 13m' : '12m / ? —')
+    expect(queryByTestId('session-row-card-squares')).toBeNull()
+  })
+
   it('keeps the squares on a row that is not light blue', () => {
     const eta = { expected_s: 600, wait_kind: 'ci', waited_since: NOW - 60 }
-    const session = row({ kanban_external: 1, kanban_external_cards: [card('github_run', eta)], kanban_stalled: 1, kanban_parked: 2 })
+
+    const session = row({
+      kanban_external: 1,
+      kanban_external_cards: [card('github_run', eta)],
+      kanban_stalled: 1,
+      kanban_parked: 2
+    })
 
     for (const stripe of ['waiting', 'stalled', null] as const) {
       const { queryByTestId, unmount } = draw(session, stripe)
@@ -70,7 +112,9 @@ describe('the ETA readout on light-blue rows', () => {
   })
 
   it('keeps the squares when the light-blue row carries no ETA (a replica, an older gateway)', () => {
-    const { queryByTestId } = draw(row({ kanban_external: 1, kanban_external_cards: [card('github_run', null)], kanban_stalled: 1 }))
+    const { queryByTestId } = draw(
+      row({ kanban_external: 1, kanban_external_cards: [card('github_run', null)], kanban_stalled: 1 })
+    )
 
     expect(queryByTestId('session-row-eta')).toBeNull()
     expect(queryByTestId('session-row-card-squares')).not.toBeNull()
@@ -107,7 +151,9 @@ describe('the ETA readout on light-blue rows', () => {
     const { getByTestId } = draw(row({ kanban_external: 1, kanban_external_cards: [card('github_run', eta)] }))
 
     expect(text(getByTestId('session-row-eta'))).toBe('12m / 25m 13m')
-    act(() => { vi.advanceTimersByTime(3 * 60 * 1000) })
+    act(() => {
+      vi.advanceTimersByTime(3 * 60 * 1000)
+    })
     expect(text(getByTestId('session-row-eta'))).toBe('15m / 25m 10m')
   })
 
