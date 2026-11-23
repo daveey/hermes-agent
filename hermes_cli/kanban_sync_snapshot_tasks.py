@@ -69,12 +69,12 @@ _CHUNK = 500  # bound values per IN (...) read, as elsewhere in kanban sync
 
 
 def _unmoved(conn: sqlite3.Connection, changes: list) -> list:
-    """The changes whose card holds exactly that Board version here and differs from it in a synced column.
+    """The changes whose card holds exactly that Board version here and differs from it in a column the apply writes.
 
     A newer row waits for the feed; an identical one needs no write (most of a 22k-card board). A reference
     column (a local run id against the Board's run uid) is not compared."""
     refs = {column for table, column in sync.REF_COLUMNS if table == "tasks"}
-    compared = sync.SYNCED_COLUMNS["tasks"] - refs
+    compared = (sync.SYNCED_COLUMNS["tasks"] | sync.SERVER_COLUMNS.get("tasks", frozenset())) - refs
     out = []
     for index in range(0, len(changes), _CHUNK):
         part = changes[index:index + _CHUNK]
