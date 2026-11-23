@@ -390,6 +390,7 @@ def refresh_remote_parents(live: sqlite3.Connection, replica: sqlite3.Connection
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli.kanban_containment_terminal import parent_status_sql
     status = parent_status_sql(replica)
+    from hermes_cli.kanban_db_parent_states import mirrored_status
 
     # Status and result must describe the same replica snapshot. A savepoint also
     # composes with callers already reading a transaction on this connection.
@@ -398,7 +399,7 @@ def refresh_remote_parents(live: sqlite3.Connection, replica: sqlite3.Connection
         found: dict[str, str] = {}
         for i in range(0, len(wanted), 500):
             chunk = wanted[i:i + 500]
-            found.update({r[0]: r[1] for r in replica.execute(
+            found.update({r[0]: mirrored_status(replica, r[0], r[1]) for r in replica.execute(
                 f"SELECT id, {status} FROM tasks WHERE id IN ({','.join('?' * len(chunk))})", chunk)})
         values, evidence_changed = evidence.prepare(live, replica, wanted, scoped=scoped)
     finally:

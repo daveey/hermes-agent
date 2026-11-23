@@ -132,6 +132,7 @@ def _refresh_rows(live, replica, targets, scoped) -> list[str]:
     from hermes_cli import kanban_move_parent_evidence as evidence
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli.kanban_containment_terminal import parent_status_sql
+    from hermes_cli.kanban_db_parent_states import mirrored_status
     status = parent_status_sql(replica)
 
     targets = sorted(targets)
@@ -142,7 +143,7 @@ def _refresh_rows(live, replica, targets, scoped) -> list[str]:
     try:
         found: dict[str, str] = {}
         for part, marks in _chunks(wanted):
-            found.update({r[0]: r[1] for r in replica.execute(
+            found.update({r[0]: mirrored_status(replica, r[0], r[1]) for r in replica.execute(
                 f"SELECT id, {status} FROM tasks WHERE id IN ({marks})", part)})
         values = {p: (evidence.payload(replica, p) if p in wanted and p in scoped else None) for p in targets}
     finally:

@@ -4,6 +4,23 @@ from __future__ import annotations
 import sqlite3
 
 
+def parent_blocks(conn: sqlite3.Connection, pid: str, status: str | None) -> bool:
+    """Mirror hermes-hub worker/src/transitions.ts parentsSatisfied: terminal is not always success."""
+    if status not in ("done", "archived"):
+        return True
+    if status == "archived":
+        row = conn.execute("SELECT containment_episode FROM tasks WHERE id=?", (pid,)).fetchone()
+        if row is not None and row[0] is not None:
+            return True
+    from hermes_cli.kanban_spend_decision import execution_restricted
+    return execution_restricted(conn, pid)
+
+
+def mirrored_status(conn: sqlite3.Connection, pid: str, status: str) -> str:
+    """Freeze restriction evidence in the status-only foreign-parent mirror, in the replica snapshot."""
+    return f"{status}:restricted" if status in ("done", "archived") and parent_blocks(conn, pid, status) else status
+
+
 def parent_states(conn: sqlite3.Connection, task_id: str, *, remote: bool | None = None) -> list[tuple[str, str | None]]:
     """Direct prerequisite statuses; missing and containment-archived parents gate.
 

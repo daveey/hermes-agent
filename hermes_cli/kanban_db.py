@@ -1531,9 +1531,8 @@ def link_tasks(
             raise ValueError(f"cannot link {parent_id} -> {child_id}: child is already running")
         check_link_parent(conn, parent_id, child_id)  # cycles; standing parents [daveey]
         _link(conn, parent_id, child_id)
-        # If child was ready but parent is not yet terminal, demote child to todo
-        # (archived counts as terminal, matching _parents_satisfied/recompute_ready).
-        if _task_status(conn, parent_id) not in ("done", "archived"):
+        # Terminal restrictions must gate newly linked children too.
+        if parent_blocks(conn, parent_id, _task_status(conn, parent_id)):
             cur = conn.execute(
                 "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
                 (child_id,),
@@ -1941,7 +1940,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             # ``parent_found``) and block after PARENT_MISSING_BLOCK_SECONDS (synced: replica at the feed head only).
             if cur_status == "todo" and _graph.note_missing_parents(conn, task_id, states, remote=remote, fresh=fresh):
                 continue
-            if all(st in ("done", "archived") for _pid, st in states):
+            if not any(parent_blocks(conn, pid, st) for pid, st in states):
                 resume_status = _resume_status_from_events(conn, task_id)
                 promotion_payload = kanban_review_release.promotion_payload(conn, task_id, resume_status, releases)
                 if cur_status in ("blocked", "triage"):
@@ -1970,22 +1969,19 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
 PARENT_MISSING_BLOCK_SECONDS = 600
 
 
-from hermes_cli.kanban_db_parent_states import parent_states
+from hermes_cli.kanban_db_parent_states import parent_blocks, parent_states
 
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return whether every direct parent is terminal for dependency gating (:func:`parent_states`: a parent
-    another gateway owns counts by its Board status, a missing parent gates)."""
-    return all(st in ("done", "archived") for _pid, st in parent_states(conn, task_id))
+    """Mirror hermes-hub worker/src/transitions.ts parentsSatisfied: terminal, unrestricted parents only.
+    Foreign parents use the Board mirror; missing parents and containment archives gate."""
+    return not any(parent_blocks(conn, pid, st) for pid, st in parent_states(conn, task_id))
 
 
 def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, str]]:
-    """``(parent_id, status)`` for every direct parent :func:`_parents_satisfied`
-    still counts as open (``done`` / ``archived`` release the child), in id
-    order, so a refusal or a board view can name the blockers instead of the
-    caller guessing. Read-only."""
-    return [(pid, st if st is not None else "missing") for pid, st in parent_states(conn, task_id)
-            if st not in ("done", "archived")]
+    """Read-only blockers in id order; terminal restrictions carry a distinct ``:restricted`` label."""
+    return [(pid, f"{st}:restricted" if st in ("done", "archived") else st or "missing")
+            for pid, st in parent_states(conn, task_id) if parent_blocks(conn, pid, st)]
 
 
 def claim_task(

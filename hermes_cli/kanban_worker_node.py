@@ -475,16 +475,15 @@ def candidates(replica: sqlite3.Connection, own: str, *, now_ms: Optional[int] =
     picked up, so a ``runs_on=[machine:hub]`` card that asked for review sat in the MacBook's review column,
     which the MacBook could never lease (``labels_mismatch``)."""
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return replica.execute(
+    rows = replica.execute(
         "SELECT * FROM tasks WHERE status IN ('ready', 'review') AND created_on IS NOT NULL AND created_on != ? "
         "AND (lease_holder IS NULL OR COALESCE(lease_expires, 0) < ?) "
-        # The replica holds the whole board: a card with an open (or missing) parent would only be refused
-        # parents_not_done by the Board, and that refusal demotes it on every machine. [daveey]
-        "AND NOT EXISTS (SELECT 1 FROM task_links l LEFT JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = tasks.id AND COALESCE(p.status, '') NOT IN ('done', 'archived')) "
         # Same lane order as the hub dispatcher (``DISPATCH_ORDER``): a waited-on parent first. [daveey]
         f"ORDER BY status = 'review' DESC, {DISPATCH_ORDER}, id",
         (own, now_ms)).fetchall()
+    from hermes_cli.kanban_db import _parents_satisfied
+    # The whole-board replica must reject the same open, missing and restricted parents as the Board.
+    return [row for row in rows if _parents_satisfied(replica, row["id"])]
 
 
 def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> list[sync.RemoteChange]:
