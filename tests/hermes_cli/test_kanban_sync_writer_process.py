@@ -30,9 +30,18 @@ def _writer(path, revision, channel):
         channel.close()
 
 
-@pytest.mark.parametrize('revision', [None, 0, 1])
-def test_preopened_independent_writer_checks_persisted_minimum(board, revision):
+@pytest.mark.parametrize('revision', [None, 0, 1, 2])
+@pytest.mark.parametrize('upgrade', [False, True])
+def test_preopened_independent_writer_checks_persisted_minimum(board, monkeypatch, revision, upgrade):
     path, conn = board
+    if upgrade:
+        with monkeypatch.context() as old_core:
+            old_core.setattr(gate, 'REVISION', 1)
+            gate.register(conn)
+            with kbc.write_txn(conn):
+                gate.activate(conn)
+        gate.register(conn)
+        assert conn.execute('SELECT minimum FROM replay_writer_gate1').fetchone()[0] == 1
     ctx = multiprocessing.get_context('spawn')
     parent, child = ctx.Pipe()
     proc = ctx.Process(target=_writer, args=(path, revision, child))
@@ -49,14 +58,14 @@ def test_preopened_independent_writer_checks_persisted_minimum(board, revision):
         outcome, detail = parent.recv()
         proc.join(10)
         assert proc.exitcode == 0
-        if revision == 1:
+        if revision == 2:
             assert outcome == 'written'
             assert conn.execute("SELECT title FROM tasks WHERE id='t_child'").fetchone()[0] == 'child'
         else:
             assert outcome == 'refused'
             assert ('replay_writer_revision' if revision is None else 'revision too old') in detail
             assert list(conn.iterdump()) == before
-        assert conn.execute('SELECT minimum FROM replay_writer_gate1').fetchone()[0] == 1
+        assert conn.execute('SELECT minimum FROM replay_writer_gate1').fetchone()[0] == 2
     finally:
         parent.close()
         if proc.is_alive():

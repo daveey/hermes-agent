@@ -40,7 +40,7 @@ def test_preopened_legacy_writer_is_refused_after_activation(board):
         with pytest.raises(sqlite3.OperationalError, match="replay_writer_revision"):
             old.execute("INSERT INTO tasks(id,title,status,created_at) VALUES ('t_old','old','todo',1)")
         assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
-        assert old.execute("SELECT minimum FROM replay_writer_gate1").fetchone() == (1,)
+        assert old.execute("SELECT minimum FROM replay_writer_gate1").fetchone() == (gate().REVISION,)
         conn.execute("INSERT INTO tasks(id,title,status,created_at) VALUES ('t_new','new','todo',1)")
         assert conn.execute("SELECT count(*) FROM kanban_sync_outbox").fetchone()[0] == 1
     finally:
@@ -66,13 +66,14 @@ def test_reactivation_preserves_higher_minimum(board):
     _, conn = board
     with kb.write_txn(conn):
         gate().activate(conn)
-    conn.execute("UPDATE replay_writer_gate1 SET minimum=2")
-    conn.create_function("replay_writer_revision", 0, lambda: 2)
+    higher = gate().REVISION + 1
+    conn.execute("UPDATE replay_writer_gate1 SET minimum=?", (higher,))
+    conn.create_function("replay_writer_revision", 0, lambda: higher)
     before = list(conn.iterdump())
     with kb.write_txn(conn):
         gate().activate(conn)
     assert list(conn.iterdump()) == before
-    assert conn.execute("SELECT minimum FROM replay_writer_gate1").fetchone()[0] == 2
+    assert conn.execute("SELECT minimum FROM replay_writer_gate1").fetchone()[0] == higher
 
 
 def test_install_does_not_activate_or_certify(board):
@@ -119,7 +120,7 @@ def test_sync_detach_and_reinstall_cannot_remove_gate(board):
         sync.drop_triggers(conn)
         sync.install_triggers(conn)
     sync.set_mode(conn, "off")
-    assert conn.execute("SELECT minimum FROM replay_writer_gate1").fetchone()[0] == 1
+    assert conn.execute("SELECT minimum FROM replay_writer_gate1").fetchone()[0] == gate().REVISION
     old = sqlite3.connect(path, isolation_level=None)  # noqa: kanban-lockguard -- detached old writer
     try:
         with pytest.raises(sqlite3.OperationalError, match="replay_writer_revision"):
@@ -235,3 +236,44 @@ def test_cached_statement_cannot_bypass_new_gate(board):
         assert conn.execute("SELECT title FROM tasks WHERE id=?", (task,)).fetchone()[0] == 'before'
     finally:
         old.close()
+
+
+def test_new_core_reopen_does_not_raise_old_gate(board, monkeypatch):
+    path, conn = board
+    with monkeypatch.context() as old_core:
+        old_core.setattr(gate(), 'REVISION', 1)
+        gate().register(conn)
+        with kb.write_txn(conn):
+            gate().activate(conn)
+    before = list(conn.iterdump())
+    reopened = kbc.connect(path)
+    try:
+        assert list(reopened.iterdump()) == before
+        assert reopened.execute('SELECT minimum FROM replay_writer_gate1').fetchone()[0] == 1
+        assert reopened.execute('SELECT replay_writer_revision()').fetchone()[0] == 2
+        # Explicit fixture upgrade is the sole operation allowed to raise it.
+        with kb.write_txn(reopened):
+            gate().activate(reopened)
+        assert reopened.execute('SELECT minimum FROM replay_writer_gate1').fetchone()[0] == 2
+    finally:
+        reopened.close()
+
+
+def test_upgrade_rollback_preserves_old_minimum_and_writer(board, monkeypatch):
+    _, conn = board
+    with monkeypatch.context() as old_core:
+        old_core.setattr(gate(), 'REVISION', 1)
+        gate().register(conn)
+        with kb.write_txn(conn):
+            gate().activate(conn)
+    gate().register(conn)
+    before = list(conn.iterdump())
+    with pytest.raises(RuntimeError, match='rollback upgrade'):
+        with kb.write_txn(conn):
+            gate().activate(conn)
+            assert conn.execute('SELECT minimum FROM replay_writer_gate1').fetchone()[0] == 2
+            raise RuntimeError('rollback upgrade')
+    assert list(conn.iterdump()) == before
+    conn.create_function('replay_writer_revision', 0, lambda: 1)
+    conn.execute("INSERT INTO tasks(id,title,status,created_at) VALUES ('t_old','still allowed','todo',1)")
+    assert conn.execute("SELECT title FROM tasks WHERE id='t_old'").fetchone()[0] == 'still allowed'

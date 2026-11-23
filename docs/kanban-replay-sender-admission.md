@@ -33,10 +33,20 @@ the original child complete; a later round-held push and detach both progress.
 The peer is controlled test infrastructure, not proof of the deployed receiver.
 
 `test_kanban_sync_writer_process` preopens a separate process's SQLite connection,
-then activates the existing gate in a disposable fixture. Missing and lower
-revision functions refuse writes, preserving the database image; a matching
-revision proceeds. This proves database downgrade refusal, not that a fleet's old
-processes or already-read network bytes have drained.
+then explicitly activates or upgrades the gate in a disposable fixture. Missing,
+revision-0 and revision-1 functions refuse writes under minimum 2, preserving the
+database image; revision 2 proceeds. The matrix covers both fresh activation and
+an existing revision-1 gate, with the child connection opened before the upgrade.
+This proves database downgrade refusal, not that a fleet's old processes or
+already-read network bytes have drained.
+
+The registered build revision is now 2: it distinguishes this sender's audited
+pending provenance and whole-public-exchange exclusion from revision-1 builds.
+It does not certify original captures. Merely opening a connection or updating
+core neither installs nor raises a persisted gate; only explicit `activate`
+inside the caller's transaction does so. The raise is monotone, preserves higher
+minimums, rolls back with its outer transaction, and survives detach/reopen.
+No production activation caller has been added.
 
 The existing stale-session takeover control now invokes the internal strict
 engine for its deliberately unfenced predecessor and the public entry for its
@@ -46,10 +56,17 @@ remain intact.
 
 ## Remaining C acceptance
 
-- Implement/prove the migration owner's old-process and in-flight drainage gate,
-  including an admission revision that distinguishes the complete sender contract
-  from previously installed revision-1 cores. The revision-1 fixture alone is not
-  readiness and cannot revoke bytes held in an older process's memory.
+- Implement/prove the migration owner's old-process and in-flight drainage gate.
+  Minimum revision 2 distinguishes the current build from revision-1 cores, but
+  cannot revoke bytes held in an older process's memory. Gateway update pause
+  acknowledgements are not this proof: the updater separately verifies process
+  exit and suppresses supervisor restart (`update_cmd_posix_pause._stop_gateways`).
+  Even actual old-process exit cannot retract a request already at the Board;
+  spec §8 requires Board-serialized ingress barriers for the complete exposure
+  principal set before inspection. Those external barriers/readiness are still
+  unimplemented/unproved here; a free local sender lock or idle gateway is not
+  their substitute. The existing gateway active-work count does not include
+  background sync (`gateway.run_shutdown._active_work_count`).
 - Deliver due unresolved deferred diagnostics to the existing owner with a durable
   delivery receipt and episode/evidence deduplication across restart. Current
   `episodes.diagnostics` only lists due rows. Courier exit 3 means queued, not

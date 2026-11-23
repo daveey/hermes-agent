@@ -1,15 +1,17 @@
 """Monotone, opt-in local Board writer admission. [daveey]
 
-Revision 1 promises this DB fence only, NOT certified original captures. Installing
-this code does not activate a gate. The migration owner must first drain old
-processes AND in-flight sends; SQLite cannot revoke bytes already in memory.
+Revision 1 promised only the DB fence. Revision 2 additionally identifies the
+sender build with audited pending provenance and full public sender exclusion;
+it does NOT certify original captures or establish migration readiness. Installing
+this code does not activate or raise a gate. The migration owner must first drain
+old processes AND in-flight sends; SQLite cannot revoke bytes already in memory.
 Active gates survive sync detach/rollback. No downgrade/removal API is provided.
 """
 from __future__ import annotations
 
 import sqlite3
 
-REVISION = 1
+REVISION = 2
 _TABLE = "replay_writer_gate1"
 _FUNCTION = "replay_writer_revision"
 
@@ -20,7 +22,7 @@ def register(conn: sqlite3.Connection) -> None:
 
 
 def activate(conn: sqlite3.Connection) -> None:
-    """Persist revision 1 and guards inside the caller's exclusive write boundary.
+    """Persist/raise the minimum to this revision inside an exclusive write boundary.
 
     This is the local downgrade prerequisite, not migration readiness or authority
     to certify provenance. No production caller activates it yet. Trigger names
@@ -48,6 +50,9 @@ def _install(conn: sqlite3.Connection) -> None:
         minimum INTEGER NOT NULL CHECK(typeof(minimum)='integer' AND minimum>=1))""")
     conn.execute(f"""INSERT INTO {_TABLE}(id,minimum)
         SELECT 1,? WHERE NOT EXISTS(SELECT 1 FROM {_TABLE} WHERE id=1)""", (REVISION,))
+    # A revision-1 gate already exists on some images. Merely registering the new
+    # connection or reinstalling IF NOT EXISTS triggers must not silently admit it.
+    conn.execute(f"UPDATE {_TABLE} SET minimum=? WHERE id=1 AND minimum<?", (REVISION, REVISION))
     names = [row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
     for table in names:
