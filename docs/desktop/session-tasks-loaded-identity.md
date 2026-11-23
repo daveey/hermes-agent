@@ -93,7 +93,17 @@ An older unsafe batched bridge is not rehabilitated by this diagnostic.
 
 ## Reproduction on an owned Linux fixture
 
-Use the pinned lockfile and supported Node version; from `apps/desktop`:
+Use the pinned lockfile and supported Node version; from `apps/desktop`.
+The ordinary `pnpm run check:test:ui` invocation now loads a byte-exact, hash-checked
+actual companion from `src/contrib/fixtures/k01/` at mods commit
+`ff969f65b26ee67d700f3dc604adee78a34b1060` (see its origin/size/digest receipt).
+This is an offline test input, not a substitute implementation or installed-app
+qualification. All three integration suites use this default at collection. Explicit
+input below still reads exactly the supplied file, including alternate/mutated
+sources; an invalid explicit path fails without fallback. Neither runtime provenance
+semantics nor existing assertions change.
+
+For explicit-input and compiled-production replay:
 
 ```
 HERMES_K01_COMPANION=/absolute/path/to/real/session-tasks/plugin.js \

@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -7,6 +5,7 @@ import { host } from '@/sdk'
 import type * as Assets from '@/sdk/loaded-assets'
 import { identifyBytes } from '@/sdk/loaded-assets'
 
+import { readK01Companion } from './k01-companion.test-helpers'
 import { dropPlugin, setPluginEnabled } from './plugins-store'
 import { loadRuntimePlugin, unloadRuntimePlugin } from './runtime-loader'
 import { routeBlobImportsToDataUrls } from './runtime-loader.test-helpers'
@@ -19,7 +18,7 @@ vi.mock('@/sdk/loaded-assets', async original => {
 
   return { ...actual, readServedAssets: async () => [{ url: 'https://fixture.invalid/assets/sdk.js', ...await actual.identifyBytes(assetText) }] }
 })
-const companion = readFileSync(resolve(process.env.HERMES_K01_COMPANION ?? '../NO_COMPANION_INPUT'), 'utf8')
+const companion = readK01Companion()
 let restore: () => void
 const read = () => host.diagnostics.readSessionTasksLoadedIdentity()
 const surface = () => Object.getOwnPropertyDescriptor(window, '__sessionTasks')!.value

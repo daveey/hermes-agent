@@ -1,10 +1,10 @@
-import { readFileSync } from 'node:fs'
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { host } from '@/sdk'
 import type * as Assets from '@/sdk/loaded-assets'
 
+import { readK01Companion } from './k01-companion.test-helpers'
 import { $pluginRecords, dropPlugin, setPluginEnabled } from './plugins-store'
 import { loadRuntimePlugin, unloadRuntimePlugin } from './runtime-loader'
 import { routeBlobImportsToDataUrls } from './runtime-loader.test-helpers'
@@ -14,7 +14,7 @@ vi.mock('@/sdk/loaded-assets', async original => {
 
   return {...actual, readServedAssets: async () => [{url:'https://fixture.invalid/assets/sdk.js', ...await actual.identifyBytes('rework fixture')}]}
 })
-const companion = readFileSync(process.env.HERMES_K01_COMPANION!, 'utf8')
+const companion = readK01Companion()
 const ids = ['review-race', 'review-plain', 'session-tasks']
 const ordinary = (version = '') => `globalThis.__raceEvaluations.push('${version}'); export default {id:'review-race',register(){globalThis.__raceRegistrations.push('${version}');}} // ${version}`
 let restore: () => void

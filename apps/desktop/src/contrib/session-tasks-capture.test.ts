@@ -1,4 +1,3 @@
-import fs from 'node:fs'
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -6,9 +5,10 @@ import type * as Sdk from '@/sdk'
 import type * as Assets from '@/sdk/loaded-assets'
 import type * as Runtime from '@/sdk/runtime'
 
+import { readK01Companion } from './k01-companion.test-helpers'
 import type * as Loader from './runtime-loader'
 import { routeBlobImportsToDataUrls } from './runtime-loader.test-helpers'
-const companion=fs.readFileSync(process.env.HERMES_K01_COMPANION ?? '../NO_COMPANION_INPUT','utf8')
+const companion=readK01Companion()
 const assetRead=vi.hoisted(()=>vi.fn())
 vi.mock('@/sdk/loaded-assets',async importOriginal=>({ ...await importOriginal<typeof Assets>(),readServedAssets:assetRead }))
 let restore:()=>void, loader:typeof Loader, sdk:typeof Sdk, runtime:typeof Runtime
