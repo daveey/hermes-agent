@@ -83,9 +83,12 @@ def test_native_four_families_actual_mutation_and_quiet_recovery(store, tmp_path
         life.report_ready('annotations', scope)
         life.transition('annotations', scope, 'facts', 1)
         with annotations.use(consumer), request_guard():
-            for entry in entries.values():
-                with pytest.raises(annotations.AnnotationUnavailable):
-                    entry([dict(row)])
+            for family, entry in entries.items():
+                if family == 'review':
+                    assert entry([dict(row)]) == [row]  # optional cold metadata, no fresh empty fact
+                else:
+                    with pytest.raises(annotations.AnnotationUnavailable):
+                        entry([dict(row)])
         assert wait_until(ready, timeout=10)
         with annotations.use(consumer), request_guard():
             initial = {family: entry([dict(row)])[0] for family, entry in entries.items()}
@@ -114,8 +117,8 @@ def test_native_four_families_actual_mutation_and_quiet_recovery(store, tmp_path
         assert wait_until(cleared, timeout=10)
         assert before.get(keys['turn']).value['payload']['turn_live'] is True
         assert facts.snapshot(scope).get(FactKey(scope, 'AnnotationInput', 'review')).source_vector
-        life.transition('annotations', scope, 'legacy', 2)
     finally:
+        life.transition('annotations', scope, 'legacy', 2)
         consumer.close()
         owner.close()
         handle.close()
