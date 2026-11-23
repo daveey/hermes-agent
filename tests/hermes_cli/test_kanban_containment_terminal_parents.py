@@ -23,6 +23,10 @@ def test_remote_mirror_terminal_archive_does_not_satisfy(incremental, legacy, mo
                            "INSERT INTO task_links VALUES ('held','child'),('ordinary','child');")
         marker = "" if legacy else ",containment_episode TEXT"
         replica.execute(f"CREATE TABLE tasks(id TEXT PRIMARY KEY,status TEXT{marker})")
+        # Dependency reads now inspect real restriction evidence as well as status.
+        replica.execute("CREATE TABLE task_events(id INTEGER PRIMARY KEY,task_id TEXT,kind TEXT,"
+                        "payload TEXT,created_at INTEGER)")
+        replica.row_factory = sqlite3.Row
         if legacy:
             replica.execute("INSERT INTO tasks VALUES ('held','archived'),('ordinary','archived')")
         else:

@@ -9,8 +9,10 @@ def parent_blocks(conn: sqlite3.Connection, pid: str, status: str | None) -> boo
     if status not in ("done", "archived"):
         return True
     if status == "archived":
-        row = conn.execute("SELECT containment_episode FROM tasks WHERE id=?", (pid,)).fetchone()
-        if row is not None and row[0] is not None:
+        from hermes_cli.kanban_containment_terminal import parent_status_sql
+        projected = parent_status_sql(conn)
+        row = conn.execute(f"SELECT {projected} FROM tasks WHERE id=?", (pid,)).fetchone()
+        if row is not None and row[0] != "archived":
             return True
     from hermes_cli.kanban_spend_decision import execution_restricted
     return execution_restricted(conn, pid)
