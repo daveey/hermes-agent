@@ -37,32 +37,33 @@ def _concrete(payload: dict[str, Any]) -> Optional[str]:
 
 
 def add_run_models(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]) -> None:
-    """Stamp ``run_model`` on each listed card from its newest run's terminal/attestation/route events."""
+    """Stamp ``run_model`` on each listed card from its newest run's terminal/attestation/route events.
+
+    One statement: SQLite joins each card's newest run (``MAX(task_runs.id)``) to that run's events through
+    ``idx_events_run``. Reading every run's events of these kinds and dropping the older runs' in Python cost a
+    result row each (2,228 rows for the hub's 157 listed cards), and in the Desktop backend every row step can wait
+    out a GIL switch interval."""
     if not found:
         return
     ids = list(found)
     ph = ",".join("?" for _ in ids)
     try:
-        newest = dict(conn.execute(
-            f"SELECT task_id, MAX(id) FROM task_runs WHERE task_id IN ({ph}) GROUP BY task_id", ids).fetchall())
-        if not newest:
-            return
         got = conn.execute(
-            f"SELECT task_id, run_id, kind, payload FROM task_events WHERE task_id IN ({ph}) "
-            f"AND kind IN ({','.join('?' for _ in _KINDS)}) ORDER BY id", [*ids, *_KINDS]).fetchall()
+            f"SELECT e.task_id, e.kind, e.payload FROM (SELECT task_id, MAX(id) AS run_id FROM task_runs "
+            f"WHERE task_id IN ({ph}) GROUP BY task_id) n JOIN task_events e "
+            f"ON e.run_id = n.run_id AND e.task_id = n.task_id "
+            f"WHERE e.kind IN ({','.join('?' for _ in _KINDS)}) ORDER BY e.id", [*ids, *_KINDS]).fetchall()
     except sqlite3.Error:
         return
     concrete: dict[str, str] = {}
     routed: dict[str, Optional[str]] = {}
-    for task_id, run_id, kind, raw in got:
-        if run_id is None or run_id != newest.get(task_id):
-            continue
+    for task_id, kind, raw in got:  # the newest run's events only, oldest first
         payload = _payload(raw)
         if kind == "run_route":
             routed[task_id] = str(payload.get("model") or "").strip() or None  # an unknown route counts too
         elif model := _concrete(payload):
             concrete[task_id] = model
-    for task_id in newest:
+    for task_id in {**routed, **concrete}:
         model = concrete.get(task_id) or routed.get(task_id)
         if task_id in found and model:
             found[task_id]["run_model"] = model

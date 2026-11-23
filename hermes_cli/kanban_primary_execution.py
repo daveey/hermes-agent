@@ -1,5 +1,6 @@
 """Executor-owned running evidence on a PRIMARY mirror; never local read authority."""
 from hermes_cli.kanban_replica_execution import LIVENESS_KINDS, raw, run_evidence
+from hermes_cli.kanban_table_columns import tables_columns
 
 
 class PrimaryMirror(ValueError):
@@ -18,9 +19,7 @@ def attach(conn, rows, *, gateway, profile, board):
 
 def materialize(conn, rows):
     """Fetch current-run tuples; the returned list owns no cursor or connection."""
-    tasks = {r[1] for r in conn.execute('PRAGMA table_info(tasks)')}
-    runs = {r[1] for r in conn.execute('PRAGMA table_info(task_runs)')}
-    events = {r[1] for r in conn.execute('PRAGMA table_info(task_events)')}
+    tasks, runs, events = tables_columns(conn, 'tasks', 'task_runs', 'task_events')  # one row, not one per column
     if not ({'id', 'status', 'current_run_id', 'assignee'} <= tasks
             and {'id', 'task_id', 'uid', 'status', 'ended_at'} <= runs
             and {'task_id', 'run_id', 'kind', 'created_at', 'uid'} <= events):

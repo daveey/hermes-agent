@@ -14,6 +14,7 @@ import json
 import sqlite3
 
 from hermes_cli.execution_observations import epoch, ident
+from hermes_cli.kanban_table_columns import tables_columns
 
 # Executor-written lifecycle events of an attempt; liveness only, never progress.
 LIVENESS_KINDS = ("heartbeat", "claimed", "spawned")
@@ -42,9 +43,7 @@ def read_runs(conn: sqlite3.Connection, gateway: str, profile: str) -> dict[str,
     (``idx_task_chat_links_chat``, the ``tasks`` and ``task_runs`` primary keys, the ``task_events(run_id, id)``
     index; ~4 ms including the schema probe for 154 links / 3 running cards on a real default-board replica).
     Empty on a replica whose schema lacks the run columns."""
-    tasks = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    runs = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
-    events = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
+    tasks, runs, events = tables_columns(conn, "tasks", "task_runs", "task_events")  # one row, not one per column
     if not ({"current_run_id", "status", "created_on"} <= tasks
             and {"id", "task_id", "uid", "status", "ended_at"} <= runs
             and {"task_id", "run_id", "kind", "created_at", "uid"} <= events):

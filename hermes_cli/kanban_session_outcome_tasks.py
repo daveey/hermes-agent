@@ -41,7 +41,8 @@ def select_listed_local_task_set(conn: sqlite3.Connection, ids: Iterable[str], s
     args = (json.dumps(list(dict.fromkeys(ids))), json.dumps(statuses))
     sid_ph = "SELECT value FROM json_each(?)"
     st_ph = "SELECT value FROM json_each(?)"
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    from hermes_cli.kanban_table_columns import table_columns
+    cols = table_columns(conn, "tasks")  # one result row, not one per column
     if "session_id" not in cols:
         return {}, {}  # explicitly supported pre-session schema
     select = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in _TASK_FIELDS)

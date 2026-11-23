@@ -56,7 +56,8 @@ def run_machine(row: dict[str, Any], now: Optional[float] = None) -> Optional[st
 
 def placement_select(conn: sqlite3.Connection, alias: str = "", names: tuple[str, ...] = _PLACEMENT) -> str:
     """SELECT terms for ``names`` of ``tasks`` (aliased ``alias``); a column an older board lacks reads NULL."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    from hermes_cli.kanban_table_columns import table_columns
+    cols = table_columns(conn, "tasks")  # one result row, not one per column
     pre = f"{alias}." if alias else ""
     return ", ".join(f"{pre}{c}" if c in cols else f"NULL AS {c}" for c in names)
 

@@ -39,7 +39,8 @@ def watch_park_sql(alias: str = "t") -> str:
 def not_watch_sql(conn: sqlite3.Connection, alias: str = "t") -> str:
     """``NOT watch_park_sql`` on boards whose ``task_events`` carry park payloads, else ``1`` (no watches)."""
     try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
+        from hermes_cli.kanban_table_columns import table_columns
+        cols = table_columns(conn, "task_events")  # one result row, not one per column
     except sqlite3.Error:
         cols = set()
     return f"NOT {watch_park_sql(alias)}" if {"id", "task_id", "kind", "payload"} <= cols else "1"

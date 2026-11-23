@@ -53,6 +53,7 @@ from hermes_cli import kanban_links_diagnostics as diag
 from hermes_cli.kanban_links_tickets import StartTickets as _StartTickets
 from hermes_cli import kanban_links_narrow as _links_narrow, kanban_external_activity as _external_activity
 from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
+from hermes_cli.kanban_table_columns import table_columns  # one result row per probe, not one per column
 from hermes_cli.kanban_open_asks import card_is_open_human_ask
 from hermes_cli.kanban_activity_projection import WAITING_ON_CAP
 import contextlib
@@ -151,7 +152,7 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
     including malformed JSON and Python's non-ASCII whitespace handling.
     """
     ph = ",".join("?" for _ in statuses)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    cols = table_columns(conn, "tasks")
     conn.create_function("kanban_open_ask", 3, card_is_open_human_ask, deterministic=True)
     evidence = "t.human_request" if "human_request" in cols else "NULL"
     kind = "t.block_kind" if "block_kind" in cols else "NULL"
@@ -180,7 +181,7 @@ def _counted_sub_clause(conn: sqlite3.Connection) -> str:
     """SQL predicate (aliases ``s`` subs, ``t`` tasks) for a ``tui`` sub that counts as the chat's work."""
     owner = "s.chat_id = COALESCE(t.session_id, '')"
     try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
+        cols = table_columns(conn, "kanban_notify_subs")  # one result row, not one per column
     except sqlite3.Error:
         cols = set()
     if "delivery_metadata" not in cols:
@@ -209,7 +210,7 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
 
 
 def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STATUSES, *, tasks=None) -> dict[str, int]:
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    cols = table_columns(conn, "tasks")
     if "session_id" not in cols:
         return {}  # explicitly supported pre-session schema, not a failed read
     match, params = _status_filter(conn, statuses)
@@ -256,7 +257,7 @@ def _read_parked(path: Path) -> tuple[dict[str, int], dict[str, int]]:
 
 
 def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]]:
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    cols = table_columns(conn, "tasks")
     if "session_id" not in cols:
         return {}, {}
     match, params = _status_filter(conn, ACTIVE_STATUSES)
@@ -325,7 +326,7 @@ def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]
 
 def _parked_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     """(session, task) for every parked card (scheduled/blocked/triage) a session created or shepherds."""
-    if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+    if "session_id" not in table_columns(conn, "tasks"):
         return set()
     parked = f"(t.status IN ('scheduled', 'blocked', 'triage') AND {_not_watch(conn)})"  # watch: kanban_watch
     pairs: set[tuple[str, str]] = {
@@ -625,7 +626,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         if not me:
             return []
         # Old replicas can still be displayed, but cannot prove an exact revision.
-        columns = {r[1] for r in conn.execute('PRAGMA table_info(replica)')}
+        columns = table_columns(conn, 'replica')
         version_column = 'version' if 'version' in columns else 'NULL'
         info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
@@ -1609,8 +1610,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
     of, in ``statuses`` — the same pairs ``_read_counts`` counts."""
     with cached_ro(path) as conn, _execution_transaction(conn) as read_at:
         conn.row_factory = sqlite3.Row
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-        if "session_id" not in cols:
+        if "session_id" not in table_columns(conn, "tasks"):
             return []  # explicitly supported pre-session schema
         from hermes_cli.kanban_session_outcome_tasks import select_listed_local_tasks
         found = select_listed_local_tasks(conn, ids, statuses)

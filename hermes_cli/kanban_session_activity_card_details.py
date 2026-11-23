@@ -23,13 +23,58 @@ def _first_line(text: Any) -> str:
     return line[:_NOTE_CHARS]
 
 
+# Run summaries and comments that can still decide ``note``/``pr_url``, in ``_add_card_details``' offer order (runs,
+# then comments; each in its ``(task_id, started_at|created_at, rowid)`` index order). Per card, ``m`` is the newest
+# time of a text that surely has a visible first line (TEXT with an ASCII letter or digit): every older row loses the
+# note to it. Rows at or after ``m`` and rows that may name a PR stay, so the winner and its ties are unchanged; a
+# non-numeric time (``bad``) keeps all of that card's rows (Python compares, or fails, exactly as before). Reading
+# them all cost one result row each (4,549 for the hub's listed cards, 874 comments on one), and each row step can
+# wait on the GIL in the Desktop backend; ``b`` aggregates without copying the texts.
+_KEEP = "(b.bad OR b.m IS NULL OR {at} >= b.m OR (instr({text}, 'https://github.com/') AND instr({text}, '/pull/')))"
+_NOTE_ROWS = f"""
+WITH b AS (SELECT task_id, MAX(bad) AS bad, MAX(m) AS m FROM (
+    SELECT task_id, MAX(typeof(COALESCE(ended_at, started_at, 0)) NOT IN ('integer', 'real')) AS bad,
+           MAX(CASE WHEN typeof(summary) = 'text' AND summary GLOB '*[0-9A-Za-z]*'
+                    THEN COALESCE(ended_at, started_at, 0) END) AS m
+    FROM task_runs WHERE task_id IN ({{ph}}) AND summary IS NOT NULL GROUP BY task_id
+    UNION ALL
+    SELECT task_id, MAX(typeof(COALESCE(created_at, 0)) NOT IN ('integer', 'real')),
+           MAX(CASE WHEN typeof(body) = 'text' AND body GLOB '*[0-9A-Za-z]*' THEN COALESCE(created_at, 0) END)
+    FROM task_comments WHERE task_id IN ({{ph}}) GROUP BY task_id) GROUP BY task_id)
+SELECT 0 AS src, r.task_id, COALESCE(r.ended_at, r.started_at) AS at, r.summary, r.started_at AS k, r.rowid AS rid
+FROM task_runs r JOIN b ON b.task_id = r.task_id WHERE r.task_id IN ({{ph}}) AND r.summary IS NOT NULL
+  AND {_KEEP.format(at='COALESCE(r.ended_at, r.started_at, 0)', text='r.summary')}
+UNION ALL
+SELECT 1, c.task_id, c.created_at, c.body, c.created_at, c.rowid
+FROM task_comments c JOIN b ON b.task_id = c.task_id WHERE c.task_id IN ({{ph}})
+  AND {_KEEP.format(at='COALESCE(c.created_at, 0)', text='c.body')}
+ORDER BY 1, 2, 5, 6"""
+
+
+def _note_rows(conn: sqlite3.Connection, ids: list[str], ph: str) -> list[tuple[Any, Any, Any]]:
+    """``(task_id, at, text)`` of the run summaries and comments that can decide each card's note and PR."""
+    try:
+        return [tuple(r)[1:4] for r in conn.execute(_NOTE_ROWS.format(ph=ph), [*ids, *ids, *ids, *ids]).fetchall()]
+    except sqlite3.Error:  # a board without one of the tables: read each one that exists, as before
+        out: list[tuple[Any, Any, Any]] = []
+        for sql in (f"SELECT task_id, COALESCE(ended_at, started_at) AS at, summary FROM task_runs "
+                    f"WHERE task_id IN ({ph}) AND summary IS NOT NULL",
+                    f"SELECT task_id, created_at AS at, body FROM task_comments WHERE task_id IN ({ph})"):
+            try:
+                out.extend(tuple(r) for r in conn.execute(sql, ids).fetchall())
+            except sqlite3.Error:
+                pass
+        return out
+
+
 def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]], *, replica: Any = LEGACY_REPLICA) -> None:
     """Canonical details in chunks sized for the largest query's fixed bindings."""
     from hermes_cli.kanban_run_model import _KINDS
 
     if not found:
         return
-    size = min(500, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(_KINDS))
+    limit = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    size = min(500, limit - len(_KINDS), limit // 4)  # _NOTE_ROWS binds the chunk four times
     ids = list(found)
     owned = replica is LEGACY_REPLICA
     if owned:
@@ -74,11 +119,8 @@ def _add_card_details_chunk(conn: sqlite3.Connection, found: dict[str, dict[str,
             if at >= prs.get(task_id, (-1, ""))[0]:
                 prs[task_id] = (at, url)
 
-    for r in rows(f"SELECT task_id, COALESCE(ended_at, started_at) AS at, summary FROM task_runs "
-                  f"WHERE task_id IN ({ph}) AND summary IS NOT NULL"):
-        offer(r["task_id"], r["at"], r["summary"])
-    for r in rows(f"SELECT task_id, created_at AS at, body FROM task_comments WHERE task_id IN ({ph})"):
-        offer(r["task_id"], r["at"], r["body"])
+    for task_id, at, text in _note_rows(conn, ids, ph):
+        offer(task_id, at, text)
     for r in rows(f"SELECT id AS task_id, completed_at AS at, result FROM tasks WHERE id IN ({ph}) AND result IS NOT NULL"):
         for url in _PR_URL_RE.findall(str(r["result"] or "")):
             if (r["at"] or 0) >= prs.get(r["task_id"], (-1, ""))[0]:
@@ -188,17 +230,28 @@ def _authority(conn: sqlite3.Connection, replica: sqlite3.Connection | None,
 
 
 def _blocked_payload(conn: sqlite3.Connection, replica: sqlite3.Connection | None,
-                     parent: str, info: dict[str, Any]) -> dict[str, Any]:
+                     parent: str, info: dict[str, Any], memo: dict | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {"id": parent, "status": info["status"]}
     episode = info.get("episode")
     if info["status"] == "triage" and episode:
-        out["contained"] = {"episode": episode, "authority": _authority(conn, replica, parent, episode)}
+        authority = _read_once(memo, ("authority", parent, episode), lambda: _authority(conn, replica, parent, episode))
+        out["contained"] = {"episode": episode, "authority": dict(authority)}
     return out
+
+
+def _read_once(memo: dict | None, key: tuple, read):
+    """``read()``, once per ``key`` in one ``_add_blocked_upstream`` call (``memo``); a raising read is not kept."""
+    if memo is None:
+        return read()
+    if key not in memo:
+        memo[key] = read()
+    return memo[key]
 
 
 def _walk(conn: sqlite3.Connection, task_id: str,
           replica: sqlite3.Connection | None, *,
-          root_parents: dict[str, list[str]] | None = None) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+          root_parents: dict[str, list[str]] | None = None,
+          memo: dict | None = None) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     seen = {task_id}
     frontier = {task_id}
     nearest_open: dict[str, str] | None = None
@@ -206,11 +259,11 @@ def _walk(conn: sqlite3.Connection, task_id: str,
         parents: dict[str, dict[str, Any]] = {}
         for child in sorted(frontier):
             parent_ids = (root_parents[child] if root_parents is not None and child in root_parents
-                          else _parent_ids(conn, replica, child))
+                          else _read_once(memo, ("parents", child), lambda: _parent_ids(conn, replica, child)))
             for parent in parent_ids:
                 if parent in seen or parent in parents:
                     continue
-                info = _task_info(conn, replica, parent)
+                info = _read_once(memo, ("task", parent), lambda: _task_info(conn, replica, parent))
                 if info is not None:
                     parents[parent] = info
         if not parents:
@@ -220,7 +273,7 @@ def _walk(conn: sqlite3.Connection, task_id: str,
             if nearest_open is None and status not in {"todo", "done", "archived"}:
                 nearest_open = {"id": parent, "status": status}
             if status in {"blocked", "triage"}:
-                return _blocked_payload(conn, replica, parent, parents[parent]), nearest_open
+                return _blocked_payload(conn, replica, parent, parents[parent], memo), nearest_open
         seen.update(parents)
         frontier = set(parents)
     return None, nearest_open
@@ -233,6 +286,9 @@ def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, A
     owned = replica is LEGACY_REPLICA
     if owned:
         replica = _replica_for(conn)
+    # Cards share ancestors: read each parent's edges, status and containment authority once per call, not once per
+    # card that reaches it (1,449 statements for the hub's 120 listed cards, each a GIL wait in the Desktop backend).
+    memo: dict = {}
     try:
         try:
             root_parents = _root_parents(conn, replica, list(found))
@@ -245,7 +301,7 @@ def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, A
             if card.get("status") in {"done", "archived", "blocked", "triage"}:
                 continue
             try:
-                blocked, upstream = _walk(conn, task_id, replica, root_parents=root_parents)
+                blocked, upstream = _walk(conn, task_id, replica, root_parents=root_parents, memo=memo)
             except sqlite3.Error:
                 logging.getLogger(__name__).debug("Could not read blocked upstream for %s", task_id, exc_info=True)
                 continue

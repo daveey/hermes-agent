@@ -73,6 +73,28 @@ _HOSTS_LOCK = threading.Lock()
 _HOSTS: dict[str, tuple[int, dict[str, float]]] = {}  # board file -> (last event id read, host -> newest record)
 
 
+# The board's newest event id and, as ONE JSON array, every watch payload after the cursor (from 0 when the newest
+# id is below the cursor): one statement and one result row. Read row by row, a cold read was ~10k rows on the hub
+# and each row step can wait out a GIL switch interval in the Desktop backend.
+_WATCH_PAYLOADS_SQL = (
+    "SELECT m.top, json_group_array(e.payload) FILTER (WHERE e.id IS NOT NULL) "
+    "FROM (SELECT COALESCE(MAX(id), 0) AS top FROM task_events) m LEFT JOIN task_events e "
+    "ON e.kind = ? AND e.id > (CASE WHEN m.top < ? THEN 0 ELSE ? END)")
+
+
+def _watch_payloads(conn: sqlite3.Connection, cursor: int) -> tuple[int, list]:
+    """``(newest event id, watch payloads with a larger id than the cursor)``; the cursor counts as 0 when the
+    newest id is below it."""
+    try:
+        top, packed = conn.execute(_WATCH_PAYLOADS_SQL, (WATCH_EVENT, cursor, cursor)).fetchone()
+        return int(top), json.loads(packed)
+    except sqlite3.Error:  # e.g. a payload JSON cannot carry (a BLOB): read row by row, as before
+        top = conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0] or 0
+        return top, [payload for _eid, payload in conn.execute(
+            "SELECT id, payload FROM task_events WHERE kind = ? AND id > ?",
+            (WATCH_EVENT, 0 if top < cursor else cursor))]
+
+
 def hosts_seen(conn: sqlite3.Connection) -> dict[str, float]:
     """``{host: when it last wrote a watch record}`` on this board: the hosts that advertise
     ``external-watch-v1``. Read incrementally (only events newer than the last read, through the
@@ -82,12 +104,11 @@ def hosts_seen(conn: sqlite3.Connection) -> dict[str, float]:
         key = str(row[2] or id(conn)) if row else str(id(conn))
         with _HOSTS_LOCK:
             cursor, hosts = _HOSTS.get(key, (0, {}))
-        top = conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0] or 0
+        top, payloads = _watch_payloads(conn, cursor)
         if top < cursor:  # another database behind the same key (a test's fresh file): start over
             cursor, hosts = 0, {}
         hosts = dict(hosts)
-        for _eid, payload in conn.execute("SELECT id, payload FROM task_events WHERE kind = ? AND id > ?",
-                                         (WATCH_EVENT, cursor)):
+        for payload in payloads:
             rec = _json(payload)
             if rec.get("host"):
                 at = float(rec.get("observed_at") or 0)
