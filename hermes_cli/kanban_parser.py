@@ -19,6 +19,7 @@ from hermes_cli.kanban_chat_links_settle import DEFAULT_SETTLE_S
 # FILE_LINES cap) gains no line for it. [daveey]
 from hermes_cli.kanban_operator_resume import cmd as cmd_resume
 from hermes_cli.kanban_diagnostic_correction import command as cmd_correct_diagnostics
+from hermes_cli.kanban_text_edit import command as cmd_edit_text
 from hermes_cli.kanban_quota_episode_release import cmd as cmd_quota_release  # same ride as cmd_resume
 
 
@@ -533,6 +534,10 @@ _SPECS = [
              help="Override the live-claim guard: complete a running, claimed task "
                   "even without owning its run (closes the worker's run)."),
     ], help="Mark one or more tasks done"),
+    _cmd("edit-text", [
+        _TASK_ID,
+        _arg("--request-file", required=True, help="Exact UTF-8 JSON text CAS request (owner operator only)"),
+    ], help="Audited inactive owner-local text CAS; preserves lifecycle and admission"),
     _cmd("correct-diagnostics", [
         _TASK_ID,
         _arg("--request-file", required=True, help="UTF-8 JSON exact-content quotation request (operator only)"),

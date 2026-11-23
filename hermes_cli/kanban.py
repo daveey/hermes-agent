@@ -56,7 +56,7 @@ from hermes_cli.kanban_cli_park import (
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
-from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release, cmd_correct_diagnostics as _cmd_correct_diagnostics
+from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release, cmd_correct_diagnostics as _cmd_correct_diagnostics, cmd_edit_text as _cmd_edit_text
 from hermes_cli.kanban_claim_cli import cmd_claim as _cmd_claim  # moved; re-exported for callers
 from hermes_cli.kanban_source_cli import cmd_source_release as _cmd_source_release
 from hermes_cli.kanban_run_models_cli import command as _cmd_attest_run_models
@@ -215,7 +215,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             return importlib.import_module("hermes_cli.kanban_actionability_cli").command(args)
         # Maintenance handlers skip init_db; their connections still run schema setup.
         if handler := {"repair": _cmd_repair, "recover": _cmd_recover,
-                       "correct-diagnostics": _cmd_correct_diagnostics}.get(action):
+                       "correct-diagnostics": _cmd_correct_diagnostics, "edit-text": _cmd_edit_text}.get(action):
             return handler(args)
         try:
             kb.init_db()
@@ -268,7 +268,7 @@ def _profile_author() -> str:
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "attest-run-models", "create", "swarm", "assign", "reclaim", "move", "reassign", "link", "unlink",
-    "claim", "comment", "attach", "attach-rm", "complete", "edit", "block", "correct-diagnostics",
+    "claim", "comment", "attach", "attach-rm", "complete", "edit", "block", "correct-diagnostics", "edit-text",
     "schedule", "unblock", "contain", "resume-contained", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",

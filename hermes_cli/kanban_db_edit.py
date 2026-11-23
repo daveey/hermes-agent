@@ -11,8 +11,10 @@ from typing import Optional
 _UNSET = object()
 
 
-def _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only):
+def _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only, text_cas=None):
     """Recheck maintenance custody and body CAS under edit_task's write transaction."""
+    if text_cas is not None:
+        text_cas.check(conn, task_id)
     if home_open_only:
         from hermes_cli.kanban_model_retirement import owns_policy
         if status in ('done', 'archived') or not owns_policy(conn, task_id):
@@ -23,9 +25,25 @@ def _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only)
     return True
 
 
-def _append_edit_comment(conn, task_id, audit_comment):
+def _append_edit_comment(conn, task_id, audit_comment, text_cas=None):
+    if text_cas is not None:
+        text_cas.audit(conn, task_id)
     if audit_comment is not None:
         _kb.add_comment(conn, task_id, *audit_comment)
+
+
+def _selected_fields(supplied):
+    hook = supplied["text_cas"]
+    if hook is not None:
+        from hermes_cli.kanban_text_edit import TextCAS
+        if type(hook) is not TextCAS:
+            raise ValueError("invalid internal text CAS hook")
+        return hook.fields(supplied)
+    return {key: supplied[key] for key in ("title", "body", "priority") if supplied[key] is not None}
+
+
+def _ordinary_edit_fields(fields, text_cas):
+    return [] if text_cas is not None else [field for field in fields if field != "priority"]
 
 
 class PriorityLowerRefused(ValueError):
@@ -93,7 +111,7 @@ def edit_task(
     priority_bump: Optional[int] = None,
     admission_class: Optional[str] = None, admission_frees: Optional[str] = None,
     expected_body: object = _UNSET, home_open_only: bool = False,
-    audit_comment: Optional[tuple[str, str]] = None,
+    audit_comment: Optional[tuple[str, str]] = None, text_cas=None,
 ) -> bool:
     """Edit task fields, optionally backfilling a completed task's result.
 
@@ -106,6 +124,7 @@ def edit_task(
     exact stored-body CAS, ``home_open_only`` to recheck nonterminal home custody,
     and ``audit_comment`` to append an explanation in the same transaction. [daveey]
     """
+    selected = _selected_fields(locals())
     from hermes_cli.kanban_model_neutral import validate_text
     validate_text(title, body)
     from hermes_cli.kanban_priority import bounded
@@ -113,15 +132,12 @@ def edit_task(
         raise ValueError("priority_bump must be positive and cannot be combined with priority")
     if priority is not None:
         priority = bounded(priority)
-    changed_fields = [
-        field for field, value in (("title", title), ("body", body), ("priority", priority))
-        if value is not None
-    ]
+    changed_fields = list(selected)
     with _kb.write_txn(conn):
         status = _kb._task_status(conn, task_id)
         if status is None or (result is not None and status != "done"):
             return False
-        if not _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only):
+        if not _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only, text_cas):
             return False
         previous_priority = conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0] or 0
         if priority_bump is not None:
@@ -134,10 +150,10 @@ def edit_task(
         from hermes_cli.kanban_admission_class import edit_fields
         admission = edit_fields(conn, task_id, admission_class, admission_frees)
         changed_fields.extend(admission)
-        for field, value in (("title", title), ("body", body), ("priority", priority), *admission.items()):
-            if value is not None:
-                assignments.append(f"{field} = ?")
-                params.append(value)
+        selected.update({k: v for k, v in (("priority", priority), *admission.items()) if v is not None})
+        for field, value in selected.items():
+            assignments.append(f"{field} = ?")
+            params.append(value)
         if result is not None:
             assignments.append("result = ?")
             params.append(result)
@@ -157,7 +173,7 @@ def edit_task(
                 payload["reason"] = priority_reason.strip()
             _kb._append_event(conn, task_id, "reprioritized", payload)
         if result is None:
-            non_priority_fields = [field for field in changed_fields if field != "priority"]
+            non_priority_fields = _ordinary_edit_fields(changed_fields, text_cas)
             if non_priority_fields:
                 _kb._append_event(conn, task_id, "edited", {"fields": non_priority_fields})
         else:
@@ -201,7 +217,7 @@ def edit_task(
                 },
                 run_id=run_id,
             )
-        _append_edit_comment(conn, task_id, audit_comment)
+        _append_edit_comment(conn, task_id, audit_comment, text_cas)
     _kb.notify_task_updated(conn, task_id, changed_fields, board=board)
     return True
 
