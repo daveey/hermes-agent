@@ -224,25 +224,33 @@ def test_failed_push_capability_request_interrupts_reachable_sampling(live, cloc
     assert episodes(live)[0]['reachable_ms'] == 30000
 
 
-def _other_process_failure(path):
+def _other_process_failure(path, capability):
     from pathlib import Path
     conn = kbc.connect(Path(path))
     try:
         receiver = helpers.Observing()
+        if capability:
+            def offline(*args):
+                raise OSError('capability unavailable in another process')
+            receiver._call = offline
+            with pytest.raises(OSError, match='capability unavailable'):
+                helpers.helpers.push(conn, receiver)
+            return
         receiver.failure = OSError('other process offline')
         assert helpers.poll(conn, receiver)['status'] == 'unavailable'
     finally:
         conn.close()
 
 
-def test_other_process_failed_read_breaks_shared_sampling_baseline(live, clock):
+@pytest.mark.parametrize('capability', [False, True])
+def test_other_process_failed_read_breaks_shared_sampling_baseline(live, clock, capability):
     import multiprocessing
     receiver = setup(live)
     helpers.poll(live, receiver)
     clock[1] += 30000
     helpers.poll(live, receiver)
     path = live.execute('PRAGMA database_list').fetchone()[2]
-    child = multiprocessing.get_context('spawn').Process(target=_other_process_failure, args=(path,))
+    child = multiprocessing.get_context('spawn').Process(target=_other_process_failure, args=(path, capability))
     child.start()
     try:
         child.join(30)
@@ -251,6 +259,17 @@ def test_other_process_failed_read_breaks_shared_sampling_baseline(live, clock):
         if child.is_alive():
             child.kill()
             child.join()
+    clock[1] += 10000
+    helpers.poll(live, receiver)
+    assert episodes(live)[0]['reachable_ms'] == 30000
+
+
+def test_abandoned_reserved_read_cannot_leave_reusable_baseline(live, clock):
+    receiver = setup(live)
+    helpers.poll(live, receiver)
+    clock[1] += 30000
+    helpers.poll(live, receiver)
+    observation._reserve(live, journal.snapshot(live))  # no reply or failure handler
     clock[1] += 10000
     helpers.poll(live, receiver)
     assert episodes(live)[0]['reachable_ms'] == 30000
