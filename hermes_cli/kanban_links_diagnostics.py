@@ -76,6 +76,11 @@ def published() -> None:
     event(_lane.get() + ".publish")
 
 
+def shared() -> None:
+    """A queued strict reader took a projection that started after it arrived (no rebuild of its own)."""
+    event(_lane.get() + ".shared")
+
+
 def board_decision(done, inputs, started, max_age, reads) -> str:
     """Original short-circuit admission, with its reason exposed; never replay twice."""
     if inputs is None:

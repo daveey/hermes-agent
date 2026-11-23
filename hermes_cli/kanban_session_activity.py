@@ -49,6 +49,7 @@ from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 from hermes_cli.kanban_links_refresh import ScopeRefresher
 from hermes_cli import kanban_links_diagnostics as diag
+from hermes_cli.kanban_links_tickets import StartTickets as _StartTickets
 from hermes_cli import kanban_links_narrow as _links_narrow, kanban_external_activity as _external_activity
 from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
 from hermes_cli.kanban_open_asks import card_is_open_human_ask, stamp_needs_you
@@ -880,6 +881,8 @@ _links_lock = threading.Lock()
 # from, released ones included (``remote_links_and_origin_rows``).
 _LINKS_SCOPE_CAP = 16
 _links_cache: dict[tuple, tuple] = {}
+_links_tickets = _StartTickets(lambda: time.monotonic())  # queued strict readers share one rebuild
+_links_fresh = _links_tickets.fresh
 _origin_rows_sink = threading.local()  # .rows: set by _project_remote_links for _store_links
 
 
@@ -964,6 +967,7 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
             diag.event("links_display.stale")
             _refresh_links_in_background(scope)
             return hit
+        arrival = _links_tickets.take()  # before the fingerprint: ``kanban_links_tickets``
         fingerprint = diag.timed("fingerprint", _links_fingerprint)
         if hit is not None and _links_fresh(hit, fingerprint):
             diag.source_decision(hit, fingerprint, True, time.monotonic())
@@ -976,13 +980,11 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
             if stale_ok and hit is not None:
                 diag.event("links_display.stale")
                 return hit
+            if hit is not None and _links_tickets.answers(scope, arrival, hit):
+                diag.shared()
+                return hit
             diag.source_decision(hit, fingerprint, False, time.monotonic())
             return _publish_links(scope, fingerprint)
-
-
-def _links_fresh(hit: tuple, fingerprint: tuple) -> bool:
-    """Within its max age, and read under ``fingerprint`` except for boards it never read (``kanban_links_narrow``)."""
-    return time.monotonic() < hit[0] and (hit[2] == fingerprint or _links_narrow.matches(hit, fingerprint))
 
 
 def _publish_links(scope: tuple, fingerprint: tuple) -> tuple:
@@ -994,6 +996,7 @@ def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
     """Project and publish (caller holds ``_links_lock``); returns the published entry. ``fingerprint`` is taken
     before projecting, so a store change during the projection leaves the cache stale and triggers another rebuild."""
     global _links_cache
+    started = _links_tickets.take()
     _origin_rows_sink.rows = []
     try:
         cards = diag.timed("projection", _project_remote_links)
@@ -1008,6 +1011,7 @@ def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
     while len(updated) > _LINKS_SCOPE_CAP:
         del updated[next(iter(updated))]
     _links_cache = updated
+    _links_tickets.publish(scope, started, updated)
     diag.published()
     return entry
 
@@ -1974,6 +1978,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     _busy.reset()
     with _links_lock:
         _links_cache.clear()
+        _links_tickets.reset()
         _links_narrow.reset()
     with _cache_lock:
         _cache = None
