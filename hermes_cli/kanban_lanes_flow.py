@@ -116,7 +116,9 @@ def _skip_reason(card: dict) -> Optional[str]:
 
 
 def classify_reason(card: dict, step: str) -> str:
-    if card.get("human_request") or card.get("block_kind") in ("needs_input", "capability"):
+    from hermes_cli.kanban_open_asks import needs_you
+
+    if needs_you(card):
         return "you"
     gate_reason = card.get("gate_reason")
     if gate_reason in (LIMIT_CARDS, LIMIT_USD):
@@ -341,6 +343,21 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None,
         cards.append({"id": card["id"], "title": card["title"] or "",
                       "lane": pol.lane_of(card["tenant"]), "step": step, "reason": reason,
                       "source": source, "age_h": card["age_h"], "pr": pr})
+        if reason == "you":
+            from hermes_cli.kanban_wait_info import describe
+
+            park = {}
+            for event in reversed(card['events']):
+                if event.get('kind') in ('scheduled', 'continued'):
+                    park = _payload(event)
+                    break
+                if event.get('kind') in ('claimed', 'unblocked', 'completed', 'archived'):
+                    break
+            cards[-1]['attention'] = {
+                'id': card['id'], 'title': card['title'], 'status': card['status'],
+                'human_request': card['human_request'], 'block_kind': card['block_kind'],
+                'wait': describe(card['status'], human=bool(card['human_request']), park=park),
+            }
         if reason == "dep":
             blockers = evidence.blockers(card["id"])
             cards[-1].update(blockers=blockers, blocker=blockers[0] if blockers else None)

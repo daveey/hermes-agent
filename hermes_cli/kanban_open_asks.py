@@ -26,6 +26,47 @@ def card_is_open_human_ask(status: Any, block_kind: Any, human_request: Any) -> 
     return bool(_stored_needs_human(human_request, block_kind))
 
 
+def needs_you(card: dict) -> bool:
+    """Current card attention, never a historical block kind or an implied consent.
+
+    Projected wait evidence and raw lane cards share this entry point. Legacy
+    scheduled device probes carry presentation-only attention, not approval.
+    """
+    status = card.get("status")
+    if status not in ("blocked", "triage", "scheduled") or card.get("stale"):
+        return False
+    import json
+
+    def obj(value):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return {}
+        return value if isinstance(value, dict) else {}
+
+    wait = obj(card.get("wait"))
+    if wait.get("wait_state"):
+        return wait["wait_state"] == "human"
+    human = obj(card.get("human_request"))
+    if card_is_open_human_ask(status, card.get("block_kind"), human):
+        return True
+    if status != "scheduled":
+        return False
+    if obj(card.get("wakes")).get("blocks_for_human") and human.get("action"):
+        return True
+    from hermes_cli.kanban_wait_info import owner_device_step
+
+    park = obj(card.get("park"))
+    for event in reversed(card.get("events") or ()):
+        if event.get("kind") in ("scheduled", "continued"):
+            park = obj(event.get("payload"))
+            break
+        if event.get("kind") in ("claimed", "unblocked", "completed", "archived"):
+            break
+    return bool(owner_device_step(park.get("wake_check")))
+
+
 def open_human_asks(card_refs: Iterable[str], count: int) -> list[dict[str, str]]:
     """``needs_you`` entries for one row: one ``card`` entry per open ask. ``card_refs`` are the owner-qualified
     keys (``<board>/<id>``) of the blocked cards of the row's lineage, from the snapshot that supplies ``count``

@@ -43,3 +43,16 @@ request-error response; these helpers introduce no new wire protocol.
 Publication is intentionally name-scoped. `effective_selector`, `routing_view`
 and whole-module imports remain private, and the boundary-lint baseline is not
 relaxed by this API extension.
+
+## Read-only attention predicate
+
+`hermes_cli.kanban_open_asks:needs_you(card)` returns a boolean for the current
+card snapshot. Pass a dictionary with `status`, `block_kind`, `human_request`
+(decoded object or stored JSON), and optional projected `wait`, `wakes`, `stale`
+and ordered `events`. It rejects terminal/running/stale cards and incomplete
+human requests; a historical `block_kind` is never enough. Current projected
+human waits and bounded legacy scheduled device-access probes also count as
+attention. The result is presentation only: it does not create consent, revive
+a retired canonical request, authorize execution or mutate a card. Lanes and
+session-pane card rendering use this same predicate. Other module names remain
+private.

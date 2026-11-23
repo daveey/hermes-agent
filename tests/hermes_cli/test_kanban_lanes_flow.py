@@ -48,7 +48,7 @@ def test_review_requested_event_is_review_without_guessing_ci():
 
 
 @pytest.mark.parametrize("fields,reason", [
-    ({"human_request": {"action": "pick"}, "status": "blocked", "block_kind": "needs_input"}, "you"),
+    ({"human_request": {"action": "pick", "why_human": "Only you know", "interaction": "reply", "scope": "This card", "evidence": "Choice needed"}, "status": "blocked", "block_kind": "needs_input"}, "you"),
     ({"parents_open": True, "status": "todo"}, "dep"),
     ({"status": "triage", "block_kind": lanes.GATE_KIND, "held": True}, "gate"),
     ({"status": "triage", "block_kind": lanes.GATE_KIND, "held": True,

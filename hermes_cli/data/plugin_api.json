@@ -181,7 +181,8 @@
         "hermes_cli.kanban_model_neutral:validate_review",
         "hermes_cli.kanban_model_neutral:MANDATORY_FLAGS",
         "hermes_cli.kanban_model_neutral:validate_explicit_selector",
-        "hermes_cli.kanban_model_neutral:validate_update_flags"
+        "hermes_cli.kanban_model_neutral:validate_update_flags",
+        "hermes_cli.kanban_open_asks:needs_you"
       ]
     },
     {

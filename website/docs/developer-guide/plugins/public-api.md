@@ -135,6 +135,7 @@ with a name allows that one name only.
 | `hermes_cli.kanban_model_neutral` | `MANDATORY_FLAGS` | plugins/kanban-validation.md: pure model-neutral validation before any mixed request writes; no routing or mutation exports |
 | `hermes_cli.kanban_model_neutral` | `validate_explicit_selector` | plugins/kanban-validation.md: pure model-neutral validation before any mixed request writes; no routing or mutation exports |
 | `hermes_cli.kanban_model_neutral` | `validate_update_flags` | plugins/kanban-validation.md: pure model-neutral validation before any mixed request writes; no routing or mutation exports |
+| `hermes_cli.kanban_open_asks` | `needs_you` | plugins/kanban-validation.md: pure model-neutral validation before any mixed request writes; no routing or mutation exports |
 | `hermes_cli.chat_launch` | `hermes_command` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.chat_launch` | `print_exit_summary` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.gateway_chat` | `shell_client_env` | user-guide/features/plugins.md § A plugin with its own chat client |
