@@ -61,6 +61,11 @@ class _SharedDelivery:
             self._expiry.close()
             raise
 
+    def check_running(self):
+        if (self._stopping or not self._thread.is_alive()
+                or not self._expiry.thread.is_alive()):
+            raise RuntimeError('local fact owner closed or worker unavailable')
+
     def _next(self):
         with self.store._condition:
             while not self._stopping and any(not owner._stopping for owner in self.owners):
@@ -131,9 +136,9 @@ class InProcessFacts:
 
     def check_running(self):
         workers = self._workers
-        if (self._stopping or workers is None or workers._stopping
-                or not workers._thread.is_alive() or not workers._expiry.thread.is_alive()):
+        if self._stopping or workers is None:
             raise RuntimeError('local fact owner closed or worker unavailable')
+        workers.check_running()
 
     def acquire(self, scope, *, lifecycle):
         with self.store._condition:
@@ -148,9 +153,11 @@ class InProcessFacts:
                     # worker cannot observe an empty owner roster at startup.
                     workers = _SharedDelivery(self.store)
                     self.store._local_delivery = workers
-                self._workers = workers
-                self.check_running()
+                # Refused candidates retain their existing drain custody, but
+                # must not poison this dormant transport's next admission.
+                workers.check_running()
                 workers.owners.add(self)
+                self._workers = workers
             self.check_running()
             reader = LocalReader(self, scope)
             self._readers.add(reader)
