@@ -192,8 +192,11 @@ def fast_retry(monkeypatch):
     return fact_feed
 
 
-@pytest.mark.parametrize("error, tracebacks", [(_sqlite_busy, 0), (lambda: RuntimeError("defect"), 1)])
-def test_retry_streak_logs_at_most_one_traceback(caplog, fast_retry, error, tracebacks):
+@pytest.mark.parametrize("error, tracebacks, warned", [
+    (_sqlite_busy, 0, [6, 8]),  # one busy retry is routine; only a persisting one warns
+    (lambda: RuntimeError("defect"), 1, [1, 6, 8]),
+])
+def test_retry_streak_logs_at_most_one_traceback(caplog, fast_retry, error, tracebacks, warned):
     # Each retry used to format a full traceback under the logging lock; at ~2/s
     # across sources that stalled the gateway event loop past its watchdog.
     caplog.set_level(logging.DEBUG, logger="hermes_cli.fact_feed")
@@ -201,9 +204,9 @@ def test_retry_streak_logs_at_most_one_traceback(caplog, fast_retry, error, trac
     records = _feed_records(caplog, "capture/publication failed")[:8]
     assert len(records) == 8
     assert sum(r.exc_info is not None for r in records) == tracebacks
-    # Still visible: attempt 1, max backoff (6) and the periodic reminder (8).
+    # Still visible: max backoff (6), the periodic reminder (8), and a defect's first attempt.
     visible = [i + 1 for i, r in enumerate(records) if r.levelno >= logging.WARNING]
-    assert visible == [1, 6, 8]
+    assert visible == warned
 
 
 def test_defect_after_busy_start_still_traced(caplog, fast_retry):

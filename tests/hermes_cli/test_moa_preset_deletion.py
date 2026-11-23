@@ -274,12 +274,14 @@ def test_moa_save_refuses_transient_read_failure_without_losing_config(tmp_path,
     real_load = utils.fast_safe_load
     failed_reads = []
 
+    from hermes_cli.web_routers.models import set_moa_models
+
     def in_moa_save():
         # Only the PUT handler's own read: a background config reader (watchers,
         # app startup) must not consume the single injected failure first.
         frame = sys._getframe(1)
         while frame is not None:
-            if frame.f_code.co_name == "set_moa_models":
+            if frame.f_code is set_moa_models.__code__:
                 return True
             frame = frame.f_back
         return False

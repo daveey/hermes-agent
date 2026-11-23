@@ -99,7 +99,10 @@ def capture_tasks(path: Path, cursor: changes.Cursor | None,
     path = Path(path).resolve()
     ensure_kanban_test_isolation(path)
     initial = path.stat()
-    with closing(open_ro(path, timeout=0)) as conn:
+    # Spend up to this capture's own time budget waiting out a busy open: the
+    # tracking registry is held only briefly per open, and timeout=0 failed
+    # nearly every first capture on a busy host (one retry ~0.1 s later each).
+    with closing(open_ro(path, timeout=budget.max_seconds)) as conn:
         # SQLite refuses oversized rows before Python allocates their values.
         conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, budget.max_bytes)
         before = _identity(path)

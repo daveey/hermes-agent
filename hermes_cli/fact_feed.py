@@ -180,7 +180,10 @@ class ChangeFeed:
                 source.traced.add(("capture", type(exc)))
                 log.exception("source capture/publication failed (attempt %d); retaining cursor", attempt)
             else:
-                log.log(logging.WARNING if _visible(attempt) else logging.DEBUG,
+                # A single busy retry is routine contention, not news: warn once
+                # it persists (max backoff, then every _REMIND_EVERY attempts).
+                warn = _visible(attempt) and not (busy and attempt == 1)
+                log.log(logging.WARNING if warn else logging.DEBUG,
                         "source capture/publication failed (attempt %d%s); retaining cursor: %s",
                         attempt, ", busy" if busy else "", exc)
             with source.publication:
