@@ -198,7 +198,8 @@ FAMILY_SOURCES = {
                ("hermes_cli/kanban_execution_observations.py", "count_snapshot"),
                ("hermes_cli/kanban_execution_observations.py", "_merge"),
                ("hermes_cli/kanban_external_activity.py", "stamp_boards"),
-               ("hermes_cli/kanban_external_activity.py", "stamp_rows")),
+               ("hermes_cli/kanban_external_activity.py", "stamp_rows"),
+               ("hermes_cli/kanban_external_activity.py", "stamp_replica_counts")),
     "goal": (("hermes_cli/goal_session_activity.py", "annotate_goal_activity"),
              ("hermes_cli/goal_session_activity.py", "project_goal_activity")),
     "cron": (("hermes_cli/cron_session_activity.py", "annotate_cron_activity"),
@@ -217,6 +218,9 @@ FAMILY_SOURCES = {
 }
 # Every call receiving the row(s) inside an audited function; any new one needs a manifest re-audit.
 AUDITED_ROW_CALLS = {
+    # Replica stamping only increments the already-declared external/unknown fields;
+    # its complete writer is included in FAMILY_SOURCES so new keys remain guarded.
+    "_external_activity.stamp_replica_counts", "row_ids",
     "identity.mark_unknown", "count_snapshot", "_external_activity.stamp_boards", "identity.row_ids",
     "identity.stamp_blocked_owners", "_mark_kanban_unknown", "stamp_needs_you", "_merge", "ids_of",
     "stamp_rows", "external_activity.stamp_rows", "_row_ids", "replace", "_row_prs", "enumerate",
