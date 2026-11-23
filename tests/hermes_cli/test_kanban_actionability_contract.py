@@ -303,6 +303,8 @@ def test_review_schedule_provenance_composition(awaiting, known):
     assert row['evidence_state'] == ('known' if known else 'unknown')
     assert row['action'] == ('wait_for_named_producer' if known else 'repair_lifecycle_contract')
     assert ('schedule_producer_malformed' in row['violations']) is not known
+    if not known:
+        assert row['blocker']['trigger'] == 'Repair the missing wake/producer through existing scheduling APIs'
     conn.close()
 
 
@@ -327,7 +329,8 @@ def test_review_carrier_pending_custody_composition(delivery):
     (None, True), ({}, True), ([], False), ('ci:run', False), (17, False),
     ({'kind': []}, False), ({'kind': 'other', 'ref': 'r'}, False),
     ({'kind': 'clock'}, True), ({'kind': 'clock', 'ref': 17}, False),
-    ({'kind': 'ci'}, False), ({'kind': 'ci', 'ref': ''}, False),
+    ({'kind': 'ci'}, False), ({'kind': 'ci', 'why': 'not a CI ref'}, False),
+    ({'kind': 'ci', 'ref': ''}, False),
     ({'kind': 'ci', 'ref': ' '}, False), ({'kind': 'ci', 'ref': 'r'}, True),
     ({'kind': 'card', 'ref': 't'}, True), ({'kind': 'deploy', 'ref': 'd'}, True),
     ({'kind': 'resource', 'ref': 'governor: pool', 'why': 'recorded load'}, True),
