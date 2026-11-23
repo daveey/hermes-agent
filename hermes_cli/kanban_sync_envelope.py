@@ -1,7 +1,8 @@
 """Durable first-send envelopes, committed by push before network I/O. [daveey]
 
 Only pending transport is retained: acknowledged outbox rows are deleted normally;
-synthetic parents are removed on acknowledgement or when their task disappears.
+unissued synthetic parents may be removed when their task disappears. An issued
+parent remains until exact final-verdict bookkeeping in the journal transaction.
 This cannot reconstruct envelopes already transmitted by an older core.
 """
 from __future__ import annotations
@@ -85,10 +86,14 @@ def parent(conn: sqlite3.Connection, task_id: str, build: Callable[[], dict], *,
     return wire
 
 
-def retire_parent(conn: sqlite3.Connection, task_id: str) -> None:
+def retire_parent(conn: sqlite3.Connection, task_id: str, *, remote: dict | None = None) -> None:
+    from hermes_cli.kanban_replay_journal import parent_cleanup_hold
+    parent_cleanup_hold(conn, task_id=task_id, remote=remote)
     conn.execute("DELETE FROM kanban_sync_parent_envelopes WHERE task_id=?", (task_id,))
 
 
 def prune_parents(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM kanban_sync_parent_envelopes WHERE NOT EXISTS "
-                 "(SELECT 1 FROM tasks WHERE id=task_id AND sync_version IS NULL)")
+    from hermes_cli.kanban_replay_journal import parent_cleanup_hold
+    held = parent_cleanup_hold(conn)
+    conn.execute("DELETE FROM kanban_sync_parent_envelopes WHERE task_id IS NOT ? AND NOT EXISTS "
+                 "(SELECT 1 FROM tasks WHERE id=task_id AND sync_version IS NULL)", (held,))

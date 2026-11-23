@@ -115,7 +115,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                              'VALUES (?,?,?,?,?,?,?,?,?)',
                              (pending['op_id'], 'tasks', row['row_uid'], 'upsert', json.dumps(wire['fields']),
                               wire['hlc'], int(time() * 1000), wire.get('status_origin'), json.dumps(wire)))
-                retire_parent(conn, row['row_uid'])
+                retire_parent(conn, row['row_uid'], remote=remote)
             reason = f"{verdict.get('reason') or status}: {verdict.get('detail') or ''}".strip(': ')
             if status == 'cancelled':
                 # Reuse non-success custody so dependency/import fences also hold
@@ -146,7 +146,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                          (verdict['version'], row['row_uid']))
         if row.get('_parent'):
             from hermes_cli.kanban_sync_envelope import retire_parent
-            retire_parent(conn, row['row_uid'])
+            retire_parent(conn, row['row_uid'], remote=remote)
         else:
             conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
         setattr(out, status, getattr(out, status) + 1)

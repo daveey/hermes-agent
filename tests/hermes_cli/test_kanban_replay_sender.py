@@ -627,8 +627,8 @@ def test_synthetic_rejection_bookkeeping_failure_rolls_back_and_recovers(live, m
     receiver = Receiver()
     receiver.status = 'rejected'
     retire = envelopes.retire_parent
-    def fail_after_retirement(conn, task_id):
-        retire(conn, task_id)
+    def fail_after_retirement(conn, task_id, **kwargs):
+        retire(conn, task_id, **kwargs)
         raise OSError('controlled bookkeeping failure')
     monkeypatch.setattr(envelopes, 'retire_parent', fail_after_retirement)
     with pytest.raises(OSError, match='^controlled bookkeeping failure$'):

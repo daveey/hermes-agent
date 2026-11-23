@@ -131,6 +131,36 @@ def guard_import(conn: sqlite3.Connection, tables: tuple[str, ...], only: Mappin
     return True
 
 
+def parent_cleanup_hold(conn: sqlite3.Connection, *, task_id: str | None = None,
+                        remote: dict | None = None) -> str | None:
+    """Keep an issued task cache until its authenticated exact final settlement.
+
+    The sender supplies its inspected serving-Board slot only inside recover's
+    bookkeeping transaction. Ordinary cleanup has no authority to infer a final
+    outcome from local row existence or a newer sync version.
+    """
+    anchor = conn.execute('SELECT journal_id FROM kanban_sync_state LIMIT 1').fetchone()
+    if anchor is None or anchor[0] is None:
+        return None
+    _reserve(conn)
+    state, encoded = _read(conn)
+    if encoded is None:
+        return None
+    wire = json.loads(encoded)
+    if wire['table'] != 'tasks':
+        return None
+    held = wire['uid']
+    if task_id == held:
+        if remote is None or reconcile(state, remote)['action'] != 'record':
+            raise ValueError('issued parent requires final verdict')
+        saved = conn.execute('SELECT wire FROM kanban_sync_parent_envelopes WHERE task_id=?', (held,)).fetchone()
+        del wire['replay']
+        if saved is None or json.loads(saved[0]) != wire:
+            raise ValueError('issued parent cache custody mismatch')
+        return None
+    return held
+
+
 def pending_wire(conn: sqlite3.Connection) -> bytes | None:
     """Return exact canonical bytes after validating identity, digest and ack custody."""
     return _read(conn)[1]
