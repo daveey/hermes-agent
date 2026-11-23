@@ -1932,7 +1932,7 @@ _notif_held_lock = threading.Lock()
 def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     """Start the background notification poller for a TUI session (its name is greppable).
 
-    f ON (``display.loaded_notification_f``, default) admits the session as a lane of the shared cooperative
+    f ON (``display.loaded_notification_f``, opt-in) admits the session as a lane of the shared cooperative
     executor (``notification_loaded_executor``): no per-chat thread. f OFF keeps the legacy per-chat thread."""
     _wire_desktop_sinks()
     from tools.process_registry import process_registry

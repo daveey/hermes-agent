@@ -920,7 +920,7 @@ DEFAULT_CONFIG = {
         "interim_assistant_messages": True,
         # Warnings stay visible unless opted out; task results, manual commands and logs are unaffected.
         "suppress_warning_notifications": False,
-        "loaded_notification_f": True,  # shared loaded-session source schedule; false restores legacy polling
+        "loaded_notification_f": False,  # incident containment: legacy until shared source cost is corrected
         # Codex Responses commentary channel: true delivers completed commentary as mid-turn interim
         # updates; false routes it to reasoning (visible only with show_reasoning).
         "show_commentary": True,

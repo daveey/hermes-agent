@@ -359,14 +359,34 @@ def test_wake_and_reconcile_share_discovery_without_duplicate_delivery(tmp_path,
     late.close()
 
 
-def test_off_keeps_legacy_polling_and_collection_parity(tmp_path, monkeypatch):
+def test_explicit_on_still_admits_the_shared_source(monkeypatch):
+    from types import SimpleNamespace
+    from hermes_cli import config
+    from tui_gateway import notification_loaded_f as loaded
+    marker = object()
+    calls = []
+    def add(session, profile, wake):
+        calls.append(session)
+        return marker
+    monkeypatch.setattr(config, 'load_config', lambda: {'display': {'loaded_notification_f': True}})
+    monkeypatch.setattr(loaded, '_owner', SimpleNamespace(add=add))
+    session = {'session_key': fixtures.CHAT, 'profile_home': None}
+    assert loaded.register(session, lambda: None) is marker
+    assert calls == [session]
+
+
+@pytest.mark.parametrize('selection', ['explicit-off', 'missing-display', 'missing-key', 'defaults'])
+def test_off_keeps_legacy_polling_and_collection_parity(tmp_path, monkeypatch, selection):
     import queue
     from types import SimpleNamespace
     from tools import async_delegation, process_registry_awaiting
     from tui_gateway import notification_loaded_f as loaded, server, notification_park, producer_admission
     from tui_gateway.notification_wait import PollerStop
     from hermes_cli import config
-    monkeypatch.setattr(config, 'load_config', lambda: {'display': {'loaded_notification_f': False}})
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    choices = {'explicit-off': {'display': {'loaded_notification_f': False}},
+               'missing-display': {}, 'missing-key': {'display': {}}, 'defaults': DEFAULT_CONFIG}
+    monkeypatch.setattr(config, 'load_config', lambda: choices[selection])
     monkeypatch.setattr(loaded, '_owner', None)
     monkeypatch.setattr(async_delegation, 'maybe_sweep_orphaned_completions', lambda *_: None)
     monkeypatch.setattr(notification_park, 'has_parked', lambda: False)

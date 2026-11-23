@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 def enabled():
     from hermes_cli.config import load_config
-    return load_config().get('display', {}).get('loaded_notification_f', True) is True
+    return load_config().get('display', {}).get('loaded_notification_f', False) is True
 
 
 class Action:
