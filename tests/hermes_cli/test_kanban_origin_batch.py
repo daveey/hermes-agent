@@ -55,6 +55,29 @@ def test_refresh_and_projection_remain_strict_after_committed_changes(world, mon
         assert projected[0]['status'] == 'unknown'  # fixture owner has no current scope heartbeat
 
 
+def test_batch_work_is_bounded_by_requested_keys_not_replica_inventory(monkeypatch):
+    monkeypatch.setenv('HERMES_ORIGIN_BATCH_READS', '1')
+    conn = sqlite3.connect(':memory:')
+    try:
+        conn.execute('CREATE TABLE replica(gw TEXT,coll TEXT,key TEXT,version INTEGER,data TEXT,'
+                     'PRIMARY KEY(gw,coll,key))')
+        # Production secondary indexes let SQLite reorder an ordinary JOIN to
+        # scan all task records, then scan json_each once for every record.
+        conn.execute('CREATE INDEX replica_poll_metadata ON replica(coll,gw)')
+        conn.executemany('INSERT INTO replica VALUES(?,?,?,?,?)',
+                         [('owner', 'tasks', str(i), i, '{}') for i in range(3000)])
+        bindings = [{'owner': {'gateway': 'owner'}, 'task_record_key': str(i)} for i in range(8)]
+        calls = []
+        def budget():
+            calls.append(1)
+            return len(calls) > 10
+        conn.set_progress_handler(budget, 1000)
+        assert batch.task_rows(conn, bindings) == {('owner', str(i)): (i, '{}') for i in range(8)}
+    finally:
+        conn.set_progress_handler(None, 0)
+        conn.close()
+
+
 def test_locked_refresh_takes_new_batch_after_preflight(world, monkeypatch):
     path, replica, binding = world
     support.publish(replica, binding)

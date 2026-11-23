@@ -18,7 +18,9 @@ def task_rows(source, bindings):
     if not wanted or source is None:
         return {}
     return {(gw, key): (version, data) for gw, key, version, data in source.execute(
-        "SELECT r.gw,r.key,r.version,r.data FROM json_each(?) AS wanted JOIN replica AS r "
+        # CROSS JOIN keeps the requested keys outermost: ordinary JOIN can
+        # scan every task via a coll index and re-scan json_each per task.
+        "SELECT r.gw,r.key,r.version,r.data FROM json_each(?) AS wanted CROSS JOIN replica AS r "
         "ON r.gw=json_extract(wanted.value,'$[0]') AND r.coll='tasks' "
         "AND r.key=json_extract(wanted.value,'$[1]')", (json.dumps(wanted),)).fetchall()}
 
