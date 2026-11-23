@@ -17,6 +17,25 @@ def _make_project(path=None, pid="p_abc", is_auto=False, label="Proj"):
     }
 
 
+def test_complete_profile_membership_survives_limited_previews():
+    from hermes_cli.web_routers.profiles import _merge_profile_tree
+
+    merged = {}
+    for profile in ("default", "research"):
+        project = _make_project(path="/work/app")
+        project.update(sessionIds=["same", "hidden"], sessionCount=2,
+                       previewSessions=[{"id": "same", "last_active": 1}])
+        _merge_profile_tree(merged, [project], profile, preview_limit=1)
+    node = next(iter(merged.values()))
+    assert node["sessionMembership"] == [
+        {"id": sid, "profile": profile}
+        for profile in ("default", "research") for sid in ("same", "hidden")
+    ]
+    assert node["sessionIds"] == ["same", "hidden"]
+    assert node["sessionCount"] == 4
+    assert len(node["previewSessions"]) == 1
+
+
 class TestMergeProfileTree:
     """Unit tests for the merge-key normalization in _merge_profile_tree."""
 

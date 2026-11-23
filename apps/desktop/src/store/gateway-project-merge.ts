@@ -37,6 +37,14 @@ const stampOwner = (sessions: SessionInfo[], connectionId: string): SessionInfo[
 function stampTree(project: SidebarProjectTree, connectionId: string): SidebarProjectTree {
   return {
     ...project,
+    ...(project.sessionMembership
+      ? {
+          sessionMembership: project.sessionMembership.map(ref => ({
+            ...ref,
+            connection_id: ref.connection_id || connectionId
+          }))
+        }
+      : {}),
     ...(project.previewSessions ? { previewSessions: stampOwner(project.previewSessions, connectionId) } : {}),
     repos: (project.repos ?? []).map(repo => ({
       ...repo,
@@ -76,6 +84,7 @@ function mergeInto(base: SidebarProjectTree, remote: SidebarProjectTree, preview
     totalCostUsd: sum(base.totalCostUsd, remote.totalCostUsd),
     ...(lastActive ? { lastActive } : {}),
     previewSessions: previews,
+    sessionMembership: [...(base.sessionMembership ?? []), ...(remote.sessionMembership ?? [])],
     ...(base.sessionIds || remote.sessionIds
       ? { sessionIds: [...new Set([...(base.sessionIds ?? []), ...(remote.sessionIds ?? [])])] }
       : {})
@@ -131,7 +140,10 @@ function withoutClaimed(project: SidebarProjectTree, claimed: ReadonlySet<string
     sessionCount,
     repos,
     ...(previewSessions ? { previewSessions } : {}),
-    ...(sessionIds ? { sessionIds } : {})
+    ...(sessionIds ? { sessionIds } : {}),
+    ...(project.sessionMembership
+      ? { sessionMembership: project.sessionMembership.filter(ref => !claimed.has(ref.id)) }
+      : {})
   }
 }
 

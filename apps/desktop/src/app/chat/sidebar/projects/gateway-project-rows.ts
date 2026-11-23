@@ -37,13 +37,19 @@ const projectRows = (node: SidebarProjectTree): SessionInfo[] => [
   ...node.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))
 ]
 
-/** Complete overview membership survives limited previews and unhydrated lanes. Bare ids belong
- * to the node's declared owner/profile; mixed-owner nodes can only claim their stamped rows. */
+/** Complete profile-scoped overview membership survives limited previews and unhydrated lanes.
+ * Legacy single-profile nodes still use their declared owner/profile for bare ids. */
 function projectMembership(node: SidebarProjectTree, ownerOf: (s: SessionInfo) => string): string[] {
   const keys = projectRows(node).map(session => sessionIdentityKey(ownerOf(session), session))
   const owner = node.connectionId ?? node.remoteProject?.connectionId
 
-  if (owner) {
+  keys.push(
+    ...(node.sessionMembership ?? []).map(ref =>
+      JSON.stringify([ref.connection_id || owner || '', ref.profile, ref.id])
+    )
+  )
+
+  if (owner && !node.sessionMembership) {
     keys.push(...(node.sessionIds ?? []).map(id => JSON.stringify([owner, node.profile || 'default', id])))
   }
 
@@ -75,7 +81,19 @@ function addToNode(
     lastActive: Math.max(node.lastActive ?? 0, ...fresh.map(sessionRecency)),
     previewSessions: [...(node.previewSessions ?? []), ...fresh],
     sessionCount: node.sessionCount + fresh.length,
-    sessionIds: [...known, ...fresh.map(session => session.id)]
+    sessionIds: [...known, ...fresh.map(session => session.id)],
+    ...(node.sessionMembership
+      ? {
+          sessionMembership: [
+            ...node.sessionMembership,
+            ...fresh.map(session => ({
+              id: session.id,
+              profile: profileOf(session),
+              connection_id: ownerOf(session)
+            }))
+          ]
+        }
+      : {})
   }
 }
 
@@ -186,7 +204,15 @@ export function withGatewayProjectRows(
     })
 
     if (existing) {
-      next = next.map(node => (node === existing ? addToNode(node, rows, ownerOf) : node))
+      next = next.map(node =>
+        node === existing
+          ? addToNode(
+              node,
+              rows.filter(session => !claimed.has(sessionIdentityKey(connectionId, session))),
+              ownerOf
+            )
+          : node
+      )
 
       continue
     }

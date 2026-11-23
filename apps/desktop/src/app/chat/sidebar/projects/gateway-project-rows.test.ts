@@ -34,6 +34,31 @@ const foreign = (session: { connection_id?: null | string }) =>
 const label = (id: string) => ({ homelab: 'Homelab', studio: 'Studio' })[id] ?? id
 
 describe('withGatewayProjectRows', () => {
+  it.each([true, false])('preserves complete mixed-profile membership after gateway merge (path %s)', hasPath => {
+    const previews = ['a', 'b', 'c'].map(id =>
+      makeSessionInfo({ id, profile: 'research', cwd: hasPath ? '/work/app' : null })
+    )
+
+    const declared = {
+      ...localApp,
+      id: 'p_app',
+      path: null,
+      sessionCount: 4,
+      sessionIds: ['a', 'b', 'c', 'hidden'],
+      sessionMembership: ['a', 'b', 'c', 'hidden'].map(id => ({ id, profile: 'research' })),
+      previewSessions: previews
+    }
+
+    const merged = mergeGatewayProjectTrees([], [{ connectionId: 'studio', projects: [declared] }], 3)
+    const hidden = makeSessionInfo({ id: 'hidden', profile: 'research', connection_id: 'studio', cwd: '/work/app' })
+    const result = withGatewayProjectRows(merged, [hidden], foreign)
+    expect(result).toEqual(merged)
+    const other = makeSessionInfo({ ...hidden, profile: 'default' })
+    const added = withGatewayProjectRows(result, [hidden, other], foreign)
+    expect(added.reduce((n, project) => n + project.sessionCount, 0)).toBe(5)
+    expect(withGatewayProjectRows(added, [hidden, other], foreign)).toEqual(added)
+  })
+
   it.each(['local', 'studio'])(
     'merges live rows into the declared %s owner folder without counting them twice',
     owner => {

@@ -1734,6 +1734,7 @@ test('all-profiles project tree merges one read per profile by folder', async ()
         {
           id: 'auto:/repo', mergeKey: '/repo', path: '/repo', label: 'repo', isAuto: true, sessionCount: 2,
           totalTokens: 10, totalCostUsd: 1, lastActive: 5,
+          sessionIds: ['d1', 'd2'], sessionMembership: [{ id: 'd1', profile: 'default' }, { id: 'd2', profile: 'default' }],
           previewSessions: [session('d1', 'default', 5), session('d2', 'default', 1)],
           repos: [{ id: 'r', sessionCount: 2, groups: [{ id: 'main', sessionCount: 2, sessions: [session('d1', 'default', 5)] }] }]
         },
@@ -1748,6 +1749,7 @@ test('all-profiles project tree merges one read per profile by folder', async ()
         {
           id: 'p_abc', mergeKey: '/repo', path: '/repo', label: 'Declared', isAuto: false, sessionCount: 1,
           totalTokens: 5, totalCostUsd: 0.5, lastActive: 9,
+          sessionIds: ['w1'], sessionMembership: [{ id: 'w1', profile: 'work' }],
           previewSessions: [session('w1', 'work', 9)],
           repos: [{ id: 'r', sessionCount: 1, groups: [{ id: 'main', sessionCount: 1, sessions: [session('w1', 'work', 9)] }] }]
         }
@@ -1781,6 +1783,8 @@ test('all-profiles project tree merges one read per profile by folder', async ()
   assert.deepEqual(result.projects.map((p: any) => p.label ?? p.id), ['Declared', '__no_project__'])
   const repo = result.projects[0]
   assert.equal(repo.sessionCount, 3)
+  assert.deepEqual(repo.sessionMembership, [{ id: 'w1', profile: 'work' }, { id: 'd1', profile: 'default' }, { id: 'd2', profile: 'default' }])
+  assert.deepEqual(repo.sessionIds, ['w1', 'd1', 'd2'])
   assert.equal(repo.totalTokens, 15)
   assert.equal(repo.totalCostUsd, 1.5)
   assert.equal(repo.lastActive, 9)

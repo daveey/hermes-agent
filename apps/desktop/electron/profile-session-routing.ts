@@ -1690,6 +1690,8 @@ function mergeTreeById(into: Map<string, any>, entries: any[], childKey: string)
 // One folder's group from a second profile folded into the first: repos/groups by id, totals added,
 // the newest activity and the newest previews across both.
 function mergeProjectInto(existing: any, project: any, previewLimit: number) {
+  existing.sessionMembership = [...(existing.sessionMembership ?? []), ...(project.sessionMembership ?? [])]
+  existing.sessionIds = [...new Set([...(existing.sessionIds ?? []), ...(project.sessionIds ?? [])])]
   const repos = new Map<string, any>((existing.repos ?? []).map((repo: any) => [repo.id, repo]))
   mergeTreeById(repos, project.repos ?? [], 'groups')
   existing.repos = [...repos.values()]

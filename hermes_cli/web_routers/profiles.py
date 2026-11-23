@@ -702,6 +702,8 @@ def _merge_profile_tree(
     a declared project (``p_<hash>``) folds with another profile's auto entry for the same
     folder. Sessions carry the owning profile; a group header never claims a single owner."""
     for project in projects:
+        project["sessionMembership"] = project.get("sessionMembership", [
+            {"id": sid, "profile": profile} for sid in project.get("sessionIds") or []])
         lane_sessions = (s for r in project.get("repos") or []
                          for lane in r.get("groups") or []
                          for s in lane.get("sessions") or [])
@@ -727,6 +729,8 @@ def _merge_profile_tree(
             existing, project = project, existing
             merged[key] = existing
 
+        existing["sessionMembership"].extend(project["sessionMembership"])
+        existing["sessionIds"] = list(dict.fromkeys((existing.get("sessionIds") or []) + (project.get("sessionIds") or [])))
         repos: dict[str, dict[str, Any]] = {r["id"]: r for r in existing.get("repos") or []}
         _merge_by_id(repos, project.get("repos") or [], "groups")
         existing["repos"] = list(repos.values())
