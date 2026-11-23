@@ -25,12 +25,10 @@ def tables_columns(conn: sqlite3.Connection, *tables: str) -> tuple[frozenset[st
     """``PRAGMA table_info(<table>)`` column names for each of ``tables``, in one statement and one row."""
     if not tables:
         return ()
-    cur = conn.cursor()
-    try:
-        cur.row_factory = None  # whatever the connection's factory, index the single row positionally
-        row = cur.execute("SELECT " + ", ".join(_ONE for _ in tables), tables).fetchone()
-    finally:
-        cur.close()
+    # Only ``execute`` is used, so any connection-like wrapper works; the single row is read positionally whatever
+    # the row factory (tuple, ``sqlite3.Row``, or a mapping in column order).
+    row = conn.execute("SELECT " + ", ".join(_ONE for _ in tables), tables).fetchone()
+    row = tuple(row.values()) if isinstance(row, dict) else tuple(row)
     return tuple(frozenset(json.loads(cell)) for cell in row)
 
 
