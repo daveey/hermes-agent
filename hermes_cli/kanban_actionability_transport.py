@@ -197,9 +197,9 @@ def before_send(conn, rows, hub, board) -> None:
                     escalation_ready(hub, board, wire, cap)
 
 
-def record_result(conn, row: dict, result: dict) -> str:
+def record_result(conn, row: dict, result: dict, *, final: bool = False) -> str:
     if row.get('op') != KIND:
-        return retain.record_result(conn, row, result)
+        return retain.record_result(conn, row, result, final=final)
     old = command(conn, row['op_id'])
     if old is None:
         raise ValueError('actionability custody missing')
@@ -209,7 +209,7 @@ def record_result(conn, row: dict, result: dict) -> str:
     if result.get('status') == 'applied':
         conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (row['op_id'],))
         state, count = 'acknowledged', 'applied'
-    elif result.get('status') == 'rejected' and not transient_rejection(result):
+    elif result.get('status') == 'rejected' and (final or not transient_rejection(result)):
         conn.execute("UPDATE kanban_sync_outbox SET state='rejected',last_error=? WHERE op_id=?",
                      (str(result.get('reason'))[:500], row['op_id']))
         state, count = 'rejected', 'rejected'
@@ -246,7 +246,9 @@ def confirm(conn, hub, board: str, op_id: str) -> dict:
     cap = capability(hub, board)
     if wire['phase'] == 'escalation':
         escalation_ready(hub, board, wire, cap)
-    reply = hub.ops(board, [wire])
+    from hermes_cli.kanban_replay_controls import confirmed_transport
+    strict = confirmed_transport(conn, old)
+    reply = None if strict else hub.ops(board, [wire])
     results = reply.get('results', []) if isinstance(reply, dict) else []
     if (isinstance(results, list) and len(results) == 1 and isinstance(results[0], dict)
             and results[0].get('client_op_id') == op_id and results[0].get('status') == 'rejected'):
@@ -256,7 +258,7 @@ def confirm(conn, hub, board: str, op_id: str) -> dict:
             with write_txn(conn):
                 record_result(conn, {'op': KIND, 'op_id': op_id}, results[0])
             raise ValueError('actionability canonical request rejected; preserve definitive custody')
-    if (not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict)
+    if not strict and (not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict)
             or results[0].get('client_op_id') != op_id or results[0].get('status') != 'applied'):
         raise ValueError('actionability delivery unknown; preserve exact request')
     gateway = hub.ident.gateway

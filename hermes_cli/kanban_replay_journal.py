@@ -124,7 +124,8 @@ def guard_import(conn: sqlite3.Connection, tables: tuple[str, ...], only: Mappin
     held = list(conn.execute("SELECT table_name,row_uid FROM kanban_sync_outbox WHERE state='rejected'"))
     if encoded is not None:
         wire = json.loads(encoded)
-        held.append((wire['table'], wire['uid']))
+        from hermes_cli.kanban_replay_controls import routing
+        held.append(routing(wire))
     for table, uid in held:
         if table in tables and (only is None or uid in only.get(table, set())):
             raise ValueError('import overlaps replay custody; explicit reconciliation required')
@@ -157,7 +158,7 @@ def parent_cleanup_hold(conn: sqlite3.Connection, *, task_id: str | None = None,
     if encoded is None:
         return None
     wire = json.loads(encoded)
-    if wire['table'] != 'tasks':
+    if wire.get('table') != 'tasks':
         return None
     held = wire['uid']
     if task_id == held:

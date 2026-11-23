@@ -62,7 +62,7 @@ def pause(conn, board, error):
                      'ON CONFLICT(id) DO UPDATE SET reason=excluded.reason,attempts=excluded.attempts,'
                      'retry_after=excluded.retry_after,paused=excluded.paused',
                      (state['journal_id'], state['generation'], pending['sequence'], pending['op_id'],
-                      wire['uid'], str(error)[:500], recovery, attempts, time() + min(60, 2 ** attempts), int(paused)))
+                      wire.get('uid', wire.get('task')), str(error)[:500], recovery, attempts, time() + min(60, 2 ** attempts), int(paused)))
     if notify:
         logging.getLogger(__name__).error('Replay current-row hold: %s', fault(conn))
     guard(conn)

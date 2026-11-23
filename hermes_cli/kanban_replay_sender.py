@@ -11,13 +11,15 @@ from urllib.parse import quote
 
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_replay_journal as journal
+from hermes_cli import kanban_replay_controls as controls
 from hermes_cli.kanban_db_connect import write_txn
 from hermes_cli.kanban_replay_reconcile import reconcile
 
 
 # Physical operation stays in the outbox; only the transport spelling is normalized.
 _WIRE_OPS = {'upsert': 'upsert', 'delete': 'delete', 'compat': 'upsert',
-             'compat_import': 'upsert', 'import': 'upsert'}
+             'compat_import': 'upsert', 'import': 'upsert', 'restore': 'upsert',
+             'retain': 'retain', 'actionability_record': 'actionability_record', 'release': 'release'}
 
 
 def _wire_op(physical):
@@ -85,14 +87,19 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         row = conn.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],)).fetchone()
         wire = json.loads(journal.pending_wire(conn))
         del wire['replay']
+        table, uid = controls.routing(wire)
         if row is None:
+            if wire['op'] in controls.CONTROLS:
+                raise ValueError('issued command source custody missing')
             saved = conn.execute('SELECT wire FROM kanban_sync_parent_envelopes WHERE task_id=?', (wire['uid'],)).fetchone()
             if saved is None or json.loads(saved[0]) != wire:
                 raise ValueError('issued source custody missing')
             return dict(row_uid=wire['uid'], table_name='tasks', op='upsert', _parent=True)
-        if row['wire_json'] is None or json.loads(row['wire_json']) != wire:
+        if row['op'] in controls.FROZEN:
+            controls.validate(conn, dict(row), wire)
+        elif row['wire_json'] is None or json.loads(row['wire_json']) != wire:
             raise ValueError('issued source custody changed')
-        if (row['row_uid'] != wire['uid'] or row['table_name'] != wire['table'] or
+        if (row['row_uid'] != uid or row['table_name'] != table or
                 pending.get('source_op', wire['op']) != row['op'] or
                 _wire_op(row['op']) != wire['op'] or row['state'] != 'pending' or
                 bool(wire.get('import')) != (row['table_name'] == 'tasks' and row['op'] in ('import', 'compat_import'))):
@@ -134,6 +141,10 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         if decision['action'] != 'record':
             return None
         verdict = decision['verdict']
+        if source()['op'] == 'release' and verdict['status'] == 'deferred':
+            raise ValueError('unsupported final command disposition; preserve custody')
+        if source()['op'] in controls.FROZEN or verdict['status'] == 'cancelled':
+            return None
         if (verdict['status'] == 'deferred' and cap.get('deferred_observation') == 'origin_pending1'
                 and (projection is not None or source().get('_parent'))):
             # The authenticated final verdict establishes server status custody
@@ -191,6 +202,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         if decision['action'] != 'record' or decision['verdict']['status'] != 'deferred':
             return None
         wire = json.loads(journal.pending_wire(conn))
+        if wire['op'] in controls.CONTROLS:
+            return None
         active = [item for item in deferred.pending(conn)
                   if item['board_incarnation'] == current['board_incarnation'] and item['task'] == wire['uid']]
         if len(active) < 16 or cap.get('deferred_observation') != 'origin_pending1':
@@ -220,7 +233,11 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             raise ValueError('source verdict identity mismatch')
         row = source()
         status = verdict['status']
-        if projection is not None:
+        if row['op'] in controls.FROZEN:
+            result = controls.settle(conn, row, verdict)
+            setattr(out, result, getattr(out, result) + 1)
+            return
+        if projection is not None and status != 'cancelled':
             projection.stage(row, json.loads(journal.pending_wire(conn)), verdict)
         if status in ('rejected', 'cancelled'):
             if row.get('_parent'):
@@ -267,7 +284,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             raise ValueError('tracer final disposition requires custody integration')
         if row.get('_parent') and not verdict.get('version'):
             project_parent(row)
-        if verdict.get('version') and row['table_name'] == 'tasks':
+        if verdict.get('version') and row['table_name'] == 'tasks' and row['op'] != 'release':
             conn.execute('UPDATE tasks SET sync_version=MAX(COALESCE(sync_version,0),?) WHERE id=?',
                          (verdict['version'], row['row_uid']))
         elif verdict.get('version') and row['table_name'] == 'task_runs':
@@ -290,6 +307,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         if journal.pending_wire(conn) is None:
             rows, _, _ = select_pending(conn, hub, board, seen, now=int(time()), limit=1, before_head=before_head,
                                         hold_rejected=True)
+            from hermes_cli.kanban_actionability_transport import before_send
+            before_send(conn, rows, hub, board)
 
         membership = refresh_capacity()
         current_row = refresh_current_row()
@@ -316,6 +335,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                 if parents:
                     op, tid = parents[0]
                     intent = envelopes.parent(conn, tid, lambda: op, supported=True)
+                elif row['op'] in controls.FROZEN:
+                    from hermes_cli.kanban_actionability_transport import outbound
+                    intent = outbound(conn, row)
                 else:
                     intent = envelopes.outbound(conn, row, lambda: strip_stale_push(conn, wire_ops.translate(
                         client._full_row_if_unseen(conn, row), client._next_hlc(conn, gateway))), supported=True)
@@ -325,6 +347,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                 encoded = journal.issue(conn, intent, source_op=None if parents else row['op'])
             row = source()  # Validate retained source custody on RETRY as well as final recovery.
         wire = json.loads(encoded)
+        from hermes_cli.kanban_actionability_transport import before_send
+        before_send(conn, [row], hub, board)
         if before_head:
             # Issuance is not permission to overwrite an unread run end or terminal
             # task. Judge even saved unissued envelopes by their frozen wire.

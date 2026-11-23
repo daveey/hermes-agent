@@ -81,7 +81,7 @@ def own_batch(rows: list[dict]) -> list[dict]:
     return rows
 
 
-def record_result(conn: sqlite3.Connection, row: dict, result: dict) -> str:
+def record_result(conn: sqlite3.Connection, row: dict, result: dict, *, final: bool = False) -> str:
     """An ACK may remove transport, never custody or independent-readback requirement."""
     status = result.get("status")
     op_id = row["op_id"]
@@ -90,7 +90,7 @@ def record_result(conn: sqlite3.Connection, row: dict, result: dict) -> str:
     if prior is not None and prior[0] in ("rejected", "confirmed", "acknowledged"):
         return "deferred"  # A delayed reply cannot revoke evidence of application or rejection.
     from hermes_cli.kanban_sync_compat import transient_rejection
-    if status == "rejected" and transient_rejection(result):
+    if not final and status == "rejected" and transient_rejection(result):
         status = "deferred"  # Infrastructure/ordering refusal is not a definitive decision.
     if status == "applied":
         conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id=?", (op_id,))
@@ -133,14 +133,15 @@ def confirm(conn: sqlite3.Connection, hub, board: str, run_uid: str) -> dict:
     if hashlib.sha256(canonical(wire).encode("utf-8")).hexdigest() != owned["request_sha256"]:
         raise ValueError("retain command digest changed")
     capability(hub, board)
-    reply = hub.ops(board, [wire])
-    results = reply.get("results", [])
+    from hermes_cli.kanban_replay_controls import confirmed_transport
+    strict = confirmed_transport(conn, owned)
+    results = [] if strict else hub.ops(board, [wire]).get("results", [])
     if (len(results) == 1 and results[0].get("client_op_id") == owned["request_uid"]
             and results[0].get("status") == "rejected"):
         from hermes_cli import kanban_db as kb
         with kb.write_txn(conn, allow_nested=True):
             record_result(conn, {"op_id": owned["op_id"]}, results[0])
-    if (len(results) != 1 or results[0].get("client_op_id") != owned["request_uid"]
+    if not strict and (len(results) != 1 or results[0].get("client_op_id") != owned["request_uid"]
             or results[0].get("status") != "applied"):
         raise ValueError("retain intent not canonically applied; preserve exact command custody")
     event = _evidence(hub, board, "task_events", owned["event_uid"])

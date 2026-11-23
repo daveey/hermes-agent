@@ -32,11 +32,6 @@ def test_non_retryable_or_exhausted_verdict_keeps_visible_identity(live, mode, r
     receiver.lose_reply = False
     receiver.evidence = dict(board='default', table='tasks', uid=tid, state='live', head=99,
                              row=dict(uid=tid, title='bounded refusal', status='todo', version=19))
-    if mode and status == 'cancelled':
-        with pytest.raises(ValueError, match='primary replay disposition not integrated'):
-            client.push(live, receiver, 'default', 'macbook', primary=mode, max_batches=1)
-        assert journal.pending_wire(live) is not None
-        return  # later controls gate, not silently expanded here
     client.push(live, receiver, 'default', 'macbook', primary=mode, max_batches=1)
     source = repair.row(live, original)
     assert source['state'] == 'rejected' and source['attempts'] == attempts + 1
