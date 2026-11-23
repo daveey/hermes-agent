@@ -108,8 +108,15 @@ async def test_cold_shutdown_retains_real_capture_custody(profiles_on_disk, monk
                 pytest.fail('retained native owner was replaced')
     finally:
         release.set()
-        assert await asyncio.to_thread(wait_until, lambda: not runtime.feed._thread.is_alive(), timeout=5)
+        # A different app lease may keep the shared scheduler alive. Fence this
+        # owner's real capture before retrying its retained shutdown instead.
+        registrations = tuple(runtime.feed._registrations)
+        assert registrations
+        assert await asyncio.to_thread(wait_until,
+            lambda: all(not bound.capturing for bound, _ in registrations), timeout=5)
         await asyncio.to_thread(runtime.close)
+        assert runtime.feed._closed
+        assert not runtime.feed._registrations
     assert runtime.binding is None
     assert not runtime.ready  # late canonical completion cannot activate after stop
 
@@ -140,7 +147,7 @@ async def test_unavailable_capture_retries_without_replacing_owner(profiles_on_d
         runtime = app.state.sessions_facts
         assert await asyncio.to_thread(wait_until, lambda: isinstance(
             runtime.store.snapshot(runtime.scope).view('sessions', selected()), Unavailable), timeout=5)
-        assert runtime.feed._budget.max_seconds == 5
+        assert runtime.feed.budget.max_seconds == 5
         assert not runtime.ready
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
             assert (await client.get('/api/profiles/sessions')).status_code == 503
@@ -150,7 +157,8 @@ async def test_unavailable_capture_retries_without_replacing_owner(profiles_on_d
             assert any(row['id'] == 'retry-entry' for row in response.json()['sessions'])
         assert app.state.sessions_facts is runtime
     assert not runtime._bootstrap.is_alive()
-    assert not runtime.feed._thread.is_alive()
+    assert runtime.feed._closed
+    assert not runtime.feed._registrations
 
 
 @pytest.mark.asyncio
@@ -207,7 +215,7 @@ async def test_cold_capture_beyond_old_bootstrap_deadline_eventually_ready(profi
             assert not runtime.ready
             release.set()
             assert await asyncio.to_thread(wait_until, lambda: runtime.ready, timeout=40)
-            assert runtime.feed._budget.max_seconds == 5
+            assert runtime.feed.budget.max_seconds == 5
         finally:
             release.set()
     assert app.state.sessions_facts is None
@@ -247,4 +255,5 @@ async def test_bootstrap_initialization_join_failure_retains_custody(profiles_on
     assert not runtime.ready
     assert runtime.binding is None
     assert runtime.feed is not None
-    assert not runtime.feed._thread.is_alive()
+    assert runtime.feed._closed
+    assert not runtime.feed._registrations
