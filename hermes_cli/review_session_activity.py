@@ -62,6 +62,17 @@ _lock = threading.Lock()
 # (owner, repo, number) -> (expires_monotonic, info | None)
 _pr_cache: dict[tuple[str, str, int], tuple[float, dict[str, Any] | None]] = {}
 _inflight: set[tuple[str, str, int]] = set()
+_refresh_listeners: set[Callable] = set()
+
+
+def subscribe_refresh(callback):
+    """Native capture wake only; callbacks must not perform reads or projection."""
+    with _lock:
+        _refresh_listeners.add(callback)
+    def close():
+        with _lock:
+            _refresh_listeners.discard(callback)
+    return close
 # row id -> ((last_active, message_count), [pr keys])
 _msg_cache: dict[str, tuple[tuple[Any, Any], list[tuple[str, str, int]]]] = {}
 
@@ -177,6 +188,9 @@ def _refresh(key: tuple[str, str, int]) -> None:
     with _lock:
         _pr_cache[key] = (time.monotonic() + ttl, info)
         _inflight.discard(key)
+        listeners = tuple(_refresh_listeners)
+    for listener in listeners:
+        listener()
 
 
 def _pr_info(key: tuple[str, str, int]) -> dict[str, Any] | None:

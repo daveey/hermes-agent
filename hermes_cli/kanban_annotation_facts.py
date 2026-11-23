@@ -55,7 +55,7 @@ class AnnotationUnavailable(RuntimeError):
 def _thaw(value):
     if isinstance(value, Mapping):
         return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, list)):
         return [_thaw(item) for item in value]
     return value
 
@@ -241,9 +241,43 @@ def _legacy_call(rows, legacy, **kwargs):
             _active_lock.notify_all()
 
 
+_native_lookup = None
+
+
+def install_lookup(lookup):
+    """Authorized startup installs one immutable profile binding registry."""
+    global _native_lookup
+    with _active_lock:
+        if _native_lookup is not None:
+            raise RuntimeError('annotation lookup already installed')
+        _native_lookup = lookup
+    def close():
+        global _native_lookup
+        with _active_lock:
+            if _native_lookup is lookup:
+                _native_lookup = None
+    return close
+
+
 def annotate(family, rows, legacy, **kwargs):
     """Request seam; binding is installed by the authorized host lifecycle."""
     binding = _current.get()
+    lookup = _native_lookup
+    if binding is None and lookup is not None:
+        pending = [(row, dict(row)) for row in rows]
+        groups = {}
+        for _, row in pending:
+            selected = lookup(row.get('profile'))
+            if selected is None:
+                raise AnnotationUnavailable('annotation profile not authorized')
+            groups.setdefault(selected, []).append(row)
+        for selected, batch in groups.items():
+            selected.annotate(family, batch, legacy, **kwargs)
+        # Publish no partial row mutation if another profile is unavailable.
+        for original, projected in pending:
+            original.clear()
+            original.update(projected)
+        return rows
     if binding is None:
         return _legacy_call(rows, legacy, **kwargs)
     return binding.annotate(family, rows, legacy, **kwargs)

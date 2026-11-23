@@ -26,7 +26,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
 from hermes_cli.turn_process_execution_observations import TURN_SOURCE, profile_for_state_path, replace, turn
@@ -134,6 +134,11 @@ def _update_paused_tui_turns(home: Path, now: float) -> set[str]:
         data = json.loads((home / "desktop" / "interrupted_turns.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return set()
+    return project_paused_tui_turns(data, lambda: _auto_continue_bounds(home), now)
+
+
+def project_paused_tui_turns(data, bounds_for_home: Callable[[], tuple[bool, float, int]], now):
+    """Pure canonical pause classifier; bounded captures supply detached data."""
     out: set[str] = set()
     bounds: tuple[bool, float, int] | None = None
     for key, entry in (data.items() if isinstance(data, dict) else ()):
@@ -146,7 +151,7 @@ def _update_paused_tui_turns(home: Path, now: float) -> set[str]:
         except (TypeError, ValueError):
             continue
         if bounds is None:
-            bounds = _auto_continue_bounds(home)
+            bounds = bounds_for_home()
         enabled, fresh_s, max_attempts = bounds
         if enabled and now - since <= fresh_s and attempts < max_attempts:
             out.add(str(key))
@@ -239,8 +244,9 @@ def annotate_turn_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return project_turn_activity(rows, live=live, leases=leases, gateway=gateway, now=now)
 
 
-def project_turn_activity(rows, *, live, leases, gateway, now):
+def project_turn_activity(rows, *, live, leases, gateway, now, lease_project=None):
     """Pure serializer over captured live IDs and per-ID lease dictionaries."""
+    lease_project = turn if lease_project is None else lease_project
     for row in rows:
         roots = [sid for sid in _row_ids(row) if sid in live]
         if roots:
@@ -249,7 +255,7 @@ def project_turn_activity(rows, *, live, leases, gateway, now):
             row.pop("turn_live", None)
         try:
             found = [lease for sid in dict.fromkeys(roots) for lease in leases.get(sid, ())]
-            replace(row, {TURN_SOURCE}, [turn(lease, gateway=gateway, profile=lease["profile"], now=now)
+            replace(row, {TURN_SOURCE}, [lease_project(lease, gateway=gateway, profile=lease["profile"], now=now)
                                          for lease in found])
         except ADAPTER_ERRORS:
             _log.debug("turn execution observation unavailable", exc_info=True)

@@ -66,10 +66,15 @@ def turn(lease, *, gateway, profile, now):
     token (``pid=..:turn=..`` or ``..:nonce=..``), so its digest identifies the lease instance.
     A missing/padded token leaves the generation absent and the projection unknown.
     """
-    cid = lease.get("conversation_id")
     digest = holder_digest(lease.get("holder"))
+    return turn_from_digest(lease, digest=digest, gateway=gateway, profile=profile, now=now)
+
+
+def turn_from_digest(lease, *, digest, gateway, profile, now):
+    """Native capture supplies only the one-way digest, never its CAS credential."""
+    cid = lease.get("conversation_id")
     generation = f"holder-sha256:{digest}" if digest else None
-    # The raw holder never leaves this function: not in identity, revision or references.
+    # The raw holder never leaves the legacy adapter or enters a captured fact.
     reference = f"session_turn_leases/{cid}/{generation}"
     raw = {"version": 1, "identity": _identity("turn", cid, gateway, profile, cid, generation),
            "owner": _owner(gateway, profile, cid), "state": "running", "source": TURN_SOURCE,
