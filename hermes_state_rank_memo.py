@@ -22,7 +22,9 @@ SQLite's order) no lower than before, the new page is the top of ``R``. Proof: a
 on the previous page, so it was not admitted or ranked strictly below the previous boundary, and none of
 its inputs moved (its own row, its parent, its chain's rows and messages); the previous page rows alone
 still fill the page at or above that boundary. Otherwise (a page row removed or lowered) the exact query
-runs. A params change is a different key, so a fresh entry from the exact query.
+runs. A params change is a different key, so a fresh entry from the exact query. SQLite ranks only
+dirty's relatives (``_rerank``): a page row outside them moved none of its inputs either, so the memo's sort
+key for it IS its exact one, and it is merged back in SQLite's order.
 
 Previews. ``_preview_raw`` (the first eligible user message, ~95% of the page projection on the hub) is
 cached per store as ``{session_id: (transcript_revision, raw)}`` and used in SQL only when the row's
@@ -186,6 +188,7 @@ class _Entry:
     ids: list  # ranked page ids, best first
     keys: dict  # id -> sort key
     eff: dict  # id -> effective_last_active as SQLite returned it
+    started: dict  # id -> started_at as SQLite returned it (rebuilds a kept row's sort key)
     dirty: set = field(default_factory=set)
 
 
@@ -265,7 +268,7 @@ class RankMemo:
 
     def put(self, key: tuple, rows: list) -> _Entry:
         entry = _Entry([r[0] for r in rows], {r[0]: sort_key(r[3], r[1], r[0]) for r in rows},
-                       {r[0]: r[3] for r in rows})
+                       {r[0]: r[3] for r in rows}, {r[0]: r[1] for r in rows})
         self.entries[key] = entry
         self.entries.move_to_end(key)
         while len(self.entries) > _MAX_ENTRIES:
@@ -322,6 +325,17 @@ def _account(outcome: str) -> None:
         logger.debug("rank memo pass accounting failed", exc_info=True)
 
 
+def _rerank(entry: _Entry, relatives: set, restricted_ids) -> list:
+    """The exact ranking of ``R`` = previous page ∪ ``relatives``, best first, stepping SQLite only through
+    ``relatives``: a previous page row outside them moved none of its inputs (module doc), so its sort key
+    and effective_last_active are the memo's. Merged in SQLite's order (``sort_key``, a total order: ids are
+    unique). Re-ranking the whole previous page brought every row of a 2000-row tree page back to Python on
+    each refresh, under the store lock, for the few rows a write touched."""
+    fresh = list(restricted_ids(sorted(relatives))) if relatives else []
+    kept = [(sid, entry.started[sid], None, entry.eff[sid]) for sid in entry.ids if sid not in relatives]
+    return sorted(kept + fresh, key=lambda r: sort_key(r[3], r[1], r[0]), reverse=True)
+
+
 def ranked_ids(conn, memo: RankMemo, key: tuple, need: int, exact_ids, restricted_ids) -> list:
     """``[(id, started_at, last_active, effective_last_active)]`` of the top ``need`` rows, from the memo
     when provable, else ``exact_ids()``. ``restricted_ids(ids)`` is the exact ranking of ``ids`` alone.
@@ -340,7 +354,7 @@ def ranked_ids(conn, memo: RankMemo, key: tuple, need: int, exact_ids, restricte
         return [(sid, None, None, entry.eff[sid]) for sid in entry.ids]
     dirty = json.dumps(sorted(entry.dirty))
     relatives = {sid for (sid,) in conn.execute(_RELATIVES_SQL, (dirty,)) if sid is not None}
-    rows = restricted_ids(sorted(set(entry.ids) | relatives))
+    rows = _rerank(entry, relatives, restricted_ids)
     got = {r[0]: sort_key(r[3], r[1], r[0]) for r in rows}
     for sid in entry.ids:
         if sid not in got:

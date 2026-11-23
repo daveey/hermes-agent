@@ -121,6 +121,8 @@ def ranked_query(where_sql: str, outer_where: str, seed_from: str, select_head: 
 # Every session with a bound >= ? (three binds of the threshold, then the JSON list of sessions whose
 # cached message max reaches it), plus all their ancestors: a chain root ranks by its members.
 # UNION ALL keeps each arm on its own index (a UNION merge scanned the PK instead); ``up`` dedupes.
+# One JSON row, handed back verbatim as the restricted ranking's ``json_each`` bind: Python never steps
+# through the ~7.5k candidate rows (hub, 2000-row tree page), each of which dropped and re-took the GIL.
 _CANDIDATES_SQL = f"""
     WITH RECURSIVE
     seed(id) AS (
@@ -133,7 +135,30 @@ _CANDIDATES_SQL = f"""
         UNION SELECT s.parent_session_id FROM up JOIN sessions s ON s.id = up.id
         WHERE s.parent_session_id IS NOT NULL
     )
-    SELECT id FROM up"""
+    SELECT json_group_array(id) FROM up"""
+
+# [daveey] The full rebuild as ONE aggregate row instead of one Python row per session (27k on the hub):
+# Python's sqlite3 releases the GIL around every step, and on the ~190-thread Desktop backend each re-take
+# could wait the 5 ms switch interval, all under the store lock. JSON renders a REAL with 15 significant
+# digits, so a REAL max travels as two exact integers [trunc(m), (m - trunc(m)) * 2**52]: for m >= 1 the
+# subtraction is exact (Sterbenz) and every fraction bit is >= ulp(m) >= 2**-52, so ``a + n / 2**52`` is m
+# again, bit for bit. A REAL below 1 (a pre-1970 stamp inside the window) travels as 1.0: still an upper
+# bound, which is all the cache claims. ``LIMIT -1`` keeps SQLite from flattening the subquery into the
+# aggregate, which would re-run the probe once per reference to ``m``.
+_FRAC = 1 << 52
+_REAL_HEAD = "CASE WHEN typeof(m) != 'real' THEN m WHEN m >= 1 THEN CAST(m AS INTEGER) ELSE 1 END"
+_REAL_FRAC = (f"CASE WHEN typeof(m) != 'real' THEN NULL WHEN m >= 1 THEN "
+              f"CAST((m - CAST(m AS INTEGER)) * {float(_FRAC)!r} AS INTEGER) ELSE 0 END")
+_REBUILD_SQL = (f"SELECT json_group_array(json_array(id, {_REAL_HEAD}, {_REAL_FRAC})) FROM ("
+                f"SELECT s.id AS id, {_msg_max_sql('s.id')} AS m FROM sessions s LIMIT -1) WHERE m IS NOT NULL")
+
+
+def _rebuilt_maxima(conn) -> dict[str, Any]:
+    """``{session_id: in-window MAX(messages.timestamp)}`` of every session with a message, exact."""
+    out: dict[str, Any] = {}
+    for sid, head, frac in json.loads(conn.execute(_REBUILD_SQL).fetchone()[0] or "[]"):
+        out[sid] = head if frac is None else head + frac / _FRAC
+    return out
 
 
 class _StoreRecency:
@@ -158,6 +183,19 @@ class _StoreRecency:
             else:
                 self.msg_max[sid] = value
 
+    def drop_below(self, conn, ids: list, threshold) -> None:
+        """Re-probe ``ids`` (cached at or above ``threshold``), stepping only through the rows whose max
+        fell below it or vanished. A row still at or above keeps its cached value: still an upper bound,
+        and it lands in the same candidate set either way. (Every row of a 2000-row tree page's ~5.5k
+        legitimately high sessions came back to Python on each fallback before.)"""
+        for sid, value in conn.execute(
+                f"SELECT id, m FROM (SELECT j.value AS id, {_msg_max_sql('j.value')} AS m FROM json_each(?) j"
+                " LIMIT -1) WHERE m IS NULL OR m < ?", (json.dumps(ids), threshold)).fetchall():
+            if value is None:
+                self.msg_max.pop(sid, None)
+            else:
+                self.msg_max[sid] = value
+
     def refresh(self, conn) -> bool:
         """Fold this snapshot's new messages in; False when ids cannot carry a watermark."""
         seq_row = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'messages'").fetchone()
@@ -166,10 +204,7 @@ class _StoreRecency:
             return False  # ids may be reused (no AUTOINCREMENT): a watermark proves nothing
         high = max(int(seq_row[0]) if seq_row else 0, int(max_id or 0))
         if self.watermark is None or self.stale or high < self.watermark:
-            self.msg_max, self.stale = {}, False
-            for sid, value in conn.execute(f"SELECT s.id, {_msg_max_sql('s.id')} FROM sessions s").fetchall():
-                if value is not None:
-                    self.msg_max[sid] = value
+            self.msg_max, self.stale = _rebuilt_maxima(conn), False
         elif high > self.watermark:
             # NOT INDEXED: walk the rowid range, never the whole (session_id, timestamp) index.
             self.probe(conn, {sid for (sid,) in conn.execute(
@@ -199,8 +234,8 @@ def clear() -> None:
         _STORES.clear()
 
 
-def _candidates(conn, store, where_clauses, params, need) -> Optional[list[str]]:
-    """Session ids that contain the page (module doc), or None to read unrestricted."""
+def _candidates(conn, store, where_clauses, params, need) -> Optional[str]:
+    """The JSON array of session ids that contain the page (module doc), or None to read unrestricted."""
     if not store.refresh(conn):
         return None
     # Among rows with an in-window last_activity_at the index key IS last_activity_at. CASE keeps the
@@ -217,10 +252,9 @@ def _candidates(conn, store, where_clauses, params, need) -> Optional[list[str]]
     high = [sid for sid, value in store.msg_max.items() if value >= threshold]
     if len(high) > 2 * need + 64:
         # Cached maxima a delete lowered stay high until probed again: re-probe them once.
-        store.probe(conn, high)
+        store.drop_below(conn, high, threshold)
         high = [sid for sid in high if store.msg_max.get(sid, threshold - 1) >= threshold]
-    return [sid for (sid,) in conn.execute(
-        _CANDIDATES_SQL, (threshold, threshold, json.dumps(high))).fetchall()]
+    return conn.execute(_CANDIDATES_SQL, (threshold, threshold, json.dumps(high))).fetchone()[0]
 
 
 def ranked_rows(db, where_clauses: list[str], params: list, select_head: str, prompt_join: str,
@@ -266,7 +300,7 @@ def ranked_rows(db, where_clauses: list[str], params: list, select_head: str, pr
                 if picked is None:
                     return conn.execute(query, query_params).fetchall()
                 narrowed = _where_sql([*where_clauses, "s.id IN (SELECT value FROM json_each(?))"])
-                narrowed_params = [*params, json.dumps(picked)]
+                narrowed_params = [*params, picked]
                 return conn.execute(ranked_query(narrowed, narrowed, seed_from, select_head, prompt_join),
                                     narrowed_params + narrowed_params + [limit, offset]).fetchall()
             finally:
@@ -287,9 +321,9 @@ def _memo_rows(db, store, rank_memo, where_sql, where_clauses, params, outer_whe
     ids_head = rank_memo._IDS_HEAD
     key = (where_sql, repr(tuple(params)), seed_from, need)
 
-    def restricted(ids, limit):
+    def restricted(ids_json: str, limit):
         narrowed = _where_sql([*where_clauses, "s.id IN (SELECT value FROM json_each(?))"])
-        narrowed_params = [*params, json.dumps(ids)]
+        narrowed_params = [*params, ids_json]
         return conn.execute(ranked_query(narrowed, narrowed, seed_from, ids_head, ""),
                             narrowed_params + narrowed_params + [limit, 0]).fetchall()
 
@@ -310,7 +344,7 @@ def _memo_rows(db, store, rank_memo, where_sql, where_clauses, params, outer_whe
         try:
             with store.lock:
                 ids_rows = rank_memo.ranked_ids(conn, store.rank_memo, key, need, exact_ids,
-                                                lambda ids: restricted(ids, -1))
+                                                lambda ids: restricted(json.dumps(ids), -1))
                 generation = store.rank_memo.generation
             if not ids_rows:
                 return []
