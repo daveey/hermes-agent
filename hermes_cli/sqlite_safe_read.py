@@ -432,8 +432,9 @@ _PREAD_LOCK = threading.Lock()
 _PREAD_FDS: dict[str, tuple[int, int, int]] = {}  # path -> (fd, st_dev, st_ino)
 _RETIRED_PREAD_FDS: list[int] = []  # superseded inodes: closed only once unlinked (see sweep)
 # Header-heavy session captures must not fstat the entire process inventory on
-# every read. Reclaim on the next read after this monotonic deadline; explicit
-# release/inventory calls still sweep immediately. Linked inodes are never closed.
+# every read. Reclaim main-file fds on the next read after this monotonic
+# deadline; sidecar/retired fds and explicit release/inventory calls stay eager.
+# Linked inodes are never closed.
 _PREAD_NEXT_SWEEP = 0.0
 _PREAD_SWEEP_SECONDS = .25
 
@@ -445,7 +446,7 @@ def _fd_is_unlinked(fd: int) -> bool:
         return True  # already invalid: nothing to protect, drop it from the cache
 
 
-def _release_unlinked_locked() -> None:
+def _release_unlinked_locked(*, sidecars_only: bool = False) -> None:
     """Close cached reader fds whose inode no path names any more (``st_nlink == 0``).
 
     Closing such an fd is lock-safe: POSIX locks on a dead inode protect nothing, since no
@@ -453,6 +454,8 @@ def _release_unlinked_locked() -> None:
     Keeping it open would pin a deleted -wal/-shm generation on disk forever and show up as a
     false "stranded on a deleted generation" in every ``/proc/<pid>/fd`` scan."""
     for key, entry in list(_PREAD_FDS.items()):
+        if sidecars_only and not key.endswith(('-wal', '-shm')):
+            continue
         if _fd_is_unlinked(entry[0]):
             _PREAD_FDS.pop(key, None)
             try:
@@ -497,6 +500,11 @@ def _pread_fd(path: Path | str) -> Optional[tuple[int, os.stat_result]]:
         if now >= _PREAD_NEXT_SWEEP:
             _release_unlinked_locked()
             _PREAD_NEXT_SWEEP = _pread_sweep_now() + _PREAD_SWEEP_SECONDS
+        else:
+            # Sidecar fds must retain their eager cleanup contract: another
+            # process's writer-open scan cannot distinguish a reader from a
+            # stranded SQLite connection. Retired fds are also swept eagerly.
+            _release_unlinked_locked(sidecars_only=True)
         cached = _PREAD_FDS.get(key)
         if cached is not None and (cached[1], cached[2]) != (st.st_dev, st.st_ino):
             _RETIRED_PREAD_FDS.append(_PREAD_FDS.pop(key)[0])  # closed by the sweep once unlinked
