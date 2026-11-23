@@ -220,6 +220,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/serve_producer_runtime.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/_subprocess_compat.py": {
    "direct": 3,
    "routed": 0,
