@@ -136,7 +136,7 @@ def _admit_next(env, task_id):
     from gateway import session_kanban
     env.monkeypatch.setattr(session_kanban, 'asdict', lambda r: {'state': r.state})
     asyncio.run(session_kanban.run_task(connection, params))
-    assert [c[0] for c in calls] == ['resume', 'submit']
+    assert [c[0] for c in calls] == ['submit']  # transcript viewers are not part of admission
     context = json.loads(created['policy'].kanban_json)
     with _connect() as conn:
         events = {kind: json.loads(payload or 'null') for kind, payload in conn.execute(

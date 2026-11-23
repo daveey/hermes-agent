@@ -84,7 +84,7 @@ def test_run_task_kanban_write_never_blocks_the_loop(tmp_path, monkeypatch):
         await asyncio.to_thread(writer.join, 10)
         return max(b - a for a, b in pairwise(ticks))
     gap = asyncio.run(scenario())
-    assert calls == ['resume', 'submit']
+    assert calls == ['submit']  # dispatcher admission does not mount a transcript viewer
     with closing(connect(board='owned')) as conn:
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='owner_admitted'", (task_id,)).fetchone()[0] == 1
     assert gap < HOLD_S / 2, f'the owner loop stalled {gap:.2f}s behind a held Kanban writer'

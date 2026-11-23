@@ -100,9 +100,9 @@ async def run_task(connection, params):
     from hermes_state_local import local_receipt
     from gateway.session_kanban_capsule import require_capsule_transport
     authority = connection.authority
-    # Resolved off-loop up front: no await separates the saved-claim check from session
-    # creation. The Kanban claim check and its marker share one off-loop transaction; a
-    # concurrent retry of the same attempt meets that marker (same session) or a stale claim.
+    # Resolve off-loop. Session creation uses the durable request identity below;
+    # the Kanban claim check and its marker share one off-loop transaction, so a
+    # concurrent retry meets that marker (same session) or a stale claim.
     owner_db = str(await asyncio.to_thread(Path(authority.db.db_path).resolve))
     # The dispatcher attempt is the durable request identity, including after the
     # task closes. Retry checks the saved claim, never reinterprets updated cards.
@@ -120,7 +120,9 @@ async def run_task(connection, params):
         from gateway.session_local_recovery import restore_local_session
         ref = restore_local_session(authority, sid)
     else:
-        policy, private = build_kanban_policy(connection, params, _load_gateway_config())
+        # Context construction reads the board, recovery history and routing policy.
+        # Cold/contended reads must not starve this owner's receipt/control RPCs.
+        policy, private = await asyncio.to_thread(build_kanban_policy, connection, params, _load_gateway_config())
         # [daveey] Capsule-required card without live run-bound transport refuses before session creation.
         await asyncio.to_thread(require_capsule_transport, policy)
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
@@ -168,7 +170,10 @@ async def run_task(connection, params):
         if checkpoint is not None:
             await tracked_write(authority, partial(cont.prepare, authority, principal_id=connection.actor.subject,
                 session_id=ref.session_id, context=context, checkpoint=checkpoint, request_id=target, owner_db=owner_db))
-    await connection.resume(ref, {})
+    # The dispatcher only submits and polls receipts; it is not a transcript viewer.
+    # create/restore already mounted the route. A viewer resume here blocks admission
+    # on history, profile-hook refresh and inventory, even though the client discards
+    # those events. Managed execution lifetime is fenced by _watch_submitter instead.
     # Finite like the `chat -q` worker it replaced: nobody can answer an approval or clarify in a
     # card (approvals.single_query_mode applies). Never unattended: that is `-z`'s auto-approval.
     # A retry of an attempt admitted before cards were finite resubmits its committed payload,

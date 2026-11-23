@@ -158,8 +158,10 @@ def owner_attempt_provably_over(conn, task_id) -> bool:
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_dispatch import _worker_alive
-    if _latest_run_event(conn, task_id, 'worker_bound'):
-        return False  # a bound run is the crash sweep's to book (bound_interpreter_gone)
+    if conn.execute("SELECT 1 FROM task_events e JOIN tasks t ON t.current_run_id=e.run_id "
+                    "WHERE t.id=? AND e.task_id=t.id AND e.kind='worker_bound' LIMIT 1",
+                    (task_id,)).fetchone() is not None:
+        return False  # even an unreadable binding is execution custody, not proof of absence
     receipt = _owner_receipt(conn, task_id)
     if receipt is None:
         return False  # no receipt: this pause did not come from an owner attempt
@@ -171,6 +173,19 @@ def owner_attempt_provably_over(conn, task_id) -> bool:
     pids = _run_worker_pids(conn, row, task_id)
     if any(_worker_alive(pid, fingerprint) for pid, fingerprint in pids):
         return False
+    # The owner can commit its marker and lose the RPC answer before any interpreter
+    # binds. Its live/queued admission is not execution evidence: bind_worker_context
+    # checks this exact claim under the same board write lock before permitting tools.
+    # A dead submitter's own refusal therefore ends this never-bound attempt even
+    # when the long-lived owner cannot settle its ledger. Never infer this from logs.
+    from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+    result = _latest_run_event(conn, task_id, 'worker_result')
+    if (result.get('submitter') is True and type(result.get('exit_code')) is int
+            and result['exit_code'] == KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+            and result.get('claim_lock') == row['claim_lock']
+            and type(result.get('pid')) is int and result['pid'] > 0
+            and result['pid'] == row['worker_pid']):
+        return True
     admission = _admission_row(receipt)
     settled = admission is not None and admission[0] == 'terminal'
     if settled and pids:
