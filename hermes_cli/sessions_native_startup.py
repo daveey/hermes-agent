@@ -80,6 +80,13 @@ class SessionsRuntime:
                     self.source.refresh_at(row.get('last_active', row.get('started_at', 0)) + 300)
         return native_json_response(result).body
 
+    def wait_projection(self, name, selector, timeout):
+        """Wait on owner memory only; capture remains on the feed thread."""
+        from hermes_cli.fact_contract import Pending
+        with self.store._condition:
+            self.store._condition.wait_for(lambda: self._stopping or not isinstance(
+                self.store.snapshot(self.scope).view(name, selector), Pending), timeout=timeout)
+
     def demand(self, scope, name, selector):
         if scope != self.scope or name not in ('sessions', 'sessions_sidebar', 'sessions_stamps'):
             raise ValueError('unauthorized sessions demand')
@@ -97,7 +104,7 @@ class SessionsRuntime:
             self.local = InProcessFacts(self.store, [self.scope], demand=self.demand)
             self.handle = self.local.acquire(self.scope, lifecycle=self.lifecycle)
             binding_handle = SimpleNamespace(v1=self.handle.v1, demand=self.handle.demand,
-                                             touch=self.source.touch)
+                                             touch=self.source.touch, wait_projection=self.wait_projection)
             self.binding = self.profiles.bind_sessions_facts(binding_handle, self.scope)
             from hermes_cli.sessions_fact_routes import selector_for
             from hermes_cli.fact_contract import Ready

@@ -158,6 +158,22 @@ class SessionsFactRoutes:
             self._handle.demand(name, selector)
         raise HTTPException(503, "sessions projection unavailable", headers={"Retry-After": "1"})
 
+    async def first_response(self, name, selector):
+        """Native owners may bound a cold read without request-side source I/O."""
+        try:
+            return self.response(name, selector)
+        except HTTPException as error:
+            wait = getattr(self._handle, 'wait_projection', None)
+            if error.status_code != 503 or wait is None:
+                raise
+            result = self._handle.v1.snapshot(self._scope).view(name, selector)
+            if isinstance(result, self._ready_type):
+                return self.response(name, selector)  # Publication raced the first snapshot.
+            if not isinstance(result, self._pending_type):
+                raise
+        await asyncio.to_thread(wait, name, selector, 4.0)
+        return self.response(name, selector)
+
     def wrap(self, name, legacy, *, signature=None, provider=None):
         """Wrap BEFORE legacy admission/cache lookup; preserve the HTTP schema."""
         signature = signature or inspect.signature(legacy)
@@ -170,7 +186,7 @@ class SessionsFactRoutes:
             binding, mode = provider() if provider is not None else (self, self._begin())
             if mode == "facts":
                 try:
-                    return binding.response(name, selector)
+                    return await binding.first_response(name, selector)
                 finally:
                     binding._end()
             # Shield the entire legacy path, not just its inner coalescer: a

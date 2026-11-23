@@ -108,7 +108,8 @@ async def test_cold_demand_foreign_scope_and_rollback(native):
     runtime = native
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(runtime)), base_url='http://test') as client:
         response = await client.get('/api/profiles/sessions', params={'profile': 'worker', 'limit': 1})
-        assert response.status_code == 503
+        assert response.status_code == 200
+        assert response.json() == profiles.get_profiles_sessions(**selected(profile='worker', limit=1))
         await asyncio.to_thread(wait_ready, runtime, selected(profile='worker', limit=1))
         assert (await client.get('/api/profiles/sessions', params={'profile': 'worker', 'limit': 1})).status_code == 200
         assert (await client.get('/api/profiles/sessions', params={'profile': 'foreign'})).status_code == 404
