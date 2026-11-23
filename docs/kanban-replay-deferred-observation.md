@@ -2,20 +2,33 @@
 
 Status: proposed sender/receiver read contract extending section 7 for draft PR4077,
 **pending independent review, not implemented or advertised by the serving Board.**
-A bounded sender tracer now records ordinary already-known task handoffs atomically
+A bounded sender tracer records ordinary already-known task handoffs atomically
 with transport settlement, exposing task/origin references through
-`kanban_replay_deferred.pending`. At a full local 16-record handoff set, the sender
-now obtains a complete capability-gated task membership read outside the writer
-transaction, validates Board/caller/task identity and every entry, and retires only
-absent unchanged pre-read captures atomically with exact handoff/prune/settlement.
-Unavailable or invalid reads preserve custody; newer captures during the read survive.
-This is a capacity-recovery tracer, not the general observation poller. Fair rotation,
-fingerprint episode tracking, diagnostic delivery and synthetic-parent reconciliation
-remain open; this is not complete deferred support. An observed absence never marks
-status applied; the newly settled historical handoff stays visible until ordinary
-observation retirement is integrated.
-Captured status/HLC in that local record describe the requested handoff, not current
-server queue evidence or proof that status applied.
+`kanban_replay_deferred.pending`. A full local 16-record handoff set first obtains
+a capability-gated complete membership read so exact settlement can recover capacity.
+
+After successful transport/ack, the bound-journal push now polls at most one tracked
+task using the same proposed read contract, outside writer transactions. Indexed
+per-table successor lookups and a durable cursor rotate across tracked tasks even
+when a read is unavailable. A per-task read token rejects older concurrent replies
+without discarding unrelated task reads. The observer atomically stores all validated
+entries (including other gateways) and retires only absent unchanged pre-read handoff
+instances. A bounded random capture token also protects an identical status/HLC
+recapture, including migration from the earlier nullable-token schema. No token is
+an operation ID or result ledger.
+
+`kanban_replay_observation.observed` exposes the **last successful complete** reads;
+these records can be stale and carry no freshness or reachable-time guarantee yet.
+Unavailable/invalid reads preserve them and handoff custody. Read/storage failures
+are diagnostic warnings and do not fail already-acknowledged transport. The capacity
+read can occur in addition to the ordinary one-task poll. A separately obtained
+complete empty poll may retire the historical handoff without claiming application.
+
+Fingerprint episode timing, five-minute owner diagnostic delivery and synthetic-parent
+reconciliation remain open; this is not complete deferred support. Observed absence
+never marks status applied or updates sync_version. Captured status/HLC in a handoff
+record describe the requested handoff, not current server queue evidence or proof
+that status applied.
 The approved spec requires observation but does not specify this new read surface.
 This document does not enable replay, migrate
 slots, add a writer, or authorize cancellation. The approved post-collection design

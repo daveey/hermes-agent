@@ -23,27 +23,47 @@ def handoff(conn, wire, verdict, board_incarnation, *, membership=None):
             not isinstance(wire.get('fields', {}).get('status'), str) or
             reference != dict(task=wire['uid'], origin=wire['status_origin'])):
         raise ValueError('deferred reference does not match issued status')
-    conn.execute(_SCHEMA)
+    install(conn)
     key = (board_incarnation, wire['uid'], wire['status_origin'])
     if membership is not None:
         origins, observed = membership
-        # Retire only the pre-read capture: a newer handoff during I/O is not
-        # evidence covered by that observation, even when it reuses an origin.
-        for row in observed:
-            if row['origin'] not in origins:
-                conn.execute('DELETE FROM kanban_replay_deferred1 '
-                             'WHERE board_incarnation=? AND task=? AND origin=? AND status=? AND hlc=?',
-                             (*key[:2], row['origin'], row['status'], row['hlc']))
+        retire_absent(conn, board_incarnation, wire['uid'], origins, observed)
     exists = conn.execute('SELECT 1 FROM kanban_replay_deferred1 '
                           'WHERE board_incarnation=? AND task=? AND origin=?', key).fetchone()
     count = conn.execute('SELECT COUNT(*) FROM kanban_replay_deferred1 '
                          'WHERE board_incarnation=? AND task=?', key[:2]).fetchone()[0]
     if not exists and count >= 16:
         raise ValueError('deferred custody requires fresh membership reconciliation')
-    conn.execute('INSERT INTO kanban_replay_deferred1 VALUES (?,?,?,?,?) '
+    from uuid import uuid4
+    conn.execute('INSERT INTO kanban_replay_deferred1 '
+                 '(board_incarnation,task,origin,status,hlc,capture_token) VALUES (?,?,?,?,?,?) '
                  'ON CONFLICT(board_incarnation,task,origin) DO UPDATE SET '
-                 'status=excluded.status,hlc=excluded.hlc',
-                 (*key, wire['fields']['status'], wire['hlc']))
+                 'status=excluded.status,hlc=excluded.hlc,capture_token=excluded.capture_token',
+                 (*key, wire['fields']['status'], wire['hlc'], uuid4().hex))
+
+
+def install(conn):
+    """Add a bounded recapture token without changing visible handoff fields."""
+    conn.execute(_SCHEMA)
+    if 'capture_token' not in {row[1] for row in conn.execute('PRAGMA table_info(kanban_replay_deferred1)')}:
+        conn.execute('ALTER TABLE kanban_replay_deferred1 ADD COLUMN capture_token TEXT')
+
+
+def captures(conn, board, task):
+    """Snapshot exact handoff instances before I/O, including identical recaptures."""
+    install(conn)
+    return [dict(row) for row in conn.execute('SELECT * FROM kanban_replay_deferred1 '
+                                              'WHERE board_incarnation=? AND task=?', (board, task))]
+
+
+def retire_absent(conn, board, task, origins, observed):
+    """A complete read may retire only unchanged pre-read capture instances."""
+    for row in observed:
+        if row['origin'] not in origins:
+            conn.execute('DELETE FROM kanban_replay_deferred1 '
+                         'WHERE board_incarnation=? AND task=? AND origin=? AND status=? AND hlc=? '
+                         'AND capture_token IS ?',
+                         (board, task, row['origin'], row['status'], row['hlc'], row['capture_token']))
 
 
 def validate_membership(reply, local, task):

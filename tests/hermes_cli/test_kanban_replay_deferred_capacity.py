@@ -18,12 +18,13 @@ class Observation(helpers.Deferred):
         self.conn = conn
         self.reads = 0
         self.reply = {}
+        self.task = None
 
     def _call(self, method, path, body=None):
         if '/deferred?task=' in path:
             assert method == 'GET' and not self.conn.in_transaction
             self.reads += 1
-            assert path.endswith(quote(json.loads(journal.pending_wire(self.conn))['uid'], safe=''))
+            assert path.endswith(quote(self.task, safe=''))
             return self.reply
         return super()._call(method, path, body)
 
@@ -31,6 +32,7 @@ class Observation(helpers.Deferred):
 def full(conn):
     tid = helpers.intent(conn)
     receiver = Observation(conn)
+    receiver.task = tid
     receiver.slot.update(h='1', a='1', last_op_id=journal.snapshot(conn)['last_op_id'],
         last_payload_sha256=journal.snapshot(conn)['last_payload_sha256'],
         last_verdict=journal.snapshot(conn)['last_verdict'])
@@ -54,7 +56,7 @@ def full(conn):
 def test_full_stale_handoffs_refresh_before_exact_settlement_without_resend(live):
     tid, receiver, wire = full(live)
     result = helpers.push(live, receiver)
-    assert receiver.reads == 1 and result.deferred == 1 and len(receiver.sent) == 1
+    assert receiver.reads == 2 and result.deferred == 1 and len(receiver.sent) == 1
     assert deferred.pending(live) == [dict(board_incarnation=receiver.slot['board_incarnation'],
         task=tid, origin=wire['status_origin'], status='done', hlc=wire['hlc'])]
     assert journal.pending_wire(live) is None and receiver.slot['a'] == '2'
@@ -110,11 +112,14 @@ def test_concurrent_handoff_during_read_cannot_be_retired_by_older_observation(l
 
     def race(method, path, body=None):
         reply = original(method, path, body)
-        if '/deferred?task=' in path:
+        if '/deferred?task=' in path and receiver.reads == 1:
             with kbc.write_txn(live):
                 newer = dict(wire, status_origin='prior-origin-0', hlc='newer-captured-hlc')
                 deferred.handoff(live, newer, dict(deferred=dict(task=wire['uid'], origin='prior-origin-0')),
                                  receiver.slot['board_incarnation'])
+            # The later ordinary poll sees the newer remote obligation too.
+            receiver.reply = dict(reply, entries=reply['entries'] + [dict(reply['entries'][0],
+                                  origin='prior-origin-0', hlc='newer-captured-hlc')])
         return reply
 
     receiver._call = race
@@ -153,10 +158,10 @@ def test_complete_full_membership_does_not_evict_an_origin(live):
 
 
 def test_complete_empty_membership_never_marks_status_success(live):
-    tid, receiver, wire = full(live)
+    tid, receiver, _ = full(live)
     receiver.reply['entries'] = []
     assert helpers.push(live, receiver).deferred == 1
-    # Retain the historical handoff until the normal diagnostic poller is wired;
+    # A separate complete post-settlement read retires the diagnostic reference;
     # absence is not application and no remote/current-row status is synthesized.
-    assert [row['origin'] for row in deferred.pending(live)] == [wire['status_origin']]
+    assert receiver.reads == 2 and deferred.pending(live) == []
     assert live.execute('SELECT sync_version FROM tasks WHERE id=?', (tid,)).fetchone()[0] == 7

@@ -85,6 +85,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                   if item['board_incarnation'] == current['board_incarnation'] and item['task'] == wire['uid']]
         if len(active) < 16 or cap.get('deferred_observation') != 'origin_pending1':
             return None
+        with write_txn(conn):
+            active = deferred.captures(conn, current['board_incarnation'], wire['uid'])
         source()  # Frozen source must still exist before any reconciliation read.
         reply = hub._call('GET', root + 'deferred?task=' + quote(wire['uid'], safe=''))
         return deferred.validate_membership(reply, current, wire['uid']), active
@@ -200,4 +202,6 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         if remote != expected:
             raise ValueError('ack readback mismatch')
         reconcile(settled, remote)
+    from hermes_cli.kanban_replay_observation import after_push
+    after_push(conn, hub, root, settled, cap)
     return out
