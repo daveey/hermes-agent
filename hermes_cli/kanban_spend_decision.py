@@ -25,13 +25,37 @@ def ensure_producer(conn, task_id: str) -> None:
         scope = execution_restricted(conn, task_id) and not safety
         prior = json.loads(previous[0]) if previous else None
         cause = 'safety_refusal' if safety else 'scope_stopped' if scope else None
-        if prior and (cause is None or prior.get('cause') == cause):
+        route = prior.get('producer') if isinstance(prior, dict) else None
+        live = _live_route(conn, route)
+        if live and (cause is None or prior.get('cause') == cause):
             return
         if cause:
             payload['cause'] = cause
-        route = prior['producer'] if prior else producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
+        if not live:
+            route = producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
         kb._append_event(conn, task_id, NOTICE, {**payload, "episode": episode, "producer": route})
 
+
+
+def _live_route(conn, route) -> bool:
+    """A notice is not ownership when its decision executor has closed or disappeared."""
+    if not isinstance(route, dict):
+        return False
+    if route.get('kind') == 'supervisor':
+        task = kb.get_task(conn, route.get('task_id'))
+        return task is not None and task.status not in ('done', 'archived')
+    # Explicit administrative exhaustion is a terminal routing boundary, not
+    # permission to recurse into another decision owner or release the root hold.
+    return route.get('kind') in ('chats', 'unavailable')
+
+
+def repair_triage_routes(conn, *, skip: set[str]) -> None:
+    """Repair ownership independently of idle/release eligibility; never change task status."""
+    rows = conn.execute("SELECT t.id FROM tasks t WHERE t.status='triage' AND EXISTS "
+                        "(SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.kind=?)", (EVENT,)).fetchall()
+    for row in rows:
+        if row[0] not in skip:
+            safe_ensure_producer(conn, row[0])
 
 
 def safe_ensure_producer(conn, task_id: str) -> None:
@@ -265,7 +289,11 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
         conn, title=forwarded_title(f"Spend budget decision: {task.title}"[:200], f"Spend budget decision: {task_id}"),
         body=f"Card {task_id} has stopped. No chat owns its decision.\n\n"
              + "Source title and stop reason (historical evidence):\n" + forwarded_text(task.title) + "\n"
-             + forwarded_text(note) + "\n\n" + guidance + action,
+             + forwarded_text(note) + "\n\n" + guidance + action
+             + "\n\nApply the disposition on the source before completing this decision card; a recommendation or "
+             "completion alone does not change its hold. If authority/capability is unavailable, retain this "
+             "decision card as a non-executing owner with the exact prerequisite instead of completing and "
+             "leaving the source ownerless. Never renew spend or bypass safety/scope gates implicitly.",
         assignee=_supervisor_profile(), created_by="kanban-spend-budget", workspace_kind="scratch",
         idempotency_key=f"spend-budget-decision:{task_id}:{episode}", tenant=task.tenant)
     stop = pending_episode(conn, task_id)

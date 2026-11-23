@@ -291,8 +291,11 @@ def sweep_stale_triage(
 
     # Retained executor copies have no triage policy authority. Local cap keys cannot
     # arbitrate supervisor creation across gateways, even when neither has synced yet.
-    from hermes_cli.kanban_spend_decision import pending as spend_decision_pending, safe_ensure_producer
+    from hermes_cli.kanban_spend_decision import pending as spend_decision_pending, repair_triage_routes
     copies = foreign_ids(conn)
+    # Decision ownership needs repair even while execution is gated, fresh, capped
+    # or contained. Only the home board may publish its replacement route.
+    repair_triage_routes(conn, skip=copies)
     try:
         # After the foreign-copy fence. A retained worker copy must not create a supervisor card.
         escalate_stranded_contained(conn, now=now, skip=copies)
@@ -303,7 +306,6 @@ def sweep_stale_triage(
         if row["id"] in copies or containment_held(conn, row["id"]):
             continue
         if spend_decision_pending(conn, row["id"]):
-            safe_ensure_producer(conn, row["id"])
             continue
         if row["human_request"] or open_recovery_card(conn, row["id"]) or current_park(conn, row['id']):
             continue  # a human owns it, or its kernel recovery card is its producer
