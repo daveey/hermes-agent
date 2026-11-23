@@ -186,7 +186,10 @@ def gated_web_app():
     web_server.app.state.bound_host = "gw.example.test"
     web_server.app.state.bound_port = 443
     web_server.app.state.auth_required = True
-    yield web_server.app
+    # A real serve owns one lifespan; concurrent requests have separate jars,
+    # not separate startup owners for the same app/origin. [daveey]
+    with TestClient(web_server.app, base_url="http://gw.example.test"):
+        yield web_server.app
     for k, v in prev.items():
         setattr(web_server.app.state, k, v)
 
@@ -203,9 +206,12 @@ def test_cookie_gate_burst_with_stale_rt_rotates_once(gated_web_app):
 
     def call():
         # One TestClient per request: a shared jar would hand later requests the rotated RT.
-        with TestClient(gated_web_app, base_url="http://gw.example.test") as client:
+        client = TestClient(gated_web_app, base_url="http://gw.example.test")
+        try:
             clients_ready.wait(timeout=60)
             return client.get("/api/auth/me", cookies=cookies)
+        finally:
+            client.close()
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(call) for _ in range(4)]
