@@ -10,8 +10,6 @@ import json
 import sqlite3
 from collections.abc import Callable, Mapping
 
-import rfc8785
-
 from hermes_cli.kanban_replay_reconcile import _identity, _local_state, reconcile
 from hermes_cli.kanban_replay_wire import freeze, verify
 
@@ -47,6 +45,8 @@ def _ack(state: dict) -> dict | None:
 
 
 def _check_wire(state: dict, encoded: bytes | None) -> None:
+    import rfc8785
+
     pending = state['pending']
     if pending is None:
         if encoded is not None:
@@ -138,6 +138,8 @@ def pending_wire(conn: sqlite3.Connection) -> bytes | None:
 
 def issue(conn: sqlite3.Connection, intent: dict) -> bytes:
     """Freeze only the dependency-ordered head selected by the serialized sender."""
+    import rfc8785
+
     _reserve(conn)
     state = snapshot(conn)
     restore = conn.execute('SELECT replay_restore_required FROM kanban_sync_state '

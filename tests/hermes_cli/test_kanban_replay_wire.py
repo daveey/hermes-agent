@@ -1,7 +1,43 @@
 """RFC8785 digest framing matches the Board, not Python's JSON spelling."""
 import hashlib
+import subprocess
+import sys
+from pathlib import Path
+import textwrap
 
 import pytest
+
+
+def test_legacy_updater_parser_does_not_require_new_replay_dependency(tmp_path):
+    """A hand-pulled legacy venv must reach update before installing new deps."""
+    probe = tmp_path / 'replay_dependency_probe.py'
+    probe.write_text(textwrap.dedent('''
+        import builtins
+        import sys
+        sys.path.insert(0, sys.argv[1])
+        original_import = builtins.__import__
+        def without_rfc8785(name, *args, **kwargs):
+            if name == 'rfc8785':
+                raise ModuleNotFoundError("controlled legacy venv: no rfc8785", name=name)
+            return original_import(name, *args, **kwargs)
+        builtins.__import__ = without_rfc8785
+        from hermes_cli.main import _build_cli_parser
+        parser, _ = _build_cli_parser()
+        args = parser.parse_args(['update', '--yes', '--branch', 'main'])
+        assert args.command == 'update'
+        from hermes_cli.kanban_replay_wire import freeze
+        try:
+            freeze({'fields': {}, 'replay': {}})
+        except ModuleNotFoundError as exc:
+            assert exc.name == 'rfc8785'
+        else:
+            raise AssertionError('replay must not silently substitute noncanonical JSON')
+        print('legacy parser reachable; replay still requires canonical dependency')
+    '''))
+    result = subprocess.run([sys.executable, '-I', str(probe), str(Path(__file__).resolve().parents[2])],
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'legacy parser reachable' in result.stdout
 
 
 def test_digest_uses_jcs_and_excludes_replaceable_session_and_self_digest():

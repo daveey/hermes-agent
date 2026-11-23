@@ -8,10 +8,12 @@ from __future__ import annotations
 import copy
 import hashlib
 
-import rfc8785
-
 
 def _digest(wire: dict) -> str:
+    # Legacy hand-pulled environments must reach the updater before installing
+    # this new dependency. Actual replay still requires RFC8785, with no fallback.
+    import rfc8785
+
     body = copy.deepcopy(wire)
     body['replay'].pop('payload_sha256', None)
     body['replay'].pop('session', None)
