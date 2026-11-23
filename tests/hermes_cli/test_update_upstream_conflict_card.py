@@ -13,6 +13,8 @@ def conflict_repo(tmp_path, monkeypatch):
 
 
 def test_conflict_files_one_card_and_refreshes_it(conflict_repo, tmp_path, monkeypatch):
+    from tests.hermes_cli.test_update_upstream_conflict import _gateway_identity
+    _gateway_identity(tmp_path, monkeypatch, "hub")
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "board.db"))
     save_config({"platform_toolsets": {"cli": ["terminal", "file"]}, "terminal": {"backend": "local"}})
     up, _fork, live, gate = conflict_repo

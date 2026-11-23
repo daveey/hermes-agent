@@ -466,6 +466,9 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/local_runtime/processes.py",  # bounded probes' spawn_server/job custody
     "agent/deadline.py",  # bounded probes' process-tree timeout cleanup
     "hermes_cli/kanban_db.py",  # update_upstream_conflict files the conflict card
+    "hermes_cli/kanban_capability_registry.py",  # conflict owner requires installed gateway identity
+    "hermes_cli/kanban_hub_admission_placement.py",  # conflict ownership uses the canonical hub predicate
+    "hermes_cli/kanban_placement.py",  # conflict ownership honors configured hub aliases
     "hermes_cli/kanban_db_connect.py",
     "hermes_cli/kanban_db_sync.py",  # conflict reporting validates the inventory board
     "hermes_cli/kanban_sync_client.py",  # authoritative conflict-owner evidence
