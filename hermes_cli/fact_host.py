@@ -55,7 +55,7 @@ class _Handler(socketserver.BaseRequestHandler):
             scope = owner.authorize(hello["token"])
             subscription = owner.store.subscribe(scope, (), None, hello.get("after"), lambda _: None)
             self.request.settimeout(60)
-            send(self.request, {"scope": scope})
+            send(self.request, {"scope": scope, "epoch": owner.store.snapshot(scope).epoch})
             while not owner.closed.is_set():
                 command = receive(self.request)
                 if owner.closed.is_set():

@@ -93,16 +93,16 @@ class DemandChannel:
         with connect(self.endpoint.path) as sock:
             sock.settimeout(1)
             send(sock, {"version": 1, "token": self.endpoint.token, "after": None})
-            if receive(sock)["scope"] != self.scope:
+            hello = receive(sock)
+            if hello["scope"] != self.scope:
                 raise ValueError("unauthorized_scope")
-            # The v1 hello has no epoch. Read a reset identity on this same
-            # connection so an ACK is never attributed to a different owner.
-            send(sock, {"op": "next"})
-            pin = receive(sock)["pin"]
-            send(sock, {"op": "release", "token": pin["token"]})
-            receive(sock)
+            # Authenticate the ACK's owner on this connection without exporting
+            # any facts. Older owners lacking epoch fail closed and retry.
+            epoch = hello["epoch"]
+            if not isinstance(epoch, str) or not epoch:
+                raise ValueError("invalid_owner_epoch")
             send(sock, command)
-            return pin["epoch"], receive(sock)["accepted"] is True
+            return epoch, receive(sock)["accepted"] is True
 
     def close(self):
         with self._lock:

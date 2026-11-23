@@ -89,6 +89,33 @@ def test_old_ack_after_new_owner_reset_replays(tmp_path, monkeypatch):
         owner.close()
 
 
+@pytest.mark.platforms('posix')
+def test_demand_control_never_exports_fact_snapshot(tmp_path, monkeypatch):
+    from hermes_cli.fact_demand import DemandChannel
+    scope = Scope('install', 'profile')
+    token = 't' * 32
+    monkeypatch.chdir(tmp_path)
+    exported, delivered = threading.Event(), threading.Event()
+    owner = FactHost('owner', {token: scope}, demand=lambda *args: delivered.set())
+
+    def forbidden_export(subscription):
+        exported.set()
+        raise ValueError('demand_must_not_export_snapshot')
+
+    monkeypatch.setattr(owner, 'next', forbidden_export)
+    owner.start()
+    channel = DemandChannel(scope, Endpoint('owner/facts.sock', token))
+    try:
+        channel.put('title', {})
+        assert delivered.wait(2), 'demand stalled behind snapshot export'
+        assert not exported.is_set()
+        assert wait_until(lambda: all(not e.pending for e in channel._active.values()), timeout=2)
+        assert next(iter(channel._active.values())).epoch == owner.store.snapshot(scope).epoch
+    finally:
+        channel.close()
+        owner.close()
+
+
 def test_active_demand_bound_expiry_rejection_and_shutdown(monkeypatch):
     from hermes_cli import fact_demand
     now = [0.0]
