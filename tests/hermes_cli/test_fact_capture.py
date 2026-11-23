@@ -180,7 +180,6 @@ def test_elapsed_budget_refuses_and_closes(board, monkeypatch):
         borrowed[0].execute("SELECT 1")
 
 
-
 def test_briefly_held_tracking_registry_does_not_fail_capture(board, monkeypatch):
     """A capture waits out a momentary registry holder on its open, and only there.
 
@@ -188,12 +187,10 @@ def test_briefly_held_tracking_registry_does_not_fail_capture(board, monkeypatch
     registry is busy" and only succeeded on the feed's retry ~0.1 s later."""
     import threading
     from types import SimpleNamespace
-    from hermes_cli import fact_capture as capture
     from hermes_cli import kanban_generation, sqlite_safe_read
 
     path, writer = board
     kb.create_task(writer, title="a", assignee="w")
-    monkeypatch.setattr(capture, "time", time)  # real clock: this test is about waiting
     held, release, released, waited = threading.Event(), threading.Event(), threading.Event(), []
 
     def holder():
