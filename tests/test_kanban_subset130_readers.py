@@ -5,6 +5,7 @@ DB because ingress now refuses it (a FOREIGN legacy executor copy, which the ret
 route-resolution fault is injected: no natural trigger is known, so a live worker/natural fault stays unproven.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import time
 

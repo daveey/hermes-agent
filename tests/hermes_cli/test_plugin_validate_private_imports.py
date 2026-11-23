@@ -105,8 +105,11 @@ def test_kanban_pure_validation_exports_are_name_scoped(tmp_path):
     """Publish validation, not routing or a whole-module exemption."""
     from hermes_cli import kanban_model_neutral as neutral
 
-    names = ("validate_selector", "validate_text", "validate_review")
-    assert all(callable(getattr(neutral, name)) for name in names)
+    validators = ("validate_selector", "validate_text", "validate_review",
+                  "validate_explicit_selector", "validate_update_flags")
+    assert all(callable(getattr(neutral, name)) for name in validators)
+    assert neutral.MANDATORY_FLAGS == ("pin_mandatory", "model_pin_mandatory", "require_model")
+    names = (*validators, "MANDATORY_FLAGS")
     imports = "".join(f"from hermes_cli.kanban_model_neutral import {name}\n" for name in names)
     assert _private_warnings(validate_plugin_dir(_plugin(tmp_path / "validation", {"view.py": imports}))) == []
     private = _plugin(tmp_path / "routing", {"view.py": (

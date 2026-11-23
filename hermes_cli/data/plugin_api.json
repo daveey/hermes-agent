@@ -174,11 +174,14 @@
       ]
     },
     {
-      "source": "Kanban dashboard ingress: pure model-neutral validation before any mixed request writes; no routing or mutation exports",
+      "source": "plugins/kanban-validation.md: pure model-neutral validation before any mixed request writes; no routing or mutation exports",
       "entries": [
         "hermes_cli.kanban_model_neutral:validate_selector",
         "hermes_cli.kanban_model_neutral:validate_text",
-        "hermes_cli.kanban_model_neutral:validate_review"
+        "hermes_cli.kanban_model_neutral:validate_review",
+        "hermes_cli.kanban_model_neutral:MANDATORY_FLAGS",
+        "hermes_cli.kanban_model_neutral:validate_explicit_selector",
+        "hermes_cli.kanban_model_neutral:validate_update_flags"
       ]
     },
     {

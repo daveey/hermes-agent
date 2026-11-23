@@ -4,6 +4,7 @@ Recording-fixture evidence only (dispatch_once with spawn_fn); not live canonica
 The stored row stays author evidence; the review fault branch is covered by the copied readers suite.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc

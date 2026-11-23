@@ -10,6 +10,7 @@ The tool keeps base truthiness for metadata pin_mandatory/require_model (N1); RE
 No courier/selfwork result shape is introduced: a refusal is the ordinary ``tool_error`` body.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 import sqlite3

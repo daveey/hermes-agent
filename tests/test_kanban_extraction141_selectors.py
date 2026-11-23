@@ -1,4 +1,5 @@
 """E1/E2 opt-in exact selectors; shared ingress intentionally retains baseline."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import json
 
 import pytest
