@@ -52,6 +52,45 @@ def test_projection_fault_preserves_terminal_no_open_action(board, monkeypatch, 
         assert row['violations'] == []
 
 
+@pytest.mark.parametrize('awaiting,known', [
+    ([], False), ({'kind': 'ci'}, False), ({'kind': 'invalid', 'ref': 'r'}, False),
+    ({'kind': 'clock'}, True), ({'kind': 'ci', 'ref': 'run-17'}, True),
+])
+def test_review_report_counts_malformed_schedule_as_unknown(awaiting, known):
+    from tests.hermes_cli.test_kanban_actionability_contract import complete_fixture, event
+    from hermes_cli.kanban_actionability_cli import report
+    conn = complete_fixture()
+    conn.execute("UPDATE tasks SET status='scheduled' WHERE id='root'")
+    event(conn, 'schedule', 'scheduled', {'wake_at': 1000, 'awaiting': awaiting}, 101)
+    conn.commit()
+    before = list(conn.iterdump())
+    result = report(conn, now=200)
+    row = next(r for r in result['rows'] if r['task_id'] == 'root')
+    assert result['unknown_count'] == 1 + (not known)
+    assert row['evidence_state'] == ('known' if known else 'unknown')
+    assert row['action'] == ('wait_for_named_producer' if known else 'repair_lifecycle_contract')
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+@pytest.mark.parametrize('delivery', ['pending', 'unknown', 'confirmed', 'rejected'])
+def test_review_report_propagates_carrier_receipt_custody(delivery):
+    from tests.hermes_cli.test_kanban_actionability_contract import held_fixture
+    from hermes_cli.kanban_actionability_cli import report
+    conn = held_fixture()
+    conn.execute("INSERT INTO kanban_failure_commands VALUES('owner','run','request','retain',?,NULL)", (delivery,))
+    conn.commit()
+    before = list(conn.iterdump())
+    result = report(conn, now=200)
+    row = next(r for r in result['rows'] if r['task_id'] == 'root')
+    pending = delivery in ('pending', 'unknown')
+    assert row['owner']['kind'] == ('unknown' if pending else 'task')
+    assert row['evidence_state'] == ('unknown' if pending else 'known')
+    assert row['release']['authority'] == 'unavailable'
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
 def start(conn, tid):
     assert kb.claim_task(conn, tid, claimer='default') is not None
     return kb.get_task(conn, tid).current_run_id

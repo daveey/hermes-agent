@@ -106,9 +106,34 @@ def _status(row: dict, facts: dict, now: int) -> None:
                action='repair_lifecycle_contract')
 
 
+def valid_awaiting(value) -> bool:
+    """Validate recorded producer provenance without normalizing away malformed evidence."""
+    if value is None or value == {}:
+        return True  # absent provenance may still have a recorded condition probe
+    if not isinstance(value, dict):
+        return False
+    if any(value.get(k) is not None and not isinstance(value[k], str)
+           for k in ('ref', 'why', 'gateway', 'board')):
+        return False
+    kind = value.get('kind')
+    if kind == 'clock':
+        return True
+    field = {'card': 'ref', 'ci': 'ref', 'deploy': 'ref', 'chat': 'why', 'external': 'ref'}
+    if not isinstance(kind, str) or kind not in field:
+        return False
+    named = value.get(field[kind])
+    if kind == 'external' and not named:
+        named = value.get('why')
+    return isinstance(named, str) and bool(named.strip())
+
+
 def _schedule(row: dict, facts: dict, now: int) -> None:
     wake = positive_time(facts.get('wake_at'))
-    awaiting = facts.get('awaiting') or {}
+    valid = valid_awaiting(facts.get('awaiting'))
+    awaiting = (facts.get('awaiting') or {}) if valid else {}
+    if not valid:
+        row['evidence_state'] = 'unknown'
+        row['violations'].append('schedule_producer_malformed')
     probe = facts.get('probe')
     if not wake:
         row['violations'].append('scheduled_wake_missing')
@@ -116,7 +141,7 @@ def _schedule(row: dict, facts: dict, now: int) -> None:
         row['violations'].append('scheduled_wake_overdue')
     trigger = f"Recorded clock reaches {wake}" if awaiting.get('kind') == 'clock' and wake else (
         f"Recorded {awaiting.get('kind')} producer {awaiting.get('ref') or awaiting.get('why') or ''}" if awaiting else '')
-    if probe:
+    if probe and valid:
         trigger = f'Recorded condition probe succeeds: {probe}'
     if not trigger:
         row['violations'].append('recovery_trigger_missing')

@@ -5,7 +5,7 @@ import json
 import sqlite3
 import time
 
-from hermes_cli.kanban_actionability import owner, project
+from hermes_cli.kanban_actionability import owner, project, valid_awaiting
 from hermes_cli.kanban_actionability_evidence import EVIDENCE_ERRORS, effective
 
 KINDS = ('created', 'blocked', 'scheduled', 'continued', 'spend_budget_triaged',
@@ -81,7 +81,7 @@ class Reader:
                         payload.get(k) is not None and not isinstance(payload[k], str)
                         for k in ('episode', 'episode_uid', 'cause')) or any(
                         payload.get(k) is not None and not isinstance(payload[k], dict)
-                        for k in ('next_action', 'producer')):
+                        for k in ('next_action', 'producer')) or not valid_awaiting(payload.get('awaiting')):
                     self.malformed.add(tid)
             except (ValueError, TypeError):
                 self.malformed.add(tid)
@@ -175,7 +175,7 @@ def _route_owner(reader: Reader, route: dict) -> dict:
         if not task or task['status'] in ('done', 'archived'):
             return {'kind': 'unavailable', 'refs': [tid]}
         stop, restricted, unknown = _state(reader, tid, reader.events(tid))
-        if unknown or reader.synced:
+        if unknown or reader.synced or reader.pending(tid):
             return {'kind': 'unknown', 'refs': [tid]}
         held = stop or restricted or task.get('containment_episode')
         return {'kind': 'unavailable' if held else 'task', 'refs': [tid]}
@@ -253,7 +253,7 @@ def _describe(conn, tid, *, now, reader):
              'unknown': reader.synced or reader.partial or missing or bool(receipt_only) or bool(source and not reader.uid(source))
                         or bool(task.get('human_request') and not _human_step(task['human_request']))}
     if schedule:
-        facts.update(wake_at=schedule['data'].get('wake_at'), awaiting=record(schedule['data'].get('awaiting')))
+        facts.update(wake_at=schedule['data'].get('wake_at'), awaiting=schedule['data'].get('awaiting'))
     wake_columns = reader.columns('task_wake_checks')
     if {'task_id', 'cmd'} <= wake_columns:
         probe = conn.execute('SELECT cmd FROM task_wake_checks WHERE task_id=?', (tid,)).fetchone()

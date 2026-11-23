@@ -290,6 +290,80 @@ def test_effective_policy_adapts_actual_restriction_cause(cause):
     conn.close()
 
 
+@pytest.mark.parametrize('awaiting,known', [
+    ([], False), ({'kind': 'ci'}, False),
+    ({'kind': 'not-a-producer', 'ref': 'r'}, False),
+    ({'kind': 'clock'}, True), ({'kind': 'ci', 'ref': 'run-17'}, True),
+])
+def test_review_schedule_provenance_composition(awaiting, known):
+    conn = complete_fixture()
+    conn.execute("UPDATE tasks SET status='scheduled' WHERE id='root'")
+    event(conn, 'schedule', 'scheduled', {'wake_at': 1000, 'awaiting': awaiting}, 101)
+    row = describe(conn, 'root', now=200)
+    assert row['evidence_state'] == ('known' if known else 'unknown')
+    assert row['action'] == ('wait_for_named_producer' if known else 'repair_lifecycle_contract')
+    assert ('schedule_producer_malformed' in row['violations']) is not known
+    conn.close()
+
+
+@pytest.mark.parametrize('delivery', ['pending', 'unknown', 'confirmed', 'rejected'])
+def test_review_carrier_pending_custody_composition(delivery):
+    conn = held_fixture()
+    conn.execute("UPDATE tasks SET status='running',current_run_id=1 WHERE id='owner'")
+    conn.execute("INSERT INTO task_runs VALUES(1,'run','owner','running',NULL)")
+    conn.execute("INSERT INTO kanban_failure_commands VALUES('owner','run','request','retain',?,NULL)", (delivery,))
+    carrier = describe(conn, 'owner', now=200)
+    row = describe(conn, 'root', now=200)
+    pending = delivery in ('pending', 'unknown')
+    assert row['owner']['kind'] == ('unknown' if pending else 'task')
+    assert row['evidence_state'] == ('unknown' if pending else 'known')
+    assert row['release']['authority'] == 'unavailable'
+    if pending:
+        assert carrier['action'] == 'resolve_release_authority'
+    conn.close()
+
+
+@pytest.mark.parametrize('value,valid', [
+    (None, True), ({}, True), ([], False), ('ci:run', False), (17, False),
+    ({'kind': []}, False), ({'kind': 'other', 'ref': 'r'}, False),
+    ({'kind': 'clock'}, True), ({'kind': 'clock', 'ref': 17}, False),
+    ({'kind': 'ci'}, False), ({'kind': 'ci', 'ref': ''}, False),
+    ({'kind': 'ci', 'ref': ' '}, False), ({'kind': 'ci', 'ref': 'r'}, True),
+    ({'kind': 'card', 'ref': 't'}, True), ({'kind': 'deploy', 'ref': 'd'}, True),
+    ({'kind': 'chat', 'why': 'question'}, True), ({'kind': 'chat', 'ref': 'chat'}, False),
+    ({'kind': 'external', 'ref': 'ticket'}, True),
+    ({'kind': 'external', 'why': 'vendor'}, True),
+    ({'kind': 'external', 'ref': '', 'why': 'vendor'}, True),
+    ({'kind': 'external'}, False), ({'kind': 'external', 'why': []}, False),
+    ({'kind': 'ci', 'ref': 'r', 'gateway': []}, False),
+    ({'kind': 'ci', 'ref': 'r', 'board': []}, False),
+    ({'kind': 'ci', 'ref': 'r', 'why': []}, False),
+    ({'kind': 'ci', 'ref': 'r', 'gateway': None, 'board': 'b'}, True),
+])
+def test_review_awaiting_shape_is_not_coerced(value, valid):
+    from hermes_cli.kanban_actionability import valid_awaiting
+    assert valid_awaiting(value) is valid
+
+
+@pytest.mark.parametrize('probe', [None, 'recorded-probe'])
+def test_review_malformed_producer_cannot_be_hidden_by_probe(probe):
+    row = project({'task': {'id': 'r', 'status': 'scheduled', 'assignee': 'default'},
+                   'wake_at': 1000, 'awaiting': [], 'probe': probe}, now=200)
+    assert row['evidence_state'] == 'unknown'
+    assert row['action'] == 'repair_lifecycle_contract'
+    assert 'schedule_producer_malformed' in row['violations']
+    assert 'Recorded condition probe' not in row['instruction']
+
+
+def test_review_malformed_historical_provenance_marks_source_unknown():
+    conn = held_fixture()
+    event(conn, 'old-bad', 'scheduled', {'awaiting': []}, 99)
+    row = describe(conn, 'root', now=200)
+    assert row['evidence_state'] == 'unknown'
+    assert row['release']['authority'] == 'unavailable'
+    conn.close()
+
+
 def complete_fixture():
     """Small complete local read schema: unknown predicates cannot hide each other."""
     conn = fixture()
