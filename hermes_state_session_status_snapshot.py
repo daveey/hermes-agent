@@ -176,7 +176,7 @@ def _process_items(db: Any, tip: str) -> list[dict]:
             state = "succeeded" if row.get("exit_code") == 0 else "failed"
         item = {"kind": "process", "id": f"process:{row['session_id']}", "state": state,
                 "at": float(row.get("exited_at") or 0)}
-        if state == "failed" and process_registry.is_completion_consumed(row["session_id"]):
+        if state == "failed" and (row.get("acknowledged") or process_registry.is_completion_consumed(row["session_id"])):
             item["acknowledged"] = True  # the agent read this exit (poll acknowledge / wait / log): handled
         items.append(item)
     return items

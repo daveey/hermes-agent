@@ -31,6 +31,13 @@ def _result_paths(*, strict: bool = False):
     directory = get_hermes_home() / "logs" / "process-results"
     cutoff = time.time() - RESULT_RETENTION_SECONDS
     retained = []
+    if not strict:
+        for ack in directory.glob("proc_*.ack"):
+            try:
+                if ack.stat().st_mtime < cutoff and not ack.with_suffix(".json").exists():
+                    ack.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
     if strict:
         # Path.glob may suppress enumeration errors. An absent results directory
         # is normal before the first completion; other errors are not absence.
@@ -46,6 +53,7 @@ def _result_paths(*, strict: bool = False):
             if modified < cutoff:
                 if not strict:
                     path.unlink(missing_ok=True)
+                    path.with_suffix(".ack").unlink(missing_ok=True)
             else:
                 retained.append((modified, path))
         except FileNotFoundError:
@@ -57,6 +65,7 @@ def _result_paths(*, strict: bool = False):
             visible.append(path)
         elif not strict:
             path.unlink(missing_ok=True)
+            path.with_suffix(".ack").unlink(missing_ok=True)
     return visible
 
 
@@ -98,6 +107,40 @@ def save_completed_result(session, obligation: dict | None = None) -> None:
     except OSError:
         # Preserve live delivery on disk failure, but never silently claim durability.
         logger.warning("Could not retain completed process result %s", session.id, exc_info=True)
+
+
+def record_consumed(session) -> None:
+    """Persist an output acknowledgement separately: a late result rewrite cannot erase it."""
+    if session.sandbox_key:
+        return
+    directory = get_hermes_home() / "logs" / "process-results"
+    try:
+        make_user_dir(directory, mode=0o700, parents=True, exist_ok=True)
+        atomic_json_write(directory / f"{session.id}.ack", {
+            "id": session.id, "started_at": session.started_at,
+            "parent_session_id": session.parent_session_id,
+        }, mode=0o600)
+    except OSError:
+        logger.warning("Could not retain process acknowledgement %s", session.id, exc_info=True)
+
+
+def completion_consumed(session) -> bool:
+    """Only an exact process incarnation/owner acknowledgement clears a status failure."""
+    path = get_hermes_home() / "logs" / "process-results" / f"{session.id}.ack"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return False
+    return record == {"id": session.id, "started_at": session.started_at,
+                      "parent_session_id": session.parent_session_id}
+
+
+def status_exit_fields(session, *, strict: bool) -> dict:
+    fields = {"exit_code": session.exit_code, "exited_at": session.exited_at,
+              "completion_reason": session.completion_reason}
+    if strict:
+        fields["acknowledged"] = completion_consumed(session)
+    return fields
 
 
 def _owns_result(owner: str, parent: str | None) -> bool:

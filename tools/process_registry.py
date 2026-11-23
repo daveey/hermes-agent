@@ -1970,7 +1970,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             if not finalizing:
                 self._poll_observed.add(session.id)
                 if acknowledge:
-                    self._completion_consumed.add(session.id)
+                    self._consume_completion(session.id, session=session)
         if session.detached and not session.output_log:
             result.update(detached=True, note="Process recovered after restart -- output history unavailable")
         return result
@@ -2002,7 +2002,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             **self._status_head(session), **(self._exit_fields(session) if exited else {}),
             "output": "\n".join(selected), "total_lines": total_lines, "showing": f"{len(selected)} lines"}
         if exited and observed_completion_output and not finalizing:
-            self._consume_completion(session.id)
+            self._consume_completion(session.id, session=session)
         return result
 
     def wait(self, session_id: str, timeout: int | None = None) -> dict:
@@ -2035,7 +2035,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             self._reconcile_local_exit(session)  # orphaned-pipe reader guard
             result = None
             if session.exited and not self._reader_finalizing(session):
-                self._consume_completion(session.id)
+                self._consume_completion(session.id, session=session)
                 result = self._exit_snapshot(session, "exited")
             elif _is_interrupted():
                 result = {
@@ -2111,7 +2111,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             # Only suppress the autonomous turn after its output is present in
             # the explicit kill result, matching wait/log consumption.
             if consume_output and not finalizing:
-                self._consume_completion(session.id)
+                self._consume_completion(session.id, session=session)
             return result
         try:
             early = self._signal_kill(session, consume_output)
@@ -2214,7 +2214,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
                 with session._lock:
                     output = _completion_output(session)
                 if consume_output:
-                    self._consume_completion(session.id)
+                    self._consume_completion(session.id, session=session)
                 # No waitable handle, so this is not a collected exit. Close the
                 # entry without queueing a completion, and do not signal a PID
                 # whose start time does not match.
@@ -2323,7 +2323,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
         can discover a forgotten preview server that is blocking session reset (#29177).
         """
         # Retained reads are opt-in; routine status bars use the live registry.
-        from tools.process_registry_results import registry_sessions
+        from tools.process_registry_results import registry_sessions, status_exit_fields
         sessions = registry_sessions(self, include_retained, strict, owner_session_id, load_completed_results)
         from tools.environments.sandbox_scope import sandbox_visible
         all_sessions = list(sessions.values()) if strict else [
@@ -2370,9 +2370,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             if s.persist_on_release:
                 entry["persist_on_release"] = True
             if s.exited:
-                entry["exit_code"] = s.exit_code
-                entry["exited_at"] = s.exited_at
-                entry["completion_reason"] = s.completion_reason
+                entry.update(status_exit_fields(s, strict=strict))
             if s.detached:
                 entry["detached"] = True
             result.append(entry)

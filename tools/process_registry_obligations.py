@@ -202,11 +202,13 @@ class ProcessObligationMixin:
     def _tui_owed_ids(self) -> set:
         return vars(self).setdefault("_tui_owed", set())
 
-    def _consume_completion(self, session_id: str) -> None:
+    def _consume_completion(self, session_id: str, *, session) -> None:
         """The agent has the output (wait/log/kill): suppress the autonomous notice, here and across a restart.
         Under ``self._lock`` so it cannot interleave with ``_move_to_finished``'s receipt write."""
         with self._lock:
             self._completion_consumed.add(session_id)
+            from tools.process_registry_results import record_consumed
+            record_consumed(session)
             settle_quietly(session_id, "consumed via wait/log")
 
     def settle_completion(self, session_id: str, how: str) -> bool:
@@ -235,6 +237,8 @@ class ProcessObligationMixin:
         from tools import process_registry as registry_module  # its save name (tests patch it there)
         with self._lock:
             if consume_output:
+                from tools.process_registry_results import record_consumed
+                record_consumed(session)
                 settle_quietly(session.id, "consumed via kill")
             registry_module.save_completed_result(session, None if consume_output else owed_still(session.id))
 
