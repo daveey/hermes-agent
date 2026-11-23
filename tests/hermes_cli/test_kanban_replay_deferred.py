@@ -20,6 +20,8 @@ class Deferred(helpers.Receiver):
         self.drop = False
 
     def _call(self, method, path, body=None):
+        if '/deferred?task=' in path:
+            raise ValueError('deferred custody requires fresh membership reconciliation: read unavailable')
         reply = super()._call(method, path, body)
         if path.endswith('/capability'):
             reply['deferred_observation'] = self.observation

@@ -4,9 +4,16 @@ Status: proposed sender/receiver read contract extending section 7 for draft PR4
 **pending independent review, not implemented or advertised by the serving Board.**
 A bounded sender tracer now records ordinary already-known task handoffs atomically
 with transport settlement, exposing task/origin references through
-`kanban_replay_deferred.pending`. It does not yet implement this read, observation,
-fair rotation, diagnostic delivery, stale-16 reconciliation or synthetic-parent
-reconciliation. Those gates remain open; this is not complete deferred support.
+`kanban_replay_deferred.pending`. At a full local 16-record handoff set, the sender
+now obtains a complete capability-gated task membership read outside the writer
+transaction, validates Board/caller/task identity and every entry, and retires only
+absent unchanged pre-read captures atomically with exact handoff/prune/settlement.
+Unavailable or invalid reads preserve custody; newer captures during the read survive.
+This is a capacity-recovery tracer, not the general observation poller. Fair rotation,
+fingerprint episode tracking, diagnostic delivery and synthetic-parent reconciliation
+remain open; this is not complete deferred support. An observed absence never marks
+status applied; the newly settled historical handoff stays visible until ordinary
+observation retirement is integrated.
 Captured status/HLC in that local record describe the requested handoff, not current
 server queue evidence or proof that status applied.
 The approved spec requires observation but does not specify this new read surface.

@@ -72,6 +72,23 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
             raise ValueError('issued source custody routing changed')
         return dict(row)
 
+    membership = None
+
+    def refresh_capacity():
+        from hermes_cli import kanban_replay_deferred as deferred
+        current = journal.snapshot(conn)
+        decision = reconcile(current, remote)
+        if decision['action'] != 'record' or decision['verdict']['status'] != 'deferred':
+            return None
+        wire = json.loads(journal.pending_wire(conn))
+        active = [item for item in deferred.pending(conn)
+                  if item['board_incarnation'] == current['board_incarnation'] and item['task'] == wire['uid']]
+        if len(active) < 16 or cap.get('deferred_observation') != 'origin_pending1':
+            return None
+        source()  # Frozen source must still exist before any reconciliation read.
+        reply = hub._call('GET', root + 'deferred?task=' + quote(wire['uid'], safe=''))
+        return deferred.validate_membership(reply, current, wire['uid']), active
+
     def record(verdict):
         pending = journal.snapshot(conn)['pending']
         if verdict['client_op_id'] != pending['op_id']:
@@ -105,7 +122,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
             if cap.get('deferred_observation') != 'origin_pending1' or row.get('_parent'):
                 raise ValueError('tracer final disposition requires custody integration')
             from hermes_cli.kanban_replay_deferred import handoff
-            handoff(conn, json.loads(journal.pending_wire(conn)), verdict, local['board_incarnation'])
+            handoff(conn, json.loads(journal.pending_wire(conn)), verdict, local['board_incarnation'],
+                    membership=membership)
             conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
             out.deferred += 1
             return  # Transport handoff is not authoritative row success.
@@ -133,6 +151,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         if journal.pending_wire(conn) is None:
             rows, _, _ = select_pending(conn, hub, board, {}, now=int(time()), limit=1, before_head=False,
                                         hold_rejected=True)
+        membership = refresh_capacity()
         with write_txn(conn):
             decision = journal.recover(conn, remote, record)
             if decision['action'] == 'record':
@@ -167,6 +186,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
         out.sent += 1
         remote = hub._call('GET', root + 'inspect')['slot']
+        membership = refresh_capacity()
         with write_txn(conn):
             decision = journal.recover(conn, remote, record)
         if decision['action'] != 'record':
