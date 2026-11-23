@@ -1370,6 +1370,14 @@ def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
     write_txn serializes against concurrent dispatchers, and the per-row
     UPDATE uses ``current_run_id IS NULL`` as a CAS guard so a racing claim
     can't produce an orphaned row."""
+    # A replica can receive a running task before its run page. That is not
+    # legacy executor state: synthesizing a run here captures a phantom local
+    # current_run_uid which then masks every authoritative feed echo.
+    from pathlib import Path
+    from hermes_cli.kanban_db_sync import SHADOW_DIR
+    path = _main_db_file(conn)
+    if path and Path(path).parent.name == SHADOW_DIR:
+        return
     with write_txn(conn):
         inflight = conn.execute(
             "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
