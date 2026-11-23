@@ -94,25 +94,46 @@ actual stale-refill assertion fails. Existing recovery tests retain unrelated
 business-row refill and parent ambiguity controls. Tests run through
 `scripts/run_tests.sh`, with file retries disabled.
 
-## Boundaries requiring disposition before activation
+## Lost-anchor admission (B5)
 
-- A lost INTEGER-PK singleton cannot be reconstructed by the present refill
-  algorithm. Index-derived loss counts alone cannot prove its survival. A
-  surviving sync journal anchor plus lost sender state causes `missing journal
-  state`; this is a fault, not a recoverable allocator inferred from a backup.
-- Loss/recreation of the **sync anchor** is different: public push selects strict
-  transport from `sync_state.journal_id`. This audit does not establish a safe
-  legacy fallback after that anchor is lost or recreated. The supported attach /
-  recovery / admission chain must be disposed before activation; do not infer it
-  from nofill coverage or passing integrity checks.
-- `_build` does not invoke `mark_restore_required`; the helper's existence is not
-  evidence of a wired restore lifecycle. Normal strict push does inspect/reconcile
-  the serving slot before issue, but that does not prove the lost-anchor case.
-- Missing deferred, command, omission or lineage custody needs authoritative
-  reconciliation. This change prevents stale refill; it does not promise complete
-  recovery or turn missing metadata into known history.
-- Ordinary sync status counts are not an allocator/restore/deferred-custody
-  readiness proof. No live status or no-pending acceptance is claimed here.
+`_build` now writes `kanban_replay_recovery_loss1` in the same transaction as
+salvage, before the rebuilt image can be installed. This independent singleton
+records recovery and the protocol loss report even if the sync anchor or sender
+singleton was unreadable. It is also written for a not-yet-synced database, so
+later sync installation cannot turn recovered unknown history into a clean legacy
+image. It has no independent index/refill route and is not a per-operation ledger.
+Readable prior rebuild reports are retained; unreadable prior history stays loss.
 
-These boundaries are recorded for the managing owner's post-B disposition. They
-are not permission to begin C, certify original captures, merge, deploy or replay.
+Public sender admission checks the marker, the restore flag and any existing
+journal binding **before** selecting legacy or performing sender network I/O.
+Missing/recreated anchors with surviving journal custody become durably
+restore-required. Every rebuilt database is held, even if no protocol loss was
+index-countable or the anchor survived intact. Clearing the ordinary flag alone
+cannot clear the independent rebuild hold. `RestoreRequired` is isolated as a
+per-board round error, so an affected board does not crash sync for other boards.
+The gate installs no journal, certifies no original capture and enables no mode.
+
+`test_kanban_replay_admission_loss.py` exercises actual table and singleton page
+damage through `_build` and reopen, NULL/recreated anchors, all eleven indexed
+custody-loss classes, later sync installation and the real sync-round boundary.
+Lost command/deferred/omission/lineage rows remain explicitly reported LOSS, not
+absent work that can be silently retired or reconstructed. Never-bound,
+unrecovered legacy databases retain their existing transport.
+
+## Remaining recovery and rollout boundaries
+
+- Authoritative reconciliation tooling for incomplete/lost journals is not
+  implemented here. The independent rebuild hold has no automatic clear path;
+  replay's existing intact-image reconciliation helper is not sufficient to
+  certify completeness of a rebuilt image.
+- Complete loss of all local evidence cannot be diagnosed from surviving local
+  metadata. Recovery of that case remains outside this bounded sender change.
+- These checks fence the commissioned sender and its normal sync round. They do
+  not certify the excluded direct non-outbox protect commands/scan or promise
+  that all unrelated read-only reconciliation interfaces are disabled.
+- Ordinary sync status counts are not allocator/restore/deferred readiness or
+  live no-pending proof. Old-writer drain/minimum-writer admission stays dormant
+  and must be proved separately before final independent review and landing.
+- No activation, receiver migration, integration, deployment or live proof is
+  established by B4/B5. No runtime write hook, SQLite authorizer or reentrancy is
+  introduced.

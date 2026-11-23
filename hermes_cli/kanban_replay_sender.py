@@ -43,6 +43,8 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
     """Select only the journal-bound transport; never auto-enroll or fall back."""
     from hermes_cli import kanban_sync_client as client
     client.refuse_if_schema_ahead(conn)
+    from hermes_cli.kanban_replay_admission import guard
+    guard(conn)
     if (sync.sync_state(conn) or {}).get('journal_id') is not None:
         from hermes_cli import kanban_replay_existence as existence
         existence.guard(conn)

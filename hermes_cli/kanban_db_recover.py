@@ -481,6 +481,11 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
             floors = {name: max((rid for _cols, entries in (listed_by_table.get(name) or {}).values()
                                  for rid in entries), default=0) for name, _sql in tables}
             _rebuild_sequence(src, dst, tables, fill, floors)
+        from hermes_cli.kanban_replay_admission import mark_rebuilt
+        mark_rebuilt(dst, {name: asdict(loss) for name, loss in result.tables.items()
+                           if name.startswith(('kanban_replay_', 'kanban_sync_', 'kanban_failure_',
+                                               'kanban_actionability_')) and
+                           (loss.unreadable_paths or loss.known_lost or loss.possibly_lost)})
         dst.execute("COMMIT")
         for sql in later:
             with contextlib.suppress(sqlite3.Error):  # an index the data now violates is reported by the check below
