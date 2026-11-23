@@ -56,8 +56,10 @@ def test_hint_failure_revokes_readiness_then_quiet_retry(owner):
     assert not owner.ready
     assert owner.retry_at == 3
     owner.watch.failed = False
+    owner.changed()  # a healthy hint must not cancel the outstanding inventory/recovery check
     owner.step(2.5, reconcile=False)
     assert not owner.ready
+    assert owner.retry_at == 3
     owner.step(3, reconcile=False)
     assert owner.ready
     assert action.due(legacy_due=False)
@@ -97,3 +99,85 @@ def test_unsupported_watch_uses_census_not_one_second_retries(owner, monkeypatch
     assert not owner.ready
     owner.step(30, reconcile=True)
     assert attempts == [1, 1]
+
+
+def test_roster_census_arms_successor_before_closing_predecessor(owner, monkeypatch, tmp_path):
+    from hermes_cli import fact_source_watch
+    owner.add(lambda: None)
+    owner.step(0, reconcile=True)
+    old = owner.watch
+    monkeypatch.setattr(sources, 'inventory', lambda: ((tmp_path / 'successor.db',), ()))
+    fail = [True]
+
+    def successor(*args, **kwargs):
+        assert not old.closed
+        if fail[0]:
+            raise OSError('cannot yet arm successor scope')
+        return Watch()
+
+    monkeypatch.setattr(fact_source_watch, 'NativeSourceWatch', successor)
+    owner.step(30, reconcile=True)
+    assert owner.watch is old
+    assert not old.closed
+    assert not owner.ready
+    fail[0] = False
+    owner.step(31, reconcile=False)
+    assert old.closed
+    assert owner.watch is not old
+    assert owner.ready
+    assert owner.signature == ((tmp_path / 'successor.db',), ())
+
+
+def test_registration_context_survives_owner_thread_scope(monkeypatch, tmp_path):
+    from contextvars import ContextVar
+    from hermes_cli import fact_source_watch
+    marker = ContextVar('native_registration_scope', default='outside')
+    monkeypatch.setattr(fact_source_watch, 'NativeSourceWatch', Watch)
+    monkeypatch.setattr(sources, 'inventory', lambda: ((tmp_path / (marker.get() + '.db'),), ()))
+    token = marker.set('registered')
+    owner = sources.Sources(threading.Event())
+    marker.reset(token)
+    try:
+        owner.add(lambda: None)
+        owner.step(0, reconcile=True)
+        assert owner.signature == ((tmp_path / 'registered.db',), ())
+        assert marker.get() == 'outside'
+    finally:
+        owner.close()
+
+
+def test_native_to_bound_owner_never_reactivates_legacy_on_detach(owner, monkeypatch):
+    from gateway.kanban_notification_schedule import BoundActions
+    from hermes_cli.fact_fake import FakeStore
+    from tests.tui_gateway import test_notification_facts as helpers
+    from tui_gateway import notification_facts, notification_loaded_f
+
+    scheduler = notification_loaded_f.Scheduler(clock=lambda: 0)
+    scheduler.gateway_sources = owner
+    monkeypatch.setattr(notification_loaded_f, '_owner', scheduler)
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    gate = BoundActions(lambda: None, native=True)
+    store = FakeStore()
+    helpers.ready_siblings(store)
+    binding = None
+    try:
+        assert gate.legacy
+        assert not gate.due(0, legacy_due=True)
+        owner.step(0, reconcile=True)
+        assert not gate.legacy
+        binding = notification_facts.bind(store, helpers.SCOPE, '/canonical/native-transition')
+        binding.report_ready()
+        store.activate(helpers.SCOPE)
+        store.drain()
+        assert gate.due(0, legacy_due=True)
+        assert gate.native_action is None
+        assert not gate.legacy
+        binding.close()
+        assert not gate.due(0, legacy_due=True)
+        assert not gate.legacy
+        assert gate.native_action is None
+    finally:
+        gate.close()
+        if binding is not None:
+            binding.close()
+        scheduler.close()

@@ -109,11 +109,12 @@ class Sources:
                         old.close()
                 if self.watch is not None:
                     self.watch.check()
-                if not self.ready:
-                    log.info('gateway notification native sources ready (%d paths; shared 30s census)',
-                             len(signature[0]))
-                self.ready = True
-                self.retry_at = float('inf')
+                if refresh:
+                    if not self.ready:
+                        log.info('gateway notification native sources ready (%d paths; shared 30s census)',
+                                 len(signature[0]))
+                    self.ready = True
+                    self.retry_at = float('inf')
             except NotImplementedError:
                 self.ready = False
                 self.retry_at = float('inf')  # unsupported platform: census only, not a 1s retry loop

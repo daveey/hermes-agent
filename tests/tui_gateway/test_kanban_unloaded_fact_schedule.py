@@ -182,6 +182,8 @@ def test_early_report_deadline_does_not_postpone_legacy_work(monkeypatch, bound)
     import threading
     from types import SimpleNamespace
 
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '0')  # explicitly exercise the legacy rollback path
+
     owner = None
     if bound:
         store = FakeStore()

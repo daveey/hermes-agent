@@ -28,6 +28,10 @@ class BoundActions:
         self.native = native
         self.native_action = None
 
+    @property
+    def legacy(self):
+        return not self.was_bound or (self.native and not self.facts_bound and self.native_action is None)
+
     def _native_due(self, now, legacy_due):
         from tui_gateway.notification_gateway_sources import enabled
         if not self.native or not enabled():

@@ -901,7 +901,7 @@ def _loop(stop: threading.Event) -> None:
                     schedule.gate.retry_at = time.monotonic() + interval
                     logger.warning("kanban unloaded pass failed", exc_info=True)
                 maintenance = time.monotonic() + interval
-                if not schedule.gate.was_bound and schedule.role != "retired":
+                if schedule.gate.legacy and schedule.role != "retired":
                     # An early report wake may not admit legacy work. Keep its
                     # outstanding deadline rather than postponing it a full interval.
                     maintenance = min(maintenance, schedule.next_legacy)
