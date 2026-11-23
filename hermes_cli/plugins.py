@@ -570,6 +570,9 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # bundled key from another directory (resolve_manifest_winners); gate the winners, then
         # load survivors in requires_plugins order (see resolve_plugin_load_order).
         winners = resolve_manifest_winners(manifests)
+        # A plugin may import an enabled sibling through a private alias before that sibling's
+        # own loader runs. Receipt the same gated discovery closure before ANY eager imports.
+        self._register_reviewed_directory_closure(winners.values(), disabled, enabled)
         to_load = {k: m for k, m in winners.items() if self._gate_manifest(m, disabled, enabled)}
         for lookup_key in resolve_plugin_load_order(to_load):
             manifest = to_load[lookup_key]

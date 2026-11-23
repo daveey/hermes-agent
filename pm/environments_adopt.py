@@ -73,6 +73,11 @@ def adopt(previous: Path, selected: Path, running: Path) -> bool:
         return False
     lease_generation(selected)  # The old lease stays: loaded modules keep reading from it.
     old, new = site_packages(previous), site_packages(selected)
+    # Mirror initial activation: receipt the selected RECORD root before exposing imports or .pth.
+    # Do not install attestation in processes that booted without it.
+    attestation = sys.modules.get("hermes_cli.code_attestation")
+    if attestation is not None:
+        attestation.register_dependency_environment(new)
     sys.path[:] = [str(new) if entry and Path(entry).resolve() == old.resolve() else entry for entry in sys.path]
     known = {pth.name for pth in old.glob("*.pth")}
     for pth in sorted(new.glob("*.pth")):

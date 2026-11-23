@@ -311,6 +311,16 @@ def installed_in_selected_environment(requirements: list[str]) -> bool:
 
 
 class PluginLoaderMixin:
+    def _register_reviewed_directory_closure(self, manifests, disabled, enabled) -> None:
+        """Preflight this discovery scope only; manifests and enablement never confer review."""
+        from hermes_cli.plugin_review_records import register_directory
+        from hermes_cli.plugins_discovery import gate_manifest
+
+        for manifest in manifests:
+            if (manifest.source != "entrypoint" and manifest.path
+                    and gate_manifest(manifest, disabled, enabled).action in {"load", "load_now", "defer"}):
+                register_directory(manifest_key(manifest), Path(manifest.path))
+
     def on_plugin_loaded(self, callback: Callable[[list[dict[str, Any]]], Any]) -> Callable[[], None]:
         """Subscribe to "a discovery sweep loaded plugins this process did not have": fires from INSIDE
         :meth:`discover_and_load` (never emitted by an install RPC) with one
