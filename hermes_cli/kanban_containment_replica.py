@@ -223,12 +223,13 @@ def prepare_apply(conn: sqlite3.Connection, changes) -> None:
         from hermes_cli.kanban_containment_connections import verifier
         guard.install(conn, verify_release=lambda r, s: verifier(conn, r, s))
         for ch in changes:
-            if ch.table == "task_events" and ch.fields.get("kind") in ("containment_released", "containment_closed"):
+            if ch.table == "task_events" and ch.fields.get("kind") in ("contained", "containment_released", "containment_closed"):
                 proof = _cached(conn, ch.uid)
                 if proof is not None:
                     data = _payload(proof["row"])
+                    episode = ch.uid if ch.fields["kind"] == "contained" else data["episode"]
                     conn.execute("INSERT OR IGNORE INTO containment_observations(task_id,episode) VALUES (?,?)",
-                                 (ch.fields.get("task_id"), data["episode"]))
+                                 (ch.fields.get("task_id"), episode))
 
 
 def event_permit(conn: sqlite3.Connection, uid: str, task: str, kind: str, payload: str) -> int:

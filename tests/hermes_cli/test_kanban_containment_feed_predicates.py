@@ -55,6 +55,7 @@ def test_real_feed_entrypoint_certifies_before_apply(synced_conn, monkeypatch, s
     def apply(*_a, **_k):
         assert calls == ["certify"]
         calls.append("apply")
+        return client.sync.ApplyResult(cursor=_k["new_cursor"])
 
     monkeypatch.setattr(quarantine, "certified_page", certify)
     monkeypatch.setattr(client.sync, "apply_remote_changes", apply)

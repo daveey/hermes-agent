@@ -36,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import ExitStack, contextmanager
-from dataclasses import astuple, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -847,6 +847,7 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
     that gateway's cards. [daveey]"""
     from hermes_cli.kanban_sync_stop import checkpoint
     total = pages = 0
+    from hermes_cli.kanban_sync_apply_budget import apply_page, service_pushes
     changed: dict[str, str] = {}  # status changes applied, for the parks that name those cards
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
     while True:
@@ -854,6 +855,7 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             return Pulled(total, more=True, status_changed=changed)  # unbounded, a backlog starved the round's push for hours
         pages += 1
         checkpoint()
+        service_pushes()
         page = acw.changes_page(hub, board, cursor, changed)  # a Resync carries the pages applied before it
         checkpoint()
         changes = [c for c in (adapt(ch) for ch in page.get("changes", [])) if c is not None]
@@ -871,8 +873,8 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
         from hermes_cli.kanban_sync_quarantine import certified_page
         changes = certified_page(conn, hub, board, changes)
-        applied = sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
-                                            local_pending_wins=True)
+        applied = apply_page(conn, changes, new_cursor=nxt, board=board, observers=observers,
+                             local_pending_wins=True)
         changed.update(getattr(applied, "status_changed", None) or {})
         total += len(page.get("changes", []))
         cursor = nxt
@@ -1037,7 +1039,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             _send(live, hub, slug, gateway, mode, result, after_pull=False, before_head=True, seen=evidence)
         except (HubError, OSError) as exc:
             _log.info("kanban sync: %s push before the pull failed (%s); pulling anyway", slug, exc)
-        with quarantine.mirroring(live), _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
+        from hermes_cli.kanban_sync_apply_budget import round_pushes
+        with round_pushes(live, hub, slug, gateway, mode, result, evidence), quarantine.mirroring(live), _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             quarantine.adopt(replica, live)
             quarantine.notify(live, slug)  # one hub card per new receipt (kanban_sync_quarantine_notice); never raises
             result.pulled = pulled
@@ -1113,19 +1116,8 @@ def _send(live: sqlite3.Connection, hub: Hub, slug: str, gateway: str, mode: str
           after_pull: bool, before_head: bool, seen: Optional[dict] = None) -> None:
     """Push the outbox and resolve rejections, adding to ``result``. A round does this before its pulls and after
     them (``after_pull``, which also transfers attachments); for ``before_head`` see :func:`push`."""
-    with credited(live):  # acknowledgements and the Board's merged rows: sync bookkeeping, not local edits
-        pushed = push(live, hub, slug, gateway, primary=mode == "primary", before_head=before_head, seen=seen)
-    result.push = pushed if result.push is None else PushResult(*map(sum, zip(astuple(result.push), astuple(pushed))))
-    if after_pull:
-        from hermes_cli.kanban_sync_attachments import transfer_pending
-        transfer_pending(live, hub, slug)
-    from hermes_cli.kanban_sync_rejections import resolve_rejections
-    from hermes_cli.kanban_sync_reserved_key import advance
-    try:  # children of a corrected reserved-key card follow its accepted parent (no-op without a receipt)
-        advance(live, hub, slug)
-    except (HubError, SyncUnavailable, OSError) as exc:
-        _log.info("kanban sync: %s reserved-key advance deferred (%s)", slug, exc)
-    result.rejection_resolutions += resolve_rejections(live, hub, slug)
+    from hermes_cli.kanban_sync_round_send import send
+    send(live, hub, slug, gateway, mode, result, after_pull=after_pull, before_head=before_head, seen=seen)
 
 
 def sync_all_once(hub: Optional[Hub] = None, *,

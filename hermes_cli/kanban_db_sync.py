@@ -1344,8 +1344,9 @@ def apply_remote_changes(
     from hermes_cli.kanban_sync_apply_schema import page_writer
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     from hermes_cli import kanban_containment_replica as containment
+    from hermes_cli.kanban_sync_apply_budget import check_budget, transaction_budget
     containment.prepare_apply(conn, changes)
-    with page_writer(conn, SYNCED_TABLES, cache=bool(changes) and keep is None):
+    with page_writer(conn, SYNCED_TABLES, cache=bool(changes) and keep is None), transaction_budget(conn):
         result.revision_before = _repair_revision(conn)
         # Serialize with set_mode(off): a feed fetched before detach must not
         # overwrite locally held custody after the detach transaction commits.
@@ -1355,6 +1356,7 @@ def apply_remote_changes(
             conn.execute("UPDATE kanban_sync_state SET applying = 1")
             own = _state(conn)["gateway_id"]
             for change in changes:
+                check_budget()
                 if keep is not None and not keep(conn, change):
                     result.skipped += 1
                     continue
