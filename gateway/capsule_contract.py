@@ -9,7 +9,7 @@ from hermes_cli._startup_fast import project_root_str
 CORE_ROOT = Path(project_root_str())
 
 
-def _verified_sha(*, worker=False):
+def _verified_sha(*, worker=False, deadline=None):
     """Require the boot-installed ledger as well as a clean, unchanged disk.
 
     Never install a ledger here: late provenance cannot attest already loaded
@@ -18,10 +18,12 @@ def _verified_sha(*, worker=False):
     from hermes_cli.code_attestation import integrity_observation
     from hermes_cli.git_fingerprint import capsule_code_sha
     try:
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         sha = capsule_code_sha(CORE_ROOT)
         if sha is None:
             return None
-        observed = integrity_observation()
+        observed = integrity_observation(deadline=deadline) if deadline is not None else integrity_observation()
         routes = ('managed-worker-stub',) if worker else (
             'managed-stub', 'managed-stub-relaunch', 'console-main-first')
         if (observed['core_root'] != str(CORE_ROOT.resolve())
@@ -49,7 +51,7 @@ def _advisory_sha():
 
     def verify():
         try:
-            result[0] = _verified_sha()
+            result[0] = _verified_sha(deadline=deadline)
         except Exception:
             # This advisory must never take legacy identify down with it.
             import logging

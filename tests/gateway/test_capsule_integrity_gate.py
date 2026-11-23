@@ -14,7 +14,7 @@ def observation(monkeypatch):
     value = {'core_root': str(contract.CORE_ROOT), 'boot_sha': sha,
              'route': 'managed-stub', 'generation': 1, 'unknowns': ()}
     monkeypatch.setattr(git_fingerprint, 'capsule_code_sha', lambda root: sha)
-    monkeypatch.setattr(code_attestation, 'integrity_observation', lambda: dict(value))
+    monkeypatch.setattr(code_attestation, 'integrity_observation', lambda **kwargs: dict(value))
     monkeypatch.setattr(contract, '_worker_expected_sha', None)
     return value
 
@@ -22,7 +22,7 @@ def observation(monkeypatch):
 @pytest.mark.parametrize('defect', ['missing', 'root', 'sha', 'route', 'unknown', 'pending'])
 def test_unverified_ledger_withdraws_and_refuses_owner(observation, monkeypatch, defect):
     if defect == 'missing':
-        def missing():
+        def missing(**kwargs):
             raise RuntimeError('code attestation not installed')
         monkeypatch.setattr(code_attestation, 'integrity_observation', missing)
     else:
@@ -56,6 +56,32 @@ def test_observed_worker_cannot_lose_owner_contract(argv, observation):
 
 def test_ordinary_worker_needs_no_contract(observation):
     assert contract.install_worker_contract([]) == []
+
+
+def test_advisory_forwards_deadline_but_actual_admission_is_unbounded(observation, monkeypatch):
+    seen = []
+    def observe(**kwargs):
+        seen.append(kwargs)
+        return dict(observation)
+    monkeypatch.setattr(code_attestation, 'integrity_observation', observe)
+    monkeypatch.setattr(contract.time, 'monotonic', lambda: 10.0)
+    assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == [CONTRACT_CAPABILITY]
+    assert seen == [{'deadline': 10.4}]
+    assert contract.owner_launch_sha(True) == 'a' * 40
+    assert seen[-1] == {}
+
+
+def test_advisory_expired_before_verifier_skips_inventory(observation, monkeypatch):
+    monkeypatch.setattr(contract.time, 'monotonic', lambda: 10.0)
+    monkeypatch.setattr(code_attestation, 'integrity_observation', lambda **kwargs: pytest.fail('expired scan'))
+    assert contract._verified_sha(deadline=9.0) is None
+
+
+def test_advisory_timeout_withdraws_capability(observation, monkeypatch):
+    def expired(**kwargs):
+        raise TimeoutError('inventory budget exhausted')
+    monkeypatch.setattr(code_attestation, 'integrity_observation', expired)
+    assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == []
 
 
 def test_inventory_spanning_disk_update_refuses(observation, monkeypatch):

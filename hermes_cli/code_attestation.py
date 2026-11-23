@@ -19,6 +19,7 @@ import sysconfig
 from collections import OrderedDict
 from itertools import islice
 import threading
+import time
 from types import CodeType, FunctionType
 
 
@@ -1013,10 +1014,11 @@ class Attestation:
             elif owner is None:
                 self._extension_unknown("unrooted-module:" + name, filename)
 
-    def _inventory_modules(self):
+    def _inventory_modules(self, *, deadline=None):
         # Requested snapshots only, never idle scans. Recheck mutable __file__ even
         # for an unchanged module object; retaining identity avoids id recycling.
         for name, module in self._module_snapshot():
+            _check_inventory_deadline(deadline)
             filename = getattr(module, "__file__", None)
             self._module_file(name, filename)
             key = (name, id(module))
@@ -1421,20 +1423,30 @@ class Attestation:
             self._inventory_modules()
             return tuple(sorted(self._unknown))
 
-    def integrity_observation(self):
+    def integrity_observation(self, *, deadline=None):
         """One locked inventory with its process-bound identity and unfiltered unknowns.
 
         Consumers must reject pending/unsupported provenance, not manufacture a
         ledger after startup or filter observational unknowns into permission.
         """
-        with self._lock:
-            self._inventory_modules()
+        _check_inventory_deadline(deadline)
+        acquired = (self._lock.acquire() if deadline is None else
+                    self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())))
+        if not acquired:
+            raise TimeoutError('code attestation inventory budget exhausted')
+        try:
+            _check_inventory_deadline(deadline)
+            self._inventory_modules(deadline=deadline)
+            _check_inventory_deadline(deadline)
             if getattr(self, '_reviewed_plugins', None):
                 from hermes_cli.plugin_review_records import verify_registered
                 verify_registered(self)
+            _check_inventory_deadline(deadline)
             return {"core_root": str(self.core_root), "boot_sha": self.boot_sha,
                     "route": self.route, "generation": self._generation,
                     "unknowns": tuple(sorted(self._unknown))}
+        finally:
+            self._lock.release()
 
     def latched_unknowns(self):
         """The latched unknowns without a module inventory (cheap: polled while measuring)."""
@@ -1503,9 +1515,16 @@ def register_dependency_environment(site_dir):
     return _installed.register_dependency_environment(site_dir)
 
 
-def integrity_observation():
+def _check_inventory_deadline(deadline):
+    # Cancellation is advisory-only; never return a partially verified positive.
+    # One filesystem operation is not interruptible, so check between modules.
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('code attestation inventory budget exhausted')
+
+
+def integrity_observation(*, deadline=None):
     """Observe only the ledger installed at bootstrap; missing installation refuses."""
-    return _ledger().integrity_observation()
+    return _ledger().integrity_observation(deadline=deadline)
 
 
 def unknowns():

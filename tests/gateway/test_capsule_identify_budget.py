@@ -18,7 +18,7 @@ def test_slow_identity_withdraws_only_v2_and_never_reuses_late_positive(tmp_path
     monkeypatch.setenv('HERMES_HOME', str(home))
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     calls = []
-    def slow_identity():
+    def slow_identity(**kwargs):
         calls.append(1)
         entered.set()
         assert release.wait(5)
@@ -56,9 +56,9 @@ def test_slow_identity_withdraws_only_v2_and_never_reuses_late_positive(tmp_path
     assert contract._advisory_lock.acquire(timeout=5)
     contract._advisory_lock.release()
     # Even a late success is never a cached positive on a later identify.
-    monkeypatch.setattr(contract, '_verified_sha', lambda: None)
+    monkeypatch.setattr(contract, '_verified_sha', lambda **kwargs: None)
     assert contract.available_capabilities([CAPABILITY, CONTRACT_CAPABILITY], advertised_sha='a' * 40) == [CAPABILITY]
-    monkeypatch.setattr(contract, '_verified_sha', lambda: 'a' * 40)
+    monkeypatch.setattr(contract, '_verified_sha', lambda **kwargs: 'a' * 40)
     assert contract.available_capabilities([CAPABILITY, CONTRACT_CAPABILITY], advertised_sha='a' * 40) == [CAPABILITY, CONTRACT_CAPABILITY]
     assert descriptor['capabilities'] == [CAPABILITY, CONTRACT_CAPABILITY]
 
@@ -70,7 +70,7 @@ def test_advisory_preserves_context_and_recovers_from_exception(monkeypatch, cap
     marker = contextvars.ContextVar('capsule-budget-fixture', default='unset')
     token = marker.set('profile-scope')
     seen = []
-    def verify():
+    def verify(**kwargs):
         seen.append(marker.get())
         raise LookupError('fixture unexpected inventory error')
     try:
@@ -78,7 +78,7 @@ def test_advisory_preserves_context_and_recovers_from_exception(monkeypatch, cap
         assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == []
         assert seen == ['profile-scope']
         assert 'Capsule identify verification failed' in caplog.text
-        monkeypatch.setattr(contract, '_verified_sha', lambda: 'a' * 40)
+        monkeypatch.setattr(contract, '_verified_sha', lambda **kwargs: 'a' * 40)
         assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == [CONTRACT_CAPABILITY]
     finally:
         marker.reset(token)
@@ -93,7 +93,7 @@ def test_advisory_thread_start_failure_withdraws_and_releases_slot(monkeypatch):
     with monkeypatch.context() as scoped:
         scoped.setattr('agent.memory_provider.spawn_context_thread', lambda *a, **k: RefusedThread())
         assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == []
-    monkeypatch.setattr(contract, '_verified_sha', lambda: 'a' * 40)
+    monkeypatch.setattr(contract, '_verified_sha', lambda **kwargs: 'a' * 40)
     assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == [CONTRACT_CAPABILITY]
 
 
@@ -101,7 +101,7 @@ def test_advisory_charges_startup_and_rejects_completed_late_positive(monkeypatc
     from gateway import capsule_contract as contract
     clock = [10.0]
     monkeypatch.setattr(contract.time, 'monotonic', lambda: clock[0])
-    monkeypatch.setattr(contract, '_verified_sha', lambda: 'a' * 40)
+    monkeypatch.setattr(contract, '_verified_sha', lambda **kwargs: 'a' * 40)
 
     class LateThread:
         def __init__(self, target):

@@ -38,7 +38,7 @@ def test_identify_dynamically_withdraws_contract(repo, tmp_path, monkeypatch, ad
     # Unit control-socket boundary: the real installed-ledger subprocess is
     # covered separately, never reconstructed in the production permission gate.
     from gateway import capsule_contract as contract
-    monkeypatch.setattr('hermes_cli.code_attestation.integrity_observation', lambda: {
+    monkeypatch.setattr('hermes_cli.code_attestation.integrity_observation', lambda **kwargs: {
         'core_root': str(contract.CORE_ROOT), 'boot_sha': actual(repo),
         'route': 'managed-stub', 'unknowns': ()})
     monkeypatch.setattr('gateway.control_socket.build_identify_payload', lambda: {
