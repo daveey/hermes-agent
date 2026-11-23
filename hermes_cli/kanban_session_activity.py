@@ -994,7 +994,7 @@ def _publish_links(scope: tuple, fingerprint: tuple) -> tuple:
 
 def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
     """Project and publish (caller holds ``_links_lock``); returns the published entry. ``fingerprint`` is taken
-    before projecting, so a store change during the projection leaves the cache stale and triggers another rebuild."""
+    before projecting: a store change during it leaves the entry stale for readers arriving after it started."""
     global _links_cache
     started = _links_tickets.take()
     _origin_rows_sink.rows = []

@@ -8,6 +8,7 @@ Without this, on a board written every few seconds each reader queued on ``_link
 2026-11-22, 412 strict projections in 57 min at ~6 s wall each, the lock held ~98% of the time and Desktop user-steps
 polls timing out behind it while the hub sat idle. ``publish``/``answers``/``reset`` run under ``_links_lock``."""
 import itertools
+import threading
 from typing import Callable
 
 from hermes_cli import kanban_links_narrow as _links_narrow
@@ -17,11 +18,13 @@ class StartTickets:
     def __init__(self, clock: Callable[[], float]):
         self._clock = clock  # the owner's monotonic clock, looked up per call (tests replace it)
         self._tickets = itertools.count(1)
+        self._take_lock = threading.Lock()  # next() on count is atomic only under the GIL
         self._started: dict[tuple, int] = {}
 
     def take(self) -> int:
         """A reader's arrival or a projection's start; strictly increasing across threads."""
-        return next(self._tickets)
+        with self._take_lock:
+            return next(self._tickets)
 
     def publish(self, scope: tuple, started: int, live_scopes) -> None:
         """``scope``'s cached projection is now the one that took ``started``; forget scopes the cache evicted."""
