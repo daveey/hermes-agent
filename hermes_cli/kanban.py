@@ -1053,6 +1053,13 @@ def _cmd_comment(args: argparse.Namespace) -> int:
         writer_kind, writer_session, _evidence = cli_comment_writer(author=author)
     with kbc.connect_closing() as conn:
         try:
+            from hermes_cli.kanban_foreign_comment import append
+            uid = append(conn, args.task_id, author, body, writer_kind=writer_kind,
+                         writer_session=writer_session, origin_gateway=getattr(args, "origin_gateway", None))
+            if uid:
+                print(f"Comment added to {args.task_id} (canonical comment {uid}). "
+                      "Normal sync delivers it to the home and replica; read show after sync for its local ID.")
+                return 0
             kb.add_comment(conn, args.task_id, author, body,
                            origin_gateway=getattr(args, "origin_gateway", None),
                            writer_kind=writer_kind, writer_session=writer_session)
