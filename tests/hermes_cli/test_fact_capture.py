@@ -180,32 +180,50 @@ def test_elapsed_budget_refuses_and_closes(board, monkeypatch):
         borrowed[0].execute("SELECT 1")
 
 
+
 def test_briefly_held_tracking_registry_does_not_fail_capture(board, monkeypatch):
-    """A capture waits out a momentary registry holder within its own budget.
+    """A capture waits out a momentary registry holder on its open, and only there.
 
     With timeout=0 every first capture on a busy hub failed with "tracking
     registry is busy" and only succeeded on the feed's retry ~0.1 s later."""
     import threading
+    from types import SimpleNamespace
     from hermes_cli import fact_capture as capture
-    from hermes_cli import sqlite_safe_read
+    from hermes_cli import kanban_generation, sqlite_safe_read
 
     path, writer = board
     kb.create_task(writer, title="a", assignee="w")
     monkeypatch.setattr(capture, "time", time)  # real clock: this test is about waiting
-    held, release = threading.Event(), threading.Event()
+    held, release, released, waited = threading.Event(), threading.Event(), threading.Event(), []
 
     def holder():
         with sqlite_safe_read._live_lock:
             held.set()
-            release.wait(2)
+            release.wait(5)
+        released.set()
+
+    def sleep(seconds):
+        # retry_open's busy wait: proves the open really met the held registry,
+        # then lets the holder go (deterministic, no timer race).
+        waited.append(seconds)
+        release.set()
+        assert released.wait(5)
+
+    monkeypatch.setattr(kanban_generation, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep))
+    timeouts = []
+
+    def hydrate(conn, ids):
+        timeouts.append(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        return rows(conn, ids)
 
     thread = threading.Thread(target=holder)
     thread.start()
     assert held.wait(2)
-    threading.Timer(0.005, release.set).start()
     try:
-        result = capture_tasks(path, None, rows, budget=CaptureBudget(max_seconds=0.5))
+        result = capture_tasks(path, None, hydrate)  # default budget (20 ms)
     finally:
         release.set()
         thread.join(2)
+    assert waited, "capture never met the held registry"
     assert result.after is not None
+    assert timeouts and set(timeouts) == {0}, "reads inside the snapshot must not sleep on busy"

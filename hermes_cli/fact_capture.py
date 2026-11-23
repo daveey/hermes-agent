@@ -103,6 +103,10 @@ def capture_tasks(path: Path, cursor: changes.Cursor | None,
     # tracking registry is held only briefly per open, and timeout=0 failed
     # nearly every first capture on a busy host (one retry ~0.1 s later each).
     with closing(open_ro(path, timeout=budget.max_seconds)) as conn:
+        # Only the open waits. A busy read inside the snapshot must still fail
+        # fast as busy (cheap feed retry), not sleep into CaptureBudgetExceeded
+        # and push the source into a paged full re-read.
+        conn.execute("PRAGMA busy_timeout=0")
         # SQLite refuses oversized rows before Python allocates their values.
         conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, budget.max_bytes)
         before = _identity(path)
