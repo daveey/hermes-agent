@@ -259,7 +259,7 @@ def test_final_rejection_is_visible_durable_and_acknowledged_without_sync_succes
         restarted.close()
 
 
-@pytest.mark.parametrize('status', ['cancelled', 'deferred'])
+@pytest.mark.parametrize('status', ['deferred'])
 def test_unintegrated_disposition_stays_in_custody_without_ack(live, status):
     kb.create_task(live, title='final custody', assignee='worker')
     receiver = Receiver()

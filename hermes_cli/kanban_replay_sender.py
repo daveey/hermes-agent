@@ -21,6 +21,7 @@ class PushResult:
     merged: int = 0
     rejected: int = 0
     deferred: int = 0
+    cancelled: int = 0
 
 
 def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=False, seen=None):
@@ -77,7 +78,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
             raise ValueError('source verdict identity mismatch')
         row = source()
         status = verdict['status']
-        if status == 'rejected':
+        if status in ('rejected', 'cancelled'):
             if row.get('_parent'):
                 # Move exact synthetic custody into the ordinary visible repair queue.
                 # This is not a new intent, a retry, or an authoritative row success.
@@ -91,10 +92,14 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                              (pending['op_id'], 'tasks', row['row_uid'], 'upsert', json.dumps(wire['fields']),
                               wire['hlc'], int(time() * 1000), wire.get('status_origin'), json.dumps(wire)))
                 retire_parent(conn, row['row_uid'])
-            reason = f"{verdict.get('reason') or 'rejected'}: {verdict.get('detail') or ''}".strip(': ')
+            reason = f"{verdict.get('reason') or status}: {verdict.get('detail') or ''}".strip(': ')
+            if status == 'cancelled':
+                # Reuse non-success custody so dependency/import fences also hold
+                # cancelled intents. The label and retained verdict distinguish them.
+                reason = f'cancelled: {reason}'
             conn.execute("UPDATE kanban_sync_outbox SET state='rejected', last_error=?, attempts=attempts+1 "
                          "WHERE op_id=?", (reason[:500], pending['op_id']))
-            out.rejected += 1
+            setattr(out, status, getattr(out, status) + 1)
             return  # Keep the semantic obligation visible; no sync success or identity rotation.
         if status not in ('applied', 'merged'):
             raise ValueError('tracer final disposition requires custody integration')
