@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_FACTS_GATEWAY", "0")  # native scheduling is covered by real-entry loop tests
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))

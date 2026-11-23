@@ -43,6 +43,7 @@ class FailingWakeAdapter(RecordingAdapter):
 
 
 async def _run_one_notifier_tick(monkeypatch, runner):
+    monkeypatch.setenv("HERMES_FACTS_GATEWAY", "0")  # explicitly retain legacy cadence coverage
     real_sleep = asyncio.sleep
 
     async def fake_sleep(delay):

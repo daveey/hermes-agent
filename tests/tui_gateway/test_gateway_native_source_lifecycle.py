@@ -65,6 +65,44 @@ def test_hint_failure_revokes_readiness_then_quiet_retry(owner):
     assert action.due(legacy_due=False)
 
 
+def test_sqlite_inventory_failure_revokes_readiness_and_recovers(owner, monkeypatch):
+    import sqlite3
+    action = owner.add(lambda: None)
+    owner.step(0, reconcile=True)
+    action.due(legacy_due=False)
+    inventory = sources.inventory
+
+    def unavailable():
+        raise sqlite3.OperationalError('board roster unavailable')
+
+    monkeypatch.setattr(sources, 'inventory', unavailable)
+    owner.step(30, reconcile=True)
+    assert not owner.ready
+    assert owner.retry_at == 31
+    assert action.due(legacy_due=False)
+    monkeypatch.setattr(sources, 'inventory', inventory)
+    owner.step(30.5, reconcile=False)
+    assert not owner.ready
+    owner.step(31, reconcile=False)
+    assert owner.ready
+    assert action.due(legacy_due=False)
+
+
+def test_closed_event_loop_callback_does_not_starve_other_executors(owner):
+    called = []
+
+    def closed_loop():
+        raise RuntimeError('Event loop is closed')
+
+    failed = owner.add(closed_loop)
+    healthy = owner.add(lambda: called.append('healthy'))
+    owner.step(0, reconcile=True)
+    assert called == ['healthy']
+    assert failed.closed
+    assert failed not in owner.actions
+    assert healthy.due(legacy_due=False)
+
+
 def test_last_consumer_off_withdraws_watch_and_on_rearms(owner):
     first = owner.add(lambda: None)
     owner.step(0, reconcile=True)
@@ -144,6 +182,35 @@ def test_registration_context_survives_owner_thread_scope(monkeypatch, tmp_path)
         assert marker.get() == 'outside'
     finally:
         owner.close()
+
+
+def test_native_gate_close_withdraws_membership(owner, monkeypatch):
+    from gateway.kanban_notification_schedule import BoundActions
+    from tui_gateway import notification_loaded_f
+
+    plain = BoundActions(lambda: None)
+    try:
+        assert plain.legacy  # plain unbound callers are still legacy, independently of native rollback
+    finally:
+        plain.close()
+    scheduler = notification_loaded_f.Scheduler(clock=lambda: 0)
+    scheduler.gateway_sources = owner
+    monkeypatch.setattr(notification_loaded_f, '_owner', scheduler)
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    gate = BoundActions(lambda: None, native=True)
+    try:
+        assert not gate.due(0, legacy_due=True)
+        scheduler.step()
+        assert owner.actions
+        assert owner.ready
+        gate.close()
+        assert not owner.actions
+        scheduler.step()
+        assert not owner.ready
+        assert owner.watch is None
+    finally:
+        gate.close()
+        scheduler.close()
 
 
 def test_native_to_bound_owner_never_reactivates_legacy_on_detach(owner, monkeypatch):

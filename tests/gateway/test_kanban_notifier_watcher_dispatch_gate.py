@@ -28,8 +28,9 @@ def test_notifier_watcher_skips_when_notifications_disabled():
     list_boards.assert_not_called()
 
 
-def test_notifier_watcher_polls_without_dispatch_ownership():
+def test_notifier_watcher_polls_without_dispatch_ownership(monkeypatch):
     """A profile gateway still polls its profile-owned subscriptions."""
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '0')  # legacy cadence, independent of dispatcher ownership
     runner = _make_runner(with_adapter=True)
     past_gate = []
     sleep_calls = []

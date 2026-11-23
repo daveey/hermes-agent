@@ -33,6 +33,7 @@ class DisconnectedAdapters(dict):
 
 
 async def _run_one_notifier_tick(monkeypatch, runner):
+    monkeypatch.setenv("HERMES_FACTS_GATEWAY", "0")  # legacy cadence; native loops have separate coverage
     real_sleep = asyncio.sleep
 
     async def fake_sleep(delay):

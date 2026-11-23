@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from contextvars import copy_context
 from pathlib import Path
 import threading
@@ -119,7 +120,7 @@ class Sources:
                 self.ready = False
                 self.retry_at = float('inf')  # unsupported platform: census only, not a 1s retry loop
                 log.warning('gateway native notification hints unsupported; shared 30s census only')
-            except (OSError, ValueError, RuntimeError) as exc:
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                 self.ready = False
                 self.retry_at = now + 1.0
                 log.warning('gateway notification source readiness unavailable: %s', exc)
@@ -130,7 +131,12 @@ class Sources:
                 for action in actions:
                     action.pending = True
             for action in actions:
-                action.wake()  # wake only, never execute under the source lock
+                try:
+                    action.wake()  # wake only, never execute under the source lock
+                except RuntimeError:
+                    # A watcher may have closed its asyncio loop during fanout.
+                    # Retire only that membership; other durable executors still wake.
+                    action.close()
 
     def close(self):
         if self.watch is not None:

@@ -65,6 +65,7 @@ def _runner(adapter, platform=Platform.SLACK):
 
 
 async def _one_notifier_tick(monkeypatch, runner):
+    monkeypatch.setenv("HERMES_FACTS_GATEWAY", "0")  # legacy cadence; native loops have separate coverage
     real_sleep = asyncio.sleep
 
     async def fake_sleep(delay):

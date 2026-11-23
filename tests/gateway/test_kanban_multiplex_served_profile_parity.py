@@ -23,6 +23,7 @@ from hermes_constants import get_hermes_home
 
 @pytest.fixture
 def served(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_FACTS_GATEWAY", "0")  # retain sleep-driven legacy transport fixture
     root = tmp_path / ".hermes"
     alpha = root / "profiles" / "alpha"
     alpha.mkdir(parents=True)

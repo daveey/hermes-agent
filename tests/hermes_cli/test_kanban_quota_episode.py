@@ -573,6 +573,7 @@ def _third_requeue_notice(conn, tid):
 
 
 def test_quota_notice_delivered_once_by_gateway_notifier(board, monkeypatch):
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '0')  # explicit sleep-driven legacy transport proof
     import asyncio
     from gateway.config import Platform
     from gateway.run import GatewayRunner
