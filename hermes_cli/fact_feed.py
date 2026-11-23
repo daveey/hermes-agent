@@ -17,6 +17,18 @@ from hermes_cli.kanban_generation import is_busy
 
 log = logging.getLogger(__name__)
 _RETRY = (0.1, 0.2, 0.4, 1.0, 2.0, 5.0)
+_REMIND_EVERY = 60  # attempts; ~5 minutes at the max backoff
+
+
+def _busy(exc):
+    try:
+        return is_busy(exc)
+    except Exception:  # health: allow BLE001 -- odd sqlite_errorcode on a foreign exception is simply not busy
+        return False
+
+
+def _visible(attempt):
+    return attempt in (1, len(_RETRY)) or attempt % _REMIND_EVERY == 0
 
 
 
@@ -30,6 +42,8 @@ class _Source:
     active: bool = True
     watch: object = None
     publication: object = field(default_factory=threading.RLock)
+    # Owner-thread only: exception types already traced in this failure streak.
+    traced: set = field(default_factory=set)
 
 
 class Registration:
@@ -141,6 +155,7 @@ class ChangeFeed:
                     source.cursor = capture.after
                     source.failures = 0
                     source.retry_at = None
+                    source.traced.clear()
                     # Deadlines use monotonic time, not observed_at's UTC clock.
                     deadline = getattr(capture, "next_deadline", None)
                     if deadline is not None:
@@ -159,11 +174,13 @@ class ChangeFeed:
             # One traceback per failure streak, none for an expected busy open:
             # formatting a traceback per retry under the shared logging lock
             # starved the gateway event loop until its watchdog exited (75).
-            attempt, busy = source.failures + 1, is_busy(exc)
-            if attempt == 1 and not busy:
-                log.exception("source capture/publication failed; retaining cursor")
+            # Each new exception type in a streak still gets its traceback.
+            attempt, busy = source.failures + 1, _busy(exc)
+            if not busy and ("capture", type(exc)) not in source.traced:
+                source.traced.add(("capture", type(exc)))
+                log.exception("source capture/publication failed (attempt %d); retaining cursor", attempt)
             else:
-                log.log(logging.WARNING if attempt in (1, len(_RETRY)) else logging.DEBUG,
+                log.log(logging.WARNING if _visible(attempt) else logging.DEBUG,
                         "source capture/publication failed (attempt %d%s); retaining cursor: %s",
                         attempt, ", busy" if busy else "", exc)
             with source.publication:
@@ -175,8 +192,14 @@ class ChangeFeed:
                     source.due = source.retry_at
                 try:
                     self._failure(source.adapter, exc)
-                except Exception:
-                    log.exception("source health publication failed; retry remains armed")
+                except Exception as health_exc:
+                    if ("health", type(health_exc)) not in source.traced:
+                        source.traced.add(("health", type(health_exc)))
+                        log.exception("source health publication failed; retry remains armed")
+                    else:
+                        log.log(logging.WARNING if _visible(attempt) else logging.DEBUG,
+                                "source health publication failed (attempt %d); retry remains armed: %s",
+                                attempt, health_exc)
 
     def _run(self):
         while (source := self._next()) is not None:

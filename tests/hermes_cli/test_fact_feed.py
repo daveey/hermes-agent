@@ -150,37 +150,80 @@ def test_retry_floor_not_bypassed_by_watch_storm():
         feed.close()
 
 
-def _failing_feed(error, attempts):
-    source = Adapter()
-    failures, done = [], threading.Event()
-    def capture(cursor):
-        raise error()
-    source.capture_hook = capture
-    def failure(adapter, exc):
-        failures.append(exc)
-        if len(failures) >= attempts:
-            done.set()
-    return source, done, ChangeFeed(lambda *args: None, failure)
 
-
-def _busy():
+def _sqlite_busy():
     exc = sqlite3.OperationalError("database is locked: SQLite tracking registry is busy")
     exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
     return exc
 
 
-@pytest.mark.parametrize("error, tracebacks", [(_busy, 0), (lambda: RuntimeError("defect"), 1)])
-def test_retry_streak_logs_at_most_one_traceback(caplog, error, tracebacks):
+def _run_failing(errors, attempts, *, failure_error=None):
+    """Drive `attempts` failed captures; errors[i] (last repeats) raises on attempt i+1."""
+    source, calls = Adapter(), []
+    done = threading.Event()
+    def capture(cursor):
+        calls.append(cursor)
+        raise errors[min(len(calls), len(errors)) - 1]()
+    source.capture_hook = capture
+    seen = []
+    def failure(adapter, exc):
+        seen.append(exc)
+        if len(seen) >= attempts:
+            done.set()
+        if failure_error is not None:
+            raise failure_error()
+    feed = ChangeFeed(lambda *args: None, failure)
+    try:
+        feed.register(source)
+        assert done.wait(10)
+    finally:
+        feed.close()
+
+
+def _feed_records(caplog, text):
+    return [r for r in caplog.records if r.name == "hermes_cli.fact_feed" and text in r.getMessage()]
+
+
+@pytest.fixture
+def fast_retry(monkeypatch):
+    from hermes_cli import fact_feed
+    monkeypatch.setattr(fact_feed, "_RETRY", (0.001,) * 6)
+    monkeypatch.setattr(fact_feed, "_REMIND_EVERY", 8)
+    return fact_feed
+
+
+@pytest.mark.parametrize("error, tracebacks", [(_sqlite_busy, 0), (lambda: RuntimeError("defect"), 1)])
+def test_retry_streak_logs_at_most_one_traceback(caplog, fast_retry, error, tracebacks):
     # Each retry used to format a full traceback under the logging lock; at ~2/s
     # across sources that stalled the gateway event loop past its watchdog.
     caplog.set_level(logging.DEBUG, logger="hermes_cli.fact_feed")
-    source, done, feed = _failing_feed(error, 3)
-    try:
-        feed.register(source)
-        assert done.wait(5)
-    finally:
-        feed.close()
-    records = [r for r in caplog.records if r.name == "hermes_cli.fact_feed"]
-    assert len(records) >= 3
+    _run_failing([error], 8)
+    records = _feed_records(caplog, "capture/publication failed")[:8]
+    assert len(records) == 8
     assert sum(r.exc_info is not None for r in records) == tracebacks
-    assert sum(r.levelno >= logging.WARNING for r in records) <= 2
+    # Still visible: attempt 1, max backoff (6) and the periodic reminder (8).
+    visible = [i + 1 for i, r in enumerate(records) if r.levelno >= logging.WARNING]
+    assert visible == [1, 6, 8]
+
+
+def test_defect_after_busy_start_still_traced(caplog, fast_retry):
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.fact_feed")
+    _run_failing([_sqlite_busy, lambda: RuntimeError("defect"), lambda: KeyError("other")], 5)
+    traced = [r for r in _feed_records(caplog, "capture/publication failed") if r.exc_info]
+    assert [r.exc_info[0] for r in traced] == [RuntimeError, KeyError]
+
+
+def test_failing_health_callback_traced_once(caplog, fast_retry):
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.fact_feed")
+    _run_failing([_sqlite_busy], 4, failure_error=lambda: ValueError("health down"))
+    records = _feed_records(caplog, "health publication failed")
+    assert len(records) >= 4
+    assert sum(r.exc_info is not None for r in records) == 1
+
+
+def test_foreign_errorcode_is_not_busy_and_feed_survives():
+    from hermes_cli.fact_feed import _busy
+    exc = RuntimeError("x")
+    exc.sqlite_errorcode = "weird"
+    assert _busy(exc) is False
+    assert _busy(_sqlite_busy()) is True
