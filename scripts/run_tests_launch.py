@@ -165,7 +165,10 @@ def start_pytest(
     """
     server = _fork_server_for_run(repo_root)
     # Temporary, targeted evidence for tests passing then hanging at interpreter exit.
-    if file.resolve() == (repo_root / "tests/gateway/test_derived_session_after_delete.py").resolve():
+    if file.resolve() in {
+        (repo_root / "tests/gateway/test_derived_session_after_delete.py").resolve(),
+        (repo_root / "tests/gateway/test_authenticated_session_identity.py").resolve(),
+    }:
         pytest_args = [*pytest_args, "-p", "scripts.pytest_exit_diagnostics"]
     selection = list(targets) if targets else [str(file)]
     # The first files copied os.environ before the knob was popped; no test sees it.
