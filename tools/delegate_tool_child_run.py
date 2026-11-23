@@ -849,6 +849,9 @@ class _ChildRun:
         with _quiet("Could not classify subagent outcome: %s"):
             stamp_entry(self, entry)
         self.final_entry = entry
+        if unit_id := getattr(self.child, "_delegation_unit_id", None):
+            from tools.async_delegation import record_unit_child
+            record_unit_child(unit_id, entry)
         return entry
 
     def elapsed(self) -> float:

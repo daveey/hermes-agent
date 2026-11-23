@@ -481,16 +481,28 @@ def note_gateway_shutdown() -> int:
     running records), so each reads as a restart (resumable) rather than a user stop however its run ends, a
     SIGKILL mid-unwind included. Returns how many records were marked."""
     from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
+    from tools.async_delegation import _records, _records_lock
+    with _records_lock:
+        stopped = {key for key, record in _records.items() if record.get("_stop_requested")}
     with _active_subagents_lock:
-        live = [r.get("agent") for r in _active_subagents.values()]
-    for agent in live:
-        if agent is not None:
+        live = [(sid, r.get("agent")) for sid, r in _active_subagents.items()]
+    stopped_children = set()
+    for sid, agent in live:
+        if agent is None:
+            continue
+        if getattr(agent, "_delegate_stop_requested", False) is True:
+            stopped_children.add(sid)
+        elif getattr(agent, "_delegation_unit_id", None) not in stopped:
             agent._delegate_stop_cause = GATEWAY_SHUTDOWN
     marked = 0
+    exclusion = (" AND COALESCE(json_extract(record_json, '$.unit_id'), '') NOT IN ("
+                 + ",".join("?" for _ in stopped) + ")") if stopped else ""
+    if stopped_children:
+        exclusion += " AND subagent_id NOT IN (" + ",".join("?" for _ in stopped_children) + ")"
     for db in _profile_dbs():
         marked += _write(db, lambda conn: conn.execute(
-            "UPDATE resumable_subagents SET stop_cause=? WHERE state='running' AND owner_pid=?",
-            (GATEWAY_SHUTDOWN, os.getpid())).rowcount) or 0
+            "UPDATE resumable_subagents SET stop_cause=? WHERE state='running' AND owner_pid=?" + exclusion,
+            (GATEWAY_SHUTDOWN, os.getpid(), *stopped, *stopped_children)).rowcount) or 0
     return marked
 
 

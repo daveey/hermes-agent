@@ -262,8 +262,13 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
         errors["cards"] = "card_status_unavailable"
     control_asks, control_waits = read("controls", lambda: _control_items(tip), ([], []))
     subagents, lost_before = read("subagents", lambda: _subagent_items(db, ids, since), ([], []))
+    from hermes_state_subagent_resolution import resolved_subagents
+
+    resolved = read("subagents", lambda: resolved_subagents(db, ids, (prior or {}).get("failures") or []), set())
+    subagents = [s for s in subagents if s["state"] == "running" or s["id"] not in resolved]
+    lost_before = [s for s in lost_before if s["id"] not in resolved]
     processes = read("processes", lambda: _process_items(db, tip), [])
-    acknowledged = {p["id"] for p in processes if p.get("acknowledged")}
+    acknowledged = resolved | {p["id"] for p in processes if p.get("acknowledged")}
     processes = [p for p in processes if p["id"] not in acknowledged]
     goals = read("goals", lambda: _goal_items(db, ids), [])
     # Work that failed before this generation's request is retained failure, cleared only by this

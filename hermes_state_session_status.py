@@ -65,7 +65,8 @@ def _failures(snapshot: dict, previous: dict, generation: int, coverage: dict) -
             item.get("passive") is True and item.get("state") in {"watching", "scheduled"}) for item in work)
     )
     if successful_successor:
-        retained = []
+        # A new successful turn is not evidence that a missing child was handled.
+        retained = [f for f in retained if f["id"].startswith("subagent:")]
     current = [{"id": str(item.get("id") or "unknown"), "generation": generation, "state": item["state"]}
                for item in work if item.get("state") in {"failed", "lost", "cancelled"}]
     if turn.get("state") == "failed":
@@ -91,6 +92,9 @@ def _verdict(snapshot: dict, coverage: dict, generation: int, failures: list[dic
     if any(item.get("kind") == "card" and item.get("state") == "running" for item in open_work):
         return {"kind": "running", "on": deepcopy(open_work),
                 "presentation": {"stripe": "waiting", "reason_codes": ["linked_work_running"]}}
+    if any(f["id"].startswith("subagent:") for f in failures):
+        return {"kind": "unresolved", "reason": "linked_work_unsuccessful",
+                "presentation": {"stripe": "attention", "reason_codes": ["linked_work_unsuccessful"]}}
     if any(item.get("state") == "source_unknown" for item in open_work):
         return {"kind": "waiting", "on": deepcopy(open_work),
                 "presentation": {"stripe": "none", "reason_codes": ["linked_status_unknown"]}}

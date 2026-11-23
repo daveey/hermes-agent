@@ -267,8 +267,8 @@ def _load_interim_assistant_messages() -> bool:
 def _shutdown_sessions() -> None:
     # Durable-first: flush transcripts (bounded budget) BEFORE the slow teardown so a supervisor SIGKILL can't lose them.
     # [daveey] Background jobs are journaled after the turns stop and before close kills them unreported.
-    for step in (_flush_sessions_before_exit, _release_gateway_wake_owner, _stop_turns_before_exit,
-                 _journal_background_jobs_before_exit):
+    for step in (_prepare_delegations_before_exit, _flush_sessions_before_exit, _release_gateway_wake_owner,
+                 _stop_turns_before_exit, _journal_background_jobs_before_exit):
         with contextlib.suppress(Exception):
             step()
     with _sessions_lock:

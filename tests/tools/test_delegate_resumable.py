@@ -84,7 +84,7 @@ def test_a_limit_stopped_child_is_continued_after_a_restart_on_its_own_transcrip
     assert _db_rows(parent)[sid][0] == "completed"
 
 
-@pytest.mark.parametrize("cause", ["gateway", "user"])
+@pytest.mark.parametrize("cause", ["gateway", "user", "tui", "user_then_tui"])
 def test_a_gateway_shutdown_leaves_a_resumable_record_and_a_user_stop_does_not(cause):
     import threading
 
@@ -114,15 +114,23 @@ def test_a_gateway_shutdown_leaves_a_resumable_record_and_a_user_stop_does_not(c
         assert started.wait(10)
         if cause == "gateway":
             interrupt_all(reason="gateway shutdown (test)", resumable=True)  # gateway/run_shutdown.py's call
+        elif cause == "tui":
+            from tui_gateway import server
+            from tools.async_delegation import interrupt_for_session
+            server._prepare_delegations_before_exit()
+            interrupt_for_session(parent_session_id=parent.session_id, reason="tui_shutdown")
         else:
             with _active_subagents_lock:
                 assert sid in _active_subagents
             interrupt_subagent(sid)
+            if cause == "user_then_tui":
+                from tui_gateway import server
+                server._prepare_delegations_before_exit()
         release.set()
         _completion(out["delegation_id"])
 
     state, pinned, record = _db_rows(parent)[sid]
-    if cause == "gateway":
+    if cause in {"gateway", "tui"}:
         assert (state, record["resume_mode"], record["stop_cause"]) == ("resumable", "AUTO_ON_BOOT", "gateway_shutdown")
     else:
         assert (state, pinned) == ("stopped", 0)

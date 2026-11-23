@@ -68,13 +68,21 @@ def ensure_outcome_hooks() -> None:
 def cmd_outcome(db, args):
     from hermes_state_outcome import get_outcome, refresh_outcome
 
-    if args.refresh:
+    ack = getattr(args, "ack_subagent", [])
+    if args.refresh or ack:
         ensure_outcome_hooks()
 
     sid = _resolve(db, args.session_id)
     if not sid:
         return 1
-    outcome = refresh_outcome(sid, "manual", db=db) if args.refresh else get_outcome(sid, db=db)
+    if ack:
+        from hermes_state_subagent_resolution import acknowledge_subagents
+        try:
+            acknowledge_subagents(db, sid, ack, getattr(args, "evidence", None))
+        except ValueError as exc:
+            print(str(exc))
+            return 1
+    outcome = refresh_outcome(sid, "manual", db=db) if args.refresh or ack else get_outcome(sid, db=db)
     stripe = _stripe_report(db, sid)
     if args.json:
         print(json.dumps({"session_id": sid, "outcome": outcome, "desktop_stripe": stripe,

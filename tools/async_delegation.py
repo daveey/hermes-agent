@@ -780,10 +780,14 @@ def maybe_sweep_orphaned_completions(target_queue, *, now: Optional[float] = Non
         return 0
 
 
-def _update_delivery(sql: str, params: tuple) -> bool:
+def _update_delivery(sql: str, params: tuple, *, checkpoint: str | None = None) -> bool:
     """Run one UPDATE on the ledger; True iff exactly one row changed."""
     with _DB_LOCK, _transaction() as conn:
-        return conn.execute(sql, params).rowcount == 1
+        changed = conn.execute(sql, params).rowcount == 1
+        if changed and checkpoint:
+            from hermes_state_subagent_resolution import checkpoint_delivery
+            checkpoint_delivery(conn, checkpoint)
+        return changed
 
 
 def mark_completion_delivered(delegation_id: str) -> bool:
@@ -792,7 +796,7 @@ def mark_completion_delivered(delegation_id: str) -> bool:
     now = time.time()
     return _update_delivery(
         """UPDATE async_delegations SET delivery_state='delivered', delivered_at=?, updated_at=?
-           WHERE delegation_id=? AND delivery_state!='delivered'""", (now, now, delegation_id))
+           WHERE delegation_id=? AND delivery_state!='delivered'""", (now, now, delegation_id), checkpoint=delegation_id)
 
 
 def claim_completion_delivery(delegation_id: str, claim_id: str) -> bool:
@@ -890,7 +894,7 @@ def complete_completion_delivery(delegation_id: str, claim_id: str) -> bool:
                   delivered_at=?, updated_at=?, delivery_claim=NULL,
                   delivery_claimed_at=NULL
            WHERE delegation_id=? AND delivery_state='pending'
-             AND delivery_claim=?""", (now, now, delegation_id, claim_id))
+             AND delivery_claim=?""", (now, now, delegation_id, claim_id), checkpoint=delegation_id)
 
 
 def requeue_admitted_completion(delegation_id: str, target_queue,
@@ -920,6 +924,8 @@ def requeue_admitted_completion(delegation_id: str, target_queue,
                WHERE delegation_id=? AND delivery_state='delivered' AND delivery_attempts>=?""",
             (now, delegation_id, _MAX_DELIVERY_ATTEMPTS))
         if exhausted.rowcount == 1:
+            from hermes_state_subagent_resolution import checkpoint_delivery
+            checkpoint_delivery(conn, delegation_id)
             logger.warning("Async delegation %s exhausted its %d delivery attempts; "
                            "marking terminally dropped (result remains queryable).",
                            delegation_id, _MAX_DELIVERY_ATTEMPTS)
@@ -930,6 +936,8 @@ def requeue_admitted_completion(delegation_id: str, target_queue,
                  AND COALESCE(NULLIF(completed_at, 0), dispatched_at) < ?""",
             (now, delegation_id, now - _MAX_COMPLETION_REPLAY_AGE_S))
         if aged.rowcount == 1:
+            from hermes_state_subagent_resolution import checkpoint_delivery
+            checkpoint_delivery(conn, delegation_id)
             # Never offered past the replay cap (``_replay_pending`` would skip it silently): say so.
             logger.warning("Async delegation %s: replay age expired before it could be offered again; "
                            "terminally dropped (result remains queryable).", delegation_id)
@@ -941,6 +949,8 @@ def requeue_admitted_completion(delegation_id: str, target_queue,
             (now, recovered_admission_id, delegation_id))
         if reopened.rowcount != 1:
             return False
+        from hermes_state_subagent_resolution import checkpoint_delivery
+        checkpoint_delivery(conn, delegation_id)
         rows = conn.execute("""SELECT delegation_id, event_json, completed_at, dispatched_at
                FROM async_delegations WHERE delegation_id=?""", (delegation_id,)).fetchall()
         with _orphan_lock:  # an admitted copy already had its consumer: requeue keeps live routing
@@ -1741,6 +1751,13 @@ def interrupt_for_session(
     """Signal running async delegations owned by ONE ending session to stop (any
     selector matches, see ``_session_records``). Returns how many."""
     targets = _session_records(_ACTIVE_STATES, session_key, origin_ui_session_id, parent_session_id)
+    if reason == "tui_shutdown":
+        # The backend is restarting, not the conversation ending. Exit preparation has
+        # already marked every owned child resumable; do not cancel that successor debt.
+        with _records_lock:
+            _mark_stop(targets, reason, by_shutdown=True)
+        return _interrupt_records(targets, "interrupt_for_session", reason,
+                                  "Interrupted %d async delegation(s) for backend shutdown (%s)")
     with _records_lock:
         _mark_stop(targets, reason, by_shutdown=False)
     # Its children already waiting to resume must not wake up after the person stopped or closed it.

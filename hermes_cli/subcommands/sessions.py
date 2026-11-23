@@ -58,6 +58,9 @@ def _add_outcome_parsers(sessions_subparsers) -> None:
     sessions_outcome = sessions_subparsers.add_parser("outcome", help="Show a session's stored outcome")
     sessions_outcome.add_argument("session_id", help="Session ID or unique prefix")
     _flag(sessions_outcome, "--refresh", help="Re-derive and store the outcome first")
+    sessions_outcome.add_argument("--ack-subagent", action="append", default=[], metavar="SESSION_ID",
+                                  help="Acknowledge a verified lost child (repeatable; requires --evidence)")
+    sessions_outcome.add_argument("--evidence", help="Verification evidence for --ack-subagent")
     add_json_flag(sessions_outcome, "Emit JSON")
     sessions_audit = sessions_subparsers.add_parser(
         "outcome-audit", help="Every sidebar-listed session with its outcome (the status auditor's input)")

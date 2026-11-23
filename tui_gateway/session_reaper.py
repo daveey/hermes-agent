@@ -157,6 +157,12 @@ _exit_flush_prev_handlers: dict[int, Any] = {}
 _exit_flush_handlers_installed = False
 
 
+def _prepare_delegations_before_exit() -> None:
+    """Checkpoint detached children too, even when their parent has no foreground turn."""
+    from tools.async_delegation import interrupt_all
+    interrupt_all(reason="gateway_shutdown", resumable=True, by_shutdown=True)
+
+
 def _handle_exit_flush_signal(signum, frame) -> None:
     """Flush in-memory sessions, then hand off to the prior handler (uvicorn's graceful shutdown, a supervisor's
     handler, or the default disposition) — this only *prepends* a bounded flush."""
@@ -166,6 +172,8 @@ def _handle_exit_flush_signal(signum, frame) -> None:
         # An inherited ignore (`cmd &` from a non-interactive shell) ends nothing: stopping turns here
         # would raise the one-way exit fence in a process that keeps running and refuses every command.
         return
+    with contextlib.suppress(Exception):
+        _prepare_delegations_before_exit()
     with contextlib.suppress(Exception):
         _flush_sessions_before_exit()
     # The group signal that stopped us never reaches a command in its own session: reap it now,

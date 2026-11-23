@@ -62,6 +62,27 @@ OpenAI-compatible API continuation of local sessions. A gateway crash is differe
 from a client disconnect: interrupted work becomes `unknown` rather than being
 automatically replayed, and may need resolution before queued followers proceed.
 
+### Acknowledging verified delegated work
+
+A missing or failed subagent keeps the parent outcome unresolved until its result is
+consumed or independently verified. Unrelated successful turns and open linked
+cards do not acknowledge it. A child that later finishes with a complete final
+transcript is reconciled on the next outcome refresh.
+
+After verifying a lost child's work, use the supported acknowledgment command:
+
+```bash
+hermes sessions outcome PARENT_SESSION --ack-subagent CHILD_SESSION \
+  --evidence "Verified the merged change and its deployed behavior" --json
+```
+
+Repeat `--ack-subagent` to acknowledge several children. The command refuses foreign
+or still-live children and requires evidence. It stores an owner-qualified receipt
+and refreshes the outcome; it does not declare the child successful or rewrite its
+transcript. New child activity invalidates old acknowledgment evidence. Normal
+completion delivery records equivalent receipts automatically, retained beyond the
+delegation ledger's pruning window.
+
 ### What Counts Toward Context
 
 Hermes stores session history so it can resume conversations, but it does not
