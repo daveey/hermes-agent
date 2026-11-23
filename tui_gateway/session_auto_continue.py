@@ -375,8 +375,10 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str, *,
                                                  else "Resuming interrupted turn…"})
                     _emit("message.start", sid)
                 render_notification(announce, platform="tui", diagnostic=diagnostic)
+                # The slot can change after preflight. This automatic retry keeps its marker/backoff;
+                # a second-gate refusal must not ask the user to take over the other owner's turn.
                 accepted = _run_prompt_submit(rid, sid, session, text,
-                    display_kind=None if held else "auto_continue",
+                    display_kind=None if held else "auto_continue", report_ownership_refusal=False,
                     **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
