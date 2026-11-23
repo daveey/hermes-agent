@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_cli.fact_contract import Fact, Ready, Scope
+from hermes_cli.fact_contract import Fact, FactKey, Ready, Scope
 from hermes_cli.fact_host import FactHost, acquire
 from hermes_cli.fact_replica import Endpoint
 from hermes_cli.fact_store import FactStore, view_key
@@ -96,7 +96,23 @@ def test_demand_control_never_exports_fact_snapshot(tmp_path, monkeypatch):
     token = 't' * 32
     monkeypatch.chdir(tmp_path)
     exported, delivered = threading.Event(), threading.Event()
-    owner = FactHost('owner', {token: scope}, demand=lambda *args: delivered.set())
+    # Reviewer's 85k-fact probe, with a burst rather than a single demand.
+    store = FactStore()
+    for start in range(0, 85000, 1000):
+        store.publish([Fact(FactKey(scope, 'TaskFact', f't{i}'), {'v': 'x'}, health='fresh')
+                       for i in range(start, start + 1000)])
+    calls = []
+
+    def demand(got_scope, view, selector):
+        # Materialize only the demanded key from the immutable current snapshot.
+        fact = store.snapshot(got_scope).get(FactKey(got_scope, 'TaskFact', selector['id']))
+        assert fact is not None and fact.value['v'] == 'x'
+        store.publish([Fact(view_key(got_scope, view, selector), {'encoded': b'"x"'}, health='fresh')])
+        calls.append(selector['id'])
+        if len(calls) == 16:
+            delivered.set()
+
+    owner = FactHost('owner', {token: scope}, store=store, demand=demand)
 
     def forbidden_export(subscription):
         exported.set()
@@ -106,8 +122,12 @@ def test_demand_control_never_exports_fact_snapshot(tmp_path, monkeypatch):
     owner.start()
     channel = DemandChannel(scope, Endpoint('owner/facts.sock', token))
     try:
-        channel.put('title', {})
-        assert delivered.wait(2), 'demand stalled behind snapshot export'
+        for i in range(16):
+            channel.put('title', {'id': f't{i}'})
+        assert delivered.wait(2), 'demand burst stalled behind snapshot export'
+        assert calls == [f't{i}' for i in range(16)]
+        for i in range(16):
+            assert isinstance(store.snapshot(scope).view('title', {'id': f't{i}'}), Ready)
         assert not exported.is_set()
         assert wait_until(lambda: all(not e.pending for e in channel._active.values()), timeout=2)
         assert next(iter(channel._active.values())).epoch == owner.store.snapshot(scope).epoch
