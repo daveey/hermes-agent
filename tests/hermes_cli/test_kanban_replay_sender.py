@@ -775,13 +775,12 @@ def test_parent_backoff_does_not_allocate_child_or_hide_independent_task(live):
     assert journal.snapshot(live)['settled'] == '1'
 
 
-@pytest.mark.parametrize('flag', ['primary'])
-def test_unintegrated_push_modes_refuse_before_network(live, flag):
+def test_primary_push_retains_lost_committed_transport(live):
     kb.create_task(live, title='mode custody', assignee='worker')
     receiver = Receiver()
-    options = dict(primary=False, max_batches=1)
-    options[flag] = True
-    with pytest.raises(ValueError, match='tracer push mode not integrated'):
-        client.push(live, receiver, 'default', 'macbook', **options)
-    assert not receiver.calls and journal.pending_wire(live) is None
+    receiver.lose_reply = True
+    with pytest.raises(OSError, match='reply lost after commit'):
+        client.push(live, receiver, 'default', 'macbook', primary=True, max_batches=1)
+    assert len(receiver.sent) == 1 and journal.pending_wire(live) is not None
+    assert journal.snapshot(live)['settled'] == '0' and receiver.slot['a'] == '0'
 

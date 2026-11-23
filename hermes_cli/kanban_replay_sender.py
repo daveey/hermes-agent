@@ -30,11 +30,9 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
     from hermes_cli import kanban_sync_client as client
     client.refuse_if_schema_ahead(conn)
     if (sync.sync_state(conn) or {}).get('journal_id') is not None:
-        if primary:
-            raise ValueError('tracer push mode not integrated')
         try:
             return _push_strict(conn, hub, board, gateway, max_batches=max_batches,
-                                before_head=before_head, seen={} if seen is None else seen)
+                                primary=primary, before_head=before_head, seen={} if seen is None else seen)
         except (OSError, ValueError, client.HubError):
             from hermes_cli.kanban_replay_episodes import interrupt
             interrupt(conn)
@@ -43,7 +41,7 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
                                max_batches=max_batches, before_head=before_head, seen=seen)
 
 
-def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
+def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head, seen):
     from hermes_cli import kanban_sync_client as client
     root = f'/v2/boards/{quote(board, safe="")}/replay/'
     out = client.PushResult()
@@ -82,6 +80,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
     membership = None
     current_row = None
     lagged = set()
+    from hermes_cli.kanban_replay_primary import PrimarySettlement
+    projection = PrimarySettlement(conn, hub, board) if primary else None
 
     @contextmanager
     def settlement():
@@ -90,9 +90,13 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         from hermes_cli import kanban_replica_lag as lag
         with write_txn(conn):
             yield
+            if projection is not None:
+                projection.finish()
         if lagged:
             lag.acked(client.shadow_path(board), lagged)
             lagged.clear()
+        if projection is not None:
+            projection.after_commit()
 
     def refresh_current_row():
         """Read current state separately; never enrich the historical slot verdict."""
@@ -100,6 +104,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         if decision['action'] != 'record':
             return None
         verdict = decision['verdict']
+        if projection is not None:
+            projection.read(source(), verdict)
+            return None
         if verdict['status'] not in ('applied', 'merged', 'deferred'):
             return None
         if verdict['status'] != 'deferred' and verdict.get('version'):
@@ -153,6 +160,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
             raise ValueError('source verdict identity mismatch')
         row = source()
         status = verdict['status']
+        if projection is not None:
+            projection.stage(row, json.loads(journal.pending_wire(conn)), verdict)
         if status in ('rejected', 'cancelled'):
             if row.get('_parent'):
                 # Move exact synthetic custody into the ordinary visible repair queue.
