@@ -87,6 +87,16 @@ def test_ready_row_mutated_between_admission_and_claim_is_refused(env, monkeypat
     _assert_refused_without_effects(env, tid, result, code, "ready", escape)
 
 
+@pytest.mark.parametrize("case", ["workspace", "assignee", "project", "closed"])
+def test_claim_time_capsule_refusal_is_not_also_reported_as_board_deferral(env, monkeypatch, case):
+    handle, tid = _admitted(env)
+    mutate, code, _escape = _mutations(env, handle, tid)[case]
+    _mutate_before_claim(monkeypatch, mutate)
+    result = kbd.dispatch_once(env.conn, spawn_fn=env.spawn, dispatcher_id=OWNER)
+    assert result.capsule_refused == [(tid, code)]
+    assert [d for d in result.claim_deferred if d[0] == tid] == []  # no 'claim_not_acquired' shadow
+
+
 @pytest.mark.parametrize("case", ["workspace", "assignee", "closed"])
 def test_review_row_mutated_between_admission_and_claim_is_refused(env, monkeypatch, case):
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)

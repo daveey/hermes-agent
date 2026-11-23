@@ -6,10 +6,11 @@ import time
 
 
 def claim_refused(result, task_id, deferral) -> None:
-    """Classify an unacquired claim without duplicating a claim-quiet refusal."""
+    """Classify an unacquired claim without duplicating a claim-quiet or capsule refusal."""
     if deferral is not None:
         result.claim_deferred.append((task_id, deferral))
-    elif not any(tid == task_id for tid, _ in result.quiet_deferred):
+    elif not any(tid == task_id for tid, _ in result.quiet_deferred) and not any(
+            tid == task_id for tid, _ in result.capsule_refused):  # record_claim_refusal already reported it
         result.claim_deferred.append((task_id, 'claim_not_acquired'))
 
 
