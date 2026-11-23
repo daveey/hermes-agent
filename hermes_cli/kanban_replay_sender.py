@@ -15,6 +15,18 @@ from hermes_cli.kanban_db_connect import write_txn
 from hermes_cli.kanban_replay_reconcile import reconcile
 
 
+# Physical operation stays in the outbox; only the transport spelling is normalized.
+_WIRE_OPS = {'upsert': 'upsert', 'delete': 'delete', 'compat': 'upsert',
+             'compat_import': 'upsert', 'import': 'upsert'}
+
+
+def _wire_op(physical):
+    try:
+        return _WIRE_OPS[physical]
+    except KeyError:
+        raise ValueError('tracer operation kind not integrated') from None
+
+
 @dataclass
 class PushResult:
     sent: int = 0
@@ -66,6 +78,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
     if remote != expected:
         raise ValueError('session readback mismatch')
     reconcile(local, remote)
+    remote = _ack_settled(conn, hub, root, identity, remote)
 
     def source():
         pending = journal.snapshot(conn)['pending']
@@ -80,13 +93,16 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         if row['wire_json'] is None or json.loads(row['wire_json']) != wire:
             raise ValueError('issued source custody changed')
         if (row['row_uid'] != wire['uid'] or row['table_name'] != wire['table'] or
-                row['op'] != wire['op'] or row['state'] != 'pending'):
+                pending.get('source_op', wire['op']) != row['op'] or
+                _wire_op(row['op']) != wire['op'] or row['state'] != 'pending' or
+                bool(wire.get('import')) != (row['table_name'] == 'tasks' and row['op'] in ('import', 'compat_import'))):
             raise ValueError('issued source custody routing changed')
         return dict(row)
 
     membership = None
     current_row = None
     lagged = set()
+    refused = []
     from hermes_cli.kanban_replay_primary import PrimarySettlement
     projection = PrimarySettlement(conn, hub, board) if primary else None
 
@@ -101,6 +117,10 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             yield
             if projection is not None:
                 projection.finish()
+            from hermes_cli.kanban_replay_repair import remap_refusal
+            for row, verdict in refused:
+                remap_refusal(conn, row, verdict)
+            refused.clear()
             existence.clear_settled(conn)
         if lagged:
             lag.acked(client.shadow_path(board), lagged)
@@ -131,7 +151,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                     deferred.handoff(conn, wire, verdict, local['board_incarnation'], membership=membership)
         if projection is not None:
             projection.read(source(), verdict)
-            return client._row_change('tasks', projection.current) if source().get('_parent') else None
+            return client._row_change('tasks', projection.current) if source().get('_parent') and projection.current else None
         if verdict['status'] not in ('applied', 'merged', 'deferred'):
             return None
         if verdict['status'] != 'deferred' and verdict.get('version'):
@@ -216,6 +236,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                              (pending['op_id'], 'tasks', row['row_uid'], 'upsert', json.dumps(wire['fields']),
                               wire['hlc'], int(time() * 1000), wire.get('status_origin'), json.dumps(wire)))
                 retire_parent(conn, row['row_uid'], remote=remote)
+                row = dict(conn.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?',
+                                        (pending['op_id'],)).fetchone())
             reason = f"{verdict.get('reason') or status}: {verdict.get('detail') or ''}".strip(': ')
             if status == 'cancelled':
                 # Reuse non-success custody so dependency/import fences also hold
@@ -224,6 +246,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             conn.execute("UPDATE kanban_sync_outbox SET state='rejected', last_error=?, attempts=attempts+1 "
                          "WHERE op_id=?", (reason[:500], pending['op_id']))
             setattr(out, status, getattr(out, status) + 1)
+            if status == 'rejected' and not row.get('_parent'):
+                refused.append((row, verdict))
             return  # Keep the semantic obligation visible; no sync success or identity rotation.
         if status == 'deferred':
             if cap.get('deferred_observation') != 'origin_pending1':
@@ -284,8 +308,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                 if not rows:
                     break
                 row = rows[0]
-                if row['op'] not in ('upsert', 'delete'):
-                    raise ValueError('tracer operation kind not integrated')
+                _wire_op(row['op'])
                 from hermes_cli import kanban_sync_envelope as envelopes
                 from hermes_cli import kanban_sync_wire as wire_ops
                 from hermes_cli.kanban_terminal_guard import strip_stale_push
@@ -296,7 +319,10 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                 else:
                     intent = envelopes.outbound(conn, row, lambda: strip_stale_push(conn, wire_ops.translate(
                         client._full_row_if_unseen(conn, row), client._next_hlc(conn, gateway))), supported=True)
-                encoded = journal.issue(conn, intent)
+                    if conn.execute('SELECT wire_json FROM kanban_sync_outbox WHERE op_id=?',
+                                    (row['op_id'],)).fetchone()[0] is None:
+                        raise ValueError('uncaptured source status cannot enter replay journal')
+                encoded = journal.issue(conn, intent, source_op=None if parents else row['op'])
             row = source()  # Validate retained source custody on RETRY as well as final recovery.
         wire = json.loads(encoded)
         if before_head:
@@ -317,6 +343,17 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             decision = journal.recover(conn, remote, record)
         if decision['action'] != 'record':
             break
+        # W=1: locally settling a verdict is not enough to open the next slot.
+        # Publish its ACK before selecting/issuing another intent in this push.
+        remote = _ack_settled(conn, hub, root, identity, remote)
+    settled = journal.snapshot(conn)
+    remote = _ack_settled(conn, hub, root, identity, remote)
+    from hermes_cli.kanban_replay_observation import after_push
+    after_push(conn, hub, root, settled, cap)
+    return out
+
+
+def _ack_settled(conn, hub, root, identity, remote):
     settled = journal.snapshot(conn)
     if settled['settled'] != '0' and remote['a'] != settled['settled']:
         expected = dict(remote, a=settled['settled'])
@@ -326,6 +363,4 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         if remote != expected:
             raise ValueError('ack readback mismatch')
         reconcile(settled, remote)
-    from hermes_cli.kanban_replay_observation import after_push
-    after_push(conn, hub, root, settled, cap)
-    return out
+    return remote

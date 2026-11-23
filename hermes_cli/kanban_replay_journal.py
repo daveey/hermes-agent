@@ -176,7 +176,7 @@ def pending_wire(conn: sqlite3.Connection) -> bytes | None:
     return _read(conn)[1]
 
 
-def issue(conn: sqlite3.Connection, intent: dict) -> bytes:
+def issue(conn: sqlite3.Connection, intent: dict, *, source_op: str | None = None) -> bytes:
     """Freeze only the dependency-ordered head selected by the serialized sender."""
     import rfc8785
 
@@ -201,6 +201,8 @@ def issue(conn: sqlite3.Connection, intent: dict) -> bytes:
     wire = freeze(wire)
     state['pending'] = dict(sequence=sequence, op_id=wire['client_op_id'],
                             payload_sha256=wire['replay']['payload_sha256'])
+    if source_op is not None:
+        state['pending']['source_op'] = source_op
     _validate(state)
     encoded = rfc8785.dumps(wire)
     conn.execute('UPDATE kanban_replay_sender1 SET state=?,wire=? WHERE singleton=1',

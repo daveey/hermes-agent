@@ -503,10 +503,16 @@ def _write_receipt(conn: sqlite3.Connection, hub: Any, board: str, snap: dict, n
         raise _Veto("task_changed_before_write")
     from hermes_cli import kanban_sync_client as ksc
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    # Correction is a new explicitly authorized intent, not a retry of the rejected
+    # identity. Carry only the already captured descriptor for this exact status;
+    # never infer a lifecycle origin from current events at transmission time.
+    captured = conn.execute('SELECT origin,status FROM kanban_sync_status_origins WHERE task_id=?',
+                            (task_id,)).fetchone()
+    origin = captured['origin'] if captured and captured['status'] == row['status'] else None
     conn.execute(
-        "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
-        "VALUES (?, 'tasks', ?, 'import', ?, NULL, '', ?)",
-        (parent_op, task_id, json.dumps(ksc._row_fields(conn, "tasks", row)), time.time_ns() // 1_000_000))
+        "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at, status_origin) "
+        "VALUES (?, 'tasks', ?, 'import', ?, NULL, '', ?, ?)",
+        (parent_op, task_id, json.dumps(ksc._row_fields(conn, "tasks", row)), time.time_ns() // 1_000_000, origin))
 
 
 def apply(conn: sqlite3.Connection, hub: Any, board: str, task_id: str, new_key: str, expected: Optional[str],

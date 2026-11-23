@@ -16,6 +16,9 @@ class PrimarySettlement:
     def read(self, row, verdict):
         """Read separately authenticated live state, not a historical result."""
         self.current = None
+        from hermes_cli.kanban_replay_repair import retryable
+        if retryable(row, verdict):
+            return  # Legacy transient refusal never projects an image over unacked edits.
         if verdict['status'] not in ('applied', 'merged', 'rejected', 'deferred'):
             raise ValueError('primary replay disposition not integrated')
         from hermes_cli.kanban_replay_existence import CurrentRowHold
@@ -35,6 +38,9 @@ class PrimarySettlement:
         self.current = image
 
     def stage(self, row, wire, verdict):
+        from hermes_cli.kanban_replay_repair import retryable
+        if retryable(row, verdict):
+            return
         if self.current is None:
             raise ValueError('primary replay current row not read')
         row = dict(row, fields=wire.get('fields', {}))
