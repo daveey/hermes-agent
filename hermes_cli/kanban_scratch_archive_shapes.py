@@ -9,6 +9,10 @@ let those shapes archive, while anything still unsafe keeps refusing:
   (as before) or one whose tip came from a promisor pack (``rev-list
   --exclude-promisor-objects``), such as the tags a ``blob:none`` clone fetched,
   whose bundle needed blobs that were never local (``fatal: unable to read``).
+  A commit counts only if a plain walk (no promisor exclusion) also finds it off every
+  remote-tracking ref: git 2.43 drops a promisor-pack remote tip from the ``--not`` side,
+  so an alternates clone's pushed history read as unpushed and ``bundle create`` refused
+  an empty bundle forever (worker-a2, 2026-11-23).
   A remaining ref is bundled only when every object it adds is local. A ref
   that needs objects the promisor remote vouches for is recorded and left to the
   complete payload (its local objects are in ``.git``); a ref needing objects
@@ -114,12 +118,13 @@ def select_unpushed(repo: Path, env: dict, git, head: str | None, *, partial: bo
     tips, remote, nested = _commit_tips(repo, env, git, head)
     local = _rev_list(repo, env, git, ["--exclude-promisor-objects"], sorted(set(tips.values())), remote)
     unpushed = {line[:40] for line in local.stdout.decode("ascii", "replace").split()}
-    # --exclude-promisor-objects also drops promisor remote tips from the negative side, so local commits
-    # a fetched tip already contains still list here; `bundle create ... --not --remotes` then finds nothing
-    # and refuses ("empty bundle") forever. Keep only commits the plain walk agrees are not on a remote.
+    # git 2.43 (not 2.55) drops a remote tip that is also in a promisor pack from the negative side of
+    # this walk (seen with an objects/info/alternates clone), so pushed history lists here while
+    # `bundle create ... --not --remotes` finds nothing and refuses ("empty bundle") forever. Keep only
+    # commits the plain walk also finds off every remote-tracking ref.
     if unpushed:
         plain = _rev_list(repo, env, git, [], sorted(set(tips.values())), remote, ok=(0, 128))
-        if not plain.returncode:  # a walk that cannot finish (missing commit) keeps the stricter set
+        if not plain.returncode:  # a plain walk that cannot finish keeps the promisor-walk set (bundles more)
             unpushed &= {line[:40] for line in plain.stdout.decode("ascii", "replace").split()}
     refs = [r for r, oid in tips.items() if oid in unpushed]
     for ref in nested:

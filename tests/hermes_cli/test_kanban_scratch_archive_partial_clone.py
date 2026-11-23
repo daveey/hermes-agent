@@ -269,10 +269,30 @@ def test_a_truly_local_commit_in_a_partial_clone_is_still_bundled(board, promiso
 
     repo = tmp_path / "w" / "repo"
     _clone(promisor, repo)
-    (repo / "mine.txt").write_text("mine\\n")
+    (repo / "mine.txt").write_text("mine\n")
     _run("add", ".", cwd=repo)
     _run("commit", "-q", "-m", "mine", cwd=repo)
     dest = tmp_path / "out"
     sa.archive_repo(repo, dest, task_id="t_x", completed_at=None)
     heads = _run("bundle", "list-heads", str(dest / "commits.bundle"), cwd=repo)
     assert _run("rev-parse", "HEAD", cwd=repo) in heads
+
+
+def test_failed_plain_walk_keeps_the_promisor_walk_set(board, promisor, tmp_path, monkeypatch):
+    """A plain walk that exits 128 (e.g. a missing commit) changes nothing: the refusal path stays as before."""
+    from hermes_cli import kanban_scratch_archive as sa
+
+    repo = tmp_path / "w" / "repo"
+    _clone(promisor, repo)
+    head = _run("rev-parse", "HEAD", cwd=repo)
+    _git_243(sa, monkeypatch, head)
+    listed = sa._git
+
+    def git(repo_, env, *args, **kwargs):
+        if args[:1] == ("rev-list",) and "--stdin" in args and "--exclude-promisor-objects" not in args \
+                and "--objects" not in args:
+            return subprocess.CompletedProcess(args, 128, b"", b"fatal: bad object")
+        return listed(repo_, env, *args, **kwargs)
+    monkeypatch.setattr(sa, "_git", git)
+    with pytest.raises(sa.ArchiveRefused, match="empty bundle"):
+        sa.archive_repo(repo, tmp_path / "out", task_id="t_x", completed_at=None)
