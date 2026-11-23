@@ -77,8 +77,8 @@ def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable 
     from hermes_cli.kanban_sync_quarantine import held
     if held(conn, task_id):
         return True
-    # One row for both schemas: this runs as a SQL function on every guarded write, inside sync page applies.
-    from hermes_cli.kanban_table_columns import tables_columns
+    # Page cache when applying; retain the combined aggregate fallback for guarded writes.
+    from hermes_cli.kanban_sync_apply_schema import tables_columns
     columns, task_columns = tables_columns(conn, "task_events", "tasks")
     uid = "uid" if "uid" in columns else "NULL AS uid"
     cursor = conn.execute(f"SELECT {uid},task_id,kind,payload FROM task_events WHERE task_id=? "

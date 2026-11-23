@@ -561,16 +561,9 @@ def drop_triggers(conn: sqlite3.Connection) -> None:
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    """``PRAGMA table_info`` names, built inside SQLite as ONE row (see kanban_table_columns).
-
-    Order is the pragma scan order (cid) in practice, not a documented SQLite guarantee; ``ORDER BY`` inside the
-    aggregate needs SQLite 3.44. Only install_triggers compares order, and a difference there just rebuilds them.
-
-    apply_remote_changes holds the board write lock for a whole page and reads schemas several times per change;
-    one row per column (59 for tasks) re-taking the GIL in the hub gateway held the lock ~1 s per change and
-    starved the dispatcher (2026-11-23)."""
-    row = conn.execute("SELECT json_group_array(name) FROM pragma_table_info(?)", (table,)).fetchone()
-    return json.loads(row[0])
+    """Ordered page-local columns, with the one-row aggregate fallback outside apply."""
+    from hermes_cli.kanban_sync_apply_schema import table_columns as columns
+    return columns(conn, table)
 
 
 def captured_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -1348,11 +1341,11 @@ def apply_remote_changes(
     pull and the snapshot rebuild) keeps every task field that has an unanswered local edit in the outbox, read
     in the same transaction as the apply. ``keep`` (the live-file rebuild sweep) is asked about each change inside
     that transaction; a change it refuses is skipped. [daveey]"""
-    from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_sync_apply_schema import page_writer
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     from hermes_cli import kanban_containment_replica as containment
     containment.prepare_apply(conn, changes)
-    with write_txn(conn):
+    with page_writer(conn, SYNCED_TABLES, cache=bool(changes) and keep is None):
         result.revision_before = _repair_revision(conn)
         # Serialize with set_mode(off): a feed fetched before detach must not
         # overwrite locally held custody after the detach transaction commits.
