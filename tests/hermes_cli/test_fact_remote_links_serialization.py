@@ -106,4 +106,4 @@ def test_lock_wait_past_budget_fails_without_projecting(links):
     assert result.failed and result.value is None
     source.commit(result)
     fact = source.engine.store.snapshot(source.engine.scope).get(source.key)
-    assert fact.health == 'unknown' and fact.error_code == 'links_capture_failed'
+    assert fact.health == 'unknown' and fact.error_code == 'links_capture_time_budget'

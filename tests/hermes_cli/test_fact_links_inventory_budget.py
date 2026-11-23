@@ -8,9 +8,10 @@ from hermes_cli.kanban_links_refresh import ScopeRefresher
 from tests.waiting import wait_until
 
 
-def test_startup_captures_native_sized_links_inventory(monkeypatch):
+@pytest.mark.parametrize('count', [4300, 9331])
+def test_startup_captures_native_sized_links_inventory(monkeypatch, count):
     origin = ('home', 'default', 'boards', 'hub', 'mail')
-    cards = [{'id': str(i), 'title': 'x' * 1400} for i in range(4300)]
+    cards = [{'id': str(i), 'title': 'x' * 1400} for i in range(count)]
     monkeypatch.setattr(activity, '_origin_scope', lambda: origin)
     monkeypatch.setattr(activity, '_links_refresher', ScopeRefresher(lambda _: pytest.fail('legacy admission'), 16))
     monkeypatch.setattr(activity, '_project_remote_links', lambda: cards)
@@ -73,6 +74,15 @@ def test_links_envelope_acceptance_and_no_partial_publication(case, monkeypatch)
             assert fact.health == 'fresh' and len(fact.value['cards']) == 1
         else:
             assert fact.health == 'unknown' and not fact.value
+            expected = {'time_overflow': 'links_capture_time_budget',
+                        'rows_overflow': 'links_capture_row_budget',
+                        'bytes_overflow': 'links_capture_byte_budget'}[case]
+            assert capture.error_code == fact.error_code == expected
+            binding = links.LinksFacts(SimpleNamespace(v1=SimpleNamespace(snapshot=lambda _: engine.store.snapshot(scope))),
+                                       scope, origin)
+            with pytest.raises(LinksUnavailable) as refused:
+                binding.read(False)
+            assert refused.value.error_code == expected
         assert 29 <= capture.next_deadline - clock[0] <= 30
     finally:
         source.close()

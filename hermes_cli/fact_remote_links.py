@@ -41,6 +41,10 @@ class LinksBudget(CaptureBudget):
 class LinksUnavailable(RuntimeError):
     """A participating display scope has no current projection; never scan."""
 
+    def __init__(self, message, *, error_code='links_unavailable'):
+        super().__init__(message)
+        self.error_code = error_code
+
 
 @contextmanager
 def use(binding):
@@ -76,7 +80,8 @@ class LinksFacts:
             raise LinksUnavailable('remote links owner unavailable') from exc
         if (fact is None or fact.health != 'fresh' or fact.valid_until is None
                 or fact.valid_until <= time.time()):
-            raise LinksUnavailable('remote links projection unavailable')
+            raise LinksUnavailable('remote links projection unavailable',
+                                   error_code=(fact.error_code or 'links_capture_expired') if fact is not None else 'links_capture_pending')
         cards = _thaw(fact.value['cards'])
         return (cards, _thaw(fact.value['origin_rows'])) if with_rows else cards
 
@@ -88,6 +93,7 @@ class LinksCapture:
     observed_at: float = 0
     next_deadline: float | None = None
     failed: bool = False
+    error_code: str = 'links_capture_failed'
 
 
 class RemoteLinksSource:
@@ -125,7 +131,8 @@ class RemoteLinksSource:
                 self._worker.start()
             if self._deadline is not None and time.monotonic() >= self._deadline:
                 self._deadline = None
-                return LinksCapture(after=cursor, failed=True, observed_at=time.time())
+                return LinksCapture(after=cursor, failed=True, observed_at=time.time(),
+                                    error_code='links_capture_time_budget')
             # One deadline marks a hung capture unavailable; only completion
             # wakes it afterwards. Never launch a replacement alongside it.
             return LinksCapture(after=cursor, next_deadline=self._deadline)
@@ -133,13 +140,16 @@ class RemoteLinksSource:
     def _build(self, budget):
         from hermes_cli import kanban_session_activity as activity
         started = time.monotonic()
+        error_code = 'links_capture_failed'
         try:
             if activity._origin_scope() != self._origin_scope:
+                error_code = 'links_capture_scope_changed'
                 raise ValueError('remote links capture scope changed')
             # Strict readers project under _links_lock and share its row sink and board reads: serialize
             # with them. The wait spends this capture's budget; once spent, never start the projection.
             remaining = budget.max_seconds - (time.monotonic() - started)
             if remaining <= 0 or not activity._links_lock.acquire(timeout=remaining):
+                error_code = 'links_capture_time_budget'
                 raise CaptureBudgetExceeded('remote links capture budget exceeded waiting for the projection')
             try:
                 observed_at = time.time()  # the projection observes stores from here, not from launch
@@ -153,12 +163,17 @@ class RemoteLinksSource:
                 activity._links_lock.release()
             value = {'cards': cards, 'origin_rows': rows}
             encoded = json.dumps(value, separators=(',', ':'), allow_nan=False).encode()
-            if (len(cards) + len(rows) > budget.max_keys or len(encoded) > budget.max_bytes
-                    or time.monotonic() - started > budget.max_seconds):
+            if len(cards) + len(rows) > budget.max_keys:
+                error_code = 'links_capture_row_budget'
+            elif len(encoded) > budget.max_bytes:
+                error_code = 'links_capture_byte_budget'
+            elif time.monotonic() - started > budget.max_seconds:
+                error_code = 'links_capture_time_budget'
+            if error_code != 'links_capture_failed':
                 raise CaptureBudgetExceeded('remote links capture budget exceeded')
             result = LinksCapture(freeze(value), hashlib.sha256(encoded).hexdigest(), observed_at)
         except Exception:  # health: allow BLE001 -- source failure publishes stale without exception text or empty success
-            result = LinksCapture(failed=True, observed_at=time.time())
+            result = LinksCapture(failed=True, observed_at=time.time(), error_code=error_code)
         with self._lock:
             if self._closed:
                 return
@@ -170,7 +185,7 @@ class RemoteLinksSource:
         if capture.value is None and not capture.failed:
             return
         if capture.failed:
-            self.failure()
+            self.failure(capture.error_code)
         else:
             self.engine.publish([Fact(self.key, capture.value, source_vector=((self.source, capture.after),),
                                       observed_at=capture.observed_at, valid_until=capture.observed_at + 90,
@@ -179,10 +194,10 @@ class RemoteLinksSource:
             if self._result is capture:
                 self._result = None
 
-    def failure(self):
+    def failure(self, error_code='links_capture_failed'):
         old = self.engine.store.snapshot(self.engine.scope).get(self.key)
-        fact = (replace(old, health='stale', error_code='links_capture_failed') if old is not None
-                and old.health != 'unknown' else Fact(self.key, {}, error_code='links_capture_failed'))
+        fact = (replace(old, health='stale', error_code=error_code) if old is not None
+                and old.health != 'unknown' else Fact(self.key, {}, error_code=error_code))
         self.engine.publish([fact], now=time.time())
 
     def close(self, timeout=5):
