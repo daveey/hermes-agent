@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from hermes_cli import kanban_db as kb
-from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
+
 
 EVENT = "spend_budget_triaged"
 NOTICE = "spend_budget_decision_ready"
@@ -240,6 +240,7 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
     """``producer`` body after setup. ``dead``: a chat of this gateway that is archived/hidden/missing, or ended and
     idle, is no route for the decision: the notice would sit unread (kanban_stranded_park). One ``Liveness`` per
     call: each state.db is opened at most once."""
+    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
     from hermes_cli.kanban_creator_chats import _chat_links
     from hermes_cli.kanban_db_notify import is_headless_session
     from hermes_cli.kanban_triage_sweep import _supervisor_profile

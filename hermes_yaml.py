@@ -1,12 +1,13 @@
 """Shared YAML 1.1 policy for config, manifests, and frontmatter.
 
 Ruamel's native schema includes bare y/n booleans and rejects duplicate keys.
-Every operation owns its parser/emitter; instances must not be shared by threads.
+Loaders are reused per thread; emitters/editors remain operation-owned.
 """
 
 import hashlib
 import marshal
 import os
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Any, IO, overload
@@ -23,10 +24,23 @@ class _Yaml11Resolver(VersionedResolver):
         return (1, 1)
 
 
+_loaders = threading.local()
+
+
 def _load(document: str | bytes, *, pure: bool) -> Any:
-    yaml = YAML(typ="safe", pure=pure)
+    # Reuse only successful parsers, per thread and parser implementation. Pop
+    # while loading so reentrant calls also own a distinct instance. Ruamel
+    # documents that an instance may not be reusable after a parse error.
+    if not hasattr(_loaders, 'parsers'):
+        _loaders.parsers = {}
+    yaml = _loaders.parsers.pop(pure, None)
+    if yaml is None:
+        yaml = YAML(typ="safe", pure=pure)
     yaml.version = (1, 1)
-    return yaml.load(document)
+    yaml.doc_infos.clear()
+    value = yaml.load(document)
+    _loaders.parsers[pure] = yaml
+    return value
 
 
 # Parsed-document cache. The pure-Python parser costs ~0.07 s per 120 KB config and ~0.4 s for the
