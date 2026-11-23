@@ -55,7 +55,7 @@ _generation = itertools.count(1)
 
 
 class _Observer:
-    __slots__ = ("conn", "gen", "ident", "lock", "path", "pid", "shm", "used")
+    __slots__ = ("conn", "gen", "ident", "lock", "path", "pid", "refresh", "shm", "used")
 
     def __init__(self, path: str, conn: sqlite3.Connection, ident: tuple, shm: Optional[tuple] = None):
         self.path = path
@@ -65,7 +65,8 @@ class _Observer:
         self.gen = next(_generation)
         self.pid = os.getpid()
         self.used = time.monotonic()
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # borrows ``conn`` (a few PRAGMAs); close() waits for it
+        self.refresh = threading.Lock()  # serializes ``incremental`` builds; never guards ``conn``
 
     def close(self) -> None:
         try:
@@ -272,9 +273,13 @@ def content_version(path: str) -> Optional[tuple]:
 def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> dict:
     """Read cursor, delta and volatile overlay in ONE short-lived guarded snapshot.
 
-    Serialize a board's refreshes through its observer lock, so concurrent readers cannot
-    publish an older result over a newer cursor. Only the commit-clock observer survives;
-    the row reader closes before projection, including on a failed build.
+    Serialize a board's refreshes through its observer's ``refresh`` lock, so concurrent readers
+    cannot publish an older result over a newer cursor. The observer's connection lock is held
+    only for the commit-clock PRAGMAs, never across the build: ``version``/``content_version``
+    (every GET /boards count poll) borrow it too, and used to queue behind a whole board read
+    (15.4 thread-s per minute of lock wait on the hub). An observer dropped mid-build is noticed
+    at publish (it is no longer current) and stores nothing. Only the commit-clock observer
+    survives; the row reader closes before projection, including on a failed build.
     """
     from hermes_cli import kanban_task_change
 
@@ -284,17 +289,18 @@ def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> d
     if obs is None:
         return fallback()
     cache_key = (*key, "p2")
-    with obs.lock:
-        with _lock:
-            current = _observers.get(str(path)) is obs
-            hit = _entries.get(cache_key)
+    with obs.refresh:
+        with obs.lock:
+            with _lock:
+                current = _observers.get(str(path)) is obs
+                hit = _entries.get(cache_key)
+            # Retain only the observer's commit clock, not a history-reader connection.
+            # Sample before opening the snapshot: a later commit invalidates next read.
+            commit_key = (obs.gen, *obs.ident,
+                          obs.conn.execute("PRAGMA schema_version").fetchone()[0],
+                          obs.conn.execute("PRAGMA data_version").fetchone()[0]) if current else None
         if not current:
             return fallback()
-        # Retain only the observer's commit clock, not a history-reader connection.
-        # Sample before opening the snapshot: a later commit invalidates next read.
-        commit_key = (obs.gen, *obs.ident,
-                      obs.conn.execute("PRAGMA schema_version").fetchone()[0],
-                      obs.conn.execute("PRAGMA data_version").fetchone()[0])
         if hit is not None and len(hit) > 2 and hit[0] is not None and hit[2] == commit_key:
             from hermes_cli import loop_accounting
             with loop_accounting.pass_("kanban.board.rows", skipped=True):

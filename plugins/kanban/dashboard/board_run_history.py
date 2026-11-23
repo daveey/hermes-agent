@@ -74,15 +74,25 @@ class RunHistory(tuple):
 
 
 def _signatures(conn, task_ids, columns) -> dict:
-    """Exact typed run values, packed in C instead of SQL quote/concatenation.
+    """Exact typed run values of each task, one row per task.
 
-    These bytes are only compared in-process, never persisted or unmarshalled.
-    Version 2 avoids reference-identity encoding: equal values must encode equally
-    regardless of Python object sharing. It preserves SQLite NULL/int/float/text/blob,
-    including embedded NULs that SQLite quote(text) truncates.
+    SQLite builds each task's text in C (``board_event_history.row_text``: storage class plus
+    hex bytes, so NULL/int/float/text/blob and embedded NULs stay distinct) over the covering
+    ``idx_runs_task_bookkeeping`` index. Every GET after a bookkeeping commit signs every run of
+    every displayed card here; stepping each run row into Python (1.3k-3k rows on the hub board,
+    each one a GIL hand-off in the busy backend) was the cost. Signatures are only compared
+    in-process. Without ordered aggregates (SQLite < 3.44) runs are packed with ``marshal``
+    (version 2: equal values encode equally regardless of object sharing).
     """
     if not task_ids:
         return {}
+    from plugins.kanban.dashboard.board_event_history import ORDERED_AGGREGATES, row_text
+    if ORDERED_AGGREGATES:
+        cur = conn.cursor()
+        cur.row_factory = None
+        return dict(cur.execute(
+            f"SELECT task_id, group_concat({row_text(('id', *columns))}, ',' ORDER BY id) FROM task_runs "
+            f"WHERE task_id IN ({','.join('?' for _ in task_ids)}) GROUP BY task_id", tuple(task_ids)).fetchall())
     selected = ", ".join(("task_id", "id", *columns))
     # Plain tuples, grouped in C: every GET after a bookkeeping commit reads every run of
     # every displayed card here, and per-row Row objects were most of its cost.

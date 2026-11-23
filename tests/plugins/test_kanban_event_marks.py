@@ -67,14 +67,21 @@ def test_trusted_refresh_marks_only_heartbeats_the_cursor_excludes(monkeypatch):
     assert loads == [('t', 'u')], 'nothing moved: retain every history'
     assert len(steps) < 100, f'trusted marks must not scan whole histories ({len(steps)} x100 VM steps)'
     assert len(inputs[1]['t']) == HISTORY + 3
-    # An unmarked heartbeat insert is still seen exactly.
+    # An unmarked heartbeat insert is still seen exactly. The fixture never commits, so every
+    # refresh reads in one transaction and the first one sealed each history: the heartbeat is
+    # appended to the retained rows (board_event_history.extend), never re-read whole.
     conn.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES ('t', 'heartbeat', 2)")
     inputs, memo = _refresh(conn, memo, frozenset(), loads)
-    assert loads[-1] == ('t',) and len(inputs[1]['t']) == HISTORY + 4
+    from plugins.kanban.dashboard.board_event_history import ORDERED_AGGREGATES
+    assert loads[-1] == (('t', 'u') if ORDERED_AGGREGATES else ('t',)) and len(inputs[1]['t']) == HISTORY + 4
+    assert inputs[1]['t'][-1]['kind'] == 'heartbeat' and inputs[1]['t'][-1]['created_at'] == 2
     # A heartbeat backfilled below every id (pickup history) moves the count, not the max.
     conn.execute("INSERT INTO task_events (id, task_id, kind, created_at) VALUES (-5, 'u', 'heartbeat', 0)")
     inputs, memo = _refresh(conn, memo, frozenset(), loads)
-    assert loads[-1] == ('u',) and inputs[1]['u'][0]['id'] == -5
+    # 'u' is shorter than board_event_history.RECENT, so its sealed head is empty: every row is
+    # read again with its tail, not through a reload.
+    assert loads[-1] == (('t', 'u') if ORDERED_AGGREGATES else ('u',)) and inputs[1]['u'][0]['id'] == -5
+    assert len(inputs[1]['u']) == 2
     # Marked changes reload through the cursor set.
     conn.execute("DELETE FROM task_events WHERE id = 1")
     inputs, memo = _refresh(conn, memo, frozenset({'t'}), loads)

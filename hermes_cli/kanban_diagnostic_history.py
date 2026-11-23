@@ -14,6 +14,12 @@ class EventHistory(tuple):
     def __new__(cls, rows):
         return super().__new__(cls, (MappingProxyType(dict(row)) for row in rows))
 
+    @classmethod
+    def extended(cls, history, rows):
+        """``history`` plus ``rows`` appended, sharing its (read-only) event mappings rather than
+        copying each one again. Reductions are rebuilt lazily on the new snapshot."""
+        return tuple.__new__(cls, (*history, *(MappingProxyType(dict(row)) for row in rows)))
+
     def __setattr__(self, name, value):
         raise AttributeError("event snapshots cannot be reassigned")
 

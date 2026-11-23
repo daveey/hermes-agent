@@ -134,7 +134,9 @@ def test_unchanged_run_bookkeeping_keeps_decoded_rows(source):
     source.set_trace_callback(None)
     reads = [s for s in statements if 'FROM task_runs' in s]
     assert len(reads) == 1
-    assert reads[0].startswith('SELECT task_id, id, ')
+    from plugins.kanban.dashboard.board_event_history import ORDERED_AGGREGATES
+    # One narrow signature read: one row per task when SQLite can aggregate in id order.
+    assert reads[0].startswith('SELECT task_id, group_concat(' if ORDERED_AGGREGATES else 'SELECT task_id, id, ')
     assert got[2]['t'] is retained
     source.execute("UPDATE task_runs SET worker_pid = 42")
     got, old = refresh(source, old)

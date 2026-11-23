@@ -46,11 +46,23 @@ def runs():
     conn.close()
 
 
-def test_run_overlay_does_not_build_sql_text_per_field(runs):
+def test_run_signatures_step_one_row_per_task_and_never_quote_text(runs):
+    """In the busy backend each stepped row is a GIL hand-off, so runs are signed in SQL, one row
+    per task (2026-11-22 hub profile: 1.5k run rows per board refresh). Text and blobs are hex,
+    never ``quote``d (``quote`` truncates at an embedded NUL); only reals use ``quote``."""
+    from plugins.kanban.dashboard.board_event_history import ORDERED_AGGREGATES
+    runs.executemany("INSERT INTO task_runs VALUES (?, 't', ?)", [(i, i) for i in range(2, 40)])
     statements = []
     runs.set_trace_callback(statements.append)
-    assert rh._signatures(runs, ["t"], ["worker_pid"])
-    assert not any("quote(" in s.lower() or "group_concat(" in s.lower() for s in statements)
+    assert list(rh._signatures(runs, ["t"], ["worker_pid"])) == ["t"]
+    runs.set_trace_callback(None)
+    assert len(statements) == 1
+    sql = statements[0].lower()
+    if not ORDERED_AGGREGATES:
+        assert "group_concat(" not in sql
+        return
+    assert "group by task_id" in sql and 'hex("worker_pid")' in sql
+    assert sql.count("quote(") == sql.count("when 'real' then quote(") == 2  # id, worker_pid
 
 
 @pytest.mark.parametrize("before,after", [(1, 1.0), (None, 0), ("1", 1),

@@ -15,6 +15,7 @@ from hermes_cli import kanban_diagnostics as kd
 from hermes_cli import kanban_workflow
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics
 from plugins.kanban.dashboard.board_run_history import retained_runs
+from plugins.kanban.dashboard.board_event_history import extend as extend_histories
 from plugins.kanban.dashboard.board_event_history import same_histories as _same_event_histories
 
 # Dashboard columns, left-to-right ("archived" is a filter toggle, not a column), from the
@@ -223,6 +224,12 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     cannot already prove a change; unmarked tasks retain histories without scanning.
     Legacy callers without a cursor compare whole-history count/max plus the task row and
     runs (conservative). Clock/config rules stay fresh.
+
+    A history read in the caller's transaction is retained with its seal (memo slot 6,
+    ``board_event_history.extend``). A moved task with a seal is compared in SQL instead:
+    one row per task proves all but its newest ``RECENT`` rows unchanged, and only those and
+    any new rows are read again (a 9.3k-event hub card gaining a skip event every few seconds
+    re-read all 9.3k rows, twice when its marks were equal).
     """
     ids = [r["id"] for r in diag_rows]
     trusted = event_changed is not None
@@ -233,8 +240,9 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     else:
         marks = _event_marks(conn, ids)
     runs = retained_runs(conn, ids, prev, event_changed, _rows_by_task)
-    same_events = _same_event_histories(conn, {
-        tid: prev[tid][3] for tid in ids if trusted and tid in event_changed
+    seals = {tid: prev[tid][6] for tid in ids if tid in prev and len(prev[tid]) > 6 and prev[tid][6] is not None}
+    same_events = _same_event_histories(conn, {  # a sealed history is compared by extend() below
+        tid: prev[tid][3] for tid in ids if trusted and tid in event_changed and tid not in seals
         and tid in prev and prev[tid][2] == marks.get(tid, _NO_EVENTS)
     })
 
@@ -247,7 +255,7 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
                 # An append/delete is already known to differ: avoid scanning it
                 # once for equality and again to reload. Equal marks still need
                 # the exact comparison for same-ID edits and replacements.
-                if old[2] != marks.get(tid, _NO_EVENTS):
+                if old[2] != marks.get(tid, _NO_EVENTS) or tid in seals:
                     return True
                 return not same_events[tid]
             if len(old) > 5 and old[5] is not None:
@@ -258,15 +266,24 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
         return (old[1] if old[1] is not None else _raw(old[4])) != _raw(runs[tid])
 
     changed = {tid for r, tid in zip(diag_rows, ids) if moved(r, tid)}
-    part = diagnostic_inputs(conn, task_ids=[tid for tid in ids if tid in changed]) if changed else None
-    fresh_events = part[1] if part is not None else {}
+    # A moved task whose sealed head is unchanged keeps it and re-reads only its newest rows; the rest reload.
+    # A history just proven equal (unsealed, marked, same marks) is sealed too, so the next
+    # mark of that task costs one row instead of another exact rescan.
+    resealed = {tid for tid, same in same_events.items() if same and tid not in changed}
+    grown, new_seals = extend_histories(conn, {
+        tid: (prev[tid][3] if tid in prev else None, seals.get(tid)) for tid in ids
+        if tid in changed or tid in resealed})
+    reload = [tid for tid in ids if tid in changed and tid not in grown]
+    part = diagnostic_inputs(conn, task_ids=reload) if reload else None
+    fresh_events = {**(part[1] if part is not None else {}), **grown}
     events = {}
     memo = {}
     for r, tid in zip(diag_rows, ids):
         if tid in fresh_events or tid not in changed:
             events[tid] = fresh_events[tid] if tid in fresh_events else prev[tid][3]
             # Raw run signatures are only compared by a legacy refresh, which derives them then.
-            memo[tid] = (tuple(r), None, _history_mark(events[tid]), events[tid], runs[tid], unmarked.get(tid))
+            memo[tid] = (tuple(r), None, _history_mark(events[tid]), events[tid], runs[tid], unmarked.get(tid),
+                         new_seals.get(tid) if tid in changed or tid in resealed else seals.get(tid))
         else:  # vanished between reads: no events held, so never vouch for a mark
             events[tid] = ()
             memo[tid] = (tuple(r), None, None, (), runs[tid], None)
