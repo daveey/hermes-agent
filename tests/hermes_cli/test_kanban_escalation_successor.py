@@ -141,6 +141,9 @@ def test_delayed_older_episode_does_not_replace_latest_open_owner(kanban_home, m
         _finish(conn, first)
         successor = _escalate(conn, tid, "successor")
         with kb.write_txn(conn):
+            # A legacy keyless successor prevents the new key fallback from masking
+            # incorrect event-clock selection.
+            conn.execute("UPDATE tasks SET idempotency_key=NULL WHERE id=?", (successor,))
             kb._append_event(conn, tid, kaw.ESCALATED_EVENT,
                              {"owner_task_id": first, "awaiting": RECORD, "reason": "late old delivery"})
             rows = conn.execute("SELECT id FROM task_events WHERE task_id=? AND kind=? ORDER BY id", (tid, kaw.ESCALATED_EVENT)).fetchall()
