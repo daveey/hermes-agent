@@ -71,7 +71,8 @@ class ContentOwner:
             raise ValueError('empty content source set')
         self._demands = {scope: DemandSource(engine) for scope, engine in engines.items()}
         self._publishers.update((source, source) for source in self._demands.values())
-        self.feed = ProcessOwner(self._commit, self._failure, budget=budget)
+        self.feed = ProcessOwner(self._commit, self._failure, budget=budget,
+                                 stores={scope: engine.store for scope, engine in engines.items()})
         self._activation = None
         try:
             if lazy_sources:

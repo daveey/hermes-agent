@@ -10,7 +10,7 @@ from hermes_cli.fact_content_owner import ContentOwner
 from hermes_cli.fact_inprocess import IncrementalLifecycle, InProcessFacts
 from hermes_cli.fact_materializers import Projection, view_reducer
 from hermes_cli.fact_reducers import ReducerEngine
-from hermes_cli.fact_process_owner import process_store
+from hermes_cli.fact_process import store as process_store
 
 
 class ViewOwner:

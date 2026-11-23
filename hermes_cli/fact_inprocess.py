@@ -44,6 +44,59 @@ class IncrementalLifecycle:
         return any(p.has_bindings(scope) for p in self._participants.values())
 
 
+class _SharedDelivery:
+    """Store-owned worker custody, populated only by acquired transports."""
+
+    def __init__(self, store):
+        self.store = store
+        self.owners = set()
+        self._stopping = False
+        self._retry = {}
+        self._thread = threading.Thread(target=self._run,
+                                        name='fact-local-delivery', daemon=True)
+        self._expiry = ExpiryWorker(store)
+        try:
+            self._thread.start()
+        except RuntimeError:
+            self._expiry.close()
+            raise
+
+    def _next(self):
+        with self.store._condition:
+            while not self._stopping and any(not owner._stopping for owner in self.owners):
+                now = time.monotonic()
+                readers = [reader for owner in self.owners for reader in owner._readers]
+                for reader in readers:
+                    reader.retiring = {s for s in reader.retiring if s.delivery_lock.locked()}
+                contexts = {s.subscription: r.owner._context for r in readers for s in r.subscriptions
+                            if not s.subscription.closed}
+                self._retry = {s: pair for s, pair in self._retry.items() if s in contexts}
+                pending = [s for s in contexts if s.queue or s.reset_pending]
+                ready = [(s, contexts[s]) for s in pending if self._retry.get(s, (0, 0))[0] <= now]
+                if ready:
+                    return ready
+                waits = [self._retry[s][0] - now for s in pending if s in self._retry]
+                self.store._condition.wait(min(waits) if waits else None)
+        return ()
+
+    def _run(self):
+        while subscriptions := self._next():
+            for subscription, context in subscriptions:
+                if not subscription.delivery_lock.acquire(blocking=False):
+                    self._retry[subscription] = (time.monotonic() + .1, 0)
+                    continue
+                try:
+                    context.run(subscription._deliver)
+                    self._retry.pop(subscription, None)
+                except Exception:  # health: allow BLE001 -- subscriber isolation retains reset with bounded retry
+                    count = self._retry.get(subscription, (0, 0))[1]
+                    delay = (.1, .2, .4, 1., 2., 5.)[min(count, 5)]
+                    self._retry[subscription] = (time.monotonic() + delay, min(count + 1, 5))
+                    logging.getLogger(__name__).exception('local fact callback failed; reset retained')
+                finally:
+                    subscription.delivery_lock.release()
+
+
 class InProcessFacts:
     """Sleeping delivery and independent expiry workers; no IPC or process spawn.
 
@@ -57,69 +110,52 @@ class InProcessFacts:
             raise ValueError('empty authorized scope set')
         self._readers = set()
         self._stopping = False
-        self._retry = {}
-        context = copy_context()
-        self._thread = threading.Thread(target=lambda: context.run(self._run),
-                                        name='fact-local-delivery', daemon=True)
-        self._expiry = ExpiryWorker(store)
-        try:
-            self._thread.start()
-        except RuntimeError:
-            self._expiry.close()
-            raise
+        self._context = copy_context()
+        self._workers = None
+
+    @property
+    def _thread(self):
+        return self._workers._thread if self._workers is not None else None
+
+    @property
+    def _expiry(self):
+        return self._workers._expiry if self._workers is not None else None
+
+    @property
+    def _retry(self):
+        return self._workers._retry if self._workers is not None else {}
 
     def check_control_thread(self):
         if threading.current_thread() is self._thread:
             raise RuntimeError('cannot close handles/owner from delivery thread')
 
     def check_running(self):
-        if self._stopping or not self._thread.is_alive() or not self._expiry.thread.is_alive():
+        workers = self._workers
+        if (self._stopping or workers is None or workers._stopping
+                or not workers._thread.is_alive() or not workers._expiry.thread.is_alive()):
             raise RuntimeError('local fact owner closed or worker unavailable')
 
     def acquire(self, scope, *, lifecycle):
         with self.store._condition:
-            self.check_running()
+            if self._stopping:
+                raise RuntimeError('local fact owner closed or worker unavailable')
             if scope not in self.scopes:
                 raise ValueError('unauthorized_scope')
+            if self._workers is None:
+                workers = getattr(self.store, '_local_delivery', None)
+                if workers is None:
+                    # Creation and registration share the condition, so the new
+                    # worker cannot observe an empty owner roster at startup.
+                    workers = _SharedDelivery(self.store)
+                    self.store._local_delivery = workers
+                self._workers = workers
+                self.check_running()
+                workers.owners.add(self)
+            self.check_running()
             reader = LocalReader(self, scope)
             self._readers.add(reader)
+            self.store._condition.notify_all()
             return LocalHandle(reader, lifecycle)
-
-    def _next(self):
-        with self.store._condition:
-            while not self._stopping:
-                now = time.monotonic()
-                for reader in self._readers:
-                    reader.retiring = {s for s in reader.retiring if s.delivery_lock.locked()}
-                subscriptions = {s.subscription for r in self._readers for s in r.subscriptions
-                                 if not s.subscription.closed}
-                self._retry = {s: pair for s, pair in self._retry.items() if s in subscriptions}
-                pending = [s for s in subscriptions if s.queue or s.reset_pending]
-                ready = [s for s in pending if self._retry.get(s, (0, 0))[0] <= now]
-                if ready:
-                    return ready
-                waits = [self._retry[s][0] - now for s in pending if s in self._retry]
-                self.store._condition.wait(min(waits) if waits else None)
-        return ()
-
-    def _run(self):
-        while subscriptions := self._next():
-            for subscription in subscriptions:
-                # Own delivery lock acquisition so a concurrent drain cannot
-                # turn a no-op Subscription.drain into an unbounded busy loop.
-                if not subscription.delivery_lock.acquire(blocking=False):
-                    self._retry[subscription] = (time.monotonic() + .1, 0)
-                    continue
-                try:
-                    subscription._deliver()
-                    self._retry.pop(subscription, None)
-                except Exception:  # health: allow BLE001 -- subscriber isolation retains reset with bounded retry
-                    count = self._retry.get(subscription, (0, 0))[1]
-                    delay = (.1, .2, .4, 1., 2., 5.)[min(count, 5)]
-                    self._retry[subscription] = (time.monotonic() + delay, min(count + 1, 5))
-                    logging.getLogger(__name__).exception('local fact callback failed; reset retained')
-                finally:
-                    subscription.delivery_lock.release()
 
     def close(self, timeout=5):
         self.check_control_thread()
@@ -127,8 +163,22 @@ class InProcessFacts:
             if self._readers:
                 raise RuntimeError('local owner retains reader handles')
             self._stopping = True
+            workers = self._workers
+            if workers is None or self not in workers.owners:
+                return
+            if len(workers.owners) > 1:
+                workers.owners.remove(self)
+                self.store._condition.notify_all()
+                return
+            workers._stopping = True
             self.store._condition.notify_all()
-        self._thread.join(timeout)
-        if self._thread.is_alive():
+        workers._thread.join(timeout)
+        if workers._thread.is_alive():
             raise TimeoutError('local delivery did not stop; custody retained')
-        self._expiry.close()
+        workers._expiry.close()
+        if workers._expiry.thread.is_alive():
+            raise TimeoutError('local expiry did not stop; custody retained')
+        with self.store._condition:
+            workers.owners.discard(self)
+            if getattr(self.store, '_local_delivery', None) is workers:
+                self.store._local_delivery = None

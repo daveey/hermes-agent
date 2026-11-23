@@ -1,9 +1,11 @@
 """Real startup owns seven native sources, with no legacy annotation admission."""
 import asyncio
+import time
 import pytest
 
 from hermes_cli import fact_annotation_boot as boot
 from hermes_cli import fact_annotation_lifespan as startup
+from hermes_cli.kanban_annotation_facts import AnnotationUnavailable
 from hermes_cli.fact_annotation_startup import binding_for
 from tests.hermes_cli import test_kanban_session_activity as helpers
 from tests.hermes_cli.annotation_fact_processes import request_guard
@@ -26,7 +28,7 @@ def test_real_prepare_lifespan_and_canonical_request(kanban_root, tmp_path, monk
     monkeypatch.setenv('HERMES_FACTS_ANNOTATION', '1')
     monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
     monkeypatch.setattr(routes, '_profile_targets', lambda reason: [('default', home)])
-    monkeypatch.setattr(boot, 'seeds', lambda runtime: {'default': [{'id': 'seed'}]})
+    monkeypatch.setattr(boot, 'seeds', lambda *a, **k: pytest.fail('prepare must not scan sessions'))
     monkeypatch.setattr(kanban, '_remote_cards', lambda *args: [])
     calls = []
     monkeypatch.setattr(host, 'suspend_holder', lambda: calls.append('drain'))
@@ -35,11 +37,23 @@ def test_real_prepare_lifespan_and_canonical_request(kanban_root, tmp_path, monk
         app = SimpleNamespace(state=SimpleNamespace())
         async with startup.lifespan(app):
             assert binding_for() is app.state.annotation_facts.bindings['default']
-            assert calls == ['drain']
+            assert calls == []  # lazy boot: no activation, legacy untouched
             with request_guard():
                 row = {'id': 'seed'}
-                kanban.annotate_kanban_activity([row], display=True)
+                with pytest.raises(AnnotationUnavailable):  # fail closed, never legacy
+                    kanban.annotate_kanban_activity([row], display=True)
             assert not row.get('kanban_active')
+            runtime = app.state.annotation_facts
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    with request_guard():
+                        kanban.annotate_kanban_activity([{'id': 'seed'}], display=True)
+                    break
+                except AnnotationUnavailable:
+                    await asyncio.sleep(0.1)
+            assert runtime.bindings['default']._mode == 'facts'
+            assert calls == ['drain']
         assert calls == ['drain', 'resume']
         assert binding_for() is None
     try:

@@ -11,7 +11,7 @@ def seeds(runtime, readers=None):
 
     Bodies are discarded, and cache decorators are unwrapped. The existing
     source owner captures their selector membership; no body or source cache is
-    retained here. This runs before HTTP admission, not on a request.
+    retained here. Explicit startup callers/tests only; ``prepare`` never scans.
     """
     if readers is None:
         from hermes_cli.web_routers import profiles
@@ -50,7 +50,9 @@ def prepare(*, on_created=None):
     if on_created is not None:
         on_created(runtime)
     try:
-        runtime.start(seeds(runtime))
+        # Inert install: no sessions scan, no source, no handle. Profiles
+        # activate only when an actual consumer annotates.
+        runtime.start({})
     except BaseException:
         runtime.close()
         raise

@@ -17,7 +17,7 @@ from fastapi import HTTPException
 
 from hermes_cli.fact_capture import CaptureBudget
 from hermes_cli.fact_contract import Scope, SourceId
-from hermes_cli.fact_process_owner import ProcessOwner, process_store
+from hermes_cli.fact_process import FeedLease as ChangeFeed, store as process_store
 from hermes_cli.fact_inprocess import IncrementalLifecycle, InProcessFacts
 from hermes_cli.sessions_fact_routes import PENDING_NATIVE, use
 from hermes_cli.sessions_native_source import SessionsSource
@@ -95,9 +95,10 @@ class SessionsRuntime:
         self.source.demand(name, selector)
 
     def start(self):
-        self.feed = ProcessOwner(lambda source, capture: source.commit(capture),
+        self.feed = ChangeFeed(lambda source, capture: source.commit(capture),
                                lambda source, error: source.failure(),
-                               budget=CaptureBudget(max_bytes=4 * 1024 * 1024, max_seconds=5))
+                               budget=CaptureBudget(max_bytes=4 * 1024 * 1024, max_seconds=5),
+                               stores={self.scope: self.store})
         try:
             self.feed.register(self.source)
             self.local = InProcessFacts(self.store, [self.scope], demand=self.demand)

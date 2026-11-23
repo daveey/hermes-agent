@@ -40,7 +40,9 @@ class TreeRuntime:
         self.targets = tuple(sorted(self.targets, key=lambda item: str(item[1]) != self.home))
         self.names = {name for name, _home in self.targets}
         self.homes = {str(home): name for name, home in self.targets}
-        self.scope = Scope(self.home, self.homes.get(self.home, 'default'))
+        # Shared storage needs a distinct materializer namespace from links,
+        # which legitimately uses the same home/profile origin.
+        self.scope = Scope('serve.projects.' + self.home, self.homes.get(self.home, 'default'))
         self.source_id = SourceId(self.scope, 'board.input', 'native')
         self.closed = self.drained = False
         self._previous = None

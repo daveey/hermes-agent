@@ -3,6 +3,9 @@
 The flag is startup-only. ON admits no legacy board read, including cold views;
 OFF starts the unchanged prewarm lifetime once. External roster/diagnostic inputs
 have 30s bounded recapture and 60s local validity, not subsecond upstream truth.
+Mount installs the provider only; a scope's owner is constructed and started on
+first scoped demand via the fact_process activation queue, never on the request
+thread. Failed activations stay fail-closed; close() drains their custody.
 """
 import json
 import os
@@ -19,6 +22,7 @@ from hermes_cli import fact_board_native as board_native_inputs
 
 class BoardRuntime:
     Ready, Pending, Unavailable = Ready, Pending, Unavailable
+    _failed = frozenset()  # instance rebinds to a set in __init__
 
     def __init__(self, api, *, boards=None):
         from hermes_cli import kanban_db
@@ -30,54 +34,64 @@ class BoardRuntime:
         self.current = kanban_db.get_current_board()
         self.boards = tuple(dict.fromkeys(boards if boards is not None else
                             [self.current, *(b['slug'] for b in kanban_db.list_boards())]))
-        self.owners, self.views = {}, {}
-        self._activating_views = {}
+        self.owners, self.views, self._activating_views = {}, {}, {}
+        self._failed = set()
         self._closed = self._drained = False
         self._lock = threading.RLock()
         self._previous = None
-        self._activation_owner = None
-        from hermes_cli.fact_scope_activation import ScopeActivation
-        self._activation = ScopeActivation(self.boards, self._activate)
 
     def start(self):
-        from hermes_cli.fact_process_owner import ProcessOwner
+        """Install the provider only: no owner, path resolution or thread until demand."""
         self.api.board_prewarm.stop_board_prewarm()
-        self._activation_owner = ProcessOwner(lambda *_: None, lambda *_: None)
-        self._activation_owner.register(self._activation)
         self._previous = self.api.board_fact_views._installed
         self.api.board_fact_views.install_provider(self, self.provider)
         return self
 
     def _activate(self, board):
+        """Build and start one scope's owner; runs on the fact_process worker."""
         from hermes_cli import kanban_db
-        if not self._closed and board not in self.views:
-            if board in self.owners:
-                raise RuntimeError('board activation custody retained')
-            scope = Scope(self.home, self.profile, board)
-            path = kanban_db.kanban_db_path(board=board)
-            def capture(view, selector, budget, board=board, scope=scope):
-                result = board_native_inputs.capture(self.api, board, view, dict(selector))
-                source = SourceId(scope, 'board.input', 'native')
-                return CapturedInput(result['value'], ((source, result['observations']),), result['observed_at'])
-            owner = ViewOwner(scope, capture, partial(board_native_inputs.project, self.api), ('board', 'boards', 'projects'),
-                              paths=(path, path.parent, self.home),
-                              bindings=[ContentBinding(SourceId(scope, 'tasks.content', 'local'), path)])
-            self.owners[board] = owner
-            handle = owner.start()
-            paths = (str(path),)
-            def stop(paths=paths):
-                self.api.board_legacy.stop(paths)
-                self.api.board_rows.retire(paths)
-                self.api.board_snapshot.retire(paths)
-            view = self.api.board_fact_views.bind(handle.v1, scope, stop_legacy=stop,
-                start_legacy=lambda: None, demand=handle.demand,
-                hot_selectors=(('board', self.api.board_fact_views.board_selector()), ('projects', {}),
-                               ('boards', {'include_archived': False})))
-            self._activating_views[board] = view
-            view.on_mode('facts', 1)
-            view.prepare()
+        # The lock is the closing fence: close() cannot interleave with an
+        # activation, and a queued activation that loses the race sees _closed.
+        with self._lock:
+            if self._closed or board in self.views or board in self._failed or board in self.owners:
+                return
+            try:
+                scope = Scope(self.home, self.profile, board)
+                path = kanban_db.kanban_db_path(board=board)
+                def capture(view, selector, budget, board=board, scope=scope):
+                    result = board_native_inputs.capture(self.api, board, view, dict(selector))
+                    source = SourceId(scope, 'board.input', 'native')
+                    return CapturedInput(result['value'], ((source, result['observations']),), result['observed_at'])
+                owner = ViewOwner(scope, capture, partial(board_native_inputs.project, self.api),
+                                  ('board', 'boards', 'projects'), paths=(path, path.parent, self.home),
+                                  bindings=[ContentBinding(SourceId(scope, 'tasks.content', 'local'), path)])
+                self.owners[board] = owner  # custody recorded before start: close() drains a partial owner
+                handle = owner.start()
+                paths = (str(path),)
+                def stop(paths=paths):
+                    self.api.board_legacy.stop(paths)
+                    self.api.board_rows.retire(paths)
+                    self.api.board_snapshot.retire(paths)
+                view = self.api.board_fact_views.bind(handle.v1, scope, stop_legacy=stop,
+                    start_legacy=lambda: None, demand=handle.demand,
+                    hot_selectors=(('board', self.api.board_fact_views.board_selector()), ('projects', {}),
+                                   ('boards', {'include_archived': False})))
+                self._activating_views[board] = view  # retained on failure; close() drains it
+                view.on_mode('facts', 1)
+                view.prepare()
+            except BaseException:
+                self._failed.add(board)  # no legacy fallback, no retry
+                raise
             self.views[board] = view
             del self._activating_views[board]
+
+    def _request_activation(self, board):
+        from hermes_cli import fact_process
+        try:
+            fact_process.submit(('board', self.home, self.profile, board), lambda: self._activate(board))
+        except RuntimeError:
+            return False  # capacity exceeded: stay fail-closed, no legacy read
+        return True
 
     def provider(self, board):
         from hermes_cli.config import get_hermes_home
@@ -86,20 +100,27 @@ class BoardRuntime:
         if str(get_hermes_home()) != self.home or self._closed:
             return Unavailable('board_scope_unavailable')
         if board is None:
-            self._activation.want(self.current)
             owner = self.owners.get(self.current)
+            if owner is None and self.current not in self._failed:
+                self._request_activation(self.current)  # unscoped request == current-board demand
             if owner is None or owner.handle is None:
                 return Unavailable('board_scope_unavailable')
             catalog = owner.handle.v1.snapshot(owner.scope).view('boards', {'include_archived': False})
             if not isinstance(catalog, Ready):
                 return Unavailable('board_catalog_unavailable')
             board = json.loads(catalog.encoded)['current']
-        if board in self.boards:
-            self._activation.want(board)
-        return self.views.get(board, Unavailable('board_scope_unavailable'))
+        view = self.views.get(board)
+        if view is not None:
+            return view
+        if board not in self.boards or board in self._failed:
+            return Unavailable('board_scope_unavailable')
+        if not self._request_activation(board):  # memory lookup + enqueue only
+            return Unavailable('board_scope_unavailable')
+        return Pending('board_activating')
 
     def ready(self, board):
-        self._activation.want(board)
+        if board in self.boards and board not in self.views and board not in self._failed:
+            self._request_activation(board)  # an explicit readiness probe is scoped demand
         view = self.views.get(board)
         return view.prepare() if view is not None else False
 
@@ -108,13 +129,8 @@ class BoardRuntime:
             if self._drained:
                 return
             self._closed = True  # failed teardown keeps a fail-closed installed provider
-        activation = getattr(self, '_activation_owner', None)
-        if activation is not None:
-            activation.close()  # fence activation before draining its child scopes
-        with self._lock:
             failures = []
-            for resource in (*getattr(self, '_activating_views', {}).values(),
-                             *self.views.values(), *self.owners.values()):
+            for resource in (*getattr(self, '_activating_views', {}).values(), *self.views.values(), *self.owners.values()):
                 try:
                     resource.close()
                 except Exception as exc:  # health: allow BLE001 -- retain failed custody and attempt all sibling drains

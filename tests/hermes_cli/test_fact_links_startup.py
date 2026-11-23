@@ -38,11 +38,10 @@ def test_serve_lifespan_defaults_on_and_reads_publication(origin, monkeypatch):
         import time
         from hermes_cli.fact_remote_links import RemoteLinksSource
         def recapture_scheduled():
-            feed = binding.handle.owner.feed._feed
-            with feed._condition:
+            with binding.handle.owner.feed._feed._condition:
                 return any(isinstance(s.adapter.adapter, RemoteLinksSource) and s.due is not None
                            and 25 < s.due - time.monotonic() <= 30
-                           for s in feed._sources)
+                           for s in binding.handle.owner.feed._feed._sources)
         wait_until(recapture_scheduled)
         monkeypatch.setattr(activity, '_links_lookup', lambda *a, **k: pytest.fail('legacy display read'))
         for _ in range(50):
