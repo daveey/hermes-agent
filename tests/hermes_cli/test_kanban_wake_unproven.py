@@ -96,6 +96,34 @@ def test_repark_starts_a_new_episode(parked):
     assert len(notices(conn, tid)) == 2
 
 
+@pytest.mark.parametrize("same_backstop, probe", [
+    (True, PROBE),
+    (False, PROBE),
+    (True, "python3 moved_run6_ready.py"),
+], ids=["same-backstop", "new-backstop", "same-backstop-new-probe"])
+def test_repark_notice_is_deduplicated_by_backstop(parked, same_backstop, probe):
+    conn, tid, clock = parked
+    for hour in (0, 3, 6):
+        result(parked, hour)
+    first = notices(conn, tid)
+    assert len(first) == 1
+    wake_at = first[0].payload["wake_at"]
+    clock[0] += 9 * HOUR
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+    assert kb.claim_task(conn, tid, claimer="worker")
+    next_wake_at = wake_at if same_backstop else wake_at + HOUR
+    until = datetime.fromtimestamp(next_wake_at, UTC).isoformat()
+    assert kb.schedule_task(conn, tid, reason=f"waiting SCHEDULED_UNTIL={until}", wake_check=probe)
+    assert wc.get_state(conn, tid)["cmd"] == probe
+    assert unproven._latest_park(conn, tid)[2] == next_wake_at
+    for hour in (0, 3, 6, 12):
+        result(parked, hour)
+    found = notices(conn, tid)
+    assert len(found) == (1 if same_backstop else 2)
+    assert found[-1].payload["wake_at"] == next_wake_at
+
+
 def test_clock_only_wait_never_notifies(kanban_home, monkeypatch):
     clock = [int(time.time())]
     monkeypatch.setattr(time, "time", lambda: clock[0])

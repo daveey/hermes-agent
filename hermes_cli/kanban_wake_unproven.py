@@ -7,8 +7,9 @@ whose premise can never hold (a PID of a service that restarts, a file nothing w
 24 h away, the card's origin chat gets ONE passive ``wake_probe_unproven_notice`` naming the probe and its
 last output. Probe semantics, backstops and admission are untouched; the card stays scheduled.
 
-One notice per park episode: a later park event (re-park) opens a new episode. Clock-only waits run no probe,
-so they never reach this.
+One notice per task/backstop: re-parking with the same ``wake_at`` does not open a new notice episode,
+even if probe custody changes the command. A new backstop allows another notice after the new park's
+checks age. Clock-only waits run no probe, so they never reach this.
 """
 from __future__ import annotations
 
@@ -64,11 +65,12 @@ def maybe_notice(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, *, 
     if wake_at - now <= FAR_BACKSTOP_SECONDS:
         return False
     limit = notice_seconds() if threshold is None else threshold
-    since = max(first_at, parked_at)  # a re-park opens a new episode and restarts the age
+    since = max(first_at, parked_at)  # a re-park restarts check age, not same-backstop notice eligibility
     if now - since < limit:
         return False
-    if conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? AND id > ?",
-                    (task_id, NOTICE_KIND, park_id)).fetchone():
+    if conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? "
+                    "AND (id > ? OR json_extract(payload, '$.wake_at') = ?)",
+                    (task_id, NOTICE_KIND, park_id, wake_at)).fetchone():
         return False
     kb._append_event(conn, task_id, NOTICE_KIND, {
         "wake_check": cmd, "output": (out or "")[-500:], "checks": checks, "hours": round((now - since) / 3600, 1),
