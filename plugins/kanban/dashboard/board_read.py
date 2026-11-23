@@ -295,7 +295,7 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
 
 def materialize(conn, tenant, include_archived, workflow_template_id, current_step_key, done_limit, *,
                 diagnostic_inputs: Callable = diagnostic_inputs, prev: Optional[dict] = None,
-                changed=None) -> dict:
+                changed=None, selected_ids=None) -> dict:
     """Everything the board payload reads from SQL, and nothing that depends on the clock,
     config, profiles on disk or the replica. Retained across refreshes: never mutate it.
 
@@ -305,15 +305,22 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
     ``prev`` with ``changed`` (a frozenset of task ids from ``kanban_task_change.changed_since``, taken in the
     same snapshot as this read) takes ``board_incremental.delta``: displayed IDs union marked IDs are
     read by primary key, with bounded done history. ``changed`` omitted, ``FULL`` or a set the delta cannot vouch for reads in
-    full, exactly as before."""
+    full, exactly as before. ``selected_ids`` is a shadow board's externally ranked,
+    collision-free display set; it bypasses the single-file window/delta, not filters.
+    """
     filters = dict(tenant=tenant, include_archived=include_archived,
                    workflow_template_id=workflow_template_id, current_step_key=current_step_key)
-    if prev is not None and isinstance(changed, (set, frozenset)):
+    if selected_ids is None and prev is not None and isinstance(changed, (set, frozenset)):
         from plugins.kanban.dashboard import board_incremental
         rows = board_incremental.delta(conn, filters, done_limit, diagnostic_inputs, prev, changed)
         if rows is not None:
             return rows
-    extra_where, extra_params, done_total, done_ids, done_window = _done_state(conn, filters, done_limit)
+    if selected_ids is None:
+        extra_where, extra_params, done_total, done_ids, done_window = _done_state(conn, filters, done_limit)
+    else:
+        extra_where = f"id IN ({_placeholders(selected_ids)})" if selected_ids else "0"
+        extra_params = list(selected_ids)
+        done_total, done_ids, done_window = 0, frozenset(), ()
     old = (prev or {}).get("_memo")
     old_tasks = old["tasks"] if old is not None else {}
     parsed: dict[tuple, tuple] = {}
@@ -351,7 +358,9 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
     if old is not None and diag_ids:
         by_id = {r["id"]: r for r in task_rows}
         diag_rows = [by_id[tid] for tid in diag_ids if tid in by_id]
-        diag_inputs, diag_memo = _incremental_diag_inputs(conn, diag_rows, old["diag"], diagnostic_inputs)
+        diag_inputs, diag_memo = _incremental_diag_inputs(
+            conn, diag_rows, old["diag"], diagnostic_inputs,
+            event_changed=changed if selected_ids is not None and isinstance(changed, (set, frozenset)) else None)
     else:
         marks = _event_marks(conn, diag_ids)  # before the events it vouches for
         unmarked = _unmarked_event_marks(conn, diag_ids)
@@ -382,7 +391,9 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
     tenants = [r["tenant"] for r in conn.execute("SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant")]
     from plugins.kanban.dashboard.board_incremental import filters_key
     inc = None
-    if raw_keys and int(done_limit or 0) > 0:  # what a later ``changed`` read starts from
+    if selected_ids is not None:
+        done_total = sum(t.status == "done" for t in tasks)
+    if selected_ids is None and raw_keys and int(done_limit or 0) > 0:  # a later single-file delta
         inc = {"filters": filters_key(filters), "cap": int(done_limit), "done_ids": done_ids, "window": done_window,
                "raw": {t.id: k for t, k in zip(tasks, raw_keys)}}
     return {
