@@ -63,6 +63,33 @@ def test_payload_parity_with_legacy_reader(shadow_board, monkeypatch, cap, archi
     _compare(env, monkeypatch, done_limit=cap, archived=archived)
 
 
+@pytest.mark.parametrize('reader', ['head', 'base_oracle'])
+def test_legacy_cursor_same_id_history_edit(shadow_board, monkeypatch, reader):
+    """Count/max are not content evidence when the P2 cursor is unavailable."""
+    from hermes_cli import kanban_task_change
+
+    if reader == 'base_oracle':
+        oracle.clear()
+        monkeypatch.setattr(board_shadow, 'merge', oracle.merge)
+    env = shadow_board
+    monkeypatch.setattr(kanban_task_change, 'changed_since', lambda *args: (None, None))
+    captured = []
+    original = env['mod']._diagnostics_from_inputs
+
+    def capture(inputs):
+        captured.append(inputs)
+        return original(inputs)
+
+    monkeypatch.setattr(env['mod'], '_diagnostics_from_inputs', capture)
+    tid = env['running']
+    _write(env, "INSERT INTO task_events(task_id,kind,payload,created_at) VALUES (?,'test','{}',1)", (tid,))
+    _read(env)
+    assert captured[-1][1][tid][-1]['payload'] == '{}'
+    _write(env, "UPDATE task_events SET payload=? WHERE task_id=? AND kind='test'", ('{"fresh":true}', tid))
+    _read(env)
+    assert captured[-1][1][tid][-1]['payload'] == '{"fresh":true}'
+
+
 def test_live_collision_changes_without_replica_commit(shadow_board):
     env = shadow_board
     assert env['done'] in _cards(_read(env))

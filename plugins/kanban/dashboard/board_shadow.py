@@ -63,6 +63,10 @@ def merge(payload: dict, live, tenant, include_archived, workflow_template_id, c
 
         def build(conn, prev=None, changed=None):
             ids, total = _selection(conn, filters, live_ids, live_done, cap)
+            # Without trusted content marks, count/max cannot detect same-ID history edits.
+            # Reload only the selected cards; ordinary board_read reuse stays unchanged.
+            if changed is None:
+                prev = None
             result = board_read.materialize(
                 conn, tenant, include_archived, workflow_template_id, current_step_key, cap,
                 diagnostic_inputs=diagnostic_inputs, prev=prev, changed=changed, selected_ids=ids)
