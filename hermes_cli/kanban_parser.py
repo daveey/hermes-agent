@@ -204,6 +204,9 @@ _BOARD_SPECS = [
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
+    _cmd("stranded", [_json_flag(), _arg("--limit", type=int, default=100),
+                      _arg("--after", default='', metavar="TASK_ID")],
+         help="Read-only actionability report; unknown evidence is not permission or invariant success"),
     _cmd("selfwork-producer", [
         _arg("--operation", choices=["capabilities", "prepare", "advance"], required=True),
         _arg("--request-file", default="-", help="Producer JSON snapshot ('-' = stdin)"),

@@ -121,6 +121,9 @@ def _ctx_header(lines: list[str], task: Task, *, conn: Optional[sqlite3.Connecti
     lines.append("")
     lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
     lines.append(f"Status:   {task.status}")
+    if conn is not None:
+        from hermes_cli.kanban_actionability_evidence import context
+        context(lines, conn, task)
     if task.tenant:
         lines.append(f"Tenant:   {task.tenant}")
     lines.append(f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}")

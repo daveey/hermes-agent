@@ -211,6 +211,8 @@ def kanban_command(args: argparse.Namespace) -> int:
         board_scope = kb.scoped_current_board(normed)
 
     with board_scope:
+        if action == "stranded":
+            return importlib.import_module("hermes_cli.kanban_actionability_cli").command(args)
         # Maintenance handlers skip init_db; their connections still run schema setup.
         if handler := {"repair": _cmd_repair, "recover": _cmd_recover,
                        "correct-diagnostics": _cmd_correct_diagnostics}.get(action):
@@ -741,6 +743,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
     print(f"Task {task.id}: {task.title}")
     field("status", kws.status_text(task.status, wakes))
+    from hermes_cli.kanban_actionability_evidence import render as render_actionability
+    field("actionability", render_actionability(details["actionability"]))
     _shadow_view.print_remote(field, remote_home)
     field("assignee", task.assignee or "-")
     kqr.print_field(queue_reason, field)

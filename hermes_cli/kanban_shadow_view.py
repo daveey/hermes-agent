@@ -142,10 +142,12 @@ def mark(d: dict[str, Any], home: Optional[str]) -> dict[str, Any]:
 
 def show_details(conn: sqlite3.Connection, task: Any, board: Optional[str], home: Optional[str]) -> dict[str, Any]:
     """``show``'s queue/capacity fields. A remote card has no queue here: it waits on its home gateway."""
+    from hermes_cli.kanban_actionability_evidence import fields as actionability_fields
+    details = actionability_fields(conn, task, replica=home is not None)
     if home is not None:
-        return {"capacity_note": f"remote (read-only replica of {home})"}
+        return {**details, "capacity_note": f"remote (read-only replica of {home})"}
     from hermes_cli import kanban_queue_position as kqp
-    return kqp.detail_fields(conn, task, board)
+    return {**details, **kqp.detail_fields(conn, task, board)}
 
 
 def print_remote(field: Any, home: Optional[str]) -> None:

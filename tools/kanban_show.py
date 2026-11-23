@@ -83,8 +83,10 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
     verdict = latest_verdict(conn, tid)
     if verdict and details.get("queue_note"):
         details["queue_note"] = f"{details['queue_note']} ({describe(verdict)})"
+    from hermes_cli.kanban_actionability_evidence import fields as actionability_fields
     return {
         "task": kt._fields(task, kt._TASK_FIELDS),
+        **actionability_fields(conn, task, replica=replica),
         "source": "replica" if replica else "live",
         **latest_receipt(kb.list_events(conn, tid)),
         **capsule,
