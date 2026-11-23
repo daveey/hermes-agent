@@ -33,12 +33,13 @@ def _selection(conn, filters, live_ids, live_done, cap):
     text), and use the same combined ranking as the final done column.
     """
     rows = kanban_db.list_task_rows(conn, columns="id, status, completed_at", order_by="created", **filters)
-    remote = [r for r in rows if kanban_db._lossy_text(r['id']) not in live_ids]
-    done = [(kanban_db._lossy_text(r['id']), kanban_db._to_epoch(kanban_db._lossy_text(r['completed_at'])))
-            for r in remote if r['status'] == 'done']
+    remote = [(r['id'], kanban_db._lossy_text(r['id']), kanban_db._lossy_text(r['status']),
+               kanban_db._to_epoch(kanban_db._lossy_text(r['completed_at'])))
+              for r in rows if kanban_db._lossy_text(r['id']) not in live_ids]
+    done = [(tid, epoch) for _raw, tid, status, epoch in remote if status == 'done']
     keep = {tid for tid, _epoch in sorted([*done, *live_done], key=rank_key)[:cap]} if cap > 0 else None
-    ids = [kanban_db._lossy_text(r['id']) for r in remote
-           if r['status'] != 'done' or keep is None or kanban_db._lossy_text(r['id']) in keep]
+    # Preserve raw SQL key types for the keyed fetch; Task.from_row normalizes display fields.
+    ids = [raw for raw, tid, status, _epoch in remote if status != 'done' or keep is None or tid in keep]
     return ids, len(done)
 
 
@@ -50,7 +51,8 @@ def merge(payload: dict, live, tenant, include_archived, workflow_template_id, c
             return payload
         live_file, replica_file = shadow_view.db_file(live), shadow_view.db_file(replica)
         # Include even archived / filtered / capped-out live IDs: ownership precedes selection.
-        live_ids = frozenset(r[0] for r in live.execute('SELECT id FROM tasks'))
+        live_ids = frozenset(r[0] for r in live.execute('SELECT id FROM tasks')) | frozenset(
+            t['id'] for col in payload['columns'] for t in col['tasks'])
         live_done = tuple((t['id'], t['completed_at']) for col in payload['columns']
                           if col['name'] == 'done' for t in col['tasks'])
         cap = int(done_limit or 0)
@@ -65,7 +67,7 @@ def merge(payload: dict, live, tenant, include_archived, workflow_template_id, c
                 conn, tenant, include_archived, workflow_template_id, current_step_key, cap,
                 diagnostic_inputs=diagnostic_inputs, prev=prev, changed=changed, selected_ids=ids)
             result['done_total'] = total
-            result['homes'] = shadow_view.homes_of(conn, ids)
+            result['homes'] = shadow_view.homes_of(conn, [t.id for t, _fields, _extra in result['cards']])
             return result
 
         def fallback():

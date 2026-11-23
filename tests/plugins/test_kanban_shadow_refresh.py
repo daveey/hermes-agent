@@ -34,6 +34,19 @@ def _compare(env, monkeypatch, **kw):
     return actual
 
 
+@pytest.mark.parametrize('cap', [0, 1, 3])
+def test_legacy_blob_fields_follow_task_parsing(shadow_board, monkeypatch, cap):
+    env = shadow_board
+    monkeypatch.setattr(board_read.time, 'time', lambda: 1800000000)
+    _write(env, 'UPDATE tasks SET status=? WHERE id=?', (sqlite3.Binary(b'done'), env['done']))
+    _write(env, "INSERT INTO tasks(id,title,status,created_at,created_on) VALUES (?, 'blob id', 'ready',1,'mini')",
+           (sqlite3.Binary(b'blob-id'),))
+    with closing(kbc.connect()) as live, live:
+        live.execute("INSERT INTO tasks(id,title,status,created_at) VALUES (?, 'live bytes', 'ready',1)",
+                     (sqlite3.Binary(env['ready'].encode()),))
+    _compare(env, monkeypatch, done_limit=cap)
+
+
 @pytest.mark.parametrize('cap', [0, 1, 3, 80])
 @pytest.mark.parametrize('archived', [False, True])
 def test_payload_parity_with_legacy_reader(shadow_board, monkeypatch, cap, archived):
