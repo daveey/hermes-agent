@@ -1,4 +1,6 @@
 """Live and replica card detail preserve recorded pacing without local capacity claims. [daveey]"""
+import time
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -11,6 +13,12 @@ from tests.plugins.test_kanban_foreign_card_api import (
 from tests.plugins.test_kanban_foreign_card_api import api as api, kanban_home as kanban_home  # noqa: PLC0414 -- fixtures
 
 
+# A hold three days out: still active, and never today (today's holds print without a date). A fixed epoch went
+# red at its own UTC date and would drop the hold once it passed. [daveey]
+_UNTIL = time.time() + 3 * 86400
+_UNTIL_TEXT = time.strftime('%Y-%m-%d %H:%MZ', time.gmtime(int(_UNTIL)))
+
+
 @pytest.mark.parametrize('replica', [False, True])
 def test_card_detail_names_pacing_provider_and_reset(kanban_home, api, monkeypatch, replica):
     tid = make_replica_card(kanban_home) if replica else _live_card()
@@ -21,14 +29,14 @@ def test_card_detail_names_pacing_provider_and_reset(kanban_home, api, monkeypat
     with kbc.connect(path) as conn:
         with kb.write_txn(conn):
             kb._append_event(conn, tid, 'dispatch_skipped', {
-                'reason': 'llm_paced', 'detail': 'xai-oauth held', 'until': 1795474351.914,
+                'reason': 'llm_paced', 'detail': 'xai-oauth held', 'until': _UNTIL,
                 'providers': [{'provider': 'xai-oauth', 'state': 'held', 'limit': 0}]})
     result = api.get(f'/api/plugins/kanban/tasks/{tid}')
     assert result.status_code == 200, result.text
     body = result.json()
     assert body['source'] == ('replica' if replica else 'live')
     assert body['queue']['lane'] == 'llm_pacing'
-    assert 'LLM quota pacing (xai-oauth held pool) until 2026-11-23 22:52Z' in body['queue_note']
+    assert f'LLM quota pacing (xai-oauth held pool) until {_UNTIL_TEXT}' in body['queue_note']
     assert 'worker' not in body['queue_note'] and 'slot' not in body['queue_note']
     if replica:
         assert 'capacity_note' not in body and 'wait_observation' not in body
