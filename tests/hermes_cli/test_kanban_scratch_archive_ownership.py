@@ -271,3 +271,80 @@ def test_symlinked_record_is_never_written_through(board, tmp_path):
         assert os.lstat(path / "r").st_uid == 0
     finally:
         _cleanup(path)
+
+
+def test_stale_temp_record_beside_the_workspace_is_swept(tmp_path):
+    ws = _ws(tmp_path)
+    stale = tmp_path / "workspaces" / ".t_x.ownership-abc123"
+    stale.write_text("{}")
+    other = tmp_path / "workspaces" / ".t_y.ownership-abc123"
+    other.write_text("{}")
+    own._sweep_temp_records(os.path.realpath(ws))
+    assert not stale.exists() and other.exists()
+
+
+def _root_owned_locked_tree(p):
+    (p / "rootfs" / "etc").mkdir(parents=True)
+    (p / "rootfs" / "etc" / "shadow").write_text("s")
+    _sh("chown", "-R", "0:0", str(p / "rootfs"))
+    _sh("chmod", "0000", str(p / "rootfs" / "etc" / "shadow"))
+
+
+@real_sudo
+def test_pass_interrupted_after_chown_is_finished_by_the_next_pass(board, monkeypatch):
+    tid, path = base._plain_task(_root_owned_locked_tree)
+    real = own._grant_owner_access
+    calls = []
+
+    def interrupted(root, rows):
+        calls.append(len(rows))
+        if len(calls) == 1:
+            raise OSError("killed between chown and grant")
+        return real(root, rows)
+    monkeypatch.setattr(own, "_grant_owner_access", interrupted)
+    try:
+        base._gc()
+        assert path.exists() and os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == os.getuid()
+        from hermes_cli import kanban_scratch_backoff
+        monkeypatch.setattr(kanban_scratch_backoff, "skip_logged", lambda *a, **k: False)  # the retry is due
+        assert base._gc() == 0
+        assert not path.exists()  # nothing foreign left, yet the recorded entries were opened and archived
+        assert base._members(tid)["rootfs/etc/shadow"][1] == b"s"
+    finally:
+        _cleanup(path)
+
+
+@real_sudo
+def test_card_resumed_after_selection_is_left_untouched(board, monkeypatch):
+    from hermes_cli import kanban_worktree_gc as gc
+
+    _tid, path = base._plain_task(_root_owned_locked_tree)
+    monkeypatch.setattr(gc.ws, "_is_terminal_task", lambda conn, task_id: False)
+    try:
+        base._gc()
+        assert path.exists() and not (path / own.RECORD_NAME).exists()
+        assert os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
+    finally:
+        _cleanup(path)
+
+
+@real_sudo
+def test_busy_board_during_owner_recheck_refuses_without_aborting_gc(board, monkeypatch):
+    import inspect
+    import sqlite3
+
+    from hermes_cli import kanban_db as kb
+
+    _tid, path = base._plain_task(_root_owned_locked_tree)
+    real_txn = kb.write_txn
+
+    def txn(conn):
+        if any(f.function == "owner_unchanged" for f in inspect.stack()[1:4]):
+            raise sqlite3.OperationalError("database is locked")
+        return real_txn(conn)
+    monkeypatch.setattr(kb, "write_txn", txn)
+    try:
+        assert base._gc() == 0  # the pass completes
+        assert path.exists() and os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
+    finally:
+        _cleanup(path)

@@ -310,8 +310,13 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
 
     def owner_unchanged():
         # Re-checked right before the archive changes the tree (foreign ownership adoption).
-        with kb.write_txn(conn):
-            return guard(path)
+        # A busy/failed board read refuses the change; it must not abort the whole GC pass.
+        try:
+            with kb.write_txn(conn):
+                return guard(path)
+        except sqlite3.Error:
+            log.warning("Scratch GC: owner re-check failed for %s; not adopting", task_id, exc_info=True)
+            return False
 
     archive_dir = kb.kanban_home() / "archive" / "scratch" / _board_slug(conn) / task_id
     if refusals is not None:

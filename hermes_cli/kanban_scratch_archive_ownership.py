@@ -24,8 +24,11 @@ acts on the inode, which may live outside the tree), a record path that is not a
 regular file (a planted symlink must never be written through as root), an
 unparseable earlier record, or a failed find/cat/mv. A failure after the record
 is written leaves the tree adopted in part with its record at the root; a later
-pass merges new entries by path. Without passwordless sudo, or as root, nothing
-changes. ``find -xdev`` never crosses into another filesystem.
+pass merges new entries by path and re-grants owner access to every recorded
+entry (no sudo needed), so an interrupted pass cannot pin the tree. Without
+passwordless sudo, or as root, nothing changes. ``find -xdev`` never crosses into
+another filesystem. A tree refused for hard links stays kept (logged): giving it
+up would need a copy, not a chown.
 """
 from __future__ import annotations
 
@@ -110,6 +113,33 @@ def _earlier(root: str) -> list[dict]:
         raise _refused(f"unreadable {RECORD_NAME}: {exc!r}") from exc
 
 
+def _recorded(root: str) -> list[dict]:
+    """The worker-owned record of an earlier pass (no sudo), or [] when there is none."""
+    try:
+        fd = os.open(os.path.join(root, RECORD_NAME), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return []
+        try:
+            return list(json.loads(fh.read())["entries"])
+        except (ValueError, KeyError, TypeError):
+            return []
+
+
+def _sweep_temp_records(root: str) -> None:
+    # A pass killed between mkstemp and the rename leaves its temp record beside the workspace.
+    prefix = f".{os.path.basename(root)}.ownership-"
+    parent = os.path.dirname(root)
+    for name in os.listdir(parent):
+        if name.startswith(prefix):
+            path = os.path.join(parent, name)
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid():  # windows-footgun: ok -- Linux-only
+                os.unlink(path)
+
+
 def _write_record(root: str, body: bytes) -> None:
     # Written by the worker user beside the workspace, then renamed in as root: rename replaces
     # whatever sits at the name and never writes through a link.
@@ -128,9 +158,16 @@ def _write_record(root: str, body: bytes) -> None:
 def _grant_owner_access(root: str, rows: list[dict]) -> None:
     # Now worker-owned, so no sudo: an entry the worker cannot read or (for a directory) empty
     # would refuse the scan or leave a detached tree behind. Parents come first (find pre-order).
+    # Only entries the worker owns are touched (chmod by another user fails anyway).
+    uid = os.geteuid()  # windows-footgun: ok -- only reached from adopt (Linux)
     for row in rows:
         path = root if row["path"] == "." else os.path.join(root, row["path"])
-        st = os.lstat(path)
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if st.st_uid != uid:
+            continue
         if stat.S_ISLNK(st.st_mode) or not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
             continue
         need = stat.S_IRWXU if stat.S_ISDIR(st.st_mode) else stat.S_IRUSR | stat.S_IWUSR
@@ -151,8 +188,10 @@ def adopt(workspace: Path, owner_check: Optional[Callable[[], bool]] = None) -> 
     except (OSError, subprocess.SubprocessError):
         return []
     root = os.path.realpath(workspace)
+    _sweep_temp_records(root)
     foreign = ["(", "!", "-uid", str(uid), "-o", "!", "-gid", str(gid), ")"]
     if not _sudo("find", root, "-xdev", *foreign, "-print", "-quit").stdout.strip():
+        _grant_owner_access(root, _recorded(root))  # finish a pass interrupted after its chown
         return []
     mounts = mounts_below(Path(root))
     if mounts:
@@ -161,13 +200,14 @@ def adopt(workspace: Path, owner_check: Optional[Callable[[], bool]] = None) -> 
     if linked:
         raise _refused(f"foreign-owned file with several hard links: {linked[:200]!r}")
     earlier = _earlier(root)
-    if owner_check is not None and not owner_check():
-        raise _refused("the workspace owner changed since it was selected; left untouched")
     rows = _parse(_sudo("find", root, "-xdev", *foreign, "-printf", "%U %G %m %y %P\\0").stdout)
     known = {e["path"] for e in earlier}
     merged = earlier + [r for r in rows if r["path"] not in known and r["path"] != RECORD_NAME]
+    # Last, right before the first change: the listing above can take minutes on a big tree.
+    if owner_check is not None and not owner_check():
+        raise _refused("the workspace owner changed since it was selected; left untouched")
     _write_record(root, json.dumps({"version": 1, "adopted_to": [uid, gid], "entries": merged},
                                    indent=1).encode() + b"\n")
     _sudo("find", root, "-xdev", *foreign, "-exec", "chown", "-h", f"{uid}:{gid}", "--", "{}", "+")
-    _grant_owner_access(root, [r for r in rows if r["path"] != RECORD_NAME])
+    _grant_owner_access(root, [r for r in merged if r["path"] != RECORD_NAME])
     return rows

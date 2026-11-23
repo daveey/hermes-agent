@@ -347,8 +347,11 @@ def _remove(conn, receipt, owner, days, board, refusals=None):
                 return 0
         try:
             def owner_unchanged():
-                with kb.write_txn(conn):  # local pickup shares this lock
-                    return _safe(conn, receipt, path)
+                try:
+                    with kb.write_txn(conn):  # local pickup shares this lock
+                        return _safe(conn, receipt, path)
+                except sqlite3.Error:
+                    return False  # refuse the change; the outer loop keeps going
 
             archive = sa.archive_workspace(path, kb.kanban_home() / "archive" / "scratch" / board / tid,
                                            task_id=tid, completed_at=since, owner_check=owner_unchanged)
