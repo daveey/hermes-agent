@@ -50,7 +50,9 @@ class ProcessCheckpointMixin:
         result was just recorded, dropped from every other profile's checkpoint too (after this one's
         lock is released), so no profile re-attaches it at a restart. [daveey]"""
         from tools.environments.sandbox_scope import hosted_scope
+        from tools.process_registry_events import publish
 
+        publish(self)  # Content-free wake before optional persistence, including hosted registries. [daveey]
         # A hosted caller only changes its own agent's records, which are never persisted here, so
         # it has no host change to write: it neither takes the lock nor rewrites this host's file.
         if hosted_scope() is not None:

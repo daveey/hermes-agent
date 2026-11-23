@@ -71,6 +71,10 @@ class NativeAnnotationSource(AnnotationMembershipSource):
         if self.family == 'review':
             from hermes_cli.review_session_activity import subscribe_refresh
             self._unsubscribe = subscribe_refresh(wake)
+        elif self.family == 'background':
+            from tools.process_registry import process_registry
+            from tools.process_registry_events import subscribe
+            self._unsubscribe = subscribe(process_registry, wake)
         return self
 
     def close(self):

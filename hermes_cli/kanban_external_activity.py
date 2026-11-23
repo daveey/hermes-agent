@@ -70,43 +70,57 @@ def session_external(conn: sqlite3.Connection, pairs: Iterable[tuple[str, str]],
         hit = _memo.get(key)
         if key and hit and wall - hit[0] < _TTL_S:
             return hit[1]
-    pairs = list(pairs)
-    out: dict[str, dict[str, Any]] = {}
     try:
-        from hermes_cli import kanban_external_watch as kew
-        states = kew.card_states(conn, {t for _s, t in pairs}, now=wall)
-        waits = _eta_waits(conn, {t for _s, t in pairs}, wall)
-        titles = {}
-        ids = list(set(states) | {t for t, w in waits.items() if w.get("wait_kind") == "clock"})
-        for i in range(0, len(ids), 500):
-            chunk = ids[i:i + 500]
-            titles.update((str(t), str(n or "")) for t, n in conn.execute(
-                f"SELECT id, title FROM tasks WHERE id IN ({','.join('?' for _ in chunk)})", chunk))
-        for sid, tid in sorted(pairs):
-            derived = states.get(tid)
-            wait = waits.get(tid)
-            if derived is None and wait and wait.get("wait_kind") == "clock":
-                derived = clock_state(wait)
-            if derived is None:
-                continue
-            slot = out.setdefault(sid, {"counts": [0, 0, 0], "cards": []})
-            if derived["state"] == "external_down":
-                slot["counts"][2] += 1
-            else:
-                slot["counts"][0] += 1
-                slot["counts"][1] += derived["state"] == "external_unknown"
-            ext = dict(derived["external"], state=derived["state"])
-            card = {"task_id": tid, "title": titles.get(tid, ""), "external": ext}
-            if wait and wait.get("wait_kind"):
-                card["eta"] = {k: wait.get(k) for k in ETA_KEYS}
-            slot["cards"].append(card)
-        for slot in out.values():
-            slot["cards"].sort(key=lambda c: (c["external"].get("observed_at") or 0, c["task_id"]), reverse=True)
+        out = read_session_external(conn, pairs, wall, strict=False)
     except (sqlite3.Error, ImportError, KeyError, TypeError, ValueError):
         out = {}
     with _lock:
         if key:
             _memo[key] = (wall, out)
+    return out
+
+
+def read_session_external(conn, pairs, wall, *, strict=True):
+    """Uncached canonical capture. Native mode propagates source read failures."""
+    from hermes_cli import kanban_external_watch as kew
+    pairs = list(pairs)
+    out = {}
+    if strict:
+        hosts = kew.hosts_seen(conn)
+        states = {}
+        for tid in dict.fromkeys(t for _s, t in pairs):
+            derived = kew.card_state(conn, tid, now=wall, hosts=hosts)
+            if derived is not None:
+                states[tid] = derived
+    else:
+        states = kew.card_states(conn, {t for _s, t in pairs}, now=wall)
+    waits = _eta_waits(conn, {t for _s, t in pairs}, wall)
+    titles = {}
+    ids = list(set(states) | {t for t, w in waits.items() if w.get("wait_kind") == "clock"})
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        titles.update((str(t), str(n or "")) for t, n in conn.execute(
+            f"SELECT id, title FROM tasks WHERE id IN ({','.join('?' for _ in chunk)})", chunk))
+    for sid, tid in sorted(pairs):
+        derived = states.get(tid)
+        wait = waits.get(tid)
+        if derived is None and wait and wait.get("wait_kind") == "clock":
+            derived = clock_state(wait)
+        if derived is None:
+            continue
+        slot = out.setdefault(sid, {"counts": [0, 0, 0], "cards": []})
+        if derived["state"] == "external_down":
+            slot["counts"][2] += 1
+        else:
+            slot["counts"][0] += 1
+            slot["counts"][1] += derived["state"] == "external_unknown"
+        ext = dict(derived["external"], state=derived["state"])
+        card = {"task_id": tid, "title": titles.get(tid, ""), "external": ext}
+        if wait and wait.get("wait_kind"):
+            card["eta"] = {k: wait.get(k) for k in ETA_KEYS}
+        slot["cards"].append(card)
+    for slot in out.values():
+        slot["cards"].sort(key=lambda c: (c["external"].get("observed_at") or 0, c["task_id"]), reverse=True)
     return out
 
 

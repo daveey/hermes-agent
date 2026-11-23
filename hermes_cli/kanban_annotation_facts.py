@@ -173,14 +173,17 @@ class AnnotationFacts:
         facts = snapshot.get_many(keys)
         projected = []
         now = time.time()
-        for selector, key, fact in zip(selectors, keys, facts):
-            if (fact is None or fact.key != key or fact.health != 'fresh'
-                    or (fact.valid_until is not None and fact.valid_until <= now)):
+        missing = [(selector, key) for selector, key, fact in zip(selectors, keys, facts)
+                   if fact is None or fact.key != key or fact.health != 'fresh'
+                   or (fact.valid_until is not None and fact.valid_until <= now)]
+        if missing:
+            for selector, _ in missing:
                 try:
                     self.handle.demand('annotations.' + family if self._view_facts else 'annotations', selector)
                 except (ValueError, RuntimeError):
                     raise AnnotationUnavailable('annotation demand unavailable') from None
-                raise AnnotationUnavailable('annotation projection unavailable')
+            raise AnnotationUnavailable('annotation projection unavailable')
+        for fact in facts:
             if self._view_facts:
                 patch = fact.value.get('payload')
             else:

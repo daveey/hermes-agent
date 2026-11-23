@@ -63,6 +63,15 @@ def test_variant_batch_never_partly_mutates(bridge):
     assert rows == before
 
 
+def test_cold_batch_demands_every_missing_row_atomically(bridge):
+    _, _, consumer, demands = bridge
+    rows = [{'id': 'a'}, {'id': 'b'}]
+    with pytest.raises(annotations.AnnotationUnavailable):
+        consumer.annotate('goal', rows, None)
+    assert [item[2]['row']['id'] for item in demands] == ['a', 'b']
+    assert rows == [{'id': 'a'}, {'id': 'b'}]
+
+
 def test_canonical_projection_uses_captured_goal_input():
     from hermes_cli.fact_annotation_views import projections, selector_for
     from hermes_cli.fact_materializers import view_reducer
