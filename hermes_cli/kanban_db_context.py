@@ -121,9 +121,6 @@ def _ctx_header(lines: list[str], task: Task, *, conn: Optional[sqlite3.Connecti
     lines.append("")
     lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
     lines.append(f"Status:   {task.status}")
-    if conn is not None:
-        from hermes_cli.kanban_actionability_evidence import context
-        context(lines, conn, task)
     if task.tenant:
         lines.append(f"Tenant:   {task.tenant}")
     lines.append(f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}")
@@ -138,6 +135,8 @@ def _ctx_header(lines: list[str], task: Task, *, conn: Optional[sqlite3.Connecti
     if task.branch_name:
         lines.append(f"Branch:   {task.branch_name}")
     if conn is not None:  # after Workspace, so ctx_workspace_span (no conn) keeps the same offset [daveey]
+        from hermes_cli.kanban_actionability_evidence import context
+        context(lines, conn, task)
         from hermes_cli.kanban_wake_summary import context_line
         if wake := context_line(conn, task):
             lines.append(wake)

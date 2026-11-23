@@ -47,8 +47,9 @@ def fields(conn, task, *, replica=False):
         from hermes_cli.kanban_actionability import project
         row = project({'task': {'id': task.id, 'status': task.status, 'assignee': task.assignee},
                        'unknown': True}, now=0)
-        row['violations'] = ['evidence_unavailable']
-        row.update(action='repair_lifecycle_contract', instruction='Recover authoritative task evidence')
+        if row['action'] != 'no_open_action':
+            row['violations'] = ['evidence_unavailable']
+            row.update(action='repair_lifecycle_contract', instruction='Recover authoritative task evidence')
     if replica and row['action'] != 'no_open_action':
         row['evidence_state'] = 'unknown'
     return {'actionability': row}

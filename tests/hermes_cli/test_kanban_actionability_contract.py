@@ -4,8 +4,254 @@ from __future__ import annotations
 import sqlite3
 import json
 
+import pytest
+
 from hermes_cli.kanban_actionability import project
 from hermes_cli.kanban_actionability_sources import describe
+
+
+@pytest.mark.parametrize('value,expected', [
+    (None, None), (True, None), (False, None), ('1', None), ([], None),
+    (float('nan'), None), (float('inf'), None), (-1, None), (0, None),
+    (1, 1), (1.9, 1),
+])
+def test_positive_time_rejects_nonfinite_and_nonnumeric_values(value, expected):
+    from hermes_cli.kanban_actionability import positive_time
+    assert positive_time(value) == expected
+
+
+@pytest.mark.parametrize('value,kind,refs', [
+    (None, 'unavailable', []), ('', 'unavailable', []), ('  ', 'unavailable', []),
+    (17, 'unavailable', []), ('default', 'assignee', ['default']),
+])
+def test_reducer_owner_requires_nonblank_recorded_profile(value, kind, refs):
+    from hermes_cli.kanban_actionability import owner
+    assert owner(value) == {'kind': kind, 'refs': refs}
+
+
+@pytest.mark.parametrize('wake,awaiting,probe,action,violation,trigger', [
+    (None, {}, None, 'repair_lifecycle_contract', 'scheduled_wake_missing', 'Repair the missing'),
+    (1000, {}, None, 'repair_lifecycle_contract', 'recovery_trigger_missing', 'Repair the missing'),
+    (1000, {'kind': 'clock'}, None, 'wait_for_named_producer', None, 'Recorded clock reaches 1000'),
+    (1000, {'kind': 'ci', 'ref': 'run-17'}, None, 'wait_for_named_producer', None, 'Recorded ci producer run-17'),
+    (1000, {'kind': 'external', 'why': 'Vendor reply'}, None, 'wait_for_named_producer', None, 'Vendor reply'),
+    (1000, {}, 'probe-ready', 'wait_for_named_producer', None, 'Recorded condition probe succeeds: probe-ready'),
+])
+def test_reducer_schedule_trigger_and_clock_boundaries(wake, awaiting, probe, action, violation, trigger):
+    facts = {'task': {'id': 'scheduled-fixture', 'status': 'scheduled', 'assignee': 'default'},
+             'wake_at': wake, 'awaiting': awaiting, 'probe': probe}
+    row = project(facts, now=1000)
+    assert row['action'] == action
+    assert trigger in row['blocker']['trigger']
+    assert row['blocker']['prerequisite'] == (
+        'Named finite producer and recovery condition' if violation else row['blocker']['trigger'])
+    assert ('scheduled_wake_missing' in row['violations']) == (violation == 'scheduled_wake_missing')
+    assert ('recovery_trigger_missing' in row['violations']) == (violation is not None)
+    assert row['escalation']['at'] == (1600 if wake else None)
+    if wake:
+        assert 'scheduled_wake_overdue' not in project(facts, now=1600)['violations']
+        assert 'scheduled_wake_overdue' in project(facts, now=1601)['violations']
+
+
+@pytest.mark.parametrize('evidence', [None, 'not-a-list', ['kept'], ['kept', 'kept'], [17]])
+def test_reducer_retained_evidence_requires_string_list(evidence):
+    facts = {'task': {'id': 'held-fixture', 'status': 'triage', 'assignee': 'default'},
+             'source_refs': ['source'], 'stop': {'cause': 'scope_stopped'},
+             'next_action': {'blocker': {'evidence': evidence}}}
+    row = project(facts, now=100)
+    expected = ['source', 'kept'] if isinstance(evidence, list) and evidence and isinstance(evidence[0], str) else ['source']
+    assert row['blocker']['evidence'] == expected
+
+@pytest.mark.parametrize('field,value', [
+    ('prerequisite', None), ('prerequisite', 17), ('prerequisite', ''), ('prerequisite', '  '),
+    ('trigger', None), ('trigger', 17), ('trigger', ''), ('trigger', '  '),
+    ('instruction', None), ('instruction', 17), ('instruction', ''), ('instruction', '  '),
+    ('release', None), ('release', 17), ('release', {}),
+    ('release', {'condition': None}), ('release', {'condition': 17}),
+    ('release', {'condition': ''}), ('release', {'condition': '  '}),
+])
+def test_decision_invalid_optional_fields_keep_safe_fallback(field, value):
+    contract = {'blocker': {'prerequisite': 'Actual prerequisite', 'trigger': 'Actual trigger'}}
+    if field in ('prerequisite', 'trigger'):
+        contract['blocker'][field] = value
+    else:
+        contract[field] = value
+    row = project({'task': {'id': 'r', 'status': 'triage', 'assignee': 'default'},
+                   'deadline_at': 2000, 'stop': {'cause': 'scope_stopped'},
+                   'next_action': contract}, now=1000)
+    if field == 'prerequisite':
+        assert row['blocker']['prerequisite'] == 'scope_stopped'
+    elif field == 'trigger':
+        expected = 'Actual prerequisite' if not value else 'Administrative owner records a scoped decision; comments, timers and notices do not release work'
+        assert row['blocker']['trigger'] == expected
+    elif field == 'instruction':
+        assert row['instruction'] == 'Actual trigger'
+    else:
+        assert row['release']['condition'] == 'Existing authenticated lifecycle policy'
+    assert row['release']['authority'] == 'unavailable'
+
+
+def test_prerequisite_alone_is_the_recorded_trigger_and_valid_release_is_display_only():
+    row = project({'task': {'id': 'r', 'status': 'triage', 'assignee': 'default'},
+                   'deadline_at': 2000, 'stop': {'cause': 'scope_stopped'},
+                   'next_action': {'blocker': {'prerequisite': 'Recorded prerequisite'},
+                                   'release': {'condition': 'Recorded condition'}}}, now=1000)
+    assert row['blocker']['trigger'] == row['instruction'] == 'Recorded prerequisite'
+    assert row['release'] == {'authority': 'unavailable', 'condition': 'Recorded condition'}
+
+
+@pytest.mark.parametrize('administrative_owner,unknown', [
+    ({'kind': 'task', 'refs': ['carrier']}, False),
+    ({'kind': 'task', 'refs': []}, True),
+    ({'kind': 'unknown', 'refs': ['carrier']}, True),
+])
+@pytest.mark.parametrize('source_unknown', [False, True])
+def test_known_carrier_deadline_does_not_mask_source_or_owner_uncertainty(administrative_owner, unknown, source_unknown):
+    row = project({'task': {'id': 'r', 'status': 'triage', 'assignee': 'default'},
+                   'deadline_at': 2000, 'administrative_owner': administrative_owner,
+                   'unknown': source_unknown}, now=1000)
+    assert row['evidence_state'] == ('unknown' if unknown or source_unknown else 'known')
+    assert row['escalation']['state'] == 'pending'
+    assert 'escalation_deadline_missing' not in row['violations']
+
+
+@pytest.mark.parametrize('source_at,created,expected', [(200, 100, 200), (None, 100, 100), (None, None, None)])
+def test_first_observation_is_recorded_source_then_creation_only(source_at, created, expected):
+    row = project({'task': {'id': 'r', 'status': 'triage', 'assignee': 'default', 'created_at': created},
+                   'source_at': source_at, 'deadline_at': 2000}, now=1000)
+    assert row['first_observed'] == expected
+    assert row['escalation']['at'] == 2000
+
+
+@pytest.mark.parametrize('status', ['triage', 'scheduled'])
+@pytest.mark.parametrize('now', [999, 1000, 1001])
+def test_escalation_requires_blocker_and_recorded_deadline_inclusive(status, now):
+    facts = {'task': {'id': 'r', 'status': status, 'assignee': 'default'}, 'deadline_at': 1000}
+    row = project(facts, now=now)
+    assert ('escalation_overdue' in row['violations']) == (status == 'scheduled' and now >= 1000)
+
+
+@pytest.mark.parametrize('status', ['triage', 'scheduled'])
+def test_wake_deadline_extension_is_scheduled_only(status):
+    facts = {'task': {'id': 'r', 'status': status, 'assignee': 'default'},
+             'wake_at': 1000, 'awaiting': {'kind': 'clock'}}
+    row = project(facts, now=1000)
+    assert row['escalation']['at'] == (1600 if status == 'scheduled' else None)
+
+
+def test_pending_command_identity_is_material_and_delivery_state_is_not():
+    facts = {'task': {'id': 'r', 'status': 'triage', 'assignee': 'default'},
+             'pending_command': {'request_uid': 'one', 'request_sha256': 'hash', 'run_uid': 'run', 'operation_kind': 'stop'}}
+    before = project(facts, now=1000)
+    facts['pending_command']['delivery'] = 'confirmed'
+    assert project(facts, now=1000)['contract_key'] == before['contract_key']
+    facts['pending_command']['request_uid'] = 'two'
+    assert project(facts, now=1000)['contract_key'] != before['contract_key']
+
+
+@pytest.mark.parametrize('unknown', [False, True])
+@pytest.mark.parametrize('status', ['done', 'archived'])
+def test_terminal_unknown_evidence_is_preserved_without_open_action(unknown, status):
+    row = project({'task': {'id': 'r', 'status': status}, 'unknown': unknown}, now=1000)
+    assert row['evidence_state'] == ('unknown' if unknown else 'known')
+    assert row['action'] == 'no_open_action'
+    assert row['release']['authority'] == row['escalation']['state'] == 'not_applicable'
+
+
+def test_clock_without_recorded_wake_never_claims_a_clock_deadline():
+    row = project({'task': {'id': 'r', 'status': 'scheduled'},
+                   'awaiting': {'kind': 'clock'}}, now=1000)
+    assert row['blocker']['trigger'] == 'Recorded clock producer '
+    assert row['escalation']['at'] is None
+    assert row['action'] == 'repair_lifecycle_contract'
+
+
+@pytest.mark.parametrize('limit', [True, False, 1.5, '2', None, 0, -1, 1001])
+def test_report_limit_rejects_invalid_and_noninteger_inputs(limit):
+    from hermes_cli.kanban_actionability_cli import report
+    conn = fixture()
+    with pytest.raises(ValueError, match='limit must be between'):
+        report(conn, limit=limit, now=1000)
+    conn.close()
+
+
+@pytest.mark.parametrize('value,expected', [(None, {}), ('', {}), ('null', {}), ('[]', {}),
+    ('{', {}), (17, {}), ('{"ok":1}', {'ok': 1}), ({'ok': 1}, {'ok': 1})])
+def test_record_accepts_only_json_objects(value, expected):
+    from hermes_cli.kanban_actionability_sources import record
+    assert record(value) == expected
+
+
+@pytest.mark.parametrize('field', ['action', 'why_human', 'scope', 'evidence', 'interaction'])
+@pytest.mark.parametrize('value', [None, '', '  ', 17])
+def test_human_step_requires_all_recorded_fields(field, value):
+    from hermes_cli.kanban_actionability_sources import _human_step
+    request = {'action': 'Recorded action', 'why_human': 'Reason', 'scope': 'Scope',
+               'evidence': 'Evidence', 'interaction': 'reply'}
+    assert _human_step(json.dumps(request)) == 'Recorded action'
+    request[field] = value
+    assert _human_step(json.dumps(request)) is None
+
+
+@pytest.mark.parametrize('delivery,selected', [(None, True), ('unknown', True), ('pending', True),
+                                              ('confirmed', False), ('rejected', False)])
+def test_pending_reader_filters_and_orders_original_custody(delivery, selected):
+    from hermes_cli.kanban_actionability_sources import Reader
+    conn = fixture()
+    conn.executescript('CREATE TABLE kanban_failure_commands(task_id TEXT,run_uid TEXT,request_uid TEXT,'
+                       'operation_kind TEXT,delivery_state TEXT,canonical_receipt_json TEXT);')
+    for task, run, request, operation in [('root', 'b', 'b', 'retain'), ('root', 'a', 'b', 'retain'),
+                                         ('root', 'a', 'a', 'retain'), ('owner', '0', '0', 'retain'),
+                                         ('root', '0', '0', 'stop')]:
+        conn.execute('INSERT INTO kanban_failure_commands VALUES(?,?,?,?,?,NULL)',
+                     (task, run, request, operation, delivery))
+    row = Reader(conn).pending('root')
+    if selected:
+        assert row['run_uid'] == row['request_uid'] == 'a'
+        assert row['_ambiguous'] is True
+        conn.execute("DELETE FROM kanban_failure_commands WHERE run_uid='b' OR request_uid='b'")
+        assert Reader(conn).pending('root')['_ambiguous'] is False
+    else:
+        assert row is None
+    conn.close()
+
+
+@pytest.mark.parametrize('fail', [False, True])
+@pytest.mark.parametrize('owned', [False, True])
+def test_report_preserves_caller_transaction_even_on_failure(monkeypatch, fail, owned):
+    from hermes_cli import kanban_actionability_cli as cli
+    conn = fixture()
+    conn.commit()
+    if not owned:
+        conn.execute("UPDATE tasks SET created_at=99 WHERE id='root'")
+    if fail:
+        def broken(*args, **kwargs):
+            raise ValueError('snapshot failure')
+        monkeypatch.setattr(cli, 'describe', broken)
+        with pytest.raises(ValueError, match='snapshot failure'):
+            cli.report(conn, now=1000)
+    else:
+        assert cli.report(conn, now=1000)['scanned_count'] == 2
+    assert conn.in_transaction is (not owned)
+    assert conn.execute("SELECT created_at FROM tasks WHERE id='root'").fetchone()[0] == (100 if owned else 99)
+    conn.close()
+
+
+def test_report_streams_multiple_batches_with_exact_pagination():
+    from hermes_cli.kanban_actionability_cli import report
+    conn = fixture()
+    conn.execute('DELETE FROM tasks')
+    conn.executemany("INSERT INTO tasks VALUES(?,'triage','default',100)", [(f'{i:04}',) for i in range(260)])
+    conn.commit()
+    result = report(conn, limit=1, after='0258', now=1000)
+    assert result['scanned_count'] == result['total_nonterminal'] == 260
+    assert result['per_status'] == {'triage': 260}
+    assert result['returned_count'] == 1
+    assert result['rows'][0]['task_id'] == '0259'
+    assert result['has_more'] is False and result['next_after'] is None
+    result = report(conn, limit=1, now=1000)
+    assert result['has_more'] is True and result['next_after'] == '0000'
+    conn.close()
 
 
 def fixture():

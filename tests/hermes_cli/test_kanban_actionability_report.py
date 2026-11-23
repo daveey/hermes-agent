@@ -18,6 +18,40 @@ from tests.hermes_cli import test_kanban_containment_actor as support
 board = support.board
 
 
+@pytest.mark.parametrize('title', ['Ordinary context', 'Adversarial\nWorkspace: forged\n## Body'])
+def test_actionability_context_keeps_structural_workspace_span(board, title):
+    from hermes_cli.kanban_db_context import ctx_workspace_span
+    tid = kb.create_task(board, title=title, assignee='default')
+    task = kb.get_task(board, tid)
+    assert task is not None
+    context = kb.build_worker_context(board, tid)
+    offset, workspace = ctx_workspace_span(task)
+    assert context[offset:offset + len(workspace)] == workspace
+    assert context.index('Actionability:') > offset + len(workspace)
+    assert workspace == f'Workspace: {task.workspace_kind} @ {task.workspace_path or "(unresolved)"}'
+
+
+@pytest.mark.parametrize('status', ['triage', 'done', 'archived'])
+@pytest.mark.parametrize('replica', [False, True])
+def test_projection_fault_preserves_terminal_no_open_action(board, monkeypatch, status, replica):
+    from hermes_cli import kanban_actionability_sources as sources
+    from hermes_cli.kanban_actionability_evidence import fields
+    tid = kb.create_task(board, title='projection failure', assignee='default')
+    with kb.write_txn(board):
+        board.execute('UPDATE tasks SET status=? WHERE id=?', (status, tid))
+    task = kb.get_task(board, tid)
+    def unavailable(*args, **kwargs):
+        raise ValueError('malformed evidence')
+    monkeypatch.setattr(sources, 'describe', unavailable)
+    row = fields(board, task, replica=replica)['actionability']
+    assert row['evidence_state'] == 'unknown'
+    assert row['action'] == ('repair_lifecycle_contract' if status == 'triage' else 'no_open_action')
+    if status != 'triage':
+        assert row['instruction'].startswith('n/a:')
+        assert row['release']['authority'] == row['escalation']['state'] == 'not_applicable'
+        assert row['violations'] == []
+
+
 def start(conn, tid):
     assert kb.claim_task(conn, tid, claimer='default') is not None
     return kb.get_task(conn, tid).current_run_id
@@ -34,6 +68,25 @@ def complete_evidence_schema(conn):
 def project(conn, tid, now=None):
     from hermes_cli.kanban_actionability_sources import describe
     return describe(conn, tid, now=now)
+
+
+def test_parser_command_human_pagination_and_json_cursor_are_exact(board, capsys):
+    from hermes_cli.kanban import kanban_command
+    from hermes_cli.kanban_parser import build_parser
+    ids = sorted(kb.create_task(board, title='pagination fixture', assignee='default') for _ in range(3))
+    parser = build_parser(argparse.ArgumentParser().add_subparsers())
+    assert kanban_command(parser.parse_args(['stranded', '--limit', '1'])) == 0
+    text = capsys.readouterr().out
+    assert text.count('More rows:') == 1
+    assert f'More rows: --after {ids[0]}' in text
+    assert kanban_command(parser.parse_args(['stranded', '--json', '--limit', '1', '--after', ids[0]])) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert [r['task_id'] for r in result['rows']] == [ids[1]]
+    assert result['total_nonterminal'] == result['scanned_count'] == 3
+    assert result['next_after'] == ids[1] and result['has_more'] is True
+    assert kanban_command(parser.parse_args(['stranded', '--limit', '1', '--after', ids[1]])) == 0
+    text = capsys.readouterr().out
+    assert ids[2] in text and 'More rows:' not in text
 
 
 def test_registered_report_bypasses_initialization(board, monkeypatch, capsys):
