@@ -245,7 +245,8 @@ class DispatchResult(QuietResultFields):
     a failure — a long quota window must never trip the circuit breaker."""
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
-    no DB writes; the lock holder is making progress on the same board."""
+    no DB writes; this alone does not establish the lock holder's progress."""
+    dispatch_diagnostic: Optional[dict] = None  # historical locked dry-run evidence, never admission
     at_capacity: Optional[str] = None
     """``"max_in_progress=6/6"`` / ``"max_spawn=3/3"`` when the host or board concurrency cap was full this
     tick, so no worker could start. A ready queue held only by a full cap is correctly idle, not stuck:
@@ -1905,9 +1906,8 @@ def _dispatch_lane_task(
     _kb._sync.pop_claim_deferral(task_id)
     claimed = admitted_claim(conn, task_id, assignee, lane, ttl_seconds, spawn_fn, result)
     if claimed is None:
-        deferral = _kb._sync.pop_claim_deferral(task_id)
-        if deferral is not None:  # the lane decides whether this refusal permits later candidates
-            result.claim_deferred.append((task_id, deferral))
+        from hermes_cli.kanban_dispatch_verdict import claim_refused
+        claim_refused(result, task_id, _kb._sync.pop_claim_deferral(task_id))
         return False
     from hermes_cli.kanban_candidate_receipts import claimed as note_claimed
     note_claimed(task_id)

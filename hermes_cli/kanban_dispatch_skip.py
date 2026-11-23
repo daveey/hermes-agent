@@ -219,6 +219,8 @@ def _prune_seen(conn: sqlite3.Connection) -> None:
 def _tick_skips(result: Any) -> list[tuple[str, str, Any, Optional[float], dict[str, Any]]]:
     """``(task_id, reason, detail, until, extra)`` for every row ``result`` says the tick passed over."""
     out: list[tuple[str, str, Any, Optional[float], dict[str, Any]]] = []
+    out += [(tid, "admission_deferred", "hub_claim_screen", None, {})
+            for tid in getattr(result, "admission_deferred", ())]
     for name in ("skipped_ineligible", "capsule_refused", "no_progress_held", "claim_deferred"):
         # A claim deferral carries who set it (local gate vs Board); the skip words read it back (:func:`words`).
         out += [(tid, name, code, None, {"origin": code.origin} if getattr(code, "origin", None) else {})
@@ -311,6 +313,7 @@ def _stamp(epoch: Any, now: Optional[float] = None) -> str:
 
 
 _WORDS = {
+    "admission_deferred": "held: hub claim screen deferred this card; retry next tick",
     PINNED_QUOTA_WALL: "held: pinned model {detail} quota-walled",
     LLM_PACED: "held: LLM quota pacing ({detail} pool)",
     "review_provider_wall": "held: independent review routes walled on this host",

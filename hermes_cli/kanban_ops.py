@@ -132,6 +132,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "shared_blocker_released": res.shared_blocker_released,
             "shared_blocker_probed": res.shared_blocker_probed,
             "skipped_locked": res.skipped_locked,
+            "dispatch_diagnostic": res.dispatch_diagnostic,
             "skipped_owned": res.skipped_owned,
             "dispatch_owner": res.dispatch_owner,
             "ownership_error": res.ownership_error,
@@ -191,6 +192,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Released (probe for an idle shared blocker): {', '.join(res.shared_blocker_probed)}")
     if res.skipped_locked:
         print("Skipped: another dispatcher holds this board's lock (no writes this tick)")
+        from hermes_cli.kanban_dispatch_verdict import print_historical
+        print_historical(res.dispatch_diagnostic)
     if res.skipped_owned:
         print(f"Skipped: dispatch owner {res.dispatch_owner or '(unknown)'}; "
               f"{res.ownership_error or 'dispatcher identity does not match'}")

@@ -18,7 +18,7 @@ __all__ = ["QUIET_COMPATIBLE_FIELDS", "QUIET_HOLD_FIELDS", "all_at_capacity", "a
 # classified or not, means the tick was not explained by the claim-quiet defer alone.
 QUIET_COMPATIBLE_FIELDS = frozenset({
     "quiet_deferred", "quiet_deadlines",                 # the quiet defer itself
-    "skipped_locked", "skipped_owned",                   # rows filtered out before the check
+    "skipped_locked", "skipped_owned", "dispatch_diagnostic",  # rows filtered out before the check
     "scheduling_admitted", "dispatch_owner", "lane_candidates", "admission_budget",  # per-tick census
     "promoted", "auto_assigned_default", "supervisor_requests", "remote_archived", "reaped_terminal_workers",
     "stopped_run_scopes", "agent_block_escalated", "ask_rechecked", "woken_continuations",

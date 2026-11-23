@@ -101,6 +101,73 @@ def test_failed_publication_retries_and_does_not_starve_other_stops(kanban_home,
         assert kb.get_task(conn, first).status == "triage"
 
 
+@pytest.mark.parametrize("cause", [None, "scope_stopped", "safety_refusal"])
+def test_live_route_sweep_needs_no_writer_lock(kanban_home, monkeypatch, cause):
+    with kbc.connect_closing() as conn:
+        tid = _stop(conn, cause)
+        decision.ensure_producer(conn, tid)
+        count = len(helpers._events(conn, tid, decision.NOTICE))
+        def forbidden(*args, **kwargs):
+            pytest.fail("unchanged decision route must not wait for the SQLite writer")
+        monkeypatch.setattr(kb, "write_txn", forbidden)
+        decision.repair_triage_routes(conn, skip=set())
+        assert len(helpers._events(conn, tid, decision.NOTICE)) == count
+        assert decision.pending(conn, tid)
+
+
+def test_ready_card_reaches_spawn_past_unchanged_spend_routes(
+        kanban_home, monkeypatch, all_assignees_spawnable):
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from tests.hermes_cli.test_kanban_quota_episode import routing
+    routing(monkeypatch)
+    with kbc.connect_closing() as conn:
+        stopped = _stop(conn, "scope_stopped")
+        decision.ensure_producer(conn, stopped)
+        ready = kb.create_task(conn, title="Ready with free slot", assignee="default")
+        real = decision.ensure_producer
+        real_txn = kb.write_txn
+        checking = [False]
+        def no_writer_for_noop(*args, **kwargs):
+            if checking[0]:
+                pytest.fail("pre-admission no-op maintenance waited for the writer")
+            return real_txn(*args, **kwargs)
+        def checked(c, tid):
+            checking[0] = True
+            try:
+                return real(c, tid)
+            finally:
+                checking[0] = False
+        monkeypatch.setattr(kb, "write_txn", no_writer_for_noop)
+        monkeypatch.setattr(decision, "ensure_producer", checked)
+        spawned = []
+        result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: spawned.append(task.id),
+                                        max_spawn=10, max_in_progress=10)
+        assert ready in spawned
+        assert any(row[0] == ready for row in result.spawned)
+        assert kb.get_task(conn, stopped).status == "triage"
+        assert decision.pending(conn, stopped)
+
+
+def test_repair_rechecks_after_writer_acquisition(kanban_home, monkeypatch):
+    from contextlib import contextmanager
+    with kbc.connect_closing() as conn:
+        tid = _stop(conn)
+        original = kb.write_txn
+        calls = []
+        @contextmanager
+        def raced(c, **kwargs):
+            # Another writer supplied a live route after the read-only check.
+            monkeypatch.setattr(kb, 'write_txn', original)
+            decision.ensure_producer(c, tid)
+            calls.append('other_writer')
+            with original(c, **kwargs):
+                yield
+        monkeypatch.setattr(kb, 'write_txn', raced)
+        decision.ensure_producer(conn, tid)
+        assert calls == ['other_writer']
+        assert len(helpers._events(conn, tid, decision.NOTICE)) == 1
+
+
 def test_resolved_episode_does_not_reopen_closed_producer(kanban_home):
     with kbc.connect_closing() as conn:
         tid = _stop(conn)

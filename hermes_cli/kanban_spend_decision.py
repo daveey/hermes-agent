@@ -10,31 +10,45 @@ NOTICE = "spend_budget_decision_ready"
 
 def ensure_producer(conn, task_id: str) -> None:
     """Repair pre-notice stops too; one durable producer receipt per spend-stop episode."""
-    import json
+    # Most sweeps are no-ops. Do not queue for the global SQLite writer just
+    # to discover a live route: this runs before ready-card admission while the
+    # dispatcher holds its tick lock. Every actual repair is re-read below.
+    if _producer_repair(conn, task_id) is None:
+        return
     with kb.write_txn(conn, allow_nested=True):
-        stop = pending_episode(conn, task_id)
-        if stop is None:
+        repair = _producer_repair(conn, task_id)
+        if repair is None:
             return
-        episode = stop.get("uid") or str(stop["id"])
-        previous = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=? "
-                                "AND json_extract(payload,'$.episode')=? ORDER BY id DESC LIMIT 1",
-                                (task_id, NOTICE, episode)).fetchone()
-        payload = json.loads(stop["payload"] or "{}")
-        from hermes_cli.kanban_refusal_receipt import restricted
-        safety = restricted(conn, task_id)
-        scope = execution_restricted(conn, task_id) and not safety
-        prior = json.loads(previous[0]) if previous else None
-        cause = 'safety_refusal' if safety else 'scope_stopped' if scope else None
-        prior_route = prior.get('producer') if isinstance(prior, dict) else None
-        route = episode_route(conn, task_id, episode) or prior_route
-        live = _live_route(conn, route)
-        if live and route == prior_route and (cause is None or prior.get('cause') == cause):
-            return
-        if cause:
-            payload['cause'] = cause
+        episode, payload, route, live = repair
         if not live:
             route = producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
         kb._append_event(conn, task_id, NOTICE, {**payload, "episode": episode, "producer": route})
+
+
+def _producer_repair(conn, task_id):
+    """Read-only need check; never authorizes a repair outside its transaction."""
+    import json
+    stop = pending_episode(conn, task_id)
+    if stop is None:
+        return None
+    episode = stop.get("uid") or str(stop["id"])
+    previous = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=? "
+                            "AND json_extract(payload,'$.episode')=? ORDER BY id DESC LIMIT 1",
+                            (task_id, NOTICE, episode)).fetchone()
+    payload = json.loads(stop["payload"] or "{}")
+    from hermes_cli.kanban_refusal_receipt import restricted
+    safety = restricted(conn, task_id)
+    scope = execution_restricted(conn, task_id) and not safety
+    prior = json.loads(previous[0]) if previous else None
+    cause = 'safety_refusal' if safety else 'scope_stopped' if scope else None
+    prior_route = prior.get('producer') if isinstance(prior, dict) else None
+    route = episode_route(conn, task_id, episode) or prior_route
+    live = _live_route(conn, route)
+    if live and route == prior_route and (cause is None or prior.get('cause') == cause):
+        return None
+    if cause:
+        payload['cause'] = cause
+    return episode, payload, route, live
 
 
 

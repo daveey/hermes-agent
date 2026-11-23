@@ -125,15 +125,16 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
     """All tick effects are behind the identity read, under the canonical lock."""
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
     from hermes_cli.kanban_db_dispatch import DispatchResult
+    from hermes_cli.kanban_dispatch_verdict import locked
     if getattr(conn, "_dispatch_open_contended", False):
-        return DispatchResult(skipped_locked=True)
+        return DispatchResult(skipped_locked=True, dispatch_diagnostic=locked(conn) if dry_run else None)
     try:
         db_path = connection_db_path(conn, validate=False)
     except (OSError, ValueError, sqlite3.Error) as exc:
         return DispatchResult(skipped_owned=True, ownership_error=str(exc))
     with kbc._dispatch_tick_lock(db_path) as held:
         if not held:
-            return DispatchResult(skipped_locked=True)
+            return DispatchResult(skipped_locked=True, dispatch_diagnostic=locked(conn) if dry_run else None)
         try:
             connection_db_path(conn)
             owner = get_dispatch_owner(db_path)
