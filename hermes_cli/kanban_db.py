@@ -1801,9 +1801,7 @@ def _task_status(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     return row["status"] if row else None
 
 
-def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
-    row = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    return int(row["current_run_id"]) if row and row["current_run_id"] else None
+from hermes_cli.kanban_db_run import _current_run_id
 
 
 # Distinguishes "caller named the acting profile" (which may legitimately be
@@ -2150,6 +2148,8 @@ def release_stale_claims(
     ``enforce_max_runtime`` and ``detect_crashed_workers`` remain the upper bounds for genuinely wedged or
     dead workers.
     """
+    from hermes_cli.kanban_run_end_retry import drain
+    drain(conn)
     now = int(time.time())
     reclaimed = 0
     host_prefix = _host_prefix()

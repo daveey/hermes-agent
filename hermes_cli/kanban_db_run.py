@@ -5,6 +5,11 @@ import sqlite3
 import time
 from typing import Optional
 
+def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    row = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return int(row["current_run_id"]) if row and row["current_run_id"] else None
+
+
 def _end_run(
     conn: sqlite3.Connection, task_id: str, *, outcome: str, summary: Optional[str] = None,
     error: Optional[str] = None, metadata: Optional[dict] = None, status: Optional[str] = None,

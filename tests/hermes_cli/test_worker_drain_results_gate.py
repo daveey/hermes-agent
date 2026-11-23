@@ -5,7 +5,6 @@ import pytest
 
 from hermes_cli import machine_persistent_jobs as jobs, worker_drain_results_gate as gate
 from hermes_cli.kanban_db_sync import SYNC_SCHEMA_SQL
-from hermes_cli.kanban_run_end_lease import _release
 
 
 def _board(tmp_path, rows=0, name='kanban.db'):
@@ -73,16 +72,23 @@ def test_census_count_exit_uses_the_gate(tmp_path, monkeypatch):
 
 def test_real_release_leaves_pending_row_so_gate_holds(tmp_path, monkeypatch):
     """The real kanban_run_end_lease._release drops the Board lease with the row pending."""
-    path = _board(tmp_path, rows=1)
-    conn = sqlite3.connect(path)
-    conn.execute('ALTER TABLE kanban_sync_outbox ADD COLUMN retry_after INTEGER')  # migration column
-    conn.execute('CREATE TABLE task_runs(uid TEXT, ended_at INTEGER)')
-    conn.execute("INSERT INTO task_runs VALUES ('u1', 5)")
-    released = []
-    from hermes_cli import kanban_db_sync as sync
-    monkeypatch.setattr(sync, 'release_lease', lambda c, t, u: released.append((t, u)))
-    _release(conn, 't1', 'u1')
-    conn.commit()
-    conn.close()
-    assert released == [('t1', 'u1')]  # lease gone, a process census would be zero
+    from hermes_cli import kanban_db as kb, kanban_db_sync as sync
+    from tests.hermes_cli import kanban_sync_support as support
+    from contextlib import contextmanager
+    home = support.kanban_home(tmp_path, monkeypatch)
+    with contextmanager(support.synced_conn)(home) as conn, contextmanager(support.lease_client)() as client:
+        sync.set_mode(conn, 'primary')
+        task = kb.create_task(conn, title='park', assignee='worker')
+        assert kb.claim_task(conn, task)
+        run = kb.get_task(conn, task).current_run_id
+        uid = sync.run_uid(conn, run)
+        helper = kb.create_task(conn, title='helper', assignee='worker')
+        kb.link_tasks(conn, helper, task, expected_child_run_id=run)
+        assert kb.parent_ids(conn, task) == [helper]
+        with kb.write_txn(conn):
+            conn.execute('UPDATE kanban_sync_outbox SET created_at=1')
+        assert kb.block_task(conn, task, reason='helper', kind='dependency', expected_run_id=run)
+        path = conn.execute('PRAGMA database_list').fetchone()[2]
+    released = [fields for action, fields in client.calls if action == 'release']
+    assert [fields['run_uid'] for fields in released] == [uid]
     assert gate.gate_count(0, [path]) is None

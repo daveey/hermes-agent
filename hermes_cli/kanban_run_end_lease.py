@@ -15,7 +15,12 @@ server) and never fails the transition. Crash, timeout and reclaim accounting pa
 release with their own outcome, and a neutral release sent first would hide the charge. (Archive and
 descendant reopen close the run ``reclaimed`` too, but as uncharged operator transitions, so they queue.)
 
-Only while the outbox is stalled (:func:`outbox_stalled`). Board ``releaseTask`` returns a card it still
+Only while the outbox is stalled (:func:`outbox_stalled`) for the immediate
+post-commit attempt. ``kanban_run_end_retry`` also captures a durable obligation
+in the ending transaction: after the same 120s grace the dispatcher retries it
+independently of the push loop, including when no card is still running. This
+covers a fresh queue that stalls only AFTER the one-shot callback has returned.
+Board ``releaseTask`` returns a card it still
 sees ``running`` to ``ready`` (and drops a placement card's ``runs_on``). On a healthy host the direct
 release would usually beat the row push, so a parked or done card would read ``ready`` on the Board
 until the push lands, open to a claim from another machine. There the row push ends the lease itself,
@@ -70,10 +75,14 @@ def note(conn: sqlite3.Connection, task_id: str, run_id: Optional[int]) -> None:
     uid = sync.run_uid(conn, run_id)
     if uid is None:
         return
-    if getattr(conn, "in_transaction", False):
-        _PENDING.setdefault(id(conn), []).append((task_id, uid))
-    else:
-        _release(conn, task_id, uid)
+    from hermes_cli import kanban_run_end_retry
+    if not conn.in_transaction:
+        from hermes_cli.kanban_db_connect import write_txn
+        with write_txn(conn):
+            note(conn, task_id, run_id)
+        return
+    kanban_run_end_retry.note(conn, task_id, uid)
+    _PENDING.setdefault(id(conn), []).append((task_id, uid))
 
 
 def flush(conn: sqlite3.Connection, *, committed: bool) -> None:
@@ -94,7 +103,8 @@ def _release(conn: sqlite3.Connection, task_id: str, uid: str) -> None:
         if not outbox_stalled(conn):
             return  # the row push ends the lease on the Board, with no window where the card reads ready
         _log.info("kanban sync: outbox stalled; releasing the Board lease of %s run %s at its end", task_id, uid)
-        sync.release_lease(conn, task_id, uid)
+        from hermes_cli import kanban_run_end_retry
+        kanban_run_end_retry.send(conn, task_id, uid)
     except Exception as exc:  # health: allow BLE001 -- best-effort: the lease expires on the server instead
         _log.warning("kanban sync: lease release for %s run %s failed (%s: %s); it expires on the server",
                      task_id, uid, type(exc).__name__, exc)
