@@ -2157,6 +2157,8 @@ def _dispatch_once_locked(
         from hermes_cli.kanban_candidate_receipts import global_hold
         global_hold(conn, "core update drain")
         return result
+    from hermes_cli.kanban_dispatch_storage import finish_preclaim
+    finish_preclaim(conn)  # pickup can claim/import work; never cancel its custody writes
     may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
                                                  board=board, spawn_quota=spawn_quota)
     if not may_spawn:
@@ -2181,10 +2183,8 @@ def _dispatch_once_locked(
     review_rows = _eligible_rows(conn, all_review, "review", result) if all_review else []
     hold_ineligible_budgets(conn, result, dry_run=dry_run)
     result.lane_candidates = len(all_ready) + len(all_review)
-    # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
-    # skipped_unassigned — "busy, retry later" differs from "needs routing".
-    # Resolved BEFORE the review reservation so the reservation can see which
-    # review rows the lane loop would refuse this tick.
+    # Per-profile cap: busy rows are deferred, not misclassified as unassigned.
+    # Resolve before lane reservation so it sees what the lane loop would refuse.
     per_profile_cap = max_in_progress_per_profile if (
         # Per-profile concurrency cap (#21582): when set, track how many workers each assignee already has
         # in flight, and refuse to spawn when this would push that assignee past the cap. Prevents fan-out

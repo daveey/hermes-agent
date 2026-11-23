@@ -103,7 +103,7 @@ def test_nonbusy_errors_propagate_and_restore_timeout():
         assert storage.execute_boundary(conn, "SELECT 1") is False
 
 
-def test_shared_deadline_expires_but_uncontended_work_still_commits(monkeypatch):
+def test_non_sql_work_does_not_spend_acquisition_allowance(monkeypatch):
     from hermes_cli import kanban_dispatch_storage as storage
     now = [100.0]
     monkeypatch.setattr(storage, "_clock", lambda: now[0])
@@ -112,7 +112,7 @@ def test_shared_deadline_expires_but_uncontended_work_still_commits(monkeypatch)
         def work():
             now[0] += storage.WRITE_WAIT_SECONDS + 1
             kbc._execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
-            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == int(storage.WRITE_WAIT_SECONDS * 1000)
             conn.execute("INSERT INTO example VALUES (1)")
             kbc._execute_boundary_with_retry(conn, "COMMIT")
             return DispatchResult()
@@ -172,6 +172,35 @@ def test_storage_skip_is_named_in_dispatch_suppression():
     from hermes_cli.kanban_db_dispatch_stuck import describe_suppression
     result = DispatchResult(storage_skip_reason="storage_write_contended")
     assert "storage_write_contended=1" in describe_suppression([result])
+
+
+def test_swallowed_preclaim_refusal_stops_before_pickup():
+    from hermes_cli import kanban_dispatch_storage as storage
+    with closing(sqlite3.connect(":memory:")) as conn:
+        picked_up = []
+        def work():
+            budget = storage._active.get()
+            assert budget is not None
+            budget.contended = True  # maintenance caught its boundary refusal
+            storage.finish_preclaim(conn)
+            picked_up.append(True)
+            return DispatchResult()
+        assert storage.run(conn, work, board="sample").storage_skip_reason == storage.REASON
+        assert picked_up == []
+
+
+def test_postclaim_error_is_not_replaced_by_an_empty_result():
+    from hermes_cli import kanban_dispatch_storage as storage
+    with closing(sqlite3.connect(":memory:")) as conn:
+        error = sqlite3.OperationalError("database is locked")
+        def work():
+            storage.finish_preclaim(conn)
+            assert not storage.execute_boundary(conn, "BEGIN IMMEDIATE")
+            raise error
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            storage.run(conn, work, board="sample")
+        assert caught.value is error
+
 
 
 def test_gateway_storage_skip_counts_as_skipped_pass(monkeypatch):

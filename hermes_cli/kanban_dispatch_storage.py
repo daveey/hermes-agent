@@ -21,14 +21,16 @@ class DispatchWriteContended(sqlite3.OperationalError):
 @dataclass
 class _Budget:
     conn: sqlite3.Connection
-    deadline: float
+    remaining: float
     timeout_ms: int
     contended: bool = False
+    preclaim: bool = True
 
     def execute(self, sql):
-        # No waiting after the deadline, but uncontended work still succeeds.
-        remaining_ms = max(0, int((self.deadline - _clock()) * 1000))
+        # Charge only boundary acquisition, not RPC/CPU or transaction-body time.
+        remaining_ms = max(0, int(self.remaining * 1000))
         self.conn.execute(f"PRAGMA busy_timeout = {min(self.timeout_ms, remaining_ms)}")
+        started = _clock()
         try:
             self.conn.execute(sql)
         except sqlite3.OperationalError as exc:
@@ -37,21 +39,34 @@ class _Budget:
                 raise
             self.contended = True
             raise DispatchWriteContended(REASON) from exc
+        finally:
+            self.remaining = max(0, self.remaining - (_clock() - started))
 
 
 def execute_boundary(conn, sql) -> bool:
     """True when a dispatch-scoped boundary was handled; ordinary writers are unchanged."""
     budget = _active.get()
-    if budget is None or budget.conn is not conn:
+    if budget is None or budget.conn is not conn or not budget.preclaim:
         return False
     budget.execute(sql)
     return True
 
 
+def finish_preclaim(conn):
+    """Stop cancellation before pickup can acquire execution/process custody."""
+    budget = _active.get()
+    if budget is None or budget.conn is not conn:
+        return
+    if budget.contended:
+        raise DispatchWriteContended(REASON)  # a maintenance helper may have caught it
+    budget.preclaim = False
+    conn.execute(f"PRAGMA busy_timeout = {budget.timeout_ms}")
+
+
 @contextmanager
 def _budget(conn):
     previous = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-    budget = _Budget(conn, _clock() + WRITE_WAIT_SECONDS, previous)
+    budget = _Budget(conn, WRITE_WAIT_SECONDS, previous)
     token = _active.set(budget)
     try:
         conn.execute(f"PRAGMA busy_timeout = {min(previous, int(WRITE_WAIT_SECONDS * 1000))}")
@@ -69,7 +84,7 @@ def run(conn, work, *, board):
             result = work()
         except sqlite3.OperationalError as exc:
             from hermes_cli.kanban_db_connect import _is_busy_error
-            if not isinstance(exc, DispatchWriteContended) and not _is_busy_error(exc):
+            if not budget.preclaim or (not isinstance(exc, DispatchWriteContended) and not _is_busy_error(exc)):
                 raise
             budget.contended = True
             result = DispatchResult()
