@@ -131,6 +131,16 @@ def guard_import(conn: sqlite3.Connection, tables: tuple[str, ...], only: Mappin
     return True
 
 
+def issued_operation(conn: sqlite3.Connection) -> str | None:
+    """Reserve and validate bound custody before an explicit identity-changing repair."""
+    anchor = conn.execute('SELECT journal_id FROM kanban_sync_state LIMIT 1').fetchone()
+    if anchor is None or anchor[0] is None:
+        return None
+    _reserve(conn)
+    state, _encoded = _read(conn)
+    return state['pending']['op_id'] if state['pending'] is not None else None
+
+
 def parent_cleanup_hold(conn: sqlite3.Connection, *, task_id: str | None = None,
                         remote: dict | None = None) -> str | None:
     """Keep an issued task cache until its authenticated exact final settlement.

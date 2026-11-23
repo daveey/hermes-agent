@@ -15,8 +15,12 @@ def strip_lifecycle(conn: sqlite3.Connection, task: str) -> None:
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_outbox'").fetchone():
         return
     from hermes_cli.kanban_db_sync import uuid7
+    from hermes_cli.kanban_replay_journal import issued_operation
+    held = issued_operation(conn)
     rows = conn.execute("SELECT op_id,op,fields FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=?", (task,)).fetchall()
     for op_id, op, raw in rows:
+        if op_id == held:
+            continue  # The exact final verdict, not newer local lifecycle, releases transport custody.
         fields = json.loads(raw)
         if not isinstance(fields, dict):
             raise ValueError("invalid containment outbox fields")
