@@ -1679,6 +1679,7 @@ class _TxnBoundary:
         self.conn, self.no_retry, self.done = conn, no_retry, done
         self.prior_timeout: Optional[int] = None
         self.finished = False
+        self.closed = False
         self.error: Optional[BaseException] = None
 
     def arm(self) -> None:
@@ -1700,10 +1701,14 @@ class _TxnBoundary:
             return
         try:
             self.conn.execute("ROLLBACK")
-        except sqlite3.Error:
+        except BaseException:
+            logging.getLogger(__name__).exception("write_txn: rollback failed")
             try:
                 live = bool(self.conn.in_transaction)
-            except sqlite3.Error:
+            except BaseException:
+                logging.getLogger(__name__).exception(
+                    "write_txn: in_transaction unreadable after failed rollback; treating the writer as live"
+                )
                 live = True  # unknown is treated as a live writer
             if not live:
                 # SQLite already ended the transaction itself (disk full, I/O error): "no
@@ -1719,12 +1724,46 @@ class _TxnBoundary:
                     "write_txn: rollback and close failed; withholding boundary_done"
                 )
             else:
+                self.closed = True
                 self.prior_timeout = None  # closed connections cannot restore it
                 self.finished = False
+
+    def cleanup_failed(self) -> None:
+        """Preserve the propagating error, even if rollback entry is interrupted."""
+        try:
+            self.rollback()
+        except BaseException:
+            if not (self.no_retry or self.done is not None):
+                raise  # keep default-path behavior
+            logging.getLogger(__name__).exception("write_txn: cleanup interrupted")
+        self.finish()
 
     def finish(self) -> None:
         if self.finished:
             return
+        if (self.no_retry or self.done is not None) and not self.closed:
+            try:
+                live = bool(self.conn.in_transaction)
+            except BaseException:
+                logging.getLogger(__name__).exception(
+                    "write_txn: in_transaction unreadable before boundary_done; treating the writer as live"
+                )
+                live = True
+            if live:
+                try:
+                    self.conn.execute("ROLLBACK")
+                except BaseException:
+                    logging.getLogger(__name__).exception("write_txn: final rollback failed")
+                try:
+                    self.conn.close()
+                except BaseException:
+                    logging.getLogger(__name__).exception(
+                        "write_txn: final close failed; withholding boundary_done"
+                    )
+                    self.finished = True
+                    return
+                self.closed = True
+                self.prior_timeout = None
         self.finished = True
         try:
             if self.prior_timeout is not None:
@@ -1770,11 +1809,11 @@ def write_txn(
     run-end-lease and wake hook. Callers should also release in their own
     ``finally``. A callback or timeout-restore failure after COMMIT skips those
     hooks (committed bytes remain) and is raised; queued leases are discarded
-    locally and fall back to server expiry. Cleanup errors, including callback
-    BaseException, deliberately never shadow a body/BEGIN/COMMIT error. Opt-in
-    mode rolls back on BaseException before the callback; if rollback fails with
-    a SQLite error, it closes the connection first (withholds the callback if
-    close also fails). The default path is unchanged.
+    locally and fall back to server expiry. Cleanup errors, including rollback,
+    close and callback BaseException, deliberately never shadow a body/BEGIN/COMMIT
+    error. Opt-in mode confirms ownership ended before the callback; an interrupted
+    or unreadable boundary gets one final rollback attempt and close. If close
+    fails, the callback is withheld. The default path is unchanged.
     """
     if (no_retry or boundary_done is not None) and getattr(conn, "in_transaction", False):
         raise RuntimeError(
@@ -1827,14 +1866,12 @@ def _write_txn_body(conn, allow_nested, boundary):
     except Exception:
         # SQLite may already have auto-rolled-back (EIO, contention, corruption);
         # don't let this secondary failure shadow the real one.
-        boundary.rollback()
-        boundary.finish()
+        boundary.cleanup_failed()
         _run_end_lease.flush(conn, committed=False)  # local discard only, no I/O
         raise
     except BaseException:
         if opt_in:
-            boundary.rollback()
-            boundary.finish()
+            boundary.cleanup_failed()
             _run_end_lease.flush(conn, committed=False)
         raise
     else:
@@ -1844,14 +1881,12 @@ def _write_txn_body(conn, allow_nested, boundary):
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
-            boundary.rollback()
-            boundary.finish()
+            boundary.cleanup_failed()
             _run_end_lease.flush(conn, committed=False)
             raise
         except BaseException:
             if opt_in:
-                boundary.rollback()
-                boundary.finish()
+                boundary.cleanup_failed()
                 _run_end_lease.flush(conn, committed=False)
             raise
         boundary.finish()
