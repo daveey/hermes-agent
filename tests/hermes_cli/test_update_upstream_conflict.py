@@ -5,8 +5,11 @@
 for a name it did not have yet, and validate_assignment surfaced the ImportError as "Assignee 'default'
 lacks required capabilities", so no repair owner was filed (defect kanban-c50ee42be6).
 """
+import json
 import sys
 import types
+
+import pytest
 from pathlib import Path
 
 from hermes_cli.config import save_config
@@ -21,7 +24,17 @@ def _stale_config_effective(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.config_effective", stale)
 
 
+def _gateway_identity(tmp_path, monkeypatch, gateway):
+    path = tmp_path / "mail.json"
+    path.write_text(json.dumps({"gateway": gateway}))
+    monkeypatch.setenv("HERMES_MAIL_CONFIG", str(path))
+    # Prevent a missing identity from falling back to the real host's replica.
+    from hermes_cli import kanban_capability_registry as registry
+    monkeypatch.setattr(registry, "hub_db_path", lambda: tmp_path / "absent.db")
+
+
 def test_report_files_owner_despite_stale_in_process_modules(tmp_path, monkeypatch):
+    _gateway_identity(tmp_path, monkeypatch, "hub")
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "board.db"))
     save_config({"platform_toolsets": {"cli": ["terminal", "file"]}, "terminal": {"backend": "local"}})
     _stale_config_effective(monkeypatch)
@@ -47,6 +60,7 @@ def test_report_files_owner_despite_stale_in_process_modules(tmp_path, monkeypat
 
 
 def test_report_failure_is_best_effort_and_logged(tmp_path, monkeypatch, capsys, caplog):
+    _gateway_identity(tmp_path, monkeypatch, "hub")
     # A child that cannot file (unwritable board path) returns None, warns, and keeps its stderr tail.
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x")
@@ -69,3 +83,46 @@ def test_conflict_without_owner_prints_not_filed(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(ucg, "_git_stdout", lambda *a, **k: "head")
     assert ucg._synthesize_upstream_merge(["git"], Path(tmp_path), "u" * 40) is None
     assert "Repair owner: NOT FILED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("gateway", ["worker-a1", "worker-a4", "mac"])
+def test_non_hub_fresh_child_never_creates_local_owner(tmp_path, monkeypatch, capsys, gateway):
+    _gateway_identity(tmp_path, monkeypatch, gateway)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "board.db"))
+    save_config({"platform_toolsets": {"cli": ["terminal", "file"]}})
+    for sha in ("a" * 40, "b" * 40):
+        assert uuc.report(tmp_path, sha, ["conflict.txt"]) is None
+    assert "upstream integration belongs to the hub" in capsys.readouterr().out
+    with connect_closing() as conn:
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("returncode,output,skipped", [
+    (0, uuc._SKIPPED + "\n", True),
+    (1, uuc._SKIPPED + "\n", False),
+    (0, "prefix" + uuc._SKIPPED, False),
+    (0, "", False),
+])
+def test_skip_protocol_requires_success_and_exact_marker(monkeypatch, tmp_path, capsys, returncode, output, skipped):
+    monkeypatch.setattr(uuc.subprocess, "run", lambda *a, **k: types.SimpleNamespace(
+        returncode=returncode, stdout=output, stderr=""))
+    assert uuc.report(tmp_path, "a" * 40, ["conflict.txt"]) is None
+    text = capsys.readouterr().out
+    assert ("upstream integration belongs to the hub" in text) is skipped
+    assert ("could not file upstream merge conflict card" in text) is not skipped
+
+
+@pytest.mark.parametrize("gateway", [None, "", "worker-a4", "hermes-hub", "hub"])
+def test_local_owner_authority_is_checked_at_filing_boundary(tmp_path, monkeypatch, gateway):
+    from hermes_cli import kanban_capability_registry as registry
+    monkeypatch.setattr(registry, "self_gateway", lambda: gateway)
+    save_config({"platform_toolsets": {"cli": ["terminal", "file"]}})
+    with connect_closing() as conn:
+        first = uuc._report(conn, tmp_path, "a" * 40, ["conflict.txt"])
+        second = uuc._report(conn, tmp_path, "b" * 40, ["conflict.txt"])
+        if gateway in ("hub", "hermes-hub"):
+            assert first and second == first
+            assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
+        else:
+            assert first is second is None
+            assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0

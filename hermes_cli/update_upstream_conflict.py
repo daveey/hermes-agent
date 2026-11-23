@@ -12,6 +12,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 AUTHOR = "upstream-merge"
 _RESULT = "__HERMES_UPSTREAM_CONFLICT_TASK__="
+_SKIPPED = "__HERMES_UPSTREAM_CONFLICT_HUB_ONLY__"
 _TIMEOUT_S = 60
 
 
@@ -34,6 +35,11 @@ def report(cwd: Path, upstream: str, conflicts: list[str]) -> str | None:
             runtime_command(root, args, module="hermes_cli.update_upstream_conflict", home=get_hermes_home()), cwd=str(root),
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_TIMEOUT_S, check=False)
         found = re.findall(rf"^{re.escape(_RESULT)}(t_\w+)$", proc.stdout or "", re.MULTILINE)
+        if proc.returncode == 0 and _SKIPPED in (proc.stdout or "").splitlines():
+            message = "upstream integration belongs to the hub; no local repair card filed; keeping the fork-only update"
+            log.info(message)
+            print(f"    {message}")
+            return None
         if proc.returncode == 0 and found:
             return found[-1]
         detail = f"exit {proc.returncode}: " + (proc.stderr or proc.stdout or "")[-2000:]
@@ -55,17 +61,26 @@ def main(argv: list[str] | None = None) -> int:
 
     with connect_closing() as conn:
         task_id = _report(conn, ns.cwd, ns.upstream, ns.conflict)
-    print(f"{_RESULT}{task_id}", flush=True)
+    print(f"{_RESULT}{task_id}" if task_id else _SKIPPED, flush=True)
     return 0
 
 
-def _report(conn, cwd: Path, upstream: str, conflicts: list[str]) -> str:
+def _report(conn, cwd: Path, upstream: str, conflicts: list[str]) -> str | None:
     from hermes_cli import kanban_db as kb
 
     from hermes_cli import update_conflict_reporting as routing
     config = routing.configured()
     if config is not None:
         return routing.report(conn, config, cwd, upstream, conflicts)
+    from hermes_cli.kanban_capability_registry import self_gateway
+    from hermes_cli.kanban_hub_admission_placement import is_hub
+    from hermes_cli.kanban_placement import config as placement_config
+
+    # A worker's local board cannot deduplicate against the hub's integration owner.
+    # Explicit observation routing above remains available; unknown identity is not authority.
+    gateway = self_gateway()
+    if not gateway or not is_hub(gateway, placement_config()):
+        return None
     key = "upstream-merge-conflict:" + hashlib.sha256(str(cwd.resolve()).encode()).hexdigest()[:24]
     evidence = f"Upstream SHA: `{upstream}`\nConflicting paths:\n" + "\n".join(f"- `{p}`" for p in conflicts)
     # Serialize lookup + create so overlapping unattended invocations cannot create two owners.

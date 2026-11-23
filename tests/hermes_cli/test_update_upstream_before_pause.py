@@ -119,6 +119,7 @@ def fork(tmp_path, monkeypatch):
 
     monkeypatch.setattr(update_cmd_pause_gate, '_checkout_move', checkout_move)
     report = []
+    from hermes_cli.update_upstream_conflict import report as real_report
 
     def conflict_report(cwd, sha, conflicts):
         rec.note('conflict report')
@@ -137,7 +138,7 @@ def fork(tmp_path, monkeypatch):
     args = SimpleNamespace(branch=None, channel='main', yes=True, force=True, force_venv=True, check=False,
                            plan=False, gateway=True, install_id=False, set_channel=None)
     return SimpleNamespace(origin=origin, clone=clone, upstream=upstream, base=base, rec=rec, args=args,
-                           requests=requests, report=report, gate=gate)
+                           requests=requests, report=report, gate=gate, real_report=real_report)
 
 
 @pytest.mark.parametrize('conflict', [True, False], ids=['conflict', 'clean'])
@@ -168,6 +169,28 @@ def test_fork_merge_fetches_merges_and_reports_before_the_gateways_pause(fork, m
         [merged] = t.gate  # built on origin/main, where the pull put HEAD, before the pause
         assert git(t.clone, 'rev-list', '--parents', '-n1', merged).split()[1:] == [fork_tip, upstream_tip]
         assert t.report == []
+
+
+def test_worker_conflict_keeps_fork_update_without_local_owner(fork, tmp_path, monkeypatch, capsys):
+    from tests.hermes_cli.test_update_upstream_conflict import _gateway_identity
+    from hermes_cli.config import save_config
+    from hermes_cli.kanban_db_connect import connect_closing
+
+    _gateway_identity(tmp_path, monkeypatch, 'worker-a4')
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'board.db'))
+    save_config({'platform_toolsets': {'cli': ['terminal', 'file']}})
+    monkeypatch.setattr('hermes_cli.update_upstream_conflict.report', fork.real_report)
+    monkeypatch.setattr(update_cmd_git, '_fork_merges_upstream', lambda: True)
+    commit(fork.upstream, 'upstream\n', 'upstream change')
+    fork_tip = commit(fork.origin, 'fork\n', 'fork change')
+
+    cli_main.cmd_update(fork.args)
+
+    assert git(fork.clone, 'rev-parse', 'HEAD') == fork_tip
+    assert len(fork.requests) == 1 and fork.gate == []
+    assert 'upstream integration belongs to the hub' in capsys.readouterr().out
+    with connect_closing() as conn:
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
 
 
 def test_upstream_fast_forward_still_moves_the_tree_paused_under_checkout_move(fork):

@@ -19,6 +19,8 @@ REPO = 'https://github.com/example/core.git'
 
 @pytest.fixture
 def routing(tmp_path, monkeypatch):
+    from hermes_cli import kanban_capability_registry as registry
+    monkeypatch.setattr(registry, 'self_gateway', lambda: 'hub')
     checkout = tmp_path / 'checkout'
     checkout.mkdir()
     monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'board.db'))
