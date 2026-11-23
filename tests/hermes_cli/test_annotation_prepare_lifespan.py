@@ -7,6 +7,7 @@ from hermes_cli import fact_annotation_lifespan as startup
 from hermes_cli.fact_annotation_startup import binding_for
 from tests.hermes_cli import test_kanban_session_activity as helpers
 from tests.hermes_cli.annotation_fact_processes import request_guard
+from tests.waiting import wait_until
 
 kanban_root = helpers.kanban_root
 
@@ -96,6 +97,7 @@ def test_real_serve_composes_annotations_outside_sessions(kanban_root, tmp_path,
         with TestClient(web_server.app) as client:
             client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
             assert binding_for() is not None
+            assert wait_until(lambda: web_server.app.state.sessions_facts.ready, timeout=10)
             assert web_server.app.state.sessions_facts.binding._mode == 'facts'
             response = client.get('/api/profiles/sessions')
             assert response.status_code == 200

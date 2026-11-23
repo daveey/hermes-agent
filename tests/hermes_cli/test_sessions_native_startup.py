@@ -152,6 +152,7 @@ async def test_lifespan_off_and_reentry(profiles_on_disk, monkeypatch):
     monkeypatch.setenv('HERMES_FACTS_SESSIONS', '1')
     for _ in range(2):
         async with lifespan(app):
+            assert await asyncio.to_thread(wait_until, lambda: app.state.sessions_facts.ready, timeout=10)
             assert app.state.sessions_facts.binding._mode == 'facts'
         assert app.state.sessions_facts is None
 
@@ -172,6 +173,7 @@ def test_real_app_lifespan_and_middleware(profiles_on_disk, monkeypatch):
     helpers._seed_session(profiles_on_disk['default'], 'app-entry', source='cli')
     with TestClient(web_server.app) as client:
         client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+        assert wait_until(lambda: web_server.app.state.sessions_facts.ready, timeout=10)
         assert web_server.app.state.sessions_facts.binding._mode == 'facts'
         response = client.get('/api/profiles/sessions')
         assert response.status_code == 200

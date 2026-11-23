@@ -19,6 +19,7 @@ from starlette.responses import Response
 
 
 _UNBOUND = object()
+PENDING_NATIVE = object()  # Installed native owner, not ready; NEVER select legacy.
 _current = ContextVar("sessions_fact_binding", default=_UNBOUND)
 
 
@@ -210,6 +211,8 @@ class ScopedSessionsRoutes:
     def _begin(self):
         with self._legacy._condition:
             binding = _current.get()
+            if binding is PENDING_NATIVE:
+                raise HTTPException(503, "sessions projection unavailable", headers={"Retry-After": "1"})
             if binding is None:
                 return self._legacy, self._legacy._begin()  # Explicit legacy scope.
             if binding is _UNBOUND:

@@ -5,9 +5,12 @@ in-process rendered-field composition, not dedicated fact_host activation.
 """
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import copy_context
 import inspect
+import logging
 import os
 import sys
+import threading
 from types import SimpleNamespace
 
 from fastapi import HTTPException
@@ -17,7 +20,7 @@ from hermes_cli.fact_contract import Scope, SourceId
 from hermes_cli.fact_feed import ChangeFeed
 from hermes_cli.fact_inprocess import IncrementalLifecycle, InProcessFacts
 from hermes_cli.fact_store import FactStore
-from hermes_cli.sessions_fact_routes import use
+from hermes_cli.sessions_fact_routes import PENDING_NATIVE, use
 from hermes_cli.sessions_native_source import SessionsSource
 
 
@@ -34,6 +37,23 @@ class SessionsRuntime:
         self.source = SessionsSource(self.store, SourceId(self.scope, 'sessions.display', 'canonical'),
                                      paths, self.capture, reconcile=self.reconcile)
         self.generation = 0
+        self.ready = False
+        self._stopping = False
+        self._bootstrap = None
+
+    def start_background(self):
+        context = copy_context()
+
+        def bootstrap():
+            try:
+                self.start()
+            except Exception:  # health: allow BLE001 -- isolate surface startup; retain owner for shutdown drain
+                logging.getLogger(__name__).exception('sessions bootstrap unavailable; custody retained')
+
+        # health: allow HX012 -- explicit copy_context keeps profile scope without importing the agent facade
+        self._bootstrap = threading.Thread(target=lambda: context.run(bootstrap),
+                                           name='sessions-bootstrap', daemon=True)
+        self._bootstrap.start()
 
     def reconcile(self):
         # Profiles introduced after boot use 30s reconciliation until next boot
@@ -84,18 +104,31 @@ class SessionsRuntime:
             selector = selector_for(inspect.signature(self.profiles.get_profiles_sessions), (), {})
             self.demand(self.scope, 'sessions', selector)
             with self.store._condition:
-                if not self.store._condition.wait_for(
-                        lambda: isinstance(self.store.snapshot(self.scope).view('sessions', selector), Ready), timeout=15):
-                    raise TimeoutError('sessions bootstrap unavailable; activation refused')
-            self.lifecycle.report_ready('sessions', self.scope)
-            self.generation += 1
-            self.lifecycle.transition('sessions', self.scope, 'facts', self.generation)
+                # Readiness gates this surface, not the server socket. An over-
+                # budget cold capture remains unavailable and retries normally.
+                self.store._condition.wait_for(lambda: self._stopping or isinstance(
+                    self.store.snapshot(self.scope).view('sessions', selector), Ready))
+                if self._stopping:
+                    return self
+                self.lifecycle.report_ready('sessions', self.scope)
+                self.generation += 1
+                self.lifecycle.transition('sessions', self.scope, 'facts', self.generation)
+                self.ready = True
         except BaseException:
-            self.close()
+            if self._bootstrap is None:
+                self.close()
             raise
         return self
 
     def close(self):
+        with self.store._condition:
+            self.ready = False
+            self._stopping = True
+            self.store._condition.notify_all()
+        if self._bootstrap is not None:
+            self._bootstrap.join(5)
+            if self._bootstrap.is_alive():
+                raise TimeoutError('sessions bootstrap did not stop; custody retained')
         if self.binding is not None:
             self.generation += 1
             self.lifecycle.transition('sessions', self.scope, 'legacy', self.generation)
@@ -121,7 +154,8 @@ class SessionsMiddleware:
         if scope['type'] != 'http':
             return await self.app(scope, receive, send)
         runtime = getattr(scope['app'].state, 'sessions_facts', None)
-        with use(runtime.binding if runtime is not None else None):
+        binding = None if runtime is None else (runtime.binding if runtime.ready else PENDING_NATIVE)
+        with use(binding):
             await self.app(scope, receive, send)
 
 
@@ -141,7 +175,7 @@ async def lifespan(app):
     runtime = SessionsRuntime(profiles, targets)
     app.state.sessions_facts = runtime  # custody survives a failed startup/unwind
     try:
-        await asyncio.to_thread(runtime.start)
+        runtime.start_background()
         yield
     finally:
         await asyncio.to_thread(runtime.close)
