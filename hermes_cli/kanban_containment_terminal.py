@@ -118,6 +118,26 @@ def archive_local(conn, task, *, comment=None, precondition=None, via=None, even
     return True
 
 
+_COVERED = "hermes_scope_renewal_covers"
+
+
+def _register_covered(conn) -> bool:
+    """Expose ``kanban_scope_renewal.covered`` to SQL on ``conn``; any read failure is uncovered (fail closed)."""
+    from hermes_cli import kanban_scope_renewal as renewal
+
+    def covers(task_id, key):
+        # A reader schema without comments/renewal columns (minimal mirrors) cannot prove coverage: restrictive.
+        try:
+            return 1 if str(key) in renewal.covered(conn, str(task_id)) else 0
+        except (sqlite3.Error, KeyError, IndexError, TypeError, ValueError):
+            return 0
+    try:
+        sqlite3.Connection.create_function(conn, _COVERED, 2, covers)
+    except (sqlite3.Error, TypeError):
+        return False
+    return True
+
+
 def parent_status_sql(conn, alias="", *, table="tasks"):
     """Effective dependency state, never terminal success for an execution-restricted scope.
 
@@ -132,10 +152,16 @@ def parent_status_sql(conn, alias="", *, table="tasks"):
     columns = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
     if {"task_id", "kind", "payload"} <= columns:
         live = " AND de.deleted_at IS NULL" if "deleted_at" in columns else ""
+        cause = "CASE WHEN json_valid(de.payload) THEN json_extract(de.payload,'$.cause') END"
+        # A scope stop a valid renewal froze (kanban_scope_renewal.covered: exact uid, unedited mandate) no longer
+        # restricts, exactly as execution readers treat it; safety evidence is never renewable.
+        renewed = ""
+        if "id" in columns and _register_covered(conn):
+            key = "COALESCE(de.uid, CAST(de.id AS TEXT))" if "uid" in columns else "CAST(de.id AS TEXT)"
+            renewed = f" AND NOT ({cause}='scope_stopped' AND {_COVERED}(de.task_id, {key}))"
         clauses.append(f"EXISTS (SELECT 1 FROM task_events de WHERE de.task_id={prefix}id "
                        "AND de.kind IN ('spend_budget_triaged','decision_hold_restricted') "
-                       "AND CASE WHEN json_valid(de.payload) THEN json_extract(de.payload,'$.cause') END "
-                       f"IN ('safety_refusal','scope_stopped'){live})")
+                       f"AND {cause} IN ('safety_refusal','scope_stopped'){live}{renewed})")
     if not clauses:
         return prefix + "status"
     return (f"CASE WHEN {prefix}status IN ('done','archived') AND ({' OR '.join(clauses)}) "

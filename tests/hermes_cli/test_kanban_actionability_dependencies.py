@@ -92,3 +92,68 @@ def test_foreign_parent_mirrors_preserve_actual_archived_stop(board, monkeypatch
         assert rows == {parent: 'triage', ordinary: 'archived', unrelated: 'archived'}
     finally:
         live.close()
+
+
+# Review on eeb369b4 (P1): a validly renewed, promoted and completed scope kept projecting triage to its children.
+from tests.hermes_cli import test_kanban_scope_renewal as scope
+
+
+def renewed_and_done(board, monkeypatch):
+    parent, _, episode = scope.stopped(board, monkeypatch)
+    scope.link(board, parent)
+    comment = scope.mandate(board, parent)
+    scope.renew(board, parent, episode, comment)
+    child = kb.create_task(board, title='Waits on the renewed scope', assignee='default', parents=[parent])
+    promoted, refusal = kb.promote_task(board, parent, actor='fixture', reason='renewed scope')
+    assert promoted is True, refusal
+    assert kb.complete_task(board, parent, summary='Renewed scope delivered')
+    return parent, child, episode, comment
+
+
+def test_renewed_promoted_completed_scope_releases_its_child(board, monkeypatch):
+    parent, child, _, _ = renewed_and_done(board, monkeypatch)
+    assert kb.get_task(board, parent).status == 'done'
+    assert kb.parent_states(board, child) == [(parent, 'done')]
+    kb.recompute_ready(board)
+    assert kb.get_task(board, child).status == 'ready'
+
+
+def test_edited_mandate_new_stop_or_safety_keep_the_child_waiting(board, monkeypatch):
+    for spoil in ('edit', 'stop', 'safety'):
+        parent, child, episode, comment = renewed_and_done(board, monkeypatch)
+        with kb.write_txn(board):
+            if spoil == 'edit':
+                board.execute("UPDATE task_comments SET body='Do everything' WHERE id=?", (comment,))
+            else:
+                cause = 'scope_stopped' if spoil == 'stop' else 'safety_refusal'
+                kb._append_event(board, parent, 'decision_hold_restricted', {'cause': cause, 'episode': episode})
+        assert kb.parent_states(board, child) == [(parent, 'triage')], spoil
+
+
+@pytest.mark.parametrize('incremental', [False, True])
+def test_foreign_mirrors_release_a_renewed_completed_parent(board, monkeypatch, incremental):
+    import sqlite3
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_parent_refresh as refresh
+    from hermes_cli import kanban_move_parent_evidence as evidence
+    parent, _, _, _ = renewed_and_done(board, monkeypatch)
+    stopped = kb.create_task(board, title='Unrenewed stop control', assignee='default')
+    restrict(board, stopped)
+    assert kb.archive_task(board, stopped)
+    live = sqlite3.connect(':memory:', isolation_level=None)
+    live.row_factory = sqlite3.Row
+    live.executescript('CREATE TABLE tasks(id TEXT PRIMARY KEY,status TEXT);'
+                       'CREATE TABLE task_links(parent_id TEXT,child_id TEXT);'
+                       'CREATE TABLE kanban_sync_remote_parents(parent_id TEXT PRIMARY KEY,status TEXT,refreshed_at INTEGER);'
+                       "INSERT INTO tasks VALUES('child','todo');")
+    live.executemany("INSERT INTO task_links VALUES(?,'child')", [(parent,), (stopped,)])
+    monkeypatch.setattr(evidence, 'prepare', lambda *a, **kw: ({}, {}))
+    monkeypatch.setattr(evidence, 'stored', lambda *a: {parent: None, stopped: None})
+    try:
+        if incremental:
+            refresh._refresh_rows(live, board, {parent, stopped}, scoped={})
+        else:
+            sync.refresh_remote_parents(live, board, scoped={})
+        assert dict(kb.parent_states(live, 'child', remote=True)) == {parent: 'done', stopped: 'triage'}
+    finally:
+        live.close()
