@@ -24,7 +24,7 @@ def test_archived_scope_stopped_parent_never_satisfies_child(board):
     restrict(board, parent)
     assert kb.archive_task(board, parent)
     assert kb.get_task(board, parent).status == 'archived'
-    assert kb.parent_states(board, child) == [(parent, 'triage')]
+    assert kb.unsatisfied_parents(board, child) == [(parent, 'archived:restricted')]
     kb.recompute_ready(board)
     assert kb.get_task(board, child).status == 'todo'
     assert kb.claim_task(board, child) is None
@@ -82,19 +82,19 @@ def test_foreign_parent_mirrors_preserve_actual_archived_stop(board, monkeypatch
             refresh._refresh_rows(live, board, {parent, ordinary}, scoped={})
         else:
             sync.refresh_remote_parents(live, board, scoped={})
-        assert dict(kb.parent_states(live, 'child', remote=True)) == {parent: 'triage', ordinary: 'archived'}
-        # Exact source correlation matters even when the event table has an id column.
+        assert dict(kb.parent_states(live, 'child', remote=True)) == {parent: 'archived:restricted', ordinary: 'archived'}
+        # Exact source correlation: an unrelated ordinary archive never inherits another card's stop.
         unrelated = kb.create_task(board, title='Unrelated archived control', assignee='default')
         assert kb.archive_task(board, unrelated)
-        from hermes_cli.kanban_containment_terminal import parent_status_sql
-        expression = parent_status_sql(board)
-        rows = dict(board.execute(f'SELECT id,{expression} FROM tasks WHERE id IN (?,?,?)', (parent, ordinary, unrelated)))
-        assert rows == {parent: 'triage', ordinary: 'archived', unrelated: 'archived'}
+        assert kb.parent_blocks(board, parent, 'archived') is True
+        assert kb.parent_blocks(board, ordinary, 'archived') is False
+        assert kb.parent_blocks(board, unrelated, 'archived') is False
     finally:
         live.close()
 
 
-# Review on eeb369b4 (P1): a validly renewed, promoted and completed scope kept projecting triage to its children.
+# Review on eeb369b4 (P1): a validly renewed, promoted and completed scope must release its children (now via
+# main's parent_blocks gate, which labels restricted terminal parents '<status>:restricted').
 from tests.hermes_cli import test_kanban_scope_renewal as scope
 
 
@@ -114,6 +114,7 @@ def test_renewed_promoted_completed_scope_releases_its_child(board, monkeypatch)
     parent, child, _, _ = renewed_and_done(board, monkeypatch)
     assert kb.get_task(board, parent).status == 'done'
     assert kb.parent_states(board, child) == [(parent, 'done')]
+    assert kb.unsatisfied_parents(board, child) == []
     kb.recompute_ready(board)
     assert kb.get_task(board, child).status == 'ready'
 
@@ -127,7 +128,7 @@ def test_edited_mandate_new_stop_or_safety_keep_the_child_waiting(board, monkeyp
             else:
                 cause = 'scope_stopped' if spoil == 'stop' else 'safety_refusal'
                 kb._append_event(board, parent, 'decision_hold_restricted', {'cause': cause, 'episode': episode})
-        assert kb.parent_states(board, child) == [(parent, 'triage')], spoil
+        assert kb.unsatisfied_parents(board, child) == [(parent, 'done:restricted')], spoil
 
 
 @pytest.mark.parametrize('incremental', [False, True])
@@ -154,6 +155,6 @@ def test_foreign_mirrors_release_a_renewed_completed_parent(board, monkeypatch, 
             refresh._refresh_rows(live, board, {parent, stopped}, scoped={})
         else:
             sync.refresh_remote_parents(live, board, scoped={})
-        assert dict(kb.parent_states(live, 'child', remote=True)) == {parent: 'done', stopped: 'triage'}
+        assert dict(kb.parent_states(live, 'child', remote=True)) == {parent: 'done', stopped: 'archived:restricted'}
     finally:
         live.close()
