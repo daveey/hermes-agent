@@ -119,6 +119,53 @@ def test_replica_ci_deploy_wait_publishes_external_stripe(db, monkeypatch, kind,
     assert published is not None and published["status"] == status
 
 
+@pytest.mark.parametrize("status", ["running", "todo", "done", "blocked"])
+@pytest.mark.parametrize("failure", [{"stale": True}, {"partial_source_unknown": "origin_ledger_unavailable"}])
+def test_unavailable_card_is_not_live_work_or_a_human_ask(db, monkeypatch, status, failure):
+    turn(db)
+    card = {"id": "t_remote", "status": status, "remote": True, "gateway": "edge",
+            "board": "build", "profile": "default", "human_request": HUMAN_REQUEST,
+            "block_kind": "needs_input", **failure}
+    monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: [card])
+    value = refresh(db, "card_change")
+    assert value["kind"] == "waiting", value
+    assert value["presentation"]["reason_codes"] == ["linked_status_unknown"]
+    assert value["coverage"]["state"] == "unknown"
+    assert value["on"][0]["state"] == "source_unknown"
+    # Recovery uses the same card, not a forced status or manual DB repair.
+    card.update(status="running", stale=False, partial_source_unknown=None, block_kind=None, human_request=None)
+    value = refresh(db, "card_change")
+    assert value["kind"] == "running"
+    assert value["coverage"]["state"] == "complete"
+
+
+def test_real_running_card_wins_over_another_unavailable_card(db, monkeypatch):
+    turn(db)
+    cards = [{"id": "t_remote", "status": "running", "remote": True, "stale": True},
+             {"id": "t_local", "status": "running"}]
+    monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: cards)
+    value = refresh(db, "card_change")
+    assert value["kind"] == "running"
+    assert value["coverage"]["state"] == "unknown"
+    assert [w["state"] for w in value["on"]] == ["source_unknown", "running"]
+
+
+@pytest.mark.parametrize("error", [TimeoutError, RuntimeError])
+def test_card_read_failure_is_neutral_and_recovers(db, monkeypatch, error):
+    turn(db)
+    from hermes_cli.fact_remote_links import LinksUnavailable
+    exc = LinksUnavailable if error is RuntimeError else error
+    def fail(*args, **kwargs):
+        raise exc("linked cards unavailable")
+    with monkeypatch.context() as patch:
+        patch.setattr(ksa, "session_outcome_tasks", fail)
+        value = refresh(db, "card_change")
+    assert value["kind"] == "unresolved"
+    assert value["reason"] == "source_unknown"
+    assert value["presentation"]["stripe"] == "none"
+    assert_done(refresh(db, "card_change"))
+
+
 def assert_done(status):
     assert (status["kind"], status["presentation"]["stripe"], status["coverage"]["state"]) == ("done", "done", "complete")
 
@@ -303,7 +350,7 @@ def test_unreadable_process_inventory_is_unknown_then_recovers(db, receipts):
     bad.write_text("{")
     unknown = refresh(db, "manual")
     assert (unknown["kind"], unknown["reason"], unknown["presentation"]["stripe"]) == (
-        "unresolved", "source_unknown", "attention")
+        "unresolved", "source_unknown", "none")
     assert unknown["coverage"]["state"] == "unknown"
     assert any(reason.startswith("processes:process_read_failed") for reason in unknown["coverage"]["reasons"])
     assert unknown["revision"] == done["revision"] + 1

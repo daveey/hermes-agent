@@ -258,6 +258,8 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
     kept = (prior.get("turn_evidence") or {}) if same_owner else {}
     turn, evidence = _turn(tail, live, concluding, trigger, kept, generation)
     card_asks, card_waits = read("cards", lambda: so._card_items(ids), ([], []))
+    if any(w.get("state") == "source_unknown" for w in card_waits):
+        errors["cards"] = "card_status_unavailable"
     control_asks, control_waits = read("controls", lambda: _control_items(tip), ([], []))
     subagents, lost_before = read("subagents", lambda: _subagent_items(db, ids, since), ([], []))
     processes = read("processes", lambda: _process_items(db, tip), [])

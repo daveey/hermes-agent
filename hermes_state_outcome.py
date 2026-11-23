@@ -375,6 +375,13 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
                 request = json.loads(request)
         status = str(card.get("status") or "")
         wait = card.get("wait") if isinstance(card.get("wait"), dict) else {}
+        # A retained display row is an obligation, not evidence of its last state.
+        # Check before human-ask handling too: unavailable data cannot ask the user.
+        if card.get("stale") or card.get("partial_source_unknown") or status == "unknown":
+            waits.append({"kind": "card", "id": tid, "label": _str(card.get("title")) or tid,
+                          "state": "source_unknown", "source_unknown": _str(card.get("partial_source_unknown"))
+                          or "card_status_unavailable"})
+            continue
         human = card_is_open_human_ask(status, card.get("block_kind"), request)
         explained = card.get("retained_wait") if isinstance(card.get("retained_wait"), str) else None
         # A notification subscription observes another chat's card; it does not adopt its human decision.
