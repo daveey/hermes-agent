@@ -16,6 +16,18 @@ _seed_session = helpers._seed_session
 pytestmark = pytest.mark.platforms('linux')
 
 
+@pytest.fixture(autouse=True)
+def inprocess_annotation_faults(monkeypatch):
+    # Events injected below exercise the original holder/drain boundary.
+    # Real child custody/framing has separate process integration tests.
+    from hermes_cli.sessions_native_startup import SessionsRuntime
+    from hermes_cli.sessions_capture_worker import capture
+    original = SessionsRuntime.__init__
+    def initialize(self, profiles, targets, **kwargs):
+        original(self, profiles, targets, capture_reader=capture, **kwargs)
+    monkeypatch.setattr(SessionsRuntime, '__init__', initialize)
+
+
 @pytest.mark.asyncio
 async def test_real_lifespan_serves_while_canonical_annotation_is_cold(profiles_on_disk, monkeypatch):
     from hermes_cli import web_server, web_server_app

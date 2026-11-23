@@ -24,7 +24,9 @@ from hermes_cli.sessions_native_source import SessionsSource
 
 
 class SessionsRuntime:
-    def __init__(self, profiles, targets):
+    def __init__(self, profiles, targets, *, capture_reader=None):
+        from hermes_cli.sessions_capture_process import CaptureProcess
+        self.capture_reader = capture_reader if capture_reader is not None else CaptureProcess()
         self.profiles = profiles
         self.targets = tuple(targets)
         self.names = frozenset(name for name, _ in targets)
@@ -61,23 +63,16 @@ class SessionsRuntime:
         self.names = frozenset(name for name, _ in targets)
 
     def capture(self, name, selector):
-        from hermes_cli.web_json_response import native_json_response
-        readers = {'sessions': self.profiles.get_profiles_sessions,
-                   'sessions_sidebar': self.profiles.get_profiles_sessions_sidebar,
-                   'sessions_stamps': self.profiles.get_profiles_session_stamps}
-        # Bypass the legacy request coalescer/TTL, but retain canonical SQL,
-        # ordering, projection and seven-family annotation implementations.
-        reader = readers[name]
-        if name == 'sessions_sidebar':
-            reader = reader.__wrapped__  # Skip TTL only; keep load accounting.
-        result = reader(**selector)
+        import json
+        body = self.capture_reader(name, selector)
+        result = json.loads(body)
         groups = [result.get('sessions', ())]
         groups.extend(result.get(key, {}).get('sessions', ()) for key in ('recents', 'cron', 'messaging'))
         for rows in groups:
             for row in rows:
                 if row.get('is_active'):
                     self.source.refresh_at(row.get('last_active', row.get('started_at', 0)) + 300)
-        return native_json_response(result).body
+        return body
 
     def wait_projection(self, name, selector, timeout):
         """Wait on owner memory only; capture remains on the feed thread."""
@@ -132,6 +127,9 @@ class SessionsRuntime:
             self.ready = False
             self._stopping = True
             self.store._condition.notify_all()
+        close_reader = getattr(self.capture_reader, 'close', None)
+        if close_reader is not None:
+            close_reader()
         if self._bootstrap is not None:
             self._bootstrap.join(5)
             if self._bootstrap.is_alive():

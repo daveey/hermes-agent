@@ -135,7 +135,10 @@ class SessionsSource:
             fact = Fact(key, {'encoded': body}, source_vector=((self.source, self._serial),),
                         observed_at=observed, valid_until=observed + 2 * self.refresh_seconds,
                         health='fresh')
-        except Exception:  # health: allow BLE001 -- isolate capture failures; unknown is not empty success
+        except Exception as error:  # health: allow BLE001 -- isolate capture failures; unknown is not empty success
+            from hermes_cli.sessions_capture_process import CaptureUnavailable
+            if isinstance(error, CaptureUnavailable):
+                reason = error.reason
             with self._lock:
                 report = key in self._selectors and key not in self._failed
                 if report:

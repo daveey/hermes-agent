@@ -32,7 +32,8 @@ def native(profiles_on_disk, monkeypatch):
             helpers._seed_session(home, f'{name}-{i}', source=('cli', 'cron', 'telegram', 'cli')[i], pinned=i == 0)
     observed = time.time()
     monkeypatch.setattr(time, 'time', lambda: observed)
-    runtime = SessionsRuntime(profiles, list(profiles_on_disk.items())).start()
+    from hermes_cli.sessions_capture_worker import capture
+    runtime = SessionsRuntime(profiles, list(profiles_on_disk.items()), capture_reader=capture).start()
     try:
         yield runtime
     finally:
