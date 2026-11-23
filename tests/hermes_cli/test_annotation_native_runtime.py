@@ -78,7 +78,7 @@ def test_unready_runtime_never_drains_or_installs(kanban_root, tmp_path):
         stop_legacy=lambda: calls.append('stop'), start_legacy=lambda: calls.append('start'))
     try:
         with pytest.raises(TimeoutError):
-            runtime.start({}, timeout=.05)
+            runtime.start({'default': [{'id': 'consumer'}]}, timeout=.05)
         assert calls == []
         assert binding_for() is None
     finally:

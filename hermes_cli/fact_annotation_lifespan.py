@@ -10,8 +10,9 @@ async def lifespan(app):
     from hermes_cli import fact_annotation_boot
     if getattr(app.state, 'annotation_facts', None) is not None:
         raise RuntimeError('annotation startup custody retained')
+    # Opt in until asynchronous activation can guarantee non-blocking serve.
     # health: allow HX002 -- creator-defined rollback switch, never a credential
-    enabled = os.environ.get('HERMES_FACTS_ANNOTATION', '1').strip().lower() not in ('0', 'off', 'false', 'no')
+    enabled = os.environ.get('HERMES_FACTS_ANNOTATION', '0').strip().lower() not in ('0', 'off', 'false', 'no')
     if not enabled or not sys.platform.startswith('linux'):
         yield
         return

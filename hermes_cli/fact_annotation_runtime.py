@@ -104,15 +104,19 @@ class AnnotationRuntime:
 
     def start(self, seeds, *, timeout=15):
         """Seed canonical selectors, await real source+output readiness, then cut over."""
-        keys = {scope: {FactKey(scope, 'AnnotationInput', family) for family in annotations.FIELDS}
-                for scope in self.scopes.values()}
+        # Discovery includes config-only profiles. Only actual seeded consumers
+        # gate cutover; absent stores retain unavailable evidence and reconcile
+        # in the background. Optional PR information never gates serve.
+        keys = {scope: set() for scope in self.scopes.values()}
         for profile, rows in seeds.items():
             scope = self.scopes[profile]
             for row in rows:
                 for family in annotations.FIELDS:
                     selector = selector_for(scope, row, display=family == 'kanban')
                     self.owner.demand(scope, 'annotations.' + family, selector)
-                    keys[scope].add(view_key(scope, 'annotations.' + family, selector))
+                    if family != 'review':
+                        keys[scope].add(FactKey(scope, 'AnnotationInput', family))
+                        keys[scope].add(view_key(scope, 'annotations.' + family, selector))
         deadline = time.monotonic() + timeout
         with self.store._condition:
             while True:

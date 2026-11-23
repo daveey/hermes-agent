@@ -31,8 +31,7 @@ def _remote(cards, maps, keys, execution):
             *activity.PARKED_STATUSES, 'todo', *activity.PENDING_RELEASE_STATUSES)
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
-            if activity._external_activity.replica_bucket(card):
-                keys.setdefault(sid, set()).add((str(card.get('key')), 'external_unknown', False))
+            keys.setdefault(sid, set()).update(activity._external_activity.replica_markers(card))
         keys.setdefault(sid, set()).add((str(card.get('key')), str(bucket), is_parked))
         activity._replica_exec.collect(card, execution)
         if card.get('status') not in activity.PENDING_RELEASE_STATUSES and (

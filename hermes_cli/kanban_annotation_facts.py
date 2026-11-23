@@ -195,6 +195,11 @@ class AnnotationFacts:
                     self.handle.demand('annotations.' + family if self._view_facts else 'annotations', selector)
                 except (ValueError, RuntimeError):
                     raise AnnotationUnavailable('annotation demand unavailable') from None
+            if family == 'review':
+                # Optional PR metadata cannot fail the whole sessions response.
+                # Preserve unavailable fact health, demand background recovery,
+                # and never certify fresh empty evidence or run legacy I/O.
+                return rows
             raise AnnotationUnavailable('annotation projection unavailable')
         for fact in facts:
             if self._view_facts:

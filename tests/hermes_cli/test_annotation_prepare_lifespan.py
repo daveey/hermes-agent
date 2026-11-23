@@ -1,5 +1,6 @@
 """Real startup owns seven native sources, with no legacy annotation admission."""
 import asyncio
+import pytest
 
 from hermes_cli import fact_annotation_boot as boot
 from hermes_cli import fact_annotation_lifespan as startup
@@ -46,7 +47,8 @@ def test_real_prepare_lifespan_and_canonical_request(kanban_root, tmp_path, monk
         db.close()
 
 
-def test_real_serve_composes_annotations_outside_sessions(kanban_root, tmp_path, monkeypatch):
+@pytest.mark.parametrize('optional', ['healthy', 'unused-profile', 'no-pr-info'])
+def test_real_serve_composes_annotations_outside_sessions(kanban_root, tmp_path, monkeypatch, optional):
     from contextlib import asynccontextmanager
     from fastapi.testclient import TestClient
     from hermes_state import SessionDB
@@ -59,12 +61,27 @@ def test_real_serve_composes_annotations_outside_sessions(kanban_root, tmp_path,
     db = SessionDB(db_path=home / 'state.db')
     db.create_session('composed-row', 'cli')
     db.set_session_title('composed-row', 'real composition')
+    roster = [('default', home)]
+    if optional == 'unused-profile':
+        unused = tmp_path / 'unused'
+        unused.mkdir()
+        (unused / 'config.yaml').write_text('{}')
+        roster.append(('unused', unused))
+    if optional == 'no-pr-info':
+        from hermes_cli import review_session_activity as review
+        db._execute_write(lambda conn: conn.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES ('composed-row','assistant',?,1)",
+            ('https://github.com/review-fixture/private/pull/7',)))
+        monkeypatch.setattr(review, '_fetch_override', lambda key: None)
+        monkeypatch.setattr(review, '_sync_fetch', True)
+        monkeypatch.setattr(review, '_pr_cache', {})
+        monkeypatch.setattr(review, '_inflight', set())
     @asynccontextmanager
     async def quiet_services(app):
         yield
     monkeypatch.setattr(web_server_app, 'standalone_lifespan', quiet_services)
     monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
-    monkeypatch.setattr(routes, '_profile_targets', lambda reason: [('default', home)])
+    monkeypatch.setattr(routes, '_profile_targets', lambda reason: roster)
     monkeypatch.setattr(kanban, '_remote_cards', lambda *args: [])
     calls = []
     monkeypatch.setattr(host, 'suspend_holder', lambda: calls.append('drain'))

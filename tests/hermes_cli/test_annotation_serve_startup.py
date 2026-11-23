@@ -10,9 +10,9 @@ from hermes_cli import web_server
 from tests.hermes_cli.test_serve_unloaded_sweeper import _quiet_boot
 
 
-def test_default_on_real_serve_has_no_legacy_starter(monkeypatch):
+def test_explicit_on_real_serve_has_no_legacy_starter(monkeypatch):
     _quiet_boot(monkeypatch)
-    monkeypatch.delenv('HERMES_FACTS_ANNOTATION', raising=False)
+    monkeypatch.setenv('HERMES_FACTS_ANNOTATION', '1')
     calls = []
     runtime = SimpleNamespace(close=lambda: calls.append('close'))
     def prepare(*, on_created):
