@@ -22,6 +22,10 @@ _shared_lock = threading.Lock()
 _shared = None
 
 
+class _OwnerStopped(RuntimeError):
+    """A queued terminal removal won admission; retry on a fresh owner."""
+
+
 class _Request:
     def __init__(self, action):
         self.action = action
@@ -61,6 +65,10 @@ class _NativeOwner:
         return request
 
     def add(self, watch):
+        # A timed-out last removal can precede this command. Never allocate or
+        # acknowledge coverage after it has closed the owner's control channel.
+        if self._stopped:
+            raise _OwnerStopped('native owner drained before source admission')
         events = FileEvents()
         try:
             events.replace(watch._paths, directories=watch._directories)
@@ -168,21 +176,27 @@ class NativeSourceWatch:
         self._close_request = None
         self._closed = False
         with _shared_lock:
-            if _shared is not None and _shared._stopped:
+            while True:
+                if _shared is not None and _shared._stopped:
+                    self._owner = _shared
+                    self._finish_owner()
+                if _shared is None:
+                    _shared = _NativeOwner()
                 self._owner = _shared
-                self._finish_owner()
-            if _shared is None:
-                _shared = _NativeOwner()
-            self._owner = _shared
-            try:
-                # Acknowledged only after coverage exists: bootstrap cannot race
-                # registration, including when another source is already live.
-                self._owner.submit(lambda: self._owner.add(self)).wait()
-            except BaseException:
-                cleanup = self._owner.submit(lambda: self._owner.remove(self))
-                cleanup.wait()
-                self._finish_owner()
-                raise
+                try:
+                    # Acknowledged only after coverage exists. A pending remove
+                    # can stop this owner after our caller-side stopped check.
+                    self._owner.submit(lambda: self._owner.add(self)).wait()
+                    break
+                except _OwnerStopped:
+                    # No descriptors were allocated. Retire/join the drained
+                    # owner before retrying; a failed join retains its custody.
+                    self._finish_owner()
+                except BaseException:
+                    cleanup = self._owner.submit(lambda: self._owner.remove(self))
+                    cleanup.wait()
+                    self._finish_owner()
+                    raise
 
     def check(self):
         with self._lock:
