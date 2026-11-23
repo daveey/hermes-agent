@@ -110,6 +110,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "apps/desktop/scripts/k01-mutants.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
   "batch_runner.py": {
    "direct": 2,
    "routed": 0,
@@ -920,17 +925,17 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/update_conflict_reporting.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/update_custody.py": {
    "direct": 7,
    "routed": 0,
    "status": "pending"
   },
   "hermes_cli/update_gateway_fence.py": {
-   "direct": 1,
-   "routed": 0,
-   "status": "pending"
-  },
-  "hermes_cli/update_conflict_reporting.py": {
    "direct": 1,
    "routed": 0,
    "status": "pending"
