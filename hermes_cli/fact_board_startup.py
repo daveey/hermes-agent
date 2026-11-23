@@ -31,14 +31,28 @@ class BoardRuntime:
         self.boards = tuple(dict.fromkeys(boards if boards is not None else
                             [self.current, *(b['slug'] for b in kanban_db.list_boards())]))
         self.owners, self.views = {}, {}
+        self._activating_views = {}
         self._closed = self._drained = False
         self._lock = threading.RLock()
         self._previous = None
+        self._activation_owner = None
+        from hermes_cli.fact_scope_activation import ScopeActivation
+        self._activation = ScopeActivation(self.boards, self._activate)
 
     def start(self):
-        from hermes_cli import kanban_db
+        from hermes_cli.fact_process_owner import ProcessOwner
         self.api.board_prewarm.stop_board_prewarm()
-        for board in self.boards:
+        self._activation_owner = ProcessOwner(lambda *_: None, lambda *_: None)
+        self._activation_owner.register(self._activation)
+        self._previous = self.api.board_fact_views._installed
+        self.api.board_fact_views.install_provider(self, self.provider)
+        return self
+
+    def _activate(self, board):
+        from hermes_cli import kanban_db
+        if not self._closed and board not in self.views:
+            if board in self.owners:
+                raise RuntimeError('board activation custody retained')
             scope = Scope(self.home, self.profile, board)
             path = kanban_db.kanban_db_path(board=board)
             def capture(view, selector, budget, board=board, scope=scope):
@@ -59,12 +73,11 @@ class BoardRuntime:
                 start_legacy=lambda: None, demand=handle.demand,
                 hot_selectors=(('board', self.api.board_fact_views.board_selector()), ('projects', {}),
                                ('boards', {'include_archived': False})))
-            self.views[board] = view
+            self._activating_views[board] = view
             view.on_mode('facts', 1)
             view.prepare()
-        self._previous = self.api.board_fact_views._installed
-        self.api.board_fact_views.install_provider(self, self.provider)
-        return self
+            self.views[board] = view
+            del self._activating_views[board]
 
     def provider(self, board):
         from hermes_cli.config import get_hermes_home
@@ -73,6 +86,7 @@ class BoardRuntime:
         if str(get_hermes_home()) != self.home or self._closed:
             return Unavailable('board_scope_unavailable')
         if board is None:
+            self._activation.want(self.current)
             owner = self.owners.get(self.current)
             if owner is None or owner.handle is None:
                 return Unavailable('board_scope_unavailable')
@@ -80,18 +94,27 @@ class BoardRuntime:
             if not isinstance(catalog, Ready):
                 return Unavailable('board_catalog_unavailable')
             board = json.loads(catalog.encoded)['current']
+        if board in self.boards:
+            self._activation.want(board)
         return self.views.get(board, Unavailable('board_scope_unavailable'))
 
     def ready(self, board):
-        return self.views[board].prepare()
+        self._activation.want(board)
+        view = self.views.get(board)
+        return view.prepare() if view is not None else False
 
     def close(self):
         with self._lock:
             if self._drained:
                 return
             self._closed = True  # failed teardown keeps a fail-closed installed provider
+        activation = getattr(self, '_activation_owner', None)
+        if activation is not None:
+            activation.close()  # fence activation before draining its child scopes
+        with self._lock:
             failures = []
-            for resource in (*self.views.values(), *self.owners.values()):
+            for resource in (*getattr(self, '_activating_views', {}).values(),
+                             *self.views.values(), *self.owners.values()):
                 try:
                     resource.close()
                 except Exception as exc:  # health: allow BLE001 -- retain failed custody and attempt all sibling drains

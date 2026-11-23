@@ -20,7 +20,8 @@ from hermes_cli.fact_contract import FactKey, Scope, SourceId
 from hermes_cli.fact_inprocess import InProcessFacts, IncrementalLifecycle
 from hermes_cli.fact_materializers import view_reducer
 from hermes_cli.fact_reducers import ReducerEngine
-from hermes_cli.fact_store import FactStore, view_key
+from hermes_cli.fact_store import view_key
+from hermes_cli.fact_process_owner import process_store
 
 
 class AnnotationRuntime:
@@ -29,7 +30,7 @@ class AnnotationRuntime:
                  budget=CaptureBudget(max_seconds=5)):
         if not profiles or fallback_profile not in profiles:
             raise ValueError('annotation profile roster is incomplete')
-        self.store = FactStore()
+        self.store = process_store()
         self.scopes = {name: Scope('serve.annotations.' + gateway, name) for name in profiles}
         self.engines = {scope: ReducerEngine(self.store, scope) for scope in self.scopes.values()}
         self.handles, self.bindings = {}, {}

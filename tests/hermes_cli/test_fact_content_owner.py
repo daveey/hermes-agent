@@ -104,7 +104,7 @@ def test_failed_startup_retains_exact_cleanup_owner(monkeypatch):
             if self.failed:
                 self.failed = False
                 raise TimeoutError('capture still running')
-    monkeypatch.setattr(module, 'ChangeFeed', Feed)
+    monkeypatch.setattr(module, 'ProcessOwner', Feed)
     with pytest.raises(ContentStartupError) as caught:
         ContentOwner({scope: ReducerEngine(FactStore(), scope)}, [binding])
     caught.value.owner.close()

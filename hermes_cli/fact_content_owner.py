@@ -8,7 +8,7 @@ or a declaration that consumer TaskFact/SessionFact schemas are ready.
 from dataclasses import dataclass
 
 from hermes_cli.fact_capture import CaptureBudget
-from hermes_cli.fact_feed import ChangeFeed
+from hermes_cli.fact_process_owner import ProcessOwner
 from hermes_cli.fact_demand_source import DemandSource
 from hermes_cli.fact_content_rows import task_rows, session_rows
 from hermes_cli.fact_session_source import SessionContentSource
@@ -39,7 +39,7 @@ class ContentOwner:
     Engines can share one FactStore; a source capture and its affected outputs
     are one atomic generation, not a cross-database snapshot guarantee.
     """
-    def __init__(self, engines, bindings, *, budget=CaptureBudget(), operational=()):
+    def __init__(self, engines, bindings, *, budget=CaptureBudget(), operational=(), lazy_sources=False):
         self._publishers = {}
         self._by_source = {}
         for binding in bindings:
@@ -71,9 +71,17 @@ class ContentOwner:
             raise ValueError('empty content source set')
         self._demands = {scope: DemandSource(engine) for scope, engine in engines.items()}
         self._publishers.update((source, source) for source in self._demands.values())
-        self.feed = ChangeFeed(self._commit, self._failure, budget=budget)
+        self.feed = ProcessOwner(self._commit, self._failure, budget=budget)
+        self._activation = None
         try:
-            for adapter in self._publishers:
+            if lazy_sources:
+                from hermes_cli.fact_scope_activation import ScopeActivation
+                self._activation = ScopeActivation(engines, self._activate)
+                self._publishers[self._activation] = self._activation
+                adapters = (*self._demands.values(), self._activation)
+            else:
+                adapters = tuple(self._publishers)
+            for adapter in adapters:
                 self.feed.register(adapter)
         except Exception:  # health: allow BLE001 -- construction unwind retains owner custody on failure
             try:
@@ -85,6 +93,11 @@ class ContentOwner:
     def publisher(self, source):
         """Startup key/metadata seam, not a request-side source resolver."""
         return self._by_source[source]
+
+    def _activate(self, scope):
+        for adapter in tuple(self._publishers):
+            if getattr(getattr(adapter, 'source', None), 'scope', None) == scope:
+                self.feed.register(adapter)
 
     def _commit(self, adapter, capture):
         self._publishers[adapter].commit(capture)
@@ -98,6 +111,8 @@ class ContentOwner:
             raise ValueError('unauthorized demand scope')
         if not self.feed._thread.is_alive():
             raise RuntimeError('content owner closed or unavailable')
+        if self._activation is not None:
+            self._activation.want(scope)
         self._demands[scope].demand(view, selector)
 
     def close(self):

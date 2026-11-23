@@ -10,13 +10,13 @@ from hermes_cli.fact_content_owner import ContentOwner
 from hermes_cli.fact_inprocess import IncrementalLifecycle, InProcessFacts
 from hermes_cli.fact_materializers import Projection, view_reducer
 from hermes_cli.fact_reducers import ReducerEngine
-from hermes_cli.fact_store import FactStore
+from hermes_cli.fact_process_owner import process_store
 
 
 class ViewOwner:
     def __init__(self, scope, capture, render, views, *, paths=(), bindings=(), consumer='board'):
         self.scope, self.consumer = scope, consumer
-        self.store = FactStore()
+        self.store = process_store()
         engine = ReducerEngine(self.store, scope)
         from hermes_cli.fact_contract import SourceId
         self.source = BoardInputSource(engine, SourceId(scope, 'board.input', 'native'), capture, paths=paths)

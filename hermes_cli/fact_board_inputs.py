@@ -17,6 +17,7 @@ from hermes_cli.fact_capture import CaptureBudgetExceeded
 from hermes_cli.fact_contract import Fact, FactKey, freeze
 from hermes_cli.fact_store import view_key
 from hermes_cli.fact_source_watch import NativeSourceWatch
+from hermes_cli.fact_capture_queue import submit
 
 
 @dataclass(frozen=True)
@@ -109,9 +110,8 @@ class BoardInputSource:
                 self._active = self._pending.popleft()
                 self._deadline = time.monotonic() + budget.max_seconds
                 view, selector = self._wanted[self._active]
-                self._worker = threading.Thread(target=self._context.run,
-                    args=(self._build, self._active, view, selector, budget), daemon=True, name='fact-board-capture')
-                self._worker.start()
+                key = self._active
+                self._worker = submit(lambda: self._context.run(self._build, key, view, selector, budget))
             if self._deadline is not None and time.monotonic() >= self._deadline:
                 self._deadline = None
                 return BoardCapture(key=self._active, after=cursor, failed=True, observed_at=time.time())

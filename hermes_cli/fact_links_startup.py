@@ -13,7 +13,7 @@ from hermes_cli.fact_content_owner import ContentOwner
 from hermes_cli.fact_contract import Scope, SourceId
 from hermes_cli.fact_reducers import ReducerEngine
 from hermes_cli.fact_remote_links import LinksBudget, LinksFacts, RemoteLinksSource
-from hermes_cli.fact_store import FactStore
+from hermes_cli.fact_process_owner import process_store
 
 _lock = threading.RLock()
 _runtimes = {}
@@ -30,7 +30,7 @@ class LinksRuntime:
     def __init__(self, origin):
         self.origin = origin
         self.scope = Scope(origin[0], origin[1])
-        self.store = FactStore()
+        self.store = process_store()
         self.owner = None
         self.binding = None
         self.closed = False

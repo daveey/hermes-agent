@@ -17,9 +17,8 @@ from fastapi import HTTPException
 
 from hermes_cli.fact_capture import CaptureBudget
 from hermes_cli.fact_contract import Scope, SourceId
-from hermes_cli.fact_feed import ChangeFeed
+from hermes_cli.fact_process_owner import ProcessOwner, process_store
 from hermes_cli.fact_inprocess import IncrementalLifecycle, InProcessFacts
-from hermes_cli.fact_store import FactStore
 from hermes_cli.sessions_fact_routes import PENDING_NATIVE, use
 from hermes_cli.sessions_native_source import SessionsSource
 
@@ -30,7 +29,7 @@ class SessionsRuntime:
         self.targets = tuple(targets)
         self.names = frozenset(name for name, _ in targets)
         self.scope = Scope(str(targets[0][1]), 'sessions-display')
-        self.store = FactStore()
+        self.store = process_store()
         self.lifecycle = IncrementalLifecycle({(self.scope, 'sessions')})
         self.feed = self.local = self.handle = self.binding = None
         paths = [home / filename for _, home in targets for filename in ('state.db', 'config.yaml')]
@@ -96,7 +95,7 @@ class SessionsRuntime:
         self.source.demand(name, selector)
 
     def start(self):
-        self.feed = ChangeFeed(lambda source, capture: source.commit(capture),
+        self.feed = ProcessOwner(lambda source, capture: source.commit(capture),
                                lambda source, error: source.failure(),
                                budget=CaptureBudget(max_bytes=4 * 1024 * 1024, max_seconds=5))
         try:

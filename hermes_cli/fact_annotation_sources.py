@@ -17,7 +17,7 @@ class NativeAnnotationOwner(ContentOwner):
         for source in operational:
             if isinstance(source, NativeAnnotationSource):
                 source.max_keys = budget.max_keys
-        super().__init__(engines, bindings, budget=budget, operational=operational)
+        super().__init__(engines, bindings, budget=budget, operational=operational, lazy_sources=True)
 
     def demand(self, scope, view, selector):
         from hermes_cli.fact_annotation_views import selector_for
