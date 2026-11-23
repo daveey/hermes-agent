@@ -77,3 +77,40 @@ def test_public_observation_forwards_budget(monkeypatch):
     monkeypatch.setattr(a, 'integrity_observation', lambda **kwargs: seen.append(kwargs))
     ca.integrity_observation(deadline=12.0)
     assert seen == [{'deadline': 12.0}]
+
+
+def test_lock_acquisition_timeout_refuses_without_scanning(monkeypatch):
+    a = ledger()
+    monkeypatch.setattr(ca.time, 'monotonic', lambda: 10.0)
+    calls = []
+    class BusyLock:
+        def acquire(self, **kwargs):
+            calls.append(kwargs)
+            return False
+        def release(self):
+            pytest.fail('released an unheld audit lock')
+    a._lock = BusyLock()
+    monkeypatch.setattr(a, '_inventory_modules', lambda **kwargs: pytest.fail('scanned without lock'))
+    with pytest.raises(TimeoutError):
+        a.integrity_observation(deadline=10.25)
+    assert calls == [{'timeout': 0.25}]
+
+
+def test_plugin_verification_expiry_never_returns_positive(monkeypatch):
+    from hermes_cli import plugin_review_records
+    a = ledger()
+    a._reviewed_plugins = {'fixture': object()}
+    clock = [10.0]
+    monkeypatch.setattr(ca.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(a, '_module_snapshot', list)
+    verified = []
+    def verify(current):
+        assert current is a
+        verified.append(True)
+        clock[0] = 12.0
+    monkeypatch.setattr(plugin_review_records, 'verify_registered', verify)
+    with pytest.raises(TimeoutError):
+        a.integrity_observation(deadline=11.0)
+    assert verified == [True]
+    assert a.integrity_observation()['boot_sha'] == 'a' * 40
+    assert verified == [True, True]
