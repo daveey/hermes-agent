@@ -272,7 +272,8 @@ def _reason(entry: Optional[dict]) -> str:
     if entry is None:
         return "no park event recorded"
     data = entry["payload"]
-    why = data.get("reason") or data.get("error") or data.get("reason_code") or "(no reason recorded)"
+    from hermes_cli.kanban_stranded_brief import reason
+    why = data.get("reason") or data.get("error") or reason(entry)
     return f"{entry['kind']}: {' '.join(str(why).split())[:300]}"
 
 
@@ -330,7 +331,8 @@ def _excluded(conn: sqlite3.Connection, row: dict, now: int, *, age: int, defer:
     from hermes_cli.kanban_retained_wait import explanation
     if row["status"] == "triage" and explanation(conn, tid, generated_only=False):
         return True  # a retained card its open parent or recorded wait explains owns no ask (t_01a1ee476b0f4c0b)
-    if _source_asks(conn, row):
+    from hermes_cli.kanban_spend_decision import dismissed
+    if _source_asks(conn, row) or dismissed(conn, tid):
         return True
     return _armed_wake(conn, tid) or _agent_owned(conn, tid, age=age, defer=defer)
 
@@ -420,24 +422,9 @@ def _link_desk(conn: sqlite3.Connection, task_id: str, desk, now: int) -> None:
 # --- the sweep -----------------------------------------------------------------------------------------------------
 
 def _request(conn: sqlite3.Connection, row: dict, entry: Optional[dict], age: int, owner_note: str, kind) -> dict:
-    """The generated ask. No ``choices``: the default Unblock/Archive buttons answer it (a choice list makes every
-    answer a non-archive unblock). The action follows the ask-line convention (``user_ask_lint_error``). A pending
-    spend decision refuses the Unblock button, so its release is the promote command (a new spend window)."""
-    from hermes_cli.kanban_human_request import validate_human_request
-    from hermes_cli.kanban_spend_decision import pending as spend_pending
-    tid = row["id"]
-    title = " ".join(str(row.get("title") or "").split())[:200]
-    unblock = (f"Unblock = run `hermes kanban promote {tid} --reason '<what changed>'`, which releases it with a "
-               "new spend window (the Unblock button is refused while the spend decision is pending)"
-               if spend_pending(conn, tid) else "Unblock = it goes back to work as it is")
-    return validate_human_request({
-        "action": (f"Decide this parked card ({title}): release it, archive it, or re-scope it by replying with the "
-                   f"new scope. {unblock}; archive = the card and its remaining work are dropped."),
-        "why_human": f"Parked {age // 3600}h with no live owner and no request ({_reason(entry)})",
-        "interaction": "approval",
-        "scope": "This card only",
-        "evidence": _evidence(entry, owner_note),
-    }, kind=kind)
+    """Contextual brief, retaining the existing guarded Unblock/Archive controls."""
+    from hermes_cli.kanban_stranded_brief import request
+    return request(conn, {**row, 'block_kind': kind}, entry, age, _evidence(entry, owner_note))
 
 
 def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int, defer: int,

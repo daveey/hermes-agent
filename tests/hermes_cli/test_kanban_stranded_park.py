@@ -122,10 +122,10 @@ def test_spend_stop_on_dead_chat_gets_request_and_desk(kanban_home, own_gateway)
         assert status == "triage"
         assert card_is_open_human_ask(status, kind, raw)
         request = json.loads(raw)
-        assert request["interaction"] == "approval" and request["scope"] == "This card only"
-        assert request["action"].startswith("Decide this parked card (Bounded work): release it, archive it, or re-sc")
-        assert f"Unblock = run `hermes kanban promote {tid} --reason" in request["action"]
-        assert request["why_human"].startswith("Parked 3h with no live owner and no request (spend_budget_triaged")
+        assert request["interaction"] == "approval" and "Situation: Bounded work" in request["scope"]
+        assert request["action"].startswith("Decide how to handle: Bounded work")
+        assert f"hermes kanban promote {tid} --reason" in request["action"]
+        assert request["why_human"].startswith("Tried:") and "Only you can:" in request["why_human"]
         assert "spend_budget_triaged" in request["evidence"] and "runs=" in request["evidence"]
         assert "choices" not in request
         # The desk chat is bound: a synced shepherd link (no profile, as local reconcile wants it) and a tui sub.
@@ -138,6 +138,46 @@ def test_spend_stop_on_dead_chat_gets_request_and_desk(kanban_home, own_gateway)
         _, seen = notify.unseen_events_for_sub(conn, task_id=tid, platform="tui", chat_id="desk-chat",
                                                kinds=(stranded.EVENT,))
         assert [e.kind for e in seen] == [stranded.EVENT]
+
+
+@pytest.mark.parametrize("detail", [None, "Further work needs a new budget"])
+def test_ask_has_summary_choices_consequences_recommendation(kanban_home, own_gateway, detail):
+    with kbc.connect_closing() as conn:
+        source = stopped(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET body=? WHERE id=?", ("Fix the frozen sidebar in the Mac app.\nImplementation detail", source))
+        assert budget.hold(conn, source) == "triage"
+        sup = _events(conn, source, decision.NOTICE)[-1]["producer"]["task_id"]
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (sup,))
+            kb._append_event(conn, sup, "decision_retained", {"disposition": {"summary": detail}})
+            kb._append_event(conn, sup, "triage_sweep_capped", {"cap": 3})
+        assert _sweep(conn, now=_later(3), cfg={}) == [sup]
+        ask = json.loads(_row(conn, sup)[2])
+        assert "Fix the frozen sidebar in the Mac app." in ask["scope"]
+        assert (detail or "The decision owner kept the work stopped") in ask["scope"]
+        assert "Situation:" in ask["scope"] and "Options:" in ask["scope"]
+        assert "A)" in ask["scope"] and "B)" in ask["scope"] and "Recommend:" in ask["scope"]
+        assert "If you do nothing" in ask["scope"]
+        assert "no further spend" in ask["scope"]
+        assert ask["why_human"].startswith("Tried:") and "Only you can:" in ask["why_human"]
+        assert "decision_retained:" not in ask["scope"]
+        assert "(no reason recorded)" not in str(ask)
+        assert decision.pending(conn, source)
+
+
+def test_dismissed_spend_episode_is_not_reasked_on_source(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        source = stopped(conn)
+        assert budget.hold(conn, source) == "triage"
+        sup = _events(conn, source, decision.NOTICE)[-1]["producer"]["task_id"]
+        assert kb.archive_task(conn, sup)
+        # Even before producer reconciliation, archive is already a disposition.
+        assert _sweep(conn, now=_later(3), cfg={}) == []
+        decision.ensure_producer(conn, source)
+        assert _sweep(conn, now=_later(6), cfg={}) == []
+        assert _row(conn, source)[2] is None
+        assert decision.pending(conn, source)
 
 
 def test_remote_desk_is_a_hub_subscription(kanban_home, own_gateway):
@@ -198,8 +238,8 @@ def test_open_decision_card_owns_until_done(kanban_home, own_gateway):
         assert _sweep(conn, now=_later(3), cfg={}) == []
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='done' WHERE id=?", (sup,))
-        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
-        assert card_is_open_human_ask(*_row(conn, tid))
+        assert _sweep(conn, now=_later(3), cfg={}) == []
+        assert not card_is_open_human_ask(*_row(conn, tid))
 
 
 def _reparked_supervisor(conn):
@@ -209,7 +249,7 @@ def _reparked_supervisor(conn):
     assert budget.hold(conn, tid) == "triage"
     (notice,) = _events(conn, tid, decision.NOTICE)
     with kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (notice["producer"]["task_id"],))
+        conn.execute("DELETE FROM tasks WHERE id=?", (notice["producer"]["task_id"],))
     assert _sweep(conn, now=_later(3), cfg={}) == [tid]
     decision.ensure_producer(conn, tid)
     sup = _events(conn, tid, decision.NOTICE)[-1]["producer"]["task_id"]
@@ -274,7 +314,7 @@ def test_transient_triage_card_is_rekinded(kanban_home, own_gateway):
         status, kind, raw = _row(conn, tid)
         assert kind == "needs_input"
         assert card_is_open_human_ask(status, kind, raw)
-        assert "agent_block_escalated: retry needed" in json.loads(raw)["why_human"]
+        assert "retry needed" in json.loads(raw)["scope"]
 
 
 def test_created_parked_card_uses_creation_as_episode(kanban_home, own_gateway):
@@ -377,7 +417,7 @@ def test_once_per_episode_and_again_on_a_new_episode(kanban_home, own_gateway):
             kb._append_event(conn, tid, "triage_sweep_capped", {"cap": 3})
         assert _sweep(conn, now=_later(3), cfg={}) == [tid]
         assert len(_events(conn, tid, stranded.EVENT)) == 2
-        assert "blocked: parked again" in json.loads(_row(conn, tid)[2])["why_human"]
+        assert "parked again" in json.loads(_row(conn, tid)[2])["scope"]
 
 
 def test_thresholds_come_from_config(kanban_home, own_gateway):

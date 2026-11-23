@@ -25,9 +25,10 @@ def ensure_producer(conn, task_id: str) -> None:
         scope = execution_restricted(conn, task_id) and not safety
         prior = json.loads(previous[0]) if previous else None
         cause = 'safety_refusal' if safety else 'scope_stopped' if scope else None
-        route = prior.get('producer') if isinstance(prior, dict) else None
+        prior_route = prior.get('producer') if isinstance(prior, dict) else None
+        route = episode_route(conn, task_id, episode) or prior_route
         live = _live_route(conn, route)
-        if live and (cause is None or prior.get('cause') == cause):
+        if live and route == prior_route and (cause is None or prior.get('cause') == cause):
             return
         if cause:
             payload['cause'] = cause
@@ -37,8 +38,37 @@ def ensure_producer(conn, task_id: str) -> None:
 
 
 
+def episode_route(conn, task_id: str, episode: str) -> dict | None:
+    """Reuse historical wrappers too; a closed same-episode decision is a disposition, not release."""
+    row = conn.execute(
+        "SELECT t.id,t.status FROM tasks t WHERE t.created_by='kanban-spend-budget' AND "
+        "(t.idempotency_key=? OR EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id "
+        "AND e.kind='administrative_decision' AND json_valid(e.payload) "
+        "AND json_extract(e.payload,'$.root_task')=? AND json_extract(e.payload,'$.root_episode')=?)) "
+        "ORDER BY CASE WHEN t.status IN ('done','archived') THEN 0 ELSE 1 END,t.created_at,t.id LIMIT 1",
+        (f"spend-budget-decision:{task_id}:{episode}", task_id, episode)).fetchone()
+    return ({'kind': 'dismissed' if row['status'] in ('done', 'archived') else 'supervisor',
+             'task_id': row['id']} if row else None)
+
+
+def dismissed(conn, task_id: str) -> bool:
+    """The stranded backstop must not re-ask a decision the desk already closed."""
+    import json
+    stop = pending_episode(conn, task_id)
+    if stop is None:
+        return False
+    episode = stop.get('uid') or str(stop['id'])
+    route = episode_route(conn, task_id, episode)
+    if route is None:
+        row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
+                           "AND json_extract(payload,'$.episode')=? ORDER BY id DESC LIMIT 1",
+                           (task_id, NOTICE, episode)).fetchone()
+        route = json.loads(row[0]).get('producer') if row else None
+    return bool(route and route['kind'] == 'dismissed')
+
+
 def _live_route(conn, route) -> bool:
-    """A notice is not ownership when its decision executor has closed or disappeared."""
+    """Live ownership or a terminal same-episode disposition satisfies routing, never execution."""
     if not isinstance(route, dict):
         return False
     if route.get('kind') == 'supervisor':
@@ -46,7 +76,7 @@ def _live_route(conn, route) -> bool:
         return task is not None and task.status not in ('done', 'archived')
     # Explicit administrative exhaustion is a terminal routing boundary, not
     # permission to recurse into another decision owner or release the root hold.
-    return route.get('kind') in ('chats', 'unavailable')
+    return route.get('kind') in ('chats', 'unavailable', 'dismissed')
 
 
 def repair_triage_routes(conn, *, skip: set[str]) -> None:
@@ -273,7 +303,11 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
             if origin is not None and dead(origin.gateway, origin.profile, origin.session):
                 continue
         return {"kind": "chats"}
-    episode = conn.execute("SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
+    stop = pending_episode(conn, task_id)
+    episode = (stop.get('uid') or str(stop['id'])) if stop else None
+    existing = episode_route(conn, task_id, episode) if episode else None
+    if existing:
+        return existing
     from hermes_cli.kanban_refusal_receipt import restricted
     safety = restricted(conn, task_id)
     stopped = execution_restricted(conn, task_id)

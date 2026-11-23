@@ -42,9 +42,12 @@ def test_closed_or_null_producer_is_replaced_without_execution_release(kanban_ho
                 conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, old))
         decision.ensure_producer(conn, tid)
         route = _route(conn, tid)
-        assert route["kind"] == "supervisor"
-        assert route["task_id"] != old
-        assert kb.get_task(conn, route["task_id"]).status not in ("done", "archived")
+        if status in ("done", "archived"):
+            assert route == {"kind": "dismissed", "task_id": old}
+        else:
+            assert route["kind"] == "supervisor"
+            assert (route["task_id"] == old) == (status == "null")
+            assert kb.get_task(conn, route["task_id"]).status not in ("done", "archived")
         count = len(helpers._events(conn, tid, decision.NOTICE))
         decision.ensure_producer(conn, tid)
         assert len(helpers._events(conn, tid, decision.NOTICE)) == count
