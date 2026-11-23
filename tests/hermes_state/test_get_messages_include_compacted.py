@@ -419,10 +419,13 @@ class TestDisplayDedupe:
             (sid,),
         ).fetchall()
 
+        revision = db._conn.execute("SELECT revision FROM session_content_revision").fetchone()[0]
         changes = db._conn.total_changes
         db.set_message_reaction(sid, row_ids[1], "👍", author="user")
-        # The reacted row and its session's transcript_revision (a transcript poller's cursor keys on it).
-        assert db._conn.total_changes - changes == 2
+        # Exactly the reacted row and its session's transcript_revision; each
+        # also stamps the content clock and its per-session change row.
+        assert db._conn.execute("SELECT revision FROM session_content_revision").fetchone()[0] - revision == 2
+        assert db._conn.total_changes - changes == 2 + 2 * 2
         assert db._conn.execute(
             "SELECT id, display_order, display_identity FROM messages WHERE session_id = ? ORDER BY id",
             (sid,),
@@ -444,9 +447,13 @@ class TestDisplayDedupe:
         db._execute_write(lambda conn: conn.execute(
             "UPDATE messages SET content = ? WHERE id = ?", ('"changed"', first)))
 
+        revision = db._conn.execute("SELECT revision FROM session_content_revision").fetchone()[0]
         changes = db._conn.total_changes
         db.get_messages(sid, include_compacted=True)
-        assert db._conn.total_changes - changes == 2
+        # Only the two changed-group rows are rewritten, plus two cursor
+        # bookkeeping writes per changed message (not extra message rewrites).
+        assert db._conn.execute("SELECT revision FROM session_content_revision").fetchone()[0] - revision == 2
+        assert db._conn.total_changes - changes == 2 + 2 * 2
         assert db._conn.execute(
             "SELECT COUNT(*) FROM messages WHERE session_id = ? "
             "AND (display_order IS NULL OR display_identity IS NULL)",
@@ -469,6 +476,8 @@ class TestDisplayDedupe:
         writer.close()
 
         conn = sqlite3.connect(path)
+        # This legacy schema predates the content cursor's all-column trigger.
+        conn.execute("DROP TRIGGER IF EXISTS session_content_on_messages_update")
         conn.execute("DROP TRIGGER IF EXISTS messages_display_order_insert")
         conn.execute("DROP TRIGGER IF EXISTS messages_display_visibility_update")
         conn.execute("DROP TRIGGER IF EXISTS messages_display_identity_update")

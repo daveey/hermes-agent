@@ -431,19 +431,19 @@ def test_error_midscan_still_flushes_pending_batches(arrival, monkeypatch):
     assert len(db.get_messages(CHAT)) == (1 if rows else 0)
 
 
-def test_collect_grouping_failure_releases_claims(arrival, monkeypatch):
+def test_collect_grouping_failure_retains_claims_for_delivery(arrival, monkeypatch):
     from tui_gateway import kanban_remote_late as late
 
-    replica, ledger, now, insert, _db, _opener = arrival
+    _replica, ledger, now, insert, _db, _opener = arrival
     insert(5, "done", 8 * 3600)
     monkeypatch.setattr(late, "group", lambda *a: (_ for _ in ()).throw(KeyError("owner_at")))
-    assert krn.collect(CHAT, "default", now=now) == []
-    assert _rows(ledger) == []
-    monkeypatch.undo()
-    monkeypatch.setattr(krn, "ledger_path", lambda: ledger)
-    monkeypatch.setattr(krn, "hub_db_path", lambda: replica)
+    result = krn.collect(CHAT, "default", now=now)
+    assert len(result) == 5 and result.incomplete
+    assert len(_rows(ledger)) == 5
+    for claim in result:
+        assert krn.ack(claim, ledger=ledger)
     again = krn.collect(CHAT, "default", now=now)
-    assert len(again) == 1 and len(again[0]["children"]) == 5
+    assert again == [] and again.quiet
 
 
 @pytest.mark.parametrize("order", ["human_first", "done_first"])

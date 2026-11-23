@@ -22,6 +22,7 @@ next poll once the lookup lands. Message reads are cached per
 """
 
 from __future__ import annotations
+from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 
 import json
 import logging
@@ -268,6 +269,7 @@ def _row_prs(rows: Iterable[dict[str, Any]]) -> dict[int, list[tuple[str, str, i
     return out
 
 
+@_fact_consumer('review')
 def annotate_review_wait(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``review_wait`` (``"stuck"`` / ``"parked"``) and ``review_wait_pr``
     on rows waiting on a code review; ``stuck`` wins across several PRs."""
@@ -277,19 +279,26 @@ def annotate_review_wait(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         prs = _row_prs(rows)
         now = time.time()
         for i, row in enumerate(rows):
-            best: tuple[str, str] | None = None
-            for key in prs.get(i, ()):
-                state = review_state(_pr_info(key), now)
-                if state and (best is None or (state == "stuck" and best[0] != "stuck")):
-                    best = (state, f"https://github.com/{key[0]}/{key[1]}/pull/{key[2]}")
-            if best:
-                row["review_wait"], row["review_wait_pr"] = best
-            else:
-                row.pop("review_wait", None)
-                row.pop("review_wait_pr", None)
-    except Exception:
+            reviews = [(key, _pr_info(key)) for key in prs.get(i, ())]
+            project_review_row(row, reviews=reviews, now=now)
+    except Exception:  # health: allow BLE001 -- legacy best-effort reader boundary; preserves rows on provider failure
         _log.debug("review wait annotation failed", exc_info=True)
     return rows
+
+
+def project_review_row(row, *, reviews, now):
+    """Pure serializer over ordered ((owner, repo, number), captured PR info) pairs."""
+    best: tuple[str, str] | None = None
+    for key, info in reviews:
+        state = review_state(info, now)
+        if state and (best is None or (state == "stuck" and best[0] != "stuck")):
+            best = (state, f"https://github.com/{key[0]}/{key[1]}/pull/{key[2]}")
+    if best:
+        row["review_wait"], row["review_wait_pr"] = best
+    else:
+        row.pop("review_wait", None)
+        row.pop("review_wait_pr", None)
+    return row
 
 
 def _reset_cache_for_tests() -> None:

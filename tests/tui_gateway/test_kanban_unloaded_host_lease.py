@@ -115,7 +115,7 @@ def test_the_loop_releases_its_lease_when_stopped(monkeypatch, tmp_path):
     lease = hll.HostLoopLease(ku.LEASE_NAME, "serve", interval=30, home=tmp_path)
     monkeypatch.setenv("HERMES_KANBAN_UNLOADED_FIRST_S", "0")
     monkeypatch.setattr(ku, "make_lease", lambda: lease)
-    monkeypatch.setattr(ku, "run_pass", lambda lease_, grace=0: stop.set() or "host")
+    monkeypatch.setattr(ku, "run_pass", lambda lease_, grace=0, **kw: stop.set() or "host")
     ku._loop(stop)
     other = hll.HostLoopLease(ku.LEASE_NAME, "dashboard", interval=30, home=tmp_path)
     try:

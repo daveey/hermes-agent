@@ -36,9 +36,11 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 from hermes_cli.kanban_withdrawal_notice import envelope as _withdrawal
 from tui_gateway.kanban_remote_notice_state import state as _notice_state
+from tui_gateway.notice_fanout_result import FanoutResult
+from tui_gateway.kanban_remote_notices_keyed import WakeBatch
 from hermes_cli.kanban_remote_ask import envelope as _ask, notifiable as _notifiable
 
 FRESH_S = 6 * 3600.0
@@ -728,11 +730,72 @@ def _log_dropped(task: dict, ref: str, state: str, session: str, first_seen: flo
                    minutes // 60, minutes % 60, LATE_MAX_S / 3600)
 
 
+def _claim_cards(conn, out: FanoutResult, cards: list, *, session_key: str, profile: str, me: str, now: float,
+                 path, fresh_times, skip, transcript_has, per_link: bool) -> None:
+    """Claim ``cards`` (``{gw, key, task, sid}``) for ``session_key`` into ``out``: ``collect``'s claim loop, shared
+    verbatim by its whole-scope and keyed paths. Offers already in ``out`` are not claimed twice."""
+    offered = {(item["ref"], item["state"]) for item in out}
+    for card in cards:
+        from tui_gateway.kanban_remote_late import owner_time
+        if owner_time(card["task"], now) is None and sum(
+                item.get("owner_at") is None for item in out) >= MAX_PER_POLL:
+            out.retry(0)
+            continue
+        task = card["task"]
+        ref = f"{card['gw']}/{card['key']}"
+        state = _notice_state(task)
+        if (ref, state) in offered:
+            continue
+        ident = (card["gw"], card["key"], state)
+        at_fresh = fresh_times.get(ident, _fresh_at(task))
+        fresh = at_fresh is not None and now - at_fresh <= FRESH_S
+        if not fresh and ident not in fresh_times:
+            out.retry()
+            continue  # partial sync: don't permanently settle a not-yet-observed arrival
+        sid = card.get("sid") or session_key
+        claim_session = sid if per_link else session_key
+        key = _shared_key(card["gw"], card["key"], task, profile, sid)
+        # [daveey] A state this host observed while fresh and never delivered (a busy chat, a down backend)
+        # is still claimed past FRESH_S, as a late notice (its owner time is old, so ``_notice_item`` puts
+        # it in the late group). Only a seeded state (first snapshot) settles silently as ``stale``.
+        first_seen = _observed_first_seen(fresh_times, ident)
+        reason = "stale" if fresh or first_seen is None else _late_verdict(now, first_seen)
+        settle: str | _ExpiredReason = reason
+        if reason == "late":
+            fresh = True
+        elif reason == "expired" and transcript_has is not None:
+            settle = _ExpiredReason(transcript_has, key)
+        if fresh and skip is not None and conn.execute(
+                "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
+                (claim_session, ref, state)).fetchone() is None and skip(str(task["id"])):
+            fresh, settle = False, "placeholder"  # recorded silently: the placeholder's notice covers it
+        swept_key = (str(path), profile, sid, _notice_id(card["gw"], card["key"], task, profile, sid))
+        # Render before reserving custody: a formatting error must not
+        # leave a committed claim with no receipt to hand to the caller.
+        item = _notice_item(card, claim_session, me, profile, now)
+        verdict = _claim_notice(conn, session=claim_session, ref=ref, state=state, now=now, fresh=fresh,
+                                notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has,
+                                swept_key=swept_key, settle_reason=settle)
+        if verdict == "settled" and getattr(settle, "reason", settle) == "expired":
+            _log_dropped(task, ref, state, claim_session, first_seen or 0.0, now)  # expired: observed
+        if verdict == "offer":
+            out.append(item)
+            offered.add((ref, state))
+            _note_poller_claim(sid, claim_session, ref, state)  # after the claim is out; never raises
+        elif verdict == "skip":
+            held = conn.execute(
+                "SELECT delivered,holder_pid FROM notices WHERE session=? AND ref=? AND state=?",
+                (claim_session, ref, state)).fetchone()
+            if held is None or (not held["delivered"] and held["holder_pid"] is not None):
+                out.retry()  # live custody is not proof of eventual action/ACK
+
+
 def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, ledger: Optional[Path] = None,
             now: Optional[float] = None, lineage: tuple[str, ...] = (),
             skip: Optional[Callable[[str], bool]] = None,
             transcript_has: Optional[Callable[[str, str], bool]] = None, per_link: bool = False,
-            on_defer: Optional[Callable[[], None]] = None, shared_window: bool = False) -> list[dict]:
+            on_defer: Optional[Callable[[], None]] = None, shared_window: bool = False,
+            keys: Iterable | WakeBatch | None = None) -> FanoutResult:
     """Claim and return ``[{text, session, ref, state, event_key}]`` for this session's newly terminal remote cards.
 
     ``shared_window`` is enabled by the serve poller only; strict/gateway callers
@@ -746,89 +809,125 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
     notice under its link's own session, the ledger key the Desktop sweep (``_deliver_link``) claims it
     under, so the two see each other's claim on a chat compressed before the card was linked
     (``gateway.kanban_remote_owner``; review t_01a1d013e0411032). Never raises.
+
+    The list-compatible result also reports ``quiet``, ``incomplete`` and an
+    absolute monotonic ``next_deadline``. Inspect these even for an empty list.
+    Quiet covers collection only: returned receipts still require delivery/ACK.
+    Failed/deferred reads and live unacknowledged holders retry in one second;
+    bounded backlog retries immediately. Partial committed receipts are returned
+    even after a later error, never released/discarded behind the caller's back.
+
+    ``keys`` (a fact wake's ``(owner, key)`` replica rows, or ``"<owner>/<key>"`` refs) selects the keyed path
+    (``kanban_remote_notices_keyed``): only those rows are read, in ``IN`` batches of at most 500 over one
+    short-lived read-only snapshot, with no whole-replica index, published-copy lookup or ``observe``. Its claims
+    are the same durable claims. It skips the legacy ``delivered=1`` re-offer (that pass needs every card of the
+    chat) and reports ``incomplete`` while first observations cannot be recorded (replica not caught up, no
+    baseline): startup and reconciliation must supply a complete shared WakeBatch
+    (constructed with keys=None) or run the original full collect. Only a complete
+    reconciliation batch runs legacy re-offer; ordinary dirty-key batches cannot.
+    ``keys=None`` is the unchanged whole-scope path; empty ``keys`` is quiet.
     """
     from hermes_cli.kanban_placement import is_placeholder_session
-    if is_placeholder_session(session_key):
-        return []
+    out = FanoutResult()
+    if is_placeholder_session(session_key) or not session_key:
+        return out
+    if keys is not None and not isinstance(keys, WakeBatch):
+        keys = list(keys)
+        if not keys:
+            return out
+    if isinstance(keys, WakeBatch) and now is None:
+        now = keys.now
     path = hub_db or hub_db_path()
-    if not session_key or not path.is_file():
-        return []
+    if not path.is_file():
+        out.retry()
+        return out
     now = time.time() if now is None else now
     profile = profile or "default"
-    out: list[dict] = []
+    if keys is not None:
+        return _collect_keyed(out, session_key, profile, path, ledger, now, lineage, skip, transcript_has,
+                              per_link, keys)
     try:
         sids = (session_key, *lineage)
         if hub_db is None and ledger is None:  # the host's own replica: keep its published copy current
             from tui_gateway.kanban_remote_index import ensure_holder
             ensure_holder("serve")  # once per process; a gateway's own later claim upgrades the role
+        def deferred():
+            out.retry()
+            if on_defer is not None:
+                on_defer()
+
         me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids,
-                                              own=hub_db is None and ledger is None, on_defer=on_defer,
+                                              own=hub_db is None and ledger is None, on_defer=deferred,
                                               shared_window=shared_window)
+        if not me:
+            out.retry()
+            return out
         cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
-            return []
+            return out
         conn = _ledger(ledger)
         try:
             with conn:
                 _reconcile_legacy(conn, session_key, cards, now, transcript_has, me, profile, offered=out)
-            offered = {(item["ref"], item["state"]) for item in out}
-            for card in cards:
-                from tui_gateway.kanban_remote_late import owner_time
-                if owner_time(card["task"], now) is None and sum(
-                        item.get("owner_at") is None for item in out) >= MAX_PER_POLL:
-                    continue
-                task = card["task"]
-                ref = f"{card['gw']}/{card['key']}"
-                state = _notice_state(task)
-                if (ref, state) in offered:
-                    continue
-                ident = (card["gw"], card["key"], state)
-                at_fresh = fresh_times.get(ident, _fresh_at(task))
-                fresh = at_fresh is not None and now - at_fresh <= FRESH_S
-                if not fresh and ident not in fresh_times:
-                    continue  # partial sync: don't permanently settle a not-yet-observed arrival
-                sid = card.get("sid") or session_key
-                claim_session = sid if per_link else session_key
-                key = _shared_key(card["gw"], card["key"], task, profile, sid)
-                # [daveey] A state this host observed while fresh and never delivered (a busy chat, a down backend)
-                # is still claimed past FRESH_S, as a late notice (its owner time is old, so ``_notice_item`` puts
-                # it in the late group). Only a seeded state (first snapshot) settles silently as ``stale``.
-                first_seen = _observed_first_seen(fresh_times, ident)
-                reason = "stale" if fresh or first_seen is None else _late_verdict(now, first_seen)
-                settle: str | _ExpiredReason = reason
-                if reason == "late":
-                    fresh = True
-                elif reason == "expired" and transcript_has is not None:
-                    settle = _ExpiredReason(transcript_has, key)
-                if fresh and skip is not None and conn.execute(
-                        "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
-                        (claim_session, ref, state)).fetchone() is None and skip(str(task["id"])):
-                    fresh, settle = False, "placeholder"  # recorded silently: the placeholder's notice covers it
-                swept_key = (str(path), profile, sid, _notice_id(card["gw"], card["key"], task, profile, sid))
-                verdict = _claim_notice(conn, session=claim_session, ref=ref, state=state, now=now, fresh=fresh,
-                                        notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has,
-                                        swept_key=swept_key, settle_reason=settle)
-                if verdict == "settled" and getattr(settle, "reason", settle) == "expired":
-                    _log_dropped(task, ref, state, claim_session, first_seen or 0.0, now)  # expired: observed
-                if verdict == "offer":
-                    out.append(_notice_item(card, claim_session, me, profile, now))
-                    offered.add((ref, state))
-                    _note_poller_claim(sid, claim_session, ref, state)  # after the claim is out; never raises
+            _claim_cards(conn, out, cards, session_key=session_key, profile=profile, me=me, now=now, path=path,
+                         fresh_times=fresh_times, skip=skip, transcript_has=transcript_has, per_link=per_link)
         finally:
             conn.close()
-        from tui_gateway.kanban_remote_late import collect_groups, release_undelivered
+        from tui_gateway.kanban_remote_late import collect_groups
         try:
-            return collect_groups(out, now)
+            out[:] = collect_groups(out, now)
         except (KeyError, TypeError, ValueError, OverflowError, OSError):
-            logger.warning("remote kanban: grouping late notices failed; releasing %d claim(s)", len(out),
+            logger.warning("remote kanban: grouping late notices failed; retaining %d claim(s)", len(out),
                            exc_info=True)
-            release_undelivered(out, ledger)
-            return []
+            out.retry()
     except Exception:
         logger.debug("remote kanban collect failed", exc_info=True)
-        from tui_gateway.kanban_remote_late import release_undelivered
-        release_undelivered(out, ledger)
-        return []
+        # Earlier claims have already committed. Hand them to the caller even
+        # when a later source/action fails; releasing can itself fail and strand
+        # custody in this live process with no caller holding the receipt.
+        out.retry()
+    return out
+
+
+def _collect_keyed(out: FanoutResult, session_key: str, profile: str, path: Path, ledger, now: float,
+                   lineage: tuple, skip, transcript_has, per_link: bool, keys: list | WakeBatch) -> FanoutResult:
+    """``collect(..., keys=...)``: discovery bounded to the woken replica rows, then the shared claim loop.
+    Never raises; committed claims are always handed back (as the whole-scope path does)."""
+    from tui_gateway import kanban_remote_notices_keyed as keyed
+
+    try:
+        sids = (session_key, *lineage)
+        me, by_sid, fresh_times, complete = keyed.discover(path, ledger, now, profile, sids, keys)
+        if not me:
+            out.retry()
+            return out
+        if not complete:
+            out.retry()  # first observations not recorded: a full read must settle what this one defers
+        cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
+        if not cards:
+            return out
+        conn = _ledger(ledger)
+        try:
+            # Only a complete shared reconciliation snapshot may settle absent
+            # legacy cards. A dirty-key wake is never evidence of absence.
+            if isinstance(keys, WakeBatch) and keys.reconcile and complete:
+                with conn:
+                    _reconcile_legacy(conn, session_key, cards, now, transcript_has, me, profile, offered=out)
+            _claim_cards(conn, out, cards, session_key=session_key, profile=profile, me=me, now=now, path=path,
+                         fresh_times=fresh_times, skip=skip, transcript_has=transcript_has, per_link=per_link)
+        finally:
+            conn.close()
+        from tui_gateway.kanban_remote_late import collect_groups
+        try:
+            out[:] = collect_groups(out, now)
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            logger.warning("remote kanban: grouping late notices failed; retaining %d claim(s)", len(out),
+                           exc_info=True)
+            out.retry()
+    except Exception:
+        logger.debug("remote kanban keyed collect failed", exc_info=True)
+        out.retry()
+    return out
 
 
 def ack(claim: dict, *, ledger: Optional[Path] = None) -> bool:

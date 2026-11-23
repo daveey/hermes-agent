@@ -18,6 +18,7 @@ seconds because the sidebar polls.
 """
 
 from __future__ import annotations
+from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 
 import json
 import logging
@@ -190,6 +191,7 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
             yield sid
 
 
+@_fact_consumer('background')
 def annotate_background_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``background_active`` on each session row (summed over its
     compression lineage; a process counts once per row) and
@@ -211,6 +213,12 @@ def annotate_background_activity(rows: list[dict[str, Any]]) -> list[dict[str, A
     except ADAPTER_ERRORS:
         _log.debug("process gateway identity unavailable", exc_info=True)
         gateway = local_profile = None
+    return project_background_activity(rows, owned=owned, details=details, evidence=evidence,
+                                       gateway=gateway, local_profile=local_profile, now=now)
+
+
+def project_background_activity(rows, *, owned, details, evidence, gateway, local_profile, now):
+    """Pure serializer over captured owner/process sets, details and birth evidence."""
     for row in rows:
         ids = set(_row_ids(row))
         procs = set().union(*(owned.get(sid, ()) for sid in ids))

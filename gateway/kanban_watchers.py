@@ -168,25 +168,45 @@ class GatewayKanbanWatchersMixin:
         # board, at startup (0 → first tick) and at most hourly.
         _gc_next_at = 0.0
 
-        while self._running:
-            try:
-                _gc_due = time.monotonic() >= _gc_next_at
-                _retention = 30
-                if _gc_due:
-                    _gc_next_at = time.monotonic() + _GC_INTERVAL_SECONDS
-                    _retention = _gc_retention_days()
-
-                deliveries = await asyncio.to_thread(
-                    _notifier_collect, self, _kb,
-                    notifier_profile=notifier_profile, gc_due=_gc_due, gc_retention_days=_retention,
-                )
-                for d in deliveries:
-                    await _KanbanNotification(
-                        self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
-                    ).deliver()
-            except Exception as exc:
-                logger.warning("kanban notifier tick failed: %s", exc)
-            await self._sleep_between_ticks(interval)
+        from gateway.kanban_notification_schedule import BoundActions, PassReport
+        event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        gate = BoundActions(lambda: loop.call_soon_threadsafe(event.set))
+        next_legacy = 0.0
+        try:
+            while self._running:
+                event.clear()  # sample before draining; a concurrent wake remains set
+                now = time.monotonic()
+                if gate.due(now, legacy_due=now >= next_legacy):
+                    report = PassReport()
+                    try:
+                        _gc_due = now >= _gc_next_at
+                        _retention = 30
+                        if _gc_due:
+                            _gc_next_at = now + _GC_INTERVAL_SECONDS
+                            _retention = _gc_retention_days()
+                        deliveries = await asyncio.to_thread(
+                            _notifier_collect, self, _kb, notifier_profile=notifier_profile,
+                            gc_due=_gc_due, gc_retention_days=_retention, report=report,
+                        )
+                        for d in deliveries:
+                            await _KanbanNotification(
+                                self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
+                            ).deliver()
+                    except Exception as exc:
+                        report.retry()
+                        logger.warning("kanban notifier tick failed: %s", exc)
+                    report.due_at(_gc_next_at)
+                    gate.settled(report, time.monotonic(), interval)
+                    next_legacy = time.monotonic() + interval
+                if gate.was_bound:
+                    # Bounded stop observation, but no source probes on quiet ticks.
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(event.wait(), timeout=1.0)
+                else:
+                    await self._sleep_between_ticks(interval)
+        finally:
+            gate.close()
 
     async def _kanban_remote_owner_watcher(self, interval: Optional[float] = None) -> None:
         """Admit remote cards' notices for busy chats this gateway owns (gateway/kanban_remote_owner.py). [daveey]
@@ -214,9 +234,27 @@ class GatewayKanbanWatchersMixin:
             self._kanban_notifier_profile = self._active_profile_name()
         interval = kanban_remote_owner.INTERVAL_S if interval is None else interval
         await asyncio.sleep(self._KANBAN_WATCHER_START_DELAY)  # as the notifier: let adapters wire up first
-        while self._running:
-            await kanban_remote_owner.tick(self)  # never raises
-            await self._sleep_between_ticks(interval)
+        from gateway.kanban_notification_schedule import BoundActions, PassReport
+        event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        gate = BoundActions(lambda: loop.call_soon_threadsafe(event.set))
+        next_legacy = 0.0
+        try:
+            while self._running:
+                event.clear()
+                now = time.monotonic()
+                if gate.due(now, legacy_due=now >= next_legacy):
+                    report = PassReport()
+                    await kanban_remote_owner.tick(self, report=report)
+                    gate.settled(report, time.monotonic(), interval)
+                    next_legacy = time.monotonic() + interval
+                if gate.was_bound:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(event.wait(), timeout=1.0)
+                else:
+                    await self._sleep_between_ticks(interval)
+        finally:
+            gate.close()
 
     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> Any:
         """Sync helper (runs in to_thread): call ``kanban_db_notify.<op>`` for one subscription on its board."""

@@ -1,5 +1,10 @@
 {
   "module_to_core": {
+    "plugins/kanban/dashboard/board_event_history.py hermes_cli.kanban_diagnostic_history.EventHistory": 1,
+    "plugins/kanban/dashboard/board_fact_capture.py hermes_cli.kanban_db": 1,
+    "plugins/kanban/dashboard/board_fact_views.py hermes_cli.kanban_db": 1,
+    "plugins/kanban/dashboard/board_fact_views.py hermes_cli.projection_request.RequestBinding": 1,
+    "plugins/kanban/dashboard/board_shadow.py hermes_cli.kanban_db": 1,
     "plugins/browser/browser_use/provider.py plugins.browser._common.CloudBrowserProvider": 1,
     "plugins/browser/browser_use/provider.py tools.managed_tool_gateway.peek_nous_access_token": 1,
     "plugins/browser/browser_use/provider.py tools.managed_tool_gateway.resolve_managed_tool_gateway": 1,

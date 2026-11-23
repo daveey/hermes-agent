@@ -13,6 +13,7 @@ file changes, plus a short TTL because the sidebar polls.
 """
 
 from __future__ import annotations
+from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 
 import json
 import logging
@@ -117,6 +118,7 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
             yield sid
 
 
+@_fact_consumer('cron')
 def annotate_cron_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``cron_active: True`` on rows whose lineage owns a live cron job.
     Never raises: the list must render without it."""
@@ -127,6 +129,11 @@ def annotate_cron_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     except Exception:
         _log.debug("cron activity unavailable", exc_info=True)
         return rows
+    return project_cron_activity(rows, owners)
+
+
+def project_cron_activity(rows, owners):
+    """Pure canonical serializer; owners is the captured set of cron-owning session IDs."""
     for row in rows:
         if owners and any(sid in owners for sid in _row_ids(row)):
             row["cron_active"] = True

@@ -2595,6 +2595,12 @@ This controls both the `text_to_speech` tool and spoken replies in voice mode (`
 
 ## Display Settings
 
+`display.loaded_notification_f` defaults to `true`. It enables the shared
+loaded-session notification consumer, which uses changefeed hints and bounded
+background discovery rather than a separate polling loop for each loaded chat.
+Set it to `false` to select the legacy notification path for newly initialized
+loaded sessions during rollback; this does not disable notification delivery.
+
 ```yaml
 display:
   tool_progress: all      # off | new | all | verbose

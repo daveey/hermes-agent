@@ -45,7 +45,8 @@ def _release_expired_claims(session: dict) -> None:
                                                   thread_id=thread_id)
         except Exception:  # health: allow BLE001 -- expiry must always drop the buffer
             logger.warning("kanban notice expiry release failed for %s/%s", board, task_id, exc_info=True)
-    session["_kanban_claims"] = []
+    session["_kanban_claims"] = [c for c in session.get("_kanban_claims", [])
+                                 if c.get("durable") and not c.get("acked")]
     session["_kanban_pending"] = []
 
 

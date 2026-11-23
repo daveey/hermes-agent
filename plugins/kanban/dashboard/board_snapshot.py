@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
+from plugins.kanban.dashboard import board_legacy
 
 CACHE_TTL_S = 30.0
 # A busy board moves the db signature on nearly every poll. Re-reading costs ~1.3s of
@@ -43,6 +44,15 @@ def _publish(key, sig, now, result) -> None:
         _cache[key] = (sig, now, result)
 
 
+def retire(paths) -> None:
+    """Drop snapshots after admission closes and all publishers have drained."""
+    paths = set(map(str, paths))
+    with _cache_lock:
+        for key in list(_cache):
+            if str(key[0]) in paths:
+                del _cache[key]
+
+
 def join_refresh(timeout: float = 5) -> None:
     thread = _refresh_thread
     if thread is not None:
@@ -57,15 +67,27 @@ def _schedule(read: Callable[[], dict], key, sig, now) -> None:
             result = read()
             _publish(key, sig, now, result)
         finally:
+            board_legacy.release(reservation)
             _refresh_lock.release()
 
     if not _refresh_lock.acquire(blocking=False):
         return
+    try:
+        reservation = board_legacy.reserve(key[0])
+    except board_legacy.LegacyStopped:
+        _refresh_lock.release()
+        return
     thread = threading.Thread(target=run, daemon=True, name="kanban-board-refresh")
     _refresh_thread = thread
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError:
+        board_legacy.release(reservation)
+        _refresh_lock.release()
+        raise
 
 
+@board_legacy.reader("key")
 def serve(key, sig, read: Callable[[], dict], now: Optional[float] = None) -> dict:
     """Return a board payload.
 
@@ -115,6 +137,7 @@ def _first_read(read: Callable[[], dict], key, sig, now) -> dict:
         pending.set()
 
 
+@board_legacy.reader("key")
 def prewarm(read: Callable[[], dict], key, sig, now: Optional[float] = None) -> None:
     """Take the first read of ``key`` off the first Desktop poll (boot, background thread).
     A no-op if a snapshot exists or a read is already running."""

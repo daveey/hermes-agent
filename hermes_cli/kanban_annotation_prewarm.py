@@ -32,8 +32,47 @@ def boot_phase() -> str:
     return _boot_phase[0]
 
 
+_annotation_gate = threading.Condition()
+_annotation_suspended = False
+_annotation_inflight = 0
+
+
+def suspend_annotation_prewarm(*, timeout: float = 5.0) -> None:
+    """Fence new annotation reads and drain admitted ones, across profile contexts.
+
+    Timeout retains the fence. Project-tree warmup belongs to its own consumer;
+    joining the combined boot thread here would conflate the two owners.
+    """
+    global _annotation_suspended
+    with _annotation_gate:
+        _annotation_suspended = True
+        if not _annotation_gate.wait_for(lambda: _annotation_inflight == 0, timeout):
+            raise TimeoutError("legacy annotation prewarm did not drain")
+
+
+def resume_annotation_prewarm() -> None:
+    """Re-enable legacy warmup admission; the existing holder owns restart work."""
+    global _annotation_suspended
+    with _annotation_gate:
+        _annotation_suspended = False
+
+
 def prewarm_annotation() -> bool:
-    """Build this process's annotation snapshot (and the remote-links projection under it). Never raises."""
+    """Build the annotation only while legacy warmup owns admission."""
+    global _annotation_inflight
+    with _annotation_gate:
+        if _annotation_suspended:
+            return False
+        _annotation_inflight += 1
+    try:
+        return _prewarm_annotation()
+    finally:
+        with _annotation_gate:
+            _annotation_inflight -= 1
+            _annotation_gate.notify_all()
+
+
+def _prewarm_annotation() -> bool:
     try:
         from hermes_cli import kanban_session_activity as ksa
 

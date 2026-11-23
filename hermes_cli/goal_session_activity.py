@@ -17,6 +17,7 @@ read afresh; names-only profile discovery avoids per-entry filesystem stats.
 """
 
 from __future__ import annotations
+from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 
 import json
 import logging
@@ -137,6 +138,7 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
             yield sid
 
 
+@_fact_consumer('goal')
 def annotate_goal_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``goal_active: True`` on rows whose lineage carries an active goal.
     Never raises: the list must render without it."""
@@ -147,6 +149,11 @@ def annotate_goal_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     except Exception:
         _log.debug("goal activity unavailable", exc_info=True)
         return rows
+    return project_goal_activity(rows, active)
+
+
+def project_goal_activity(rows, active):
+    """Pure canonical serializer; active is the captured set of goal-owning session IDs."""
     for row in rows:
         if active and any(sid in active for sid in _row_ids(row)):
             row["goal_active"] = True

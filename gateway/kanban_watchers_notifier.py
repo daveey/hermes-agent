@@ -19,7 +19,8 @@ from typing import Any, Callable, Optional
 
 from agent.i18n import t
 
-from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
+from gateway.kanban_watchers_common import _to_thread_process_service, logger
+from gateway.kanban_notification_schedule import PassReport
 from hermes_cli import loop_accounting as _la
 from gateway.wake import session_owned_by_profile
 from hermes_cli.kanban_block_notice import coalesce_superseded_blocks
@@ -268,6 +269,7 @@ class _Collector:
         self.gc_due = gc_due
         self.gc_retention_days = gc_retention_days
         self.deliveries: list[dict] = []
+        self.report = PassReport()
         self.include_unowned = runner._owns_kanban_dispatcher_lock()
         self.profile_adapters = getattr(runner, "_profile_adapters", {})
         self.notifier_profiles = {notifier_profile}
@@ -292,6 +294,7 @@ class _Collector:
 
     def collect(self) -> list[dict]:
         if not self.active_platforms:
+            self.report.retry()
             logger.debug("kanban notifier: no connected adapters; skipping tick")
             return self.deliveries
         # Poll each resolved DB path once: several slugs can map to one DB when
@@ -301,12 +304,13 @@ class _Collector:
         kb = self.kb
         with _pin_first():
             seen_db_paths: set[str] = set()
-            for board_meta in _list_boards(kb):
+            for board_meta in self._boards():
                 slug = board_meta.get("slug") or kb.DEFAULT_BOARD
                 db_path = board_meta.get("db_path")
                 try:
                     resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(kb.kanban_db_path(slug).resolve())
                 except Exception:
+                    self.report.retry()
                     resolved_db_path = f"slug:{slug}"
                 if resolved_db_path in seen_db_paths:
                     logger.debug("kanban notifier: skipping duplicate board slug %s for DB %s", slug, resolved_db_path)
@@ -318,6 +322,15 @@ class _Collector:
                         acct.skip()
                     acct.rows(len(self.deliveries) - before)
         return self.deliveries
+
+    def _boards(self) -> list:
+        """Default-board fallback preserves delivery, not a complete census."""
+        try:
+            return self.kb.list_boards(include_archived=False)
+        except Exception:  # health: allow BLE001 -- same fallback, with an explicit retry obligation
+            self.report.retry()
+            logger.debug("kanban notifier: board census failed", exc_info=True)
+            return [self.kb.read_board_metadata(self.kb.DEFAULT_BOARD)]
 
     def _probe_board(self, slug: str) -> tuple[bool, int, Optional[tuple]]:
         """``(has owned subs, in-flight rows, gate key)`` from one cheap read-only probe before the writable
@@ -381,6 +394,8 @@ class _Collector:
         """Claim events on one board, appending delivery dicts to ``deliveries``. Returns :data:`_SKIPPED` when
         the board's gate key proves the pass would claim, recover and sweep nothing (:func:`_gate_skips`)."""
         has_subs, inflight, board_key = self._probe_board(slug)
+        if inflight or board_key is None:
+            self.report.retry()
         gate = _gate_state(self.runner)
         if not has_subs:
             gate.pop(slug, None)
@@ -394,6 +409,7 @@ class _Collector:
             conn = _kbc().connect(board=slug)
         except Exception as exc:
             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
+            self.report.retry()
             return None
         try:
             if self.gc_due:
@@ -401,8 +417,11 @@ class _Collector:
             # A claim whose holder died between claim and send is rewound before this tick claims again.
             # Messaging has no transcript row to dedupe against, so a crash after a successful send and before
             # the ack can deliver twice; that is the at-least-once trade the tui path already makes. [daveey]
-            with contextlib.suppress(Exception):
+            try:
                 _kbn().recover_orphaned_notify_claims(conn)
+            except Exception:  # health: allow BLE001 -- retain the existing recovery retry after a swallowed failure
+                self.report.retry()
+                logger.debug("kanban notifier: claim recovery failed for %s", slug, exc_info=True)
             # No explicit init_db(): connect() already runs the migration once per
             # process, and init_db() would re-run it on a second connection racing
             # the first.
@@ -410,6 +429,10 @@ class _Collector:
                 conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned,
                 platforms=self.claim_platforms, pending_only=True, pending_kinds=self._pending_kinds(),
             )
+            if subs:
+                # Claims, refused routes and successful sends all require a later
+                # structural settlement check; an empty delivery list is not proof.
+                self.report.retry()
             if not subs:
                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
                 # Nothing pending, in flight or unclaimed: the next pass is due only when the key moves (C10: a
@@ -486,16 +509,20 @@ def _serving_key(runner: Any, collector: _Collector) -> tuple:
 
 
 @_la.accounted("notifier.collect", rows=True)
-def _notifier_collect(runner: Any, kb: Any, *, notifier_profile: Optional[str], gc_due: bool, gc_retention_days: int) -> list[dict]:
+def _notifier_collect(runner: Any, kb: Any, *, notifier_profile: Optional[str], gc_due: bool,
+                      gc_retention_days: int, report: Optional[PassReport] = None) -> list[dict]:
     """Claim unseen terminal events for every owned subscription on every board.
 
     Each gateway polls only subscriptions owned by profiles whose adapters it
     hosts; legacy rows without a profile stamp are visible only to the process
     holding the singleton dispatcher lock.
     """
-    return _Collector(
+    collector = _Collector(
         runner, kb, notifier_profile=notifier_profile, gc_due=gc_due, gc_retention_days=gc_retention_days,
-    ).collect()
+    )
+    if report is not None:
+        collector.report = report
+    return collector.collect()
 
 
 # --- Per-event message formatting: kind -> (msg, wake_handoff, wake_review_detail) ---

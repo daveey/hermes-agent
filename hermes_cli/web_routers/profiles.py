@@ -35,6 +35,8 @@ from hermes_cli.session_listing import (
     automated_listing_exclusion, automated_policy_key, automated_session_sources, stamp_automated,
     subagent_listing_scope)
 from hermes_cli.profile_session_scan_cache import ProfileSessionScanCache
+from hermes_cli.sessions_fact_routes import ScopedSessionsRoutes
+from hermes_cli import sessions_projection
 from hermes_cli.web_deps import late
 from hermes_cli.config import get_process_hermes_home
 from hermes_cli.isolated_scope import scope_to_launch_profile
@@ -46,7 +48,6 @@ from hermes_cli.process_session_activity import annotate_background_activity
 from hermes_cli.subagent_session_activity import annotate_subagent_activity
 from hermes_cli.turn_session_activity import annotate_turn_activity
 from hermes_cli.review_session_activity import annotate_review_wait
-from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_server_profiles import (
     _fallback_profile_dicts, _hub_action_name,
 )
@@ -205,16 +206,6 @@ def _tag_rows(rows: list[dict[str, Any]], name: str, now: float) -> list[dict[st
     return rows
 
 
-def _pinned_window(rows: list[dict[str, Any]], offset: int, cap: int) -> list[dict[str, Any]]:
-    """``rows[offset:offset+cap]`` plus every pinned row past it: the per-profile queries
-    back-fill pinned rows past their LIMIT, so truncating on recency alone would drop them."""
-    window = rows[offset:offset + cap]
-    if len(rows) > offset + cap:
-        seen = {id(s) for s in window}
-        window.extend(s for s in rows[offset + cap:] if s.get("pinned") and id(s) not in seen)
-    return window
-
-
 def _recency(s: dict[str, Any]) -> Any:
     return s.get("last_active") or s.get("started_at") or 0
 
@@ -319,18 +310,6 @@ def _retryable_profile_errors(errors: list[dict[str, str]], scanned) -> list[dic
     """Scan failures Retry can re-attempt. A latched corrupt store has its own notice."""
     corrupt = set(_corrupt_profile_stores(scanned))
     return [dict(err) for err in errors if err.get("profile") not in corrupt]
-
-
-def _failed_load_slice(errors: list[dict[str, str]], **extra) -> dict[str, Any]:
-    """Failed load: no ``sessions`` key. An empty list would read as data loss."""
-    return {"failed": True, "retry": True, "errors": [dict(err) for err in errors], **extra}
-
-
-def _profiles_failed(errors: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
-    return {
-        err["profile"]: {"failed": True, "retry": True, "error": err.get("error", "")}
-        for err in errors if err.get("profile")
-    }
 
 
 def _sidebar_singleflight_cache(func):
@@ -507,18 +486,7 @@ def get_profiles_sessions(
             rows, totals[name] = result
             merged.extend(stamp_automated(_tag_rows(rows, name, now), home))
 
-    sort_key = "last_active" if order == "recent" else "started_at"
-    merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
-    if archived == "only":
-        # Pinned live chats back-fill this view, but cannot consume positions
-        # in its archived-only cursor (whose total counts only archived rows).
-        window = _pinned_window([s for s in merged if s.get("archived")], offset, limit)
-        # Keep backfill after the window: clients retain only limit rows plus pins.
-        window.extend(s for s in merged if s.get("pinned") and not s.get("archived"))
-    else:
-        window = _pinned_window(merged, offset, limit)
-    if not full:
-        _strip_session_list_rows(window)
+    window = sessions_projection.select_list_window(merged, limit, offset, order, archived, full)
     annotate_kanban_activity(window, display=True)
     annotate_goal_activity(window)
     annotate_cron_activity(window)
@@ -526,14 +494,13 @@ def get_profiles_sessions(
     annotate_turn_activity(window)
     annotate_subagent_activity(window)
     annotate_review_wait(window)
-    return {"sessions": window, "total": sum(totals.values()), "profile_totals": totals,
-            "limit": limit, "offset": offset, "errors": errors,
-            "storage": _corrupt_profile_stores(targets)}
+    return sessions_projection.assemble_sessions(
+        window, totals, limit, offset, errors, _corrupt_profile_stores(targets))
 
 
 # [daveey] Row columns a stamp answer carries besides the annotators' own keys: the project placement (cwd/git) and
 # the stored outcome, which a replica record also lacks.
-_SESSION_STAMP_COLUMNS = ("cwd", "git_branch", "git_repo_root", "outcome", "muted")
+_SESSION_STAMP_COLUMNS = sessions_projection.SESSION_STAMP_COLUMNS
 
 
 # Admit scan contenders on the event loop, before they consume AnyIO slots.
@@ -550,10 +517,18 @@ async def _profiles_sessions_http(*args, **kwargs):
     return per_request_response(await _profiles_sessions_admitted(*args, **kwargs))
 
 
+_SESSION_FACT_ROUTES = ScopedSessionsRoutes()
+
+
+def bind_sessions_facts(handle, scope):
+    """Create a scoped binding; authorized middleware selects it with use(binding)."""
+    return _SESSION_FACT_ROUTES.install(handle, scope)
+
+
+_profiles_sessions_http = _SESSION_FACT_ROUTES.wrap("sessions", _profiles_sessions_http)
 sessions_router.add_api_route("/api/profiles/sessions", _profiles_sessions_http, methods=["GET"])
 
 
-@sessions_router.get("/api/profiles/sessions/stamps")
 def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile: str = "default"):
     """[daveey] Activity stamps (kanban_*, goal/cron/background/turn/review, outcome, cwd) of the named sessions of
     one profile, read the way the list endpoints annotate their rows. The Desktop sidebar shows another gateway's
@@ -581,12 +556,18 @@ def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile:
     annotate_subagent_activity(rows)
     annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
         annotate_goal_activity(annotate_kanban_activity(rows, display=True))))))
-    out = []
-    for row, before in zip(rows, base):
-        stamps = {key: row[key] for key in row if key not in before and not key.startswith("_")}
-        stamps.update({key: row.get(key) for key in _SESSION_STAMP_COLUMNS})
-        out.append({"id": row["id"], "profile": name, **stamps})
-    return {"sessions": out}
+    return sessions_projection.assemble_stamps(rows, base, name)
+
+
+async def _session_stamps_legacy(**kwargs):
+    return await run_in_threadpool(get_profiles_session_stamps, **kwargs)
+
+
+sessions_router.add_api_route(
+    "/api/profiles/sessions/stamps",
+    _SESSION_FACT_ROUTES.wrap("sessions_stamps", _session_stamps_legacy,
+                              signature=inspect.signature(get_profiles_session_stamps)),
+    methods=["GET"])
 
 
 @_sidebar_singleflight_cache
@@ -675,55 +656,23 @@ def get_profiles_sessions_sidebar(
                 _tag_rows(slices[key], name, now), automated_sources=automated))
 
     def _window(key: str) -> list[dict[str, Any]]:
-        rows[key].sort(key=_recency, reverse=True)
-        win = _pinned_window(rows[key], 0, cap[key])
-        _strip_session_list_rows(win)
+        win = sessions_projection.select_sidebar_window(rows[key], cap[key])
         annotate_subagent_activity(win)
         return annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
             annotate_goal_activity(annotate_kanban_activity(win, display=True))))))
 
     storage = _corrupt_profile_stores(scanned)
     retryable = _retryable_profile_errors(errors, scanned)
-    failed_names = {err["profile"] for err in retryable if err.get("profile")}
-    corrupt = set(storage)
-    live = [name for name, _home in scanned if name not in corrupt]
-    scoped_failed = (
-        recents_scope != "all"
-        and recents_scope in failed_names
-        and recents_scope not in contributed
-    )
-    all_failed = (
-        recents_scope == "all"
-        and bool(live)
-        and not contributed
-        and all(name in failed_names for name in live)
-    )
-    if scoped_failed or all_failed:
-        # The whole answer is this profile's (or every profile's) failed scan.
-        # Do not include ``sessions``: an empty list is a successful read.
-        return {
-            "recents": _failed_load_slice(
-                retryable, profiles_truncated={}, profiles_usage={}),
-            "cron": _failed_load_slice(retryable),
-            "messaging": _failed_load_slice(retryable, total=0),
-            "errors": errors, "storage": storage}
-
-    with one_annotation_snapshot():
-        body = {
-            "recents": {"sessions": _window("recents"), "profiles_truncated": recents_truncated,
-                        "profiles_usage": profile_totals},
-            "cron": {"sessions": _window("cron")},
-            "messaging": {"sessions": _window("messaging"), "total": len(rows["messaging"])},
-            "errors": errors, "storage": storage}
-    # A sibling profile still listed does not make the failed profile's absence
-    # a successful empty slice. Stamp that profile as a failed load with Retry.
-    failed = _profiles_failed(retryable)
-    if failed:
-        body["profiles_failed"] = failed
-        for key in ("recents", "cron", "messaging"):
-            body[key]["profiles_failed"] = failed
-            body[key]["errors"] = [dict(err) for err in retryable]
-    return body
+    scanned_names = [name for name, _home in scanned]
+    windows = {}
+    if not sessions_projection.sidebar_failed(
+            recents_scope, retryable, storage, scanned_names, contributed):
+        with one_annotation_snapshot():
+            windows = {key: _window(key) for key in sessions_projection.SIDEBAR_SLICES}
+    return sessions_projection.assemble_sidebar(
+        windows, recents_scope=recents_scope, errors=errors, retryable=retryable,
+        storage=storage, scanned=scanned_names, contributed=contributed,
+        truncated=recents_truncated, usage=profile_totals, messaging_total=len(rows["messaging"]))
 
 
 def _merge_by_id(into: dict[str, dict[str, Any]], entries: list[dict[str, Any]], child_key: str) -> None:
@@ -814,7 +763,12 @@ def profile_project_trees(
     return out
 
 
+from hermes_cli import projects_fact_routes
+
+
+@projects_fact_routes.route
 @_sidebar_singleflight_cache
+@projects_fact_routes.legacy_reader
 @_la.accounted("route/profiles.projects.tree")
 def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000, profile: Optional[str] = None):
     """Project tree for every profile at once, for the all-profiles sidebar.
@@ -846,7 +800,8 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
 
 
 sessions_router.add_api_route(
-    "/api/profiles/sessions/sidebar", get_profiles_sessions_sidebar.http_endpoint, methods=["GET"])
+    "/api/profiles/sessions/sidebar",
+    _SESSION_FACT_ROUTES.wrap("sessions_sidebar", get_profiles_sessions_sidebar.http_endpoint), methods=["GET"])
 sessions_router.add_api_route(
     "/api/profiles/projects/tree", get_profiles_projects_tree.http_endpoint, methods=["GET"])
 

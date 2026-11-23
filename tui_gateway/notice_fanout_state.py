@@ -9,8 +9,9 @@ install; the next holder resumes where the last one stopped. Each process opens 
 path and pid, PRAGMA + schema at open) and reuses it; a failed statement drops it so the next call reopens.
 
 Writes are last-writer-wins: with the lease off every process runs the pass, and two passes over the same
-interval write the same (idempotent) refreshes. A store that cannot be opened (read-only home, disk error) falls
-back to this process's memory, which is the behaviour before this file existed. Never raises.
+interval write the same (idempotent) refreshes. Memory caches only successfully committed writes; an unavailable
+store never acknowledges new work in memory. Writers return False so executors retain replay and retry. Never raises
+for SQLite failures.
 """
 
 from __future__ import annotations
@@ -109,28 +110,35 @@ def _warn_once(where: Path, exc: BaseException) -> None:
                        where, exc)
 
 
-def get_cursor(ident: str) -> Optional[int]:
+def get_cursor(ident: str, *, strict: bool = False) -> Optional[int]:
     with _mu, _open() as conn:
         if conn is None:
+            if strict:
+                raise RuntimeError("card-change cursor store unavailable")
             return _mem(path())["cursors"].get(ident)
         try:
             row = conn.execute("SELECT cursor FROM cursors WHERE ident = ?", (ident,)).fetchone()
         except sqlite3.Error as exc:
             _failed(exc)
+            if strict:
+                raise RuntimeError("card-change cursor store unavailable") from exc
             return _mem(path())["cursors"].get(ident)
         return int(row[0]) if row else None
 
 
-def set_cursor(ident: str, cursor: int) -> None:
+def set_cursor(ident: str, cursor: int) -> bool:
+    """Acknowledge only a durable commit; failed writes retain the replay position."""
     with _mu, _open() as conn:
-        _mem(path())["cursors"][ident] = int(cursor)
         if conn is None:
-            return
+            return False
         try:
             conn.execute("INSERT INTO cursors (ident, cursor) VALUES (?, ?) "
                          "ON CONFLICT(ident) DO UPDATE SET cursor = excluded.cursor", (ident, int(cursor)))
         except sqlite3.Error as exc:
             _failed(exc)
+            return False
+        _mem(path())["cursors"][ident] = int(cursor)
+        return True
 
 
 def _decode(raw: str) -> frozenset[tuple[str, str]]:
@@ -144,10 +152,12 @@ def _encode(cards: frozenset[tuple[str, str]]) -> str:
     return json.dumps(sorted(cards))
 
 
-def load_remote() -> Optional[Snapshot]:
+def load_remote(*, strict: bool = False) -> Optional[Snapshot]:
     """The last remote snapshot, or None when no pass has seeded one yet."""
     with _mu, _open() as conn:
         if conn is None:
+            if strict:
+                raise RuntimeError("card-change snapshot store unavailable")
             return _mem(path())["remote"]
         try:
             if conn.execute("SELECT 1 FROM meta WHERE k = ?", (_SEEDED,)).fetchone() is None:
@@ -155,15 +165,16 @@ def load_remote() -> Optional[Snapshot]:
             return {str(chat): _decode(cards) for chat, cards in conn.execute("SELECT chat, cards FROM remote_snapshot")}
         except sqlite3.Error as exc:
             _failed(exc)
+            if strict:
+                raise RuntimeError("card-change snapshot store unavailable") from exc
             return _mem(path())["remote"]
 
 
-def seed_remote(snapshot: Snapshot) -> None:
-    """Replace the whole snapshot (first pass)."""
+def seed_remote(snapshot: Snapshot) -> bool:
+    """Replace the whole snapshot (first pass), certifying only durable success."""
     with _mu, _open() as conn:
-        _mem(path())["remote"] = dict(snapshot)
         if conn is None:
-            return
+            return False
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM remote_snapshot")
@@ -175,22 +186,18 @@ def seed_remote(snapshot: Snapshot) -> None:
             with contextlib.suppress(sqlite3.Error):
                 conn.execute("ROLLBACK")
             _failed(exc)
+            return False
+        _mem(path())["remote"] = dict(snapshot)
+        return True
 
 
-def ack_remote(acked: dict[str, Optional[frozenset[tuple[str, str]]]]) -> None:
-    """Record the chats a pass refreshed (or skipped on purpose): their new cards, or None when they have none."""
+def ack_remote(acked: dict[str, Optional[frozenset[tuple[str, str]]]]) -> bool:
+    """Record successful actions; failure never hides pending work behind a memory ACK."""
     if not acked:
-        return
+        return True
     with _mu, _open() as conn:
-        mem = _mem(path())
-        if mem["remote"] is not None:
-            for chat, cards in acked.items():
-                if cards is None:
-                    mem["remote"].pop(chat, None)
-                else:
-                    mem["remote"][chat] = cards
         if conn is None:
-            return
+            return False
         try:
             conn.execute("BEGIN IMMEDIATE")
             for chat, cards in acked.items():
@@ -204,6 +211,15 @@ def ack_remote(acked: dict[str, Optional[frozenset[tuple[str, str]]]]) -> None:
             with contextlib.suppress(sqlite3.Error):
                 conn.execute("ROLLBACK")
             _failed(exc)
+            return False
+        mem = _mem(path())
+        if mem["remote"] is not None:
+            for chat, cards in acked.items():
+                if cards is None:
+                    mem["remote"].pop(chat, None)
+                else:
+                    mem["remote"][chat] = cards
+        return True
 
 
 def forget_memory_for_tests() -> None:

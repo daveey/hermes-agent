@@ -215,12 +215,13 @@ def test_scheduler_remote_retry_does_not_shift_normal_work(monkeypatch, stop_kin
 
     monkeypatch.setattr(sn, "_notif_poll_kanban", poll)
     monkeypatch.setattr(process_registry_awaiting, "take_ready", take)
+    sn._notification_poller_scoped_loop(stop, "sid", session)
     if stop_kind == "exception":
-        with pytest.raises(RuntimeError, match="retry failed"):
-            sn._notification_poller_scoped_loop(stop, "sid", session)
-        assert calls == [(100.0, False), (101.0, True)]
+        # A failed retry no longer kills the session's only executor. Its
+        # independent failure deadline retries even without a new source delta.
+        assert calls == [(100.0, False), (101.0, True), (102.0, False)]
+        assert producers == [100.0] and loops == [100.0]
     else:
-        sn._notification_poller_scoped_loop(stop, "sid", session)
         assert calls == [(100.0, False), (101.0, True), (105.0, False)]
         assert producers == [100.0, 105.0] and loops == [100.0, 105.0]
     assert waits[0] == 1.0

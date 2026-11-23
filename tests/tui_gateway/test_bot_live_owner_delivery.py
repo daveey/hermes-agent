@@ -101,7 +101,9 @@ def test_viewer_poller_never_discovers_or_claims_bot_execution(monkeypatch, tmp_
         '_notif_log_failure': unexpected_failure, 'logger': logging.getLogger(__name__),
     })
     # Start from the module's own globals: the fork's poller also reads its parked/held handoff helpers.
+    from tui_gateway import server, session_notifications_loop
     globals_ = {
+        **vars(server),
         **vars(session_notifications),
         'logger': logging.getLogger(__name__),
         '_kb_release_claims': release_claims, '_notif_log_failure': unexpected_failure,
@@ -114,8 +116,11 @@ def test_viewer_poller_never_discovers_or_claims_bot_execution(monkeypatch, tmp_
         '_session_home': lambda session: tmp_path,
         '_notif_handle_ready': lambda sid, session, ready, *a, **kw: (delivered.extend(ready), stop.set()),
     }
-    for name in ('_notification_poller_run', '_notification_poller_cleanup'):
+    for name in ('_notification_poller_cleanup', '_notification_poller_scoped_steps', '_notif_poller_identity'):
         globals_[name] = rebind(getattr(session_notifications, name), globals_)
+    for name in ('_notification_poller_drive', '_notification_poller_run_steps',
+                 '_notification_poller_execute_steps', '_notification_kanban_tick'):
+        globals_[name] = rebind(getattr(session_notifications_loop, name), globals_)
     poll = rebind(session_notifications._notification_poller_scoped_loop, globals_)
     poll(stop, 'live', {'agent': object(), 'history_lock': threading.RLock(), 'session_key': 'chat',
                       'active_session_lease': SimpleNamespace(lease_id='lease', released=False)})

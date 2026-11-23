@@ -66,6 +66,27 @@ class ScopeRefresher:
         self._ready = threading.Condition()
         self._pending: dict[tuple, Context] = {}
         self._worker: threading.Thread | None = None
+        self._fenced: set[tuple] = set()
+        self._active: tuple | None = None
+
+    def drain(self, scope: tuple, *, timeout: float) -> None:
+        """Fence admission, discard queued work, and join an active scope.
+
+        A timeout retains the fence: the caller still owns the transition and
+        must retry drain or explicitly resume. Never call under a projection lock.
+        """
+        with self._ready:
+            self._fenced.add(scope)
+            if self._active != scope:
+                self._pending.pop(scope, None)
+                return
+            if not self._ready.wait_for(lambda: self._active != scope, timeout):
+                raise TimeoutError('remote links scope is still refreshing')
+
+    def resume(self, scope: tuple) -> None:
+        """Restore legacy admission after replacement-source cleanup."""
+        with self._ready:
+            self._fenced.discard(scope)
 
     @property
     def busy(self) -> bool:
@@ -74,7 +95,7 @@ class ScopeRefresher:
 
     def submit(self, scope: tuple) -> None:
         with self._ready:
-            if scope in self._pending or len(self._pending) >= self._capacity:
+            if scope in self._fenced or scope in self._pending or len(self._pending) >= self._capacity:
                 return
             self._pending[scope] = copy_context()
             self._ready.notify()
@@ -96,6 +117,7 @@ class ScopeRefresher:
                 while not self._pending:
                     self._ready.wait()
                 scope = next(iter(self._pending))
+                self._active = scope
                 context = self._pending[scope]
             try:
                 from hermes_cli import loop_accounting  # one check; nested .build counts actual rebuilds
@@ -106,4 +128,6 @@ class ScopeRefresher:
             finally:
                 with self._ready:
                     del self._pending[scope]
-                context = None  # release captured request/profile values before going idle
+                    context = None  # release captured values before acknowledging drain
+                    self._active = None
+                    self._ready.notify_all()

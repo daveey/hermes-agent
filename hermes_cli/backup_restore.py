@@ -272,6 +272,7 @@ def _restore_db_pages(src: Path, dst: Path) -> bool:
     the maintenance reservation and epoch floor around this publication.
     """
     from hermes_cli.sqlite_safe_read import connect_tracked
+    from hermes_cli.fact_source_signal import publish_commit
 
     dst_conn: Optional[sqlite3.Connection] = None
     try:
@@ -289,6 +290,7 @@ def _restore_db_pages(src: Path, dst: Path) -> bool:
         finally:
             src_conn.close()
         dst_conn.close()
+        publish_commit(dst)
         # Restore original file permissions from the snapshot
         try:
             mode = src.stat().st_mode
@@ -358,6 +360,7 @@ def _restore_db_pages(src: Path, dst: Path) -> bool:
                 for _sidecar_suffix in ("-wal", "-shm", "-journal"):
                     dst.with_name(dst.name + _sidecar_suffix).unlink(missing_ok=True)
                 shutil.move(str(tmp), str(dst))
+            publish_commit(dst)
             return True
         except LiveConnectionError as exc2:
             logger.error(

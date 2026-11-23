@@ -40,6 +40,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
+from plugins.kanban.dashboard import board_legacy
 from typing import Callable, Optional, TypeVar
 
 log = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ def _sweep(now: float) -> list:
     return out
 
 
+@board_legacy.reader()
 def version(path: str) -> Optional[tuple]:
     """``(generation, dev, ino, schema_version, data_version)`` of ``path``; None when it
     cannot be observed (missing file, open/read error): the caller reads uncached."""
@@ -228,6 +230,7 @@ def version(path: str) -> Optional[tuple]:
     return (obs.gen, ident[0], ident[1], int(schema), int(data))
 
 
+@board_legacy.reader()
 def materialized(key: tuple, path: str, build: Callable[[], T],
                  update: Optional[Callable[[T], T]] = None) -> T:
     """Rows for ``key`` (``key[0]`` must be ``path``), rebuilt when the version moved.
@@ -254,6 +257,7 @@ def materialized(key: tuple, path: str, build: Callable[[], T],
     return rows
 
 
+@board_legacy.reader()
 def content_version(path: str) -> Optional[tuple]:
     """Content-only revision for switcher counts, with commit-key fallback on legacy boards."""
     from hermes_cli import kanban_task_change
@@ -270,6 +274,7 @@ def content_version(path: str) -> Optional[tuple]:
     return (ver[0], cursor) if cursor is not None else ver
 
 
+@board_legacy.reader()
 def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> dict:
     """Read cursor, delta and volatile overlay in ONE short-lived guarded snapshot.
 
@@ -322,6 +327,13 @@ def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> d
                 while len(_entries) > MAX_ENTRIES:
                     _entries.popitem(last=False)
         return rows
+
+
+def retire(paths) -> None:
+    """Retire drained authorized paths without disturbing another profile/board."""
+    with _lock:
+        retired = [_drop_observer(str(path)) for path in paths]
+    _retire(*retired)
 
 
 def clear() -> None:

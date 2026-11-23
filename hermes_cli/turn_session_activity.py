@@ -16,6 +16,7 @@ Cached for a couple of seconds because the sidebar polls.
 """
 
 from __future__ import annotations
+from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 
 import json
 import logging
@@ -216,6 +217,7 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
             yield sid
 
 
+@_fact_consumer('turn')
 def annotate_turn_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``turn_live: true`` on each row whose lineage holds a live turn lease; pop it otherwise.
     Never raises: the list must render without it."""
@@ -234,6 +236,11 @@ def annotate_turn_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         _log.debug("turn gateway identity unavailable", exc_info=True)
         gateway = None
     now = time.time()
+    return project_turn_activity(rows, live=live, leases=leases, gateway=gateway, now=now)
+
+
+def project_turn_activity(rows, *, live, leases, gateway, now):
+    """Pure serializer over captured live IDs and per-ID lease dictionaries."""
     for row in rows:
         roots = [sid for sid in _row_ids(row) if sid in live]
         if roots:

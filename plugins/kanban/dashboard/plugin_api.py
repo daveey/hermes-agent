@@ -43,7 +43,7 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics, _warnings_summary_from_diagnostics
-from plugins.kanban.dashboard import board_read, board_shadow
+from plugins.kanban.dashboard import board_catalog_projection, board_read, board_shadow
 from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the documented column list
     BOARD_COLUMNS, _placeholders, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
@@ -244,6 +244,10 @@ def _link_tasks(conn: sqlite3.Connection, links: dict[str, list[str]]) -> list[d
 
 # --- GET /board -------------------------------------------------------------
 
+from plugins.kanban.dashboard import board_fact_views
+
+
+@board_fact_views.route("board", decoded=True)
 @_la.accounted("route/kanban.board")
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
@@ -336,6 +340,7 @@ def get_session_labels(ids: str = Query(..., max_length=4000)):
 
 
 @router.get("/board")
+@board_fact_views.route("board")
 async def get_board_endpoint(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
@@ -1525,19 +1530,18 @@ def _annotate_board_meta(meta: dict) -> dict:
 
 
 @router.get("/projects")
+@board_fact_views.route("projects")
 def list_kanban_projects():
     """Live (non-archived) projects available for board scoping."""
     with _errors_to_500("failed to list projects"):
         from hermes_cli import projects_db as pdb
         with pdb.connect_closing() as pconn:
             projects = pdb.list_projects(pconn, include_archived=False)
-    return {"projects": [
-        {"id": p.id, "slug": p.slug, "name": p.name,
-         "primary_path": p.primary_path or "", "icon": p.icon or "", "color": p.color or ""}
-        for p in projects]}
+    return board_catalog_projection.projects([p.to_dict() for p in projects])
 
 
 @router.get("/boards")
+@board_fact_views.route("boards")
 @_la.accounted("route/kanban.boards")
 def list_boards(include_archived: bool = Query(False)):
     """Every board on disk with task counts and the active slug."""
@@ -1545,17 +1549,13 @@ def list_boards(include_archived: bool = Query(False)):
     current = kanban_db.get_current_board()
     # The switcher polls this: open the projects db only when a listed board is project-scoped.
     proj_map = _projects_by_id() if any(b.get("project_id") for b in boards) else {}
+    counts, workspace_kinds = {}, {}
     for b in boards:
-        b["is_current"] = (b["slug"] == current)
-        b["counts"] = _board_counts(b["slug"])
-        # Live cards only — archived tasks are hidden from every default board view,
-        # so counting them in the switcher badge would visibly disagree.
-        b["total"] = sum(n for status, n in b["counts"].items() if status != "archived")
-        b["default_workspace_kind"] = _default_workspace_kind(b)
-        pid = b["project_id"] = b.get("project_id") or None
-        proj = proj_map.get(pid) if pid else None
-        b["project_name"] = proj.name if proj else None
-    return {"boards": boards, "current": current}
+        counts[b["slug"]] = _board_counts(b["slug"])
+        workspace_kinds[b["slug"]] = _default_workspace_kind(b)
+    return board_catalog_projection.boards(
+        boards, current, counts=counts, workspace_kinds=workspace_kinds,
+        project_names={pid: proj.name for pid, proj in proj_map.items()})
 
 
 def _validate_workdir(raw: str) -> str:
@@ -1985,7 +1985,9 @@ async def stream_events(ws: WebSocket):
         await tail.shutdown()
 
 
-# Boot: read the active board before the Desktop's first poll.
-from plugins.kanban.dashboard.board_prewarm import start_board_prewarm
+from plugins.kanban.dashboard.board_prewarm import LegacyLifecycle
 
-start_board_prewarm(sys.modules[__name__])
+start_legacy = partial(LegacyLifecycle, sys.modules[__name__])
+
+
+bind_facts = partial(board_fact_views.bind_api, api=sys.modules[__name__])

@@ -5,6 +5,7 @@ Unended children older than the six-hour discovery window and persist-disabled c
 not covered; stale rows inside the window remain explicit unknown observations.
 """
 from __future__ import annotations
+from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 
 import logging
 import sqlite3
@@ -54,6 +55,7 @@ def _children(path, now):
         return rows
 
 
+@_fact_consumer('subagent')
 def annotate_subagent_activity(rows):
     """Append canonical observations, never count a missing/failed store as zero work."""
     if not rows:
@@ -69,6 +71,11 @@ def annotate_subagent_activity(rows):
     for profile, path in paths:
         children = _children(path, now)
         by_profile[profile] = (children or [], "subagent_store_unavailable" if children is None else None)
+    return project_subagent_activity(rows, by_profile=by_profile, gateway=gateway, now=now)
+
+
+def project_subagent_activity(rows, *, by_profile, gateway, now):
+    """Pure serializer; profile maps to (child tuples, optional source error)."""
     for row in rows:
         profile = row.get("profile") or "default"
         children, error = by_profile.get(profile, ([], "subagent_store_unavailable"))

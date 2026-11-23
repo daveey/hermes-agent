@@ -33,6 +33,7 @@ from hermes_state_fts import (_drop_orphan_fts_shadow_tables, base_index_recogni
 from hermes_state_holders import _read_proc_argv
 from hermes_state_search import _delete_meta, _meta_row
 from hermes_state_session_change import install_fail_open as install_session_change
+from hermes_state_session_content_change import install_fail_open as install_session_content_change
 from hermes_state_rank_memo import install_fail_open as install_rank_memo  # [daveey] D2 lowered counter
 from hermes_state_errors import is_sqlite_lock_error
 from hermes_state_titles import next_title_in_lineage
@@ -1147,7 +1148,8 @@ class SessionSchemaMixin:
         finally:
             self._fts_startup_init = False
             self._fts_tick_plan = None
-        memo.record(self, before, healed=healed)
+        if self._session_content_ready:
+            memo.record(self, before, healed=healed)
 
     def _init_schema_full(self) -> bool:
         """Create tables and FTS if missing, reconcile columns, run data migrations. Column
@@ -1197,6 +1199,7 @@ class SessionSchemaMixin:
         self._execute_ddl_skipping_settled_triggers(cursor, DEFERRED_INDEX_SQL)  # same ordering constraint (``active``)
         self._ensure_session_projection(cursor)
         install_session_change(cursor.connection)
+        self._session_content_ready = install_session_content_change(cursor.connection)
         install_rank_memo(cursor.connection)
 
         # After DEFERRED_INDEX_SQL: its partial index on ``active IS NULL`` serves the probe.

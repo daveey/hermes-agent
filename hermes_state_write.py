@@ -111,6 +111,8 @@ def _log_writer_owner(db, waiter_site) -> None:
 
 def maintain_after_commit(db):
     """Count committed writes and run due maintenance after releasing the writer mutex."""
+    from hermes_cli.fact_source_signal import publish_commit
+    publish_commit(getattr(db, "db_path", None))
     db._write_count += 1
     if db._write_count % db._CHECKPOINT_EVERY_N_WRITES == 0:
         db._try_wal_checkpoint()

@@ -410,20 +410,44 @@ def project(rows: dict, include_archived, diagnostics_from_inputs: Callable = di
     """The /board payload from ``materialize`` rows plus what may change without a
     commit (clock, config, profiles on disk, replica). Builds new containers throughout."""
     diagnostics_per_task = diagnostics_from_inputs(rows["diag_inputs"])
+    ages = {}
+    for task, _fields, _extra in rows["cards"]:
+        try:
+            ages[task.id] = kanban_db.task_age(task)
+        except Exception:  # health: allow BLE001 -- preserve one-bad-row age fallback
+            ages[task.id] = {"created_age_seconds": None, "started_age_seconds": None, "time_to_complete_seconds": None}
+    assignees = sorted(set(kanban_db.list_profiles_on_disk()) | rows["task_assignees"])
+    return project_captured(rows, include_archived, diagnostics_per_task=diagnostics_per_task,
+                            ages=ages, assignees=assignees, now=int(time.time()))
+
+
+def project_captured(rows: dict, include_archived: bool, *, diagnostics_per_task: dict,
+                     ages: dict, assignees: list, now: int) -> dict:
+    """Pure canonical board projection, shared by legacy and owner reducers.
+
+    Inputs are a coherent captured materialization plus explicit diagnostic, age,
+    profile-roster and clock projections. This function never resolves a source;
+    callers must not substitute empty mappings for unavailable source inputs.
+    Shadow merging remains a separate canonical projection step.
+    """
+    plain = {**rows, "cards": tuple((fields, extra) for _t, fields, extra in rows["cards"])}
+    return project_fields(plain, include_archived, diagnostics_per_task=diagnostics_per_task,
+                          ages=ages, assignees=assignees, now=now)
+
+
+def project_fields(rows, include_archived, *, diagnostics_per_task, ages, assignees, now):
+    """Canonical serializer over detached plain fields; no retained Task objects."""
     columns: dict[str, list[dict]] = {c: [] for c in BOARD_COLUMNS}
     if include_archived:
         columns["archived"] = []
-    for t, fields, extra in rows["cards"]:
+    for fields, extra in rows["cards"]:
         d = fresh(fields)
-        # Derived age metrics so the UI can colour stale cards without client deltas.
-        try:
-            d["age"] = kanban_db.task_age(t)
-        except Exception:  # health: allow BLE001 -- same fallback as _task_dict: one bad row must not 500 the board
-            d["age"] = {"created_age_seconds": None, "started_age_seconds": None, "time_to_complete_seconds": None}
+        d["age"] = fresh(ages[fields["id"]])
         d.update(fresh(extra))
-        _attach_diagnostics(d, diagnostics_per_task.get(t.id))
+        _attach_diagnostics(d, fresh(diagnostics_per_task.get(fields["id"])))
         preview_list_body(d)
-        columns[t.status if t.status in columns else "todo"].append(d)
+        status = fields["status"]
+        columns[status if status in columns else "todo"].append(d)
 
     # Queue lanes keep the list_tasks dispatch order; the done column is
     # history, so order it newest-completed-first. Two stable sorts compose
@@ -431,10 +455,7 @@ def project(rows: dict, include_archived, diagnostics_from_inputs: Callable = di
     columns["done"].sort(key=lambda d: d["id"], reverse=True)
     columns["done"].sort(key=lambda d: (d["completed_at"] is None, -(d["completed_at"] or 0)))
 
-    # Lane-by-profile sub-grouping: the same names as kanban_db.known_assignees (and the
-    # /assignees picker): profiles holding non-archived tasks plus profiles configured on
-    # disk, so a freshly-added profile shows up as a (possibly empty) lane immediately.
-    assignees = sorted(set(kanban_db.list_profiles_on_disk()) | rows["task_assignees"])
+    # The caller supplies the canonical profile/task-assignee union and ordering.
     done_total = rows["done_total"]
     columns_out = []
     for name, tasks in columns.items():
@@ -445,4 +466,4 @@ def project(rows: dict, include_archived, diagnostics_from_inputs: Callable = di
         columns_out.append(col)
     return {
         "columns": columns_out, "tenants": list(rows["tenants"]),
-        "assignees": assignees, "latest_event_id": rows["latest_event_id"], "now": int(time.time())}
+        "assignees": list(assignees), "latest_event_id": rows["latest_event_id"], "now": int(now)}

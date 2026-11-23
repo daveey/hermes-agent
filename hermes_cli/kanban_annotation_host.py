@@ -894,7 +894,66 @@ def _holder_refresh_scope(scope: tuple[str, ...]) -> bool:
     return True
 
 
+_holder_lock = threading.RLock()
+_holder_transfer_lock = threading.RLock()
+_holder_suspended = False
+
+
+def suspend_holder(*, timeout: float = 5.0) -> None:
+    """Process-wide cutover seam: stop/join and prohibit a racing legacy start."""
+    from hermes_cli.kanban_annotation_prewarm import suspend_annotation_prewarm
+
+    global _holder_suspended
+    with _holder_transfer_lock:
+        # A warmup may request the holder lock; never hold it while joining.
+        with _holder_lock:
+            _holder_suspended = True
+        suspend_annotation_prewarm(timeout=timeout)
+        stop_holder(timeout=timeout)
+
+
+def resume_holder(role: str) -> None:
+    """Global rollback calls this once after every facts consumer unsubscribes."""
+    from hermes_cli.kanban_annotation_prewarm import resume_annotation_prewarm
+
+    global _holder_suspended
+    with _holder_transfer_lock, _holder_lock:
+        if not _holder_suspended:
+            return
+        stop_holder()
+        resume_annotation_prewarm()
+        _holder_suspended = False
+        _start_holder(role)
+
+
+def stop_holder(*, timeout: float = 5.0) -> None:
+    """Drain the legacy owner before transferring projection ownership.
+
+    Keep custody on timeout: a replacement must never start while an old reader
+    can still publish. The holder itself closes watches and releases its lease.
+    """
+    with _holder_lock:
+        if not _holder:
+            return
+        for _thread, stop, _lease in _holder:
+            stop.set()
+        wake_holder()
+        deadline = time.monotonic() + timeout
+        for thread, _stop, _lease in _holder:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread, _stop, _lease in _holder):
+            raise TimeoutError("legacy annotation holder did not drain")
+        _holder.clear()
+
+
 def start_holder(role: str) -> threading.Thread | None:
+    with _holder_lock:
+        if _holder_suspended:
+            return None
+        return _start_holder(role)
+
+
+def _start_holder(role: str) -> threading.Thread | None:
     """Run the demand-driven refresher under the ``kanban-annotation`` host lease (once per process; never under
     the test harness)."""
     if _holder or os.environ.get("HERMES_TEST_ISOLATION") or not enabled():

@@ -918,9 +918,9 @@ DEFAULT_CONFIG = {
         # Gateway: natural mid-turn assistant status messages. Desktop: keep mid-turn narration
         # between tool calls instead of collapsing to the final message.
         "interim_assistant_messages": True,
-        # Engine warning/failure notifications stay visible unless an operator opts in.
-        # Does not suppress task results, manual commands, or existing logs.
+        # Warnings stay visible unless opted out; task results, manual commands and logs are unaffected.
         "suppress_warning_notifications": False,
+        "loaded_notification_f": True,  # shared loaded-session source schedule; false restores legacy polling
         # Codex Responses commentary channel: true delivers completed commentary as mid-turn interim
         # updates; false routes it to reasoning (visible only with show_reasoning).
         "show_commentary": True,

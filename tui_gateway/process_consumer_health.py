@@ -9,6 +9,7 @@ from pathlib import Path
 import json
 import os
 import threading
+from tui_gateway.notification_loaded_executor import current_consumer
 import time
 
 MAX_AGE = 15.0
@@ -35,7 +36,7 @@ def register(sid, session, stop, registry):
     home, key = server._session_home(session), session.get("session_key")
     if not home or not key or not hasattr(registry, "ownership_generation"):
         return
-    entry = _Consumer(sid, session, stop, threading.current_thread(), registry,
+    entry = _Consumer(sid, session, stop, current_consumer(), registry,
                       str(Path(home).resolve()), key)
     with _lock:
         _consumers[entry.thread] = entry
@@ -52,20 +53,20 @@ def invalidate(session):
 
 def unregister():
     with _lock:
-        _consumers.pop(threading.current_thread(), None)
+        _consumers.pop(current_consumer(), None)
 
 
 def begin_delivery(session):
     invalidate(session)
     with _lock:
-        entry = _consumers.get(threading.current_thread())
+        entry = _consumers.get(current_consumer())
         return (entry, entry.epoch) if entry is not None and entry.session is session else None
 
 
 def delivered(sid, session, registry, events, accepted, token):
     """Native dispatch calls this only after its actual admission result."""
     with _lock:
-        entry = _consumers.get(threading.current_thread())
+        entry = _consumers.get(current_consumer())
         if entry is None or entry.registry is not registry or entry.session is not session or entry.sid != sid:
             return
         if token is None or token[0] is not entry or token[1] != entry.epoch:

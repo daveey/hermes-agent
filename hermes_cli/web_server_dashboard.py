@@ -1261,8 +1261,9 @@ def _mount_one_plugin_api(app, plugin: dict[str, Any], enabled_set: set, disable
         if router is None:
             _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])
             return False
-        app.include_router(
-            router,
+        from hermes_cli.fact_plugin_mount import include_router
+        include_router(
+            app, mod, api_path,
             prefix=f"/api/plugins/{plugin['name']}",
             dependencies=[Depends(_plugin_route_secret_scope)],
         )

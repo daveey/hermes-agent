@@ -315,8 +315,9 @@ async def app_lifespan(app: FastAPI):
     # (stale-while-revalidate for the host-gateway memo; CLI processes keep the synchronous TTL).
     from gateway import host_attach
     host_attach.enable_stale_while_revalidate()
+    from hermes_cli.fact_plugin_mount import lifespan as plugin_lifespan
     try:
-        async with lifespan(app):
+        async with plugin_lifespan(app), lifespan(app):
             yield
     finally:
         host_attach.enable_stale_while_revalidate(False)

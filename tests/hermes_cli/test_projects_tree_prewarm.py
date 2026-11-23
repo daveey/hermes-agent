@@ -20,10 +20,13 @@ from hermes_cli.web_routers import profiles as profiles_routes
 
 def _clear_tree_cache():
     """The route's single-flight cache lives in the decorator's closure; start every test with it empty."""
-    for cell in profiles_routes.get_profiles_projects_tree.__closure__ or ():
-        value = cell.cell_contents
-        if isinstance(value, OrderedDict):
-            value.clear()
+    route = profiles_routes.get_profiles_projects_tree
+    while route is not None:
+        for cell in route.__closure__ or ():
+            value = cell.cell_contents
+            if isinstance(value, OrderedDict):
+                value.clear()
+        route = getattr(route, "__wrapped__", None)
 
 
 @pytest.fixture

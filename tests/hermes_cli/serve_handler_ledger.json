@@ -152,7 +152,7 @@
   {"current_path": "hermes_cli.web_routers.profiles:get_profiles_projects_tree", "decision": "undecided", "handler": "GET /api/profiles/projects/tree", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.profiles:get_profiles_sessions", "decision": "undecided", "handler": "GET /api/profiles/sessions", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.profiles:get_profiles_sessions_sidebar", "decision": "undecided", "handler": "GET /api/profiles/sessions/sidebar", "kind": "http", "ref": ""},
-  {"current_path": "hermes_cli.web_routers.profiles:get_profiles_session_stamps", "decision": "undecided", "handler": "GET /api/profiles/sessions/stamps", "kind": "http", "ref": ""},
+  {"current_path": "hermes_cli.web_routers.profiles:_session_stamps_legacy", "decision": "undecided", "handler": "GET /api/profiles/sessions/stamps", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.profiles:get_profile_desktop_overlay", "decision": "undecided", "handler": "GET /api/profiles/{name}/desktop-overlay", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.profiles:get_profile_setup_command", "decision": "undecided", "handler": "GET /api/profiles/{name}/setup-command", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.profiles:get_profile_soul", "decision": "undecided", "handler": "GET /api/profiles/{name}/soul", "kind": "http", "ref": ""},

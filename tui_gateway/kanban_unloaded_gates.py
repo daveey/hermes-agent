@@ -22,6 +22,22 @@ logger = logging.getLogger(__name__)
 
 
 _profile_census: ContextVar[dict | None] = ContextVar('unloaded_profile_census', default=None)
+_schedule_report: ContextVar[object | None] = ContextVar('unloaded_schedule_report', default=None)
+
+
+@contextmanager
+def scheduling(report):
+    token = _schedule_report.set(report)
+    try:
+        yield
+    finally:
+        _schedule_report.reset(token)
+
+
+def incomplete() -> None:
+    report = _schedule_report.get()
+    if report is not None:
+        report.retry()
 
 
 @contextmanager
@@ -106,6 +122,10 @@ def _notices(live: frozenset = frozenset()) -> Inputs:
             for sub in subscriptions(conn, _KANBAN_NOTIFY_KINDS):
                 chat = str(sub.get('chat_id') or '')
                 if sub.get('inflight_from') is not None and _claim_held(conn, sub, _KANBAN_NOTIFY_KINDS):
+                    if _schedule_report.get() is not None:
+                        # Holder death is not necessarily a fact publication. Keep
+                        # recovery cadence until the durable claim has settled.
+                        return Inputs()
                     # A live holder's fresh claim with nothing deliverable past its cursor: the sweep does nothing
                     # for it until the holder dies, the claim ages out or an event arrives, and every probe
                     # re-evaluates all three. Three of these held the hub's pass hot every 30 s (t_01a1dfa94f2251cd).
@@ -362,6 +382,8 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
                 if remote._holder_is_me(row[3]) or not remote._holder_alive(row[3], row[4]):
                     return Inputs()
                 held.add(tuple(row))
+            if held and _schedule_report.get() is not None:
+                return Inputs()  # foreign holder death must retain its recovery timer
     # The key is what the pass would read, not the replica's commit counter: the hub's replica commits several
     # task-row writes a second, and almost none touches a card this host owes a notice for (t_01a1dfa94f2251cd).
     # ``observe`` records this host's first sighting of EVERY terminal state, linked or not, and a later link must
@@ -628,7 +650,24 @@ def probe(kind: str, *, every_store: bool = True, live: frozenset | set = frozen
 def run(kind: str, work, *args, live: set[str], every_store: bool = True, **kwargs):
     """Each pass owns its key; pending/busy/slots never acquire a skip stamp."""
     with accounting.pass_('unloaded.' + kind) as count:
+        report = _schedule_report.get()
+        if report is not None and kind == 'card_change_pass':
+            try:
+                result = work(*args, **kwargs)
+            except Exception:  # health: allow BLE001 -- retain retry before propagating to the existing host boundary
+                report.retry()
+                raise
+            if not getattr(result, 'quiet', False):
+                report.retry()
+            elif getattr(result, 'next_deadline', None) is not None:
+                report.due_at(result.next_deadline)
+            return result
         inputs = probe(kind, every_store=every_store, live=live) if every_store else Inputs()
+        if report is not None:
+            if inputs.pending:
+                report.retry()
+            else:
+                report.due_at(time.monotonic() + max(0.0, inputs.due - time.time()))
         key = (frozenset(live), every_store, inputs.key)
         previous = _last.get(kind)
         if (not inputs.pending and previous is not None and previous[0] == key
@@ -638,7 +677,11 @@ def run(kind: str, work, *args, live: set[str], every_store: bool = True, **kwar
         # Forget BEFORE work. A raised operation must not leave an earlier stamp.
         _last.pop(kind, None)
         count.fallback() if inputs.pending else count.change()
-        result = work(*args, **kwargs)
+        try:
+            result = work(*args, **kwargs)
+        except Exception:  # health: allow BLE001 -- never turn failed work into an idle scheduling certificate
+            incomplete()
+            raise
         # Only an independent structural proof can be retained. In particular,
         # swallowed per-row errors on positive inputs cannot stamp success.
         if not inputs.pending and time.time() < inputs.due:

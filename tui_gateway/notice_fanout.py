@@ -33,6 +33,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from tui_gateway.notice_fanout_result import FanoutResult
+
 logger = logging.getLogger(__name__)
 
 MOVED_PREFIX = "moved_to_gateway:"
@@ -139,8 +141,13 @@ def mark_stale_blocked_notices(db: Any, sid: str, task_id: str) -> int:
         if meta.get("stale_tasks") == stale_tasks and bool(meta.get("stale")) == stale:
             continue
         meta.update(stale_tasks=stale_tasks, **({"stale": True} if stale else {}))
-        changed += db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
-                                      (json.dumps(meta, ensure_ascii=False), row["id"], row["display_metadata"]))
+        committed = db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+                                       (json.dumps(meta, ensure_ascii=False), row["id"], row["display_metadata"]))
+        if not committed:
+            # Another writer changed this row after capture. Replay from the durable
+            # cursor, merging its metadata instead of acknowledging a lost update.
+            raise RuntimeError("card-change stale metadata conflicted")
+        changed += committed
     return changed
 
 
@@ -159,18 +166,22 @@ def _linked_chats(conn: sqlite3.Connection, task_id: str, created_by: Optional[s
     return [c for c in dict.fromkeys(chats) if c not in released]
 
 
-def _changed_tasks(conn: sqlite3.Connection, ident: str) -> list[str]:
+def _changed_tasks(conn: sqlite3.Connection, ident: str) -> tuple[list[str], int]:
+    """Select work without acknowledging it; the caller commits actions before the cursor."""
     from tui_gateway import notice_fanout_state as state
     top = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
-    since = state.get_cursor(ident)
-    if since != top:
-        state.set_cursor(ident, top)
-    if since is None or top <= since:
-        return []
+    since = state.get_cursor(ident, strict=True)
+    if since is not None and top < since:
+        # A replaced/truncated source cannot certify the previous action cursor.
+        # Keep that cursor intact; neither a feed reset nor a quiet read ACKs loss.
+        raise RuntimeError("card-change durable event source regressed")
+    if since is None or top == since:
+        return [], top
     kinds = ",".join("?" * len(STATUS_EVENT_KINDS))
-    rows = conn.execute(f"SELECT task_id FROM task_events WHERE id > ? AND id <= ? AND kind IN ({kinds}) "
-                        f"ORDER BY id DESC LIMIT ?", (since, top, *STATUS_EVENT_KINDS, MAX_EVENTS_PER_PASS))
-    return list(dict.fromkeys(str(r[0]) for r in rows))
+    rows = conn.execute(f"SELECT task_id, id FROM task_events WHERE id > ? AND id <= ? AND kind IN ({kinds}) "
+                        f"ORDER BY id ASC LIMIT ?", (since, top, *STATUS_EVENT_KINDS, MAX_EVENTS_PER_PASS)).fetchall()
+    boundary = int(rows[-1][1]) if len(rows) == MAX_EVENTS_PER_PASS else top
+    return list(dict.fromkeys(str(r[0]) for r in rows)), boundary
 
 
 def _board_idle(ident: str) -> bool:
@@ -181,7 +192,7 @@ def _board_idle(ident: str) -> bool:
     from hermes_cli.kanban_reader_retention import reader
     from tui_gateway import notice_fanout_state as state
     try:
-        since = state.get_cursor(ident)
+        since = state.get_cursor(ident, strict=True)
         if since is None:
             return False
         with reader(Path(ident)) as ro:
@@ -197,8 +208,7 @@ def _board_idle(ident: str) -> bool:
             if ro.execute(f"SELECT 1 FROM task_events WHERE id > ? AND id <= ? AND kind IN ({kinds}) LIMIT 1",
                           (since, top, *STATUS_EVENT_KINDS)).fetchone() is not None:
                 return False
-        state.set_cursor(ident, top)
-        return True
+        return state.set_cursor(ident, top)
     except Exception:  # health: allow BLE001 -- an unreadable board is not idle; the full pass decides
         logger.debug("card-change idle check unavailable for %s", ident, exc_info=True)
         return False
@@ -232,15 +242,15 @@ def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, s
     for chat, cards in by_chat.items():
         with session_db(chat) as (db, tip):
             if db is None:
-                continue
+                raise RuntimeError("card-change session store unavailable")
             skipped = chat_skip_reason(db, chat)
             if skipped is None:
                 for tid, status in cards:
                     if status != "blocked":
-                        with contextlib.suppress(Exception):
-                            mark_stale_blocked_notices(db, tip, tid)
+                        mark_stale_blocked_notices(db, tip, tid)
                 from hermes_state_outcome import refresh_outcomes_quietly
-                refresh_outcomes_quietly([tip], "card_change", db=db)
+                if not refresh_outcomes_quietly([tip], "card_change", db=db):
+                    raise RuntimeError("card-change outcome not committed")
         out += [{"board": slug, "task_id": tid, "chat_id": chat, "session_id": tip, "status": status,
                  "skipped": skipped} for tid, status in cards]
     return out
@@ -272,7 +282,7 @@ def _remote_inputs_key() -> Optional[tuple]:
     if not gateway:
         return None
     boards = tuple((slug, str(ksc.shadow_path(slug))) for slug, _path in ksc.board_paths())
-    return (gateway, get_active_profile_name(), boards), activity._remote_links(stale_ok=True)
+    return (gateway, get_active_profile_name(), boards), activity._remote_links(stale_ok=False)
 
 
 # The ledger-card fields ``kanban_chat_links.replica_cards`` reads (owner labels, profile-board cards, cold-start
@@ -378,13 +388,15 @@ def _remote_boards_quiet(base: tuple, polled: dict, known: dict) -> bool:
     return True
 
 
-def _remote_change_pass(session_db: Callable) -> list[dict]:
+def _remote_change_pass(session_db: Callable) -> FanoutResult:
     """Observe the same remote projection as outcomes; failed reads never mean cards finished."""
     global _remote_memo
+    out = FanoutResult()
     try:
         inputs = _remote_inputs_key()
     except Exception:  # health: allow BLE001 -- an unreadable input is unknown: run the pass
         logger.debug("remote card-change inputs unavailable", exc_info=True)
+        out.retry()
         inputs = None
     polled = None
     if inputs is not None:
@@ -395,12 +407,13 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
             logger.debug("remote card-change boards unavailable", exc_info=True)
             polled = None
         if polled is None:
+            out.retry()
             inputs = None
     memo = _remote_memo
     if inputs is not None and memo is not None and memo[0] == inputs[0] and memo[1] == _ledger_content_key(inputs[1]) \
             and _remote_boards_quiet(inputs[0], polled, memo[3]):
         _remote_memo = (memo[0], memo[1], {slug: polled[slug][1] for slug in polled}, memo[3])
-        return []
+        return out
     _remote_memo = None
     from hermes_cli import kanban_session_activity as activity
     from hermes_state_outcome import refresh_outcomes_quietly
@@ -408,7 +421,7 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
     from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
     current: dict[str, set[tuple[str, str]]] = {}
     known: dict[str, set[str]] = {}
-    for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=True):
+    for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=False):
         known.setdefault(str(card.get("board")), set()).add(str(card.get("id")))
         status = card.get("status")
         if status not in activity.LISTED_STATUSES and not (status in PENDING_RELEASE_STATUSES and card.get("unfinished")):
@@ -416,11 +429,11 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
         for chat in {card.get("session"), card.get("origin_session")} - {None, ""}:
             current.setdefault(chat, set()).add((card["key"], status))
     snapshot = {chat: frozenset(cards) for chat, cards in current.items()}
-    previous = state.load_remote()
+    previous = state.load_remote(strict=True)
     if previous is None:
-        state.seed_remote(snapshot)
-        return []
-    out = []
+        if not state.seed_remote(snapshot):
+            out.retry()
+        return out
     acked: dict[str, Optional[frozenset[tuple[str, str]]]] = {}
     for chat in sorted(previous.keys() | snapshot.keys()):
         if previous.get(chat) == snapshot.get(chat):
@@ -428,19 +441,24 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
         try:
             with session_db(chat) as (db, tip):
                 if db is None:
+                    out.retry()
                     continue
                 skipped = chat_skip_reason(db, chat)
                 if skipped is None and not refresh_outcomes_quietly([tip], "card_change", db=db):
+                    out.retry()
                     continue
         except Exception:  # health: allow BLE001 -- retain failed chat invalidations and continue other chats
+            out.retry()
             logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
             continue
         # Acknowledge only a successful refresh or an intentionally skipped chat.
         acked[chat] = snapshot.get(chat)
         out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
                     "status": None, "skipped": skipped, "source": "remote"})
-    state.ack_remote(acked)
-    if inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
+    committed = state.ack_remote(acked)
+    if not committed:
+        out.retry()
+    if committed and inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
         # Only certify a projection if its cursor stayed still THROUGH fingerprint collection. A later
         # fingerprint must not describe a write the projection never saw.
         prints = _known_prints(inputs[0], known)
@@ -450,25 +468,55 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
     return out
 
 
-def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[Iterable[str]] = None) -> list[dict]:
-    """Refresh every chat linked to a card whose status moved since the last pass (see module doc). Never
-    raises; returns ``[{board, task_id, chat_id, session_id, status, skipped}]``."""
+def _board_slugs(kb: Any) -> list[str]:
+    """Enumerate without turning an unavailable roster into an empty success."""
+    unique: dict[str, str] = {}
+    for meta in kb.list_boards(include_archived=False):
+        slug = (meta or {}).get("slug") or kb.DEFAULT_BOARD
+        path = (meta or {}).get("db_path")
+        ident = str(Path(path).expanduser().resolve() if path else kb.kanban_db_path(slug).resolve())
+        unique.setdefault(ident, slug)
+    return list(unique.values())
+
+
+def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[Iterable[str]] = None) -> FanoutResult:
+    """Refresh linked chats, returning the legacy row list plus scheduling state.
+
+    ``FanoutResult.quiet`` certifies captured work drained; ``incomplete`` and
+    ``next_deadline`` (absolute monotonic seconds) retain bounded retries even
+    for an empty result. Callers must not infer quiet from list truthiness.
+    """
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_connect as _kbc
     from tui_gateway import kanban_unloaded as ku
     session_db = session_db or ku.find_session_db
-    done: list[dict] = []
-    for slug in (list(slugs) if slugs is not None else ku._board_slugs(_kb)):
+    done = FanoutResult()
+    try:
+        boards = list(slugs) if slugs is not None else _board_slugs(_kb)
+    except Exception:  # health: allow BLE001 -- roster failure is an explicit outstanding action obligation
+        logger.warning("card-change board enumeration failed", exc_info=True)
+        boards = []
+        done.retry()
+    for slug in boards:
         try:
             ident = str(_kb.kanban_db_path(slug).resolve())
             if _board_idle(ident):
                 continue
             with contextlib.closing(_kbc.connect(board=slug)) as conn:
-                done += _fan_out_changes(conn, _kb, session_db, slug, _changed_tasks(conn, ident))
+                from tui_gateway import notice_fanout_state as state
+                tids, cursor = _changed_tasks(conn, ident)
+                done += _fan_out_changes(conn, _kb, session_db, slug, tids)
+                if not state.set_cursor(ident, cursor):
+                    done.retry()
+                top = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
+                if top > cursor:
+                    done.retry(0.0)
         except Exception:
+            done.retry()
             logger.warning("card-change outcome pass failed on board %s", slug, exc_info=True)
     try:
-        done += _remote_change_pass(session_db)
+        done.absorb(_remote_change_pass(session_db))
     except Exception:  # health: allow BLE001 -- isolate the replica source and report failed reads
+        done.retry()
         logger.warning("remote card-change outcome pass failed", exc_info=True)
     return done

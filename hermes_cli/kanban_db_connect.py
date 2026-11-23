@@ -1719,6 +1719,8 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
             _run_end_lease.flush(conn, committed=False)
             raise
         annotation_mutation.flush(conn, annotation_scope)
+        from hermes_cli.fact_source_signal import publish_commit
+        publish_commit(_main_db_file(conn))
         _run_end_lease.flush(conn, committed=True)  # [daveey] Board lease of a run this txn ended
         # Post-commit torn-extend check — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)

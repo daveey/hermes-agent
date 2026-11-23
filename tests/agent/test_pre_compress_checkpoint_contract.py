@@ -371,10 +371,12 @@ def test_compressed_summary_column_is_added_to_legacy_databases(tmp_path):
     from hermes_state import SessionDB
 
     db_path = tmp_path / "state.db"
-    SessionDB(db_path)
+    SessionDB(db_path).close()
 
-    # Simulate a pre-upgrade database: the marker column does not exist.
+    # Simulate a pre-upgrade database: neither the marker column nor the
+    # newer content cursor trigger referring to that column existed yet.
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP TRIGGER IF EXISTS session_content_on_messages_update")
     conn.execute("ALTER TABLE messages DROP COLUMN _compressed_summary")
     conn.commit()
     legacy_cols = {

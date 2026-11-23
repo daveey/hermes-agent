@@ -759,16 +759,18 @@ def host_pass(grace: float = GRACE_S, *, every_store: bool = True) -> None:
 
 
 def _host_pass(grace: float, *, every_store: bool) -> None:
-    from tui_gateway.kanban_unloaded_gates import run
+    from tui_gateway.kanban_unloaded_gates import incomplete, run
     live = live_session_ids()
     try:
         run("remote_notices", sweep_remote_once, live, grace_s=grace, live=live, every_store=every_store)
     except Exception:
+        incomplete()
         logger.warning("remote kanban unloaded sweep failed", exc_info=True)
     try:
         live = live_session_ids()  # the remote wake may have loaded a chat in this very pass
         run("notices", sweep_once, live, grace_s=grace, live=live, every_store=every_store)
     except Exception:
+        incomplete()
         logger.warning("kanban unloaded sweep failed", exc_info=True)
     # [daveey] Async-delegation results no live poller delivers (parent unloaded, loaded headless, or held by
     # another backend than the copy's): one turn in the parent, ledger-claimed (delegation_unloaded).
@@ -776,6 +778,7 @@ def _host_pass(grace: float, *, every_store: bool) -> None:
         from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
         run("delegation", delegation_sweep_once, live=live, every_store=every_store)
     except Exception:
+        incomplete()
         logger.warning("async delegation unloaded sweep failed", exc_info=True)
     # [daveey] Session outcome: refresh chats whose cards moved, then make sure no notice ends a chat unanswered.
     from tui_gateway.notice_fanout import card_change_pass
@@ -799,16 +802,18 @@ def _host_pass(grace: float, *, every_store: bool) -> None:
 def residual_pass() -> None:
     """A standby's pass for the chats it holds itself: the delegation and guarantee passes skip a chat another
     backend holds (``skipped:held``), so the holder never delivers those. Nothing to do without live chats."""
+    from tui_gateway.kanban_unloaded_gates import incomplete, run
     live = live_session_ids()
     if not live:
         return
     try:
         from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
-        delegation_sweep_once(only=live)
+        run("delegation", delegation_sweep_once, only=live, live=live)
     except Exception:
+        incomplete()
         logger.warning("async delegation residual sweep failed", exc_info=True)
     from tui_gateway.notice_guarantee import guarantee_pass
-    guarantee_pass(only=live)
+    run("guarantee_pass", guarantee_pass, only=live, live=live)
 
 
 def make_lease():
@@ -818,7 +823,7 @@ def make_lease():
     return HostLoopLease(LEASE_NAME, process_role(), interval=interval)
 
 
-def run_pass(lease, grace: float = GRACE_S) -> str:
+def run_pass(lease, grace: float = GRACE_S, *, schedule=None) -> str:
     """One tick: the host pass while ``lease`` is held (then ``beat()``, also when the pass raises, so the
     watchdog keeps the lease and a ``.want`` hand-off still happens), else the residual pass. Returns which.
 
@@ -830,7 +835,10 @@ def run_pass(lease, grace: float = GRACE_S) -> str:
     wake_slots.set_holder(exclusive)
     if holder:
         try:
-            host_pass(grace, every_store=exclusive)
+            if schedule is None:
+                host_pass(grace, every_store=exclusive)
+            else:
+                schedule.run(("host", exclusive), host_pass, grace, every_store=exclusive)
         finally:
             lease.beat()
         return "host"
@@ -838,8 +846,15 @@ def run_pass(lease, grace: float = GRACE_S) -> str:
     if host_loops_retired():
         # [daveey] A superseded or code-skewed backend starts no wake on its stale code, not even for the chats
         # it still holds: they move to its successor, whose passes deliver them (t_01a1d65520e78e7d).
+        if schedule is not None:
+            schedule.role = "retired"
+            schedule.gate.retry_at = float("inf")
+            schedule.gate.retry_floor = False
         return "retired"
-    residual_pass()
+    if schedule is None:
+        residual_pass()
+    else:
+        schedule.run("residual", residual_pass)
     return "residual"
 
 
@@ -847,15 +862,27 @@ def _loop(stop: threading.Event) -> None:
     interval = max(1.0, _env_float("HERMES_KANBAN_UNLOADED_SWEEP_S", INTERVAL_S))
     grace = _env_float("HERMES_KANBAN_UNLOADED_GRACE_S", GRACE_S)
     lease = make_lease()
+    from tui_gateway.kanban_unloaded_schedule import UnloadedSchedule
+    wake = threading.Event()
+    schedule = UnloadedSchedule(wake.set, interval)
     stop.wait(_env_float("HERMES_KANBAN_UNLOADED_FIRST_S", FIRST_RUN_DELAY_S))
+    maintenance = 0.0
     try:
         while not stop.is_set():
-            try:
-                run_pass(lease, grace)
-            except Exception:
-                logger.warning("kanban unloaded pass failed", exc_info=True)
-            stop.wait(interval)
+            now = time.monotonic()
+            if wake.is_set() or now >= min(maintenance, schedule.gate.retry_at):
+                wake.clear()
+                try:
+                    run_pass(lease, grace, schedule=schedule)
+                except Exception:
+                    schedule.gate.retry_at = time.monotonic() + interval
+                    logger.warning("kanban unloaded pass failed", exc_info=True)
+                maintenance = time.monotonic() + interval
+            # Stop observation is memory-only. Lease custody still gets its
+            # normal maintenance cadence even with no admitted source pass.
+            wake.wait(min(1.0, max(0.01, min(maintenance, schedule.gate.retry_at) - time.monotonic())))
     finally:
+        schedule.close()
         lease.release()
 
 

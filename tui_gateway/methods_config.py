@@ -70,7 +70,12 @@ def _projects_handler(name: str):
     def deco(fn):
         def handler(rid, params: dict) -> dict:
             try:
-                return fn(rid, params)
+                from contextlib import nullcontext
+                from hermes_cli import projects_fact_routes
+                pin = (projects_fact_routes.request(params.get("profile"))
+                       if name in ("projects.tree", "projects.project_sessions") else nullcontext())
+                with pin:
+                    return fn(rid, params)
             except Exception as e:
                 return _err(rid, 5061, str(e))
         return method(name)(_profile_scoped(handler))
@@ -139,7 +144,14 @@ def _(rid, params: dict) -> dict:
     """Project -> repo -> lane overview with counts + a few preview sessions per project, plus the
     flat set of session ids claimed by any project (excluded from flat Recents). Lanes carry no
     session rows; drill-in uses ``projects.project_sessions``."""
-    with _profile_db(params) as db:
+    from hermes_cli import projects_fact_routes
+    selector = {"surface": "native", "profile": params.get("profile"),
+                "preview_limit": int(params.get("preview_limit") or 3),
+                "session_limit": int(params.get("session_limit") or 2000)}
+    fact_result = projects_fact_routes.read("tree", selector, decoded=True)
+    if fact_result is not None:
+        return _ok(rid, fact_result)
+    with projects_fact_routes.legacy(params.get("profile")), _profile_db(params) as db:
         if db is None:
             return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
         tree, active_id = _stamped_project_tree(
@@ -155,7 +167,13 @@ def _(rid, params: dict) -> dict:
     project_id = str(params.get("project_id") or "")
     if not project_id:
         return _err(rid, 5063, "project_id required")
-    with _profile_db(params) as db:
+    from hermes_cli import projects_fact_routes
+    selector = {"surface": "native", "profile": params.get("profile"), "project_id": project_id,
+                "session_limit": int(params.get("session_limit") or 5000)}
+    fact_result = projects_fact_routes.read("project_sessions", selector, decoded=True)
+    if fact_result is not None:
+        return _ok(rid, fact_result)
+    with projects_fact_routes.legacy(params.get("profile")), _profile_db(params) as db:
         if db is None:
             return _ok(rid, {"project": None})
         # Drill-in only needs the entered project: skip the zero-session discovery tier.

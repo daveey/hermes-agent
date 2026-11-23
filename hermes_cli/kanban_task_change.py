@@ -124,9 +124,14 @@ def _covered(conn: sqlite3.Connection, memo_key: tuple, schema: int, tables: tup
 
 
 def changed_since(conn: sqlite3.Connection, cursor: Optional[Cursor], *,
-                  tables: Optional[Iterable[str]] = None) -> tuple[Changed, Optional[Cursor]]:
+                  tables: Optional[Iterable[str]] = None,
+                  limit: Optional[int] = None) -> tuple[Changed, Optional[Cursor]]:
     """``(task ids changed after cursor, or FULL; the cursor for the next call, or None)``. ``tables`` defaults to
-    the set the file's writers watch (``tables_for``). Raises ``sqlite3.Error`` like any read."""
+    the set the file's writers watch (``tables_for``). ``limit`` bounds the dirty
+    read to limit+1 rows and returns FULL on overflow, never a partial delta.
+    Raises ``sqlite3.Error`` like any read."""
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be positive")
     path = _main_path(conn)
     if path is None:
         return FULL, None
@@ -152,8 +157,11 @@ def changed_since(conn: sqlite3.Connection, cursor: Optional[Cursor], *,
                 or revision < cursor.revision):  # (c), (b)
             changed: Changed = FULL
         else:
-            ids = frozenset(r[0] for r in conn.execute(_SINCE_SQL, (cursor.revision,)))
-            changed = FULL if rev.FULL_MARK in ids else ids
+            sql = _SINCE_SQL + (" LIMIT ?" if limit is not None else "")
+            params = (cursor.revision, limit + 1) if limit is not None else (cursor.revision,)
+            ids = frozenset(r[0] for r in conn.execute(sql, params))
+            overflow = limit is not None and len(ids) > limit
+            changed = FULL if overflow or rev.FULL_MARK in ids else ids
     finally:
         if own:
             conn.execute("COMMIT")

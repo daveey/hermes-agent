@@ -6,6 +6,7 @@ start a poller, claim events, open databases or send messages.
 """
 from pathlib import Path
 import threading
+from tui_gateway.notification_loaded_executor import current_consumer
 import time
 
 _lock = threading.RLock()
@@ -48,7 +49,7 @@ def _scope(session: dict, home: Path, session_key: str) -> bool:
 def polled(home: Path, session_key: str, board_path: Path) -> None:
     """Only the registered native thread can publish its successful board read."""
     with _lock:
-        entry = _consumers.get(threading.current_thread())
+        entry = _consumers.get(current_consumer())
         if entry is None:
             return
         session, stop, receipts, _ = entry

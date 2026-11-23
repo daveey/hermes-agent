@@ -198,7 +198,8 @@ def test_expiry_releases_only_nondurable_text_bearing_local_claims_remote_via_re
     assert [k["task_id"] for k in calls["expired"]] == ["local"]
     assert calls["remote"] == [{"id": 1}]
     assert calls["release"] == [] and calls["rewind"] == []
-    assert session["_kanban_claims"] == [] and session["_kanban_pending"] == []
+    assert session["_kanban_claims"] == [_claim(claimed_mono=0.0, task_id="durable", durable=True)]
+    assert session["_kanban_pending"] == []
 
 
 def test_fresh_texts_keeps_keyless_text():

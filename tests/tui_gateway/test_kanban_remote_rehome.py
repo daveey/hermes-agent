@@ -406,7 +406,7 @@ def test_opposite_home_legacy_reoffers_are_serialized(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('legacy', [False, True])
-def test_collect_callback_failure_releases_earlier_unreturned_claim(tmp_path, monkeypatch, legacy):
+def test_collect_callback_failure_returns_earlier_committed_claim(tmp_path, monkeypatch, legacy):
     now = time.time()
     hub = once._hub(tmp_path, now)
     ledger = tmp_path / 'ledger.db'
@@ -427,13 +427,16 @@ def test_collect_callback_failure_releases_earlier_unreturned_claim(tmp_path, mo
         if 't_second' in key:
             raise OSError('second transcript unavailable')
         return False
-    assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now,
-                       transcript_has=fails_second) == []
+    first = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now,
+                        transcript_has=fails_second)
+    assert first.incomplete and len(first) == 1
+    assert first[0]['ref'].endswith('/t_first')
+    assert krn.ack(first[0], ledger=ledger)
     assert any('t_second' in key for key, _ in calls)
-    # Same holder must immediately retry, not wait for its process to die.
+    # Same holder retries the remaining item without losing the first receipt.
     offered = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 1,
                            transcript_has=lambda *_: False)
-    assert {item['ref'].rsplit('/', 1)[-1] for item in offered} == {'t_first', 't_second'}
+    assert {item['ref'].rsplit('/', 1)[-1] for item in offered} == {'t_second'}
 
 
 def test_legacy_reconciliation_preserves_replaced_keyed_receipt(tmp_path):

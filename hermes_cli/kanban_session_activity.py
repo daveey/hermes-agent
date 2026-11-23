@@ -18,6 +18,7 @@ from __future__ import annotations
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli.kanban_ro_batch import batch as _ro_batch
 from hermes_cli import kanban_activity_identity as _identity
+from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_annotation_host as _host_copy
 from hermes_cli import kanban_annotation_refresh as _bounded, loop_accounting as _la
@@ -52,7 +53,8 @@ from hermes_cli import kanban_links_diagnostics as diag
 from hermes_cli.kanban_links_tickets import StartTickets as _StartTickets
 from hermes_cli import kanban_links_narrow as _links_narrow, kanban_external_activity as _external_activity
 from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
-from hermes_cli.kanban_open_asks import card_is_open_human_ask, stamp_needs_you
+from hermes_cli.kanban_open_asks import card_is_open_human_ask
+from hermes_cli.kanban_activity_projection import WAITING_ON_CAP
 import contextlib
 import json
 import logging
@@ -112,7 +114,6 @@ _annotate_flight_result: tuple | None = None
 _last_annotation: dict[tuple[str, ...], tuple] = {}
 _annotate_waiters = 0
 _REFRESH_WAIT_S = 1.0  # [daveey] see kanban_annotation_refresh
-WAITING_ON_CAP = 50
 
 
 def _origin_scope() -> tuple[str, ...]:
@@ -940,6 +941,11 @@ def _remote_links(stale_ok: bool = False) -> list[dict[str, Any]]:
 
 
 def _links_entry(stale_ok: bool, *, with_rows: bool = False):
+    from hermes_cli.fact_remote_links import _current
+    binding = _current.get()
+    if stale_ok and binding is not None:
+        return binding.read(with_rows)
+
     def out(entry):
         return (list(entry[3]), list(entry[4])) if with_rows else list(entry[3])
 
@@ -1252,8 +1258,6 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo", *PENDING_RELEASE_STATUSES)
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
-            if _external_activity.replica_bucket(card):
-                remote_keys.setdefault(sid, set()).add((str(card.get("key")), "external_unknown", False))
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
         _replica_exec.collect(card, execution)
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
@@ -1812,14 +1816,12 @@ def one_annotation_snapshot() -> Iterator[None]:
 
 
 def _mark_kanban_unknown(rows):
-    from hermes_cli.kanban_execution_observations import count_snapshot
+    from hermes_cli.kanban_activity_projection import project_kanban_unknown
 
-    _identity.mark_unknown(rows)
-    for row in rows:
-        count_snapshot(row, ())
-    return rows
+    return project_kanban_unknown(rows, now=time.time())
 
 
+@_fact_consumer('kanban')
 def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = False) -> list[dict[str, Any]]:
     """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
@@ -1873,53 +1875,10 @@ def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = Fals
         if shared is not None:
             _annotation_scope.attention = attention
     observed_at = observed_at if copy_at is None else min(observed_at, copy_at)
-    for row in rows:
-        row["kanban_observed_at"] = observed_at
-        row.pop("kanban_unknown", None)
-        ids = list(_identity.row_ids(row))
-        dup = _identity.lineage_duplicates(remote_keys, ids)
-        _identity.stamp_blocked_owners(row, remote_keys, ids, WAITING_ON_CAP)
-        for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),
-                            ("kanban_attention", attention), ("kanban_remote_stale", remote_stale)):
-            n = sum(counts.get(sid, 0) for sid in ids) - dup.get(key, 0)
-            if n:
-                row[key] = n
-            else:
-                row.pop(key, None)
-        stamp_needs_you(row, ids, remote_keys)  # [daveey] the open human asks, same snapshot/predicate as kanban_blocked
-        # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
-        open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
-        # Plugin sources (pending close-outs) must not recount local OR scoped remote obligations.
-        pending, extra_ids = _identity.closeout_extra(open_ids, {t for sid in ids for t in extra.get(sid, ())},
-                                                      [remote_keys.get(sid, ()) for sid in ids])
-        if pending:
-            row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
-        # [daveey] Parked/held are subsets of kanban_active. kanban_parked is stamped (even 0) whenever there is open
-        # work, so the desktop can tell "none parked" from a backend that predates the field.
-        n_parked = sum(parked.get(sid, 0) for sid in ids) - dup.get("kanban_parked", 0)
-        n_held = sum(held.get(sid, 0) for sid in ids) - dup.get("kanban_held", 0)
-        if row.get("kanban_active"):
-            row["kanban_parked"] = n_parked
-        else:
-            row.pop("kanban_parked", None)
-        if n_held:
-            row["kanban_held"] = n_held
-        else:
-            row.pop("kanban_held", None)
-        # [daveey] Stalled: parked cards whose agent-owned wait passed 2 h (amber, not grey waiting or red needs-you).
-        n_stalled = sum(stalled.get(sid, 0) for sid in ids) - dup.get("kanban_stalled", 0)
-        if n_stalled and row.get("kanban_active"):
-            row["kanban_stalled"] = n_stalled
-        else:
-            row.pop("kanban_stalled", None)
-        ids_waiting = sorted(open_ids | extra_ids)
-        if ids_waiting:
-            row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
-        else:
-            row.pop("kanban_waiting_on", None)
-        from hermes_cli.kanban_execution_observations import count_snapshot
-        count_snapshot(row, [key for sid in ids for key in remote_keys.get(sid, ())],
-                       evidence={key: value for sid in ids for key, value in execution.get(sid, {}).items()})
+    from hermes_cli.kanban_activity_projection import project_kanban_activity
+    project_kanban_activity(rows, parts=(active, blocked, unseen, remote_stale, waiting, parked, held, stalled,
+                                       remote_keys, extra, attention, execution), observed_at=observed_at,
+                            now=time.time())
     _external_activity.stamp_boards(rows, _board_db_paths, _open_ro, _parked_pairs, _identity.row_ids)
     return _external_activity.stamp_replica_counts(rows, remote_keys, _identity.row_ids)
 

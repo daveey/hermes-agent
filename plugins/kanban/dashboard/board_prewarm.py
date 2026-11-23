@@ -17,6 +17,8 @@ from hermes_cli import kanban_db
 log = logging.getLogger(__name__)
 
 _boot_thread: list[Optional[threading.Thread]] = [None]
+_lifecycle = threading.Lock()
+_stop = threading.Event()
 
 
 def boot_thread() -> Optional[threading.Thread]:
@@ -25,12 +27,20 @@ def boot_thread() -> Optional[threading.Thread]:
 
 
 def _warm_names(api):
+    if _stop.is_set():
+        return
     yield kanban_db.get_current_board()
+    if _stop.is_set():
+        return
     yield kanban_db.DEFAULT_BOARD
     # Discover only after the selected board has warmed. A failed directory
     # scan must not discard the guaranteed active/default warm-up.
     try:
+        if _stop.is_set():
+            return
         for board in kanban_db.list_boards():
+            if _stop.is_set():
+                return
             if api._board_counts(board["slug"]).get("blocked", 0):
                 yield board["slug"]
     except Exception:
@@ -46,6 +56,8 @@ def prewarm_boards(api) -> None:
     # board. Counts are query-only: discovery must not initialize every store.
     seen = set()
     for name in _warm_names(api):
+        if _stop.is_set():
+            return
         started = time.monotonic()
         try:
             resolved = api._resolve_board(name)
@@ -66,7 +78,38 @@ def start_board_prewarm(api) -> Optional[threading.Thread]:
     """Run ``prewarm_boards`` on a daemon thread (not under the test harness)."""
     if os.environ.get("HERMES_TEST_ISOLATION"):
         return None
-    thread = spawn_context_thread(lambda: prewarm_boards(api), name="kanban-board-prewarm")
-    thread.start()
-    _boot_thread[0] = thread
-    return thread
+    with _lifecycle:
+        if _boot_thread[0] is not None:
+            return _boot_thread[0]
+        _stop.clear()
+        thread = spawn_context_thread(lambda: prewarm_boards(api), name="kanban-board-prewarm")
+        thread.start()
+        _boot_thread[0] = thread
+        return thread
+
+
+class LegacyLifecycle:
+    """Mount-owned prewarm lifetime; a failed drain remains retryable."""
+
+    def __init__(self, api):
+        self._lock = threading.Lock()
+        self._closed = False
+        start_board_prewarm(api)
+
+    def close(self):
+        with self._lock:
+            if not self._closed:
+                stop_board_prewarm()
+                self._closed = True
+
+
+def stop_board_prewarm(timeout=5.0) -> None:
+    """Release-latch callback: stop discovery and join before retiring observers."""
+    with _lifecycle:
+        _stop.set()
+        thread = _boot_thread[0]
+        if thread is not None:
+            thread.join(timeout)
+            if thread.is_alive():
+                raise TimeoutError("legacy board prewarm did not drain")
+            _boot_thread[0] = None
