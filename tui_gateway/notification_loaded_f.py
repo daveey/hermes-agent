@@ -120,6 +120,8 @@ class Scheduler:
         # incomplete/retry obligation, repaid only by the next unchanged 30s
         # reconciliation (never an accelerated census); cleared on recovery.
         self.local_incomplete = {}
+        self.remote_incomplete = {}  # scope failures remain unknown until capture recovers
+        self.hint_incomplete = False
         self.next_reconcile = 0.0
         self.stop = threading.Event()
         self.thread = None
@@ -205,7 +207,14 @@ class Scheduler:
                 scan = bool(self.actions) and (self.source_dirty or now >= self.next_reconcile)
                 self.source_dirty = False
             if scan:
-                self.invalidate(self._changed_keys())
+                try:
+                    self.invalidate(self._changed_keys())
+                    self.hint_incomplete = False
+                except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                    # A remote hint is not authority over local discovery. Retry
+                    # on the next native hint or unchanged reconciliation clock.
+                    self.hint_incomplete = True
+                    log.warning('remote notification hints unavailable', exc_info=True)
             with self.lock:
                 reconcile = now >= self.next_reconcile
                 if not self.actions or (not reconcile and not self.dirty and not self.catchup):
@@ -251,25 +260,16 @@ class Scheduler:
                     else:
                         batch = first.context.run(self._capture, first.profile, keys)
                         batches[source] = batch
+                    self.remote_incomplete.pop(scope, None)
                 except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                     log.warning('loaded notification capture failed: %s', exc)
-                    with self.lock:
-                        if keys is not None:
-                            self.dirty.update(keys)  # retry keyed work without a census
-                    continue
+                    self.remote_incomplete[scope] = str(exc)
+                    # Unknown remote work is retried by the unchanged 30s
+                    # reconciliation; never accelerate a broken source census.
+                    batch = ()  # local delivery only, never fall back to a source scan
                 with self.lock:
-                    from tui_gateway.kanban_remote_notices import _linked_chats
-                    captured = ({(gw, key): tuple(sid for profile, sid in _linked_chats(task, batch.me)
-                                                  if profile == first.profile)
-                                 for gw, key, task in json.loads(batch.rows)}
-                                if hasattr(batch, 'rows') else {})
-                    if keys is None:
-                        self.known_keys[scope] = captured
-                    else:
-                        known = self.known_keys.setdefault(scope, {})
-                        for key in keys:
-                            known.pop(key, None)
-                        known.update(captured)
+                    if scope not in self.remote_incomplete:
+                        self._remember(scope, first.profile, batch, keys)
                     live = [a for a in group if not a.closed]
                     for action in live:
                         self.catchup.discard(action)
@@ -280,6 +280,20 @@ class Scheduler:
                         action.pending.append((batch, tuple(local.get(action, ()))))
                 for action in live:
                     action.wake()
+
+    def _remember(self, scope, profile_name, batch, keys):
+        from tui_gateway.kanban_remote_notices import _linked_chats
+        captured = ({(gw, key): tuple(sid for profile, sid in _linked_chats(task, batch.me)
+                                      if profile == profile_name)
+                     for gw, key, task in json.loads(batch.rows)}
+                    if hasattr(batch, 'rows') else {})
+        if keys is None:
+            self.known_keys[scope] = captured
+        else:
+            known = self.known_keys.setdefault(scope, {})
+            for key in keys:
+                known.pop(key, None)
+            known.update(captured)
 
     def _local_obligation(self, scope, group, failed):
         """Record or clear failed-board discovery; healthy boards were already delivered."""

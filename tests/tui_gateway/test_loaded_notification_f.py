@@ -329,7 +329,7 @@ def test_wake_and_reconcile_share_discovery_without_duplicate_delivery(tmp_path,
     assert late.due(legacy_due=False)
 
     # Even a failed full capture consumes the interval. Failed keyed work is
-    # retained for retry, never upgraded to a full scan.
+    # marked unknown for the next 30s reconciliation, without delaying locals.
     attempts = []
     capture = scheduler._capture
     def fail_capture(profile, keys):
@@ -346,7 +346,8 @@ def test_wake_and_reconcile_share_discovery_without_duplicate_delivery(tmp_path,
     scheduler.invalidate([('hub', card['key'])])
     scheduler.step()
     assert attempts[-1] == (('hub', card['key']),)
-    assert scheduler.dirty == {('hub', card['key'])}
+    assert not scheduler.dirty
+    assert scheduler.remote_incomplete
     monkeypatch.setattr(scheduler, '_capture', capture)
     clock[0] = 192
     scheduler.step()
