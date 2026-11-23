@@ -218,6 +218,8 @@ from hermes_cli.dashboard_auth.body_limit import AuthBodyLimitMiddleware
 
 # Register first (innermost): auth gates run before this, JSON parsing after it.
 app.add_middleware(AuthBodyLimitMiddleware)
+from hermes_cli.sessions_native_startup import SessionsMiddleware
+app.add_middleware(SessionsMiddleware)
 
 
 # Memory-provider OAuth connect routes live in the memory layer, not here.

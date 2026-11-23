@@ -147,6 +147,9 @@ class SessionsFactRoutes:
             self._condition.notify_all()
 
     def response(self, name, selector):
+        touch = getattr(self._handle, 'touch', None)
+        if touch is not None:
+            touch(name, selector)  # Optional owner-memory LRU hint, never source I/O.
         result = self._handle.v1.snapshot(self._scope).view(name, selector)
         if isinstance(result, self._ready_type):
             return Response(content=result.encoded, media_type="application/json")
