@@ -194,6 +194,7 @@ class Sources(Evidence):
 
     def parents(self, task_id):
         from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_db_parent_states import mirrored_status
 
         if task_id not in self._parents:
             out = []
@@ -201,7 +202,8 @@ class Sources(Evidence):
                 parent = self.row(parent_id)
                 # The full replica and local snapshot are newer than the local
                 # remote-parent mirror; absence on both remains missing.
-                status = parent['status'] if parent is not None else None
+                status = (mirrored_status(self.connection(parent_id), parent_id, parent['status'])
+                          if parent is not None else None)
                 if status not in ('done', 'archived'):
                     out.append((parent_id, status if status is not None else 'missing'))
             self._parents[task_id] = out
