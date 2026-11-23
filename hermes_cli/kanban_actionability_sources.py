@@ -264,4 +264,6 @@ def _describe(conn, tid, *, now, reader):
         runs = reader.rows('SELECT * FROM task_runs WHERE id=? AND task_id=?', (task['current_run_id'], tid))
         facts['run'] = runs[0] if runs else None
     facts['unknown'] |= bool(stop and not episode)
-    return project(facts, now=int(time.time()) if now is None else now)
+    from hermes_cli.kanban_actionability_confirmed import compose
+    observed_at = int(time.time()) if now is None else now
+    return compose(reader, task, facts, project(facts, now=observed_at), now=observed_at)
