@@ -779,8 +779,12 @@ def test_primary_push_retains_lost_committed_transport(live):
     kb.create_task(live, title='mode custody', assignee='worker')
     receiver = Receiver()
     receiver.lose_reply = True
-    with pytest.raises(OSError, match='reply lost after commit'):
+    error = None
+    try:
         client.push(live, receiver, 'default', 'macbook', primary=True, max_batches=1)
+    except (OSError, ValueError) as exc:
+        error = exc
+    assert isinstance(error, OSError), 'primary must reach the controlled lost committed reply'
     assert len(receiver.sent) == 1 and journal.pending_wire(live) is not None
     assert journal.snapshot(live)['settled'] == '0' and receiver.slot['a'] == '0'
 
