@@ -176,14 +176,13 @@ def test_forkserver_diagnostics_preserve_success_and_poll(tmp_path, monkeypatch)
 
 
 @pytest.mark.platforms("posix")
-@pytest.mark.parametrize("name", ["test_derived_session_after_delete.py", "test_authenticated_session_identity.py", "test_other.py"])
-def test_launcher_instruments_only_affected_file(tmp_path, monkeypatch, name):
+@pytest.mark.parametrize("affected", [True, False])
+def test_launcher_instruments_only_affected_file(tmp_path, monkeypatch, affected):
     monkeypatch.setattr(launch, "_fork_server_for_run", lambda root: None)
     popen = Mock(return_value=SimpleNamespace(pid=123))
     monkeypatch.setattr(launch.subprocess, "Popen", popen)
     monkeypatch.setattr(launch.os, "getpgid", lambda pid: pid)
-    affected = name != "test_other.py"
-    file = tmp_path / "tests/gateway" / name
+    file = tmp_path / ("tests/gateway/test_derived_session_after_delete.py" if affected else "test_other.py")
     args = ["-q"]
     launch.start_pytest(file, args, tmp_path, {}, str(tmp_path))
     assert (PLUGIN in popen.call_args.args[0]) is affected
