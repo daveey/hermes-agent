@@ -29,6 +29,10 @@ def _wire_op(physical):
         raise ValueError('tracer operation kind not integrated') from None
 
 
+class ReplayFault(ValueError):
+    """A strict stream refused progress; preserve custody and isolate its board."""
+
+
 @dataclass
 class PushResult:
     sent: int = 0
@@ -70,7 +74,11 @@ def _push(conn, hub, board, gateway, *, primary, max_batches, before_head, seen)
             interrupt(conn)
             existence.pause(conn, board, exc)
             raise
-        except (OSError, ValueError, client.HubError):
+        except ValueError as exc:
+            from hermes_cli.kanban_replay_episodes import interrupt
+            interrupt(conn)
+            raise ReplayFault(str(exc)) from exc
+        except (OSError, client.HubError):
             from hermes_cli.kanban_replay_episodes import interrupt
             interrupt(conn)
             raise

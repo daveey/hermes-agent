@@ -1,4 +1,5 @@
 """Disposable creator certificates never survive the real rebuild/fill path."""
+import json
 import sqlite3
 
 import pytest
@@ -30,7 +31,12 @@ def test_real_rebuild_preserves_schema_but_discards_certificates(tmp_path, marke
     result = recovery.RecoveryResult('failed', str(source))
     recovery._build(source, out, None, result)
     with sqlite3.connect(out, isolation_level=None) as rebuilt:
-        assert rebuilt.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall() == schema
+        # Preserve every original object, while requiring the independent recovery hold.
+        assert rebuilt.execute("SELECT type,name,sql FROM sqlite_master "
+                               "WHERE name != 'kanban_replay_recovery_loss1' ORDER BY name").fetchall() == schema
+        assert rebuilt.execute('SELECT singleton FROM kanban_replay_recovery_loss1').fetchall() == [(1,)]
+        loss = json.loads(rebuilt.execute('SELECT loss FROM kanban_replay_recovery_loss1').fetchone()[0])
+        assert loss == [{'reason': 'rebuilt database; custody completeness unknown', 'tables': {}}]
         if markers:
             assert rebuilt.execute('SELECT * FROM kanban_creator_empty_events').fetchall() == []
             assert result.tables[empty._TABLE].recovered == 0

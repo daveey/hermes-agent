@@ -55,7 +55,7 @@ from hermes_cli import kanban_sync_refusal as refusal  # one board's Containment
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
-from hermes_cli.kanban_replay_sender import PushResult, push
+from hermes_cli.kanban_replay_sender import PushResult, ReplayFault, push
 from hermes_cli.kanban_sync_compat import REASSESSMENT_REFUSALS, TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
 from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed
 from hermes_cli.kanban_sync_hub_transport import BoundedRedirects, BoundedResponseError, read_response
@@ -1146,7 +1146,7 @@ def sync_all_once(hub: Optional[Hub] = None, *,
             # (no WARNING, the board is not marked failed, the outbox-age alarm keeps its last verdict).
             _log.debug("kanban sync: round for %s skipped (%s)", slug, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"SyncRoundBusy: {exc}", skipped=True))
-        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, RestoreRequired) as exc:
+        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, RestoreRequired, ReplayFault) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)%s", slug, type(exc).__name__, exc,
                          udf_errors.error_suffix(exc))
             from hermes_cli.kanban_sync_host_outage import classify  # one host card, not one per board [daveey]

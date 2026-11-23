@@ -103,11 +103,27 @@ def test_complete_signed_fixture_reaches_existing_sender(live):
     assert journal.snapshot(live)['settled'] == '1'
 
 
-def test_local_binding_is_independent_of_signed_expectation(live):
+@pytest.mark.parametrize('field', ['board', 'board_incarnation', 'gateway_principal', 'journal_id'])
+def test_local_binding_is_independent_of_signed_expectation(live, field):
     expected, payload, key = fixtures(live)
-    expected['journal_id'] = payload['journal_id'] = 'foreign-journal'
-    with pytest.raises(ValueError, match='migration'):
-        send(live, expected, payload, key)
+    expected[field] = payload[field] = 'foreign-binding'
+    # Keep the foreign receipt internally complete and authentically signed: only
+    # the independently read local custody / board argument can reject it.
+    if field == 'gateway_principal':
+        expected['inventory']['principals'] = payload['inventory']['principals'] = sorted(
+            [journal.snapshot(live)['gateway_principal'], 'foreign-binding', 'former-epoch'])
+        payload['barriers'] = [dict(principal=p, barrier_id='barrier-' + p, position=10)
+                               for p in expected['inventory']['principals']]
+    receipt = signed(payload, key)
+    public_key = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    assert migration.verify(receipt, expectation=expected, public_key=public_key, now_ms=2000) == payload
+    receiver = sender_tests.Receiver()
+    before = list(live.iterdump())
+    with pytest.raises(ValueError, match='migration local binding mismatch'):
+        migration.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1,
+                       expectation=expected, receipt=receipt, now_ms=2000, public_key=public_key)
+    assert receiver.calls == []
+    assert list(live.iterdump()) == before
 
 
 def test_empty_or_duplicate_expected_inventory_never_certifies_completeness(live):
