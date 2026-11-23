@@ -7,6 +7,7 @@ retains trailing hints; a failed selector cannot starve unrelated selectors.
 """
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+import logging
 import threading
 import time
 
@@ -14,6 +15,8 @@ from hermes_cli.fact_capture import CaptureBudgetExceeded
 from hermes_cli.fact_contract import Fact
 from hermes_cli.fact_source_watch import NativeSourceWatch
 from hermes_cli.fact_store import view_key
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,7 @@ class SessionsSource:
         self._selectors = OrderedDict()
         self._dirty = OrderedDict()
         self._sizes, self._retry = {}, {}
+        self._failed = set()
         self._retired = set()
         self._watch = self._wake = None
         self._closed = False
@@ -54,6 +58,7 @@ class SessionsSource:
         self._selectors.pop(key)
         self._dirty.pop(key, None)
         self._retry.pop(key, None)
+        self._failed.discard(key)
         self._retired.add(key)
 
     def touch(self, name, selector):
@@ -118,15 +123,27 @@ class SessionsSource:
             name, selector = self._selectors[key]
         observed = time.time()
         self._serial += 1
+        reason, encoded_bytes = 'reader_error', None
         try:
             body = self.reader(name, selector)
-            if (not isinstance(body, bytes) or len(body) > min(budget.max_bytes, self.max_bytes)
-                    or time.monotonic() - started > budget.max_seconds):
+            encoded_bytes = len(body) if isinstance(body, bytes) else None
+            reason = ('invalid_type' if encoded_bytes is None else
+                      'bytes' if encoded_bytes > min(budget.max_bytes, self.max_bytes) else
+                      'elapsed' if time.monotonic() - started > budget.max_seconds else None)
+            if reason is not None:
                 raise CaptureBudgetExceeded('sessions view exceeds capture budget')
             fact = Fact(key, {'encoded': body}, source_vector=((self.source, self._serial),),
                         observed_at=observed, valid_until=observed + 2 * self.refresh_seconds,
                         health='fresh')
         except Exception:  # health: allow BLE001 -- isolate capture failures; unknown is not empty success
+            with self._lock:
+                report = key in self._selectors and key not in self._failed
+                if report:
+                    self._failed.add(key)
+            if report:
+                # No selector, path, payload or exception text; once per failure episode.
+                logger.warning('sessions capture unavailable reason=%s elapsed_seconds=%.3f encoded_bytes=%s',
+                               reason or 'reader_error', time.monotonic() - started, encoded_bytes)
             old = self.store.snapshot(self.source.scope).get(key)
             fact = (replace(old, health='stale', error_code='sessions_capture_failed') if old is not None
                     else Fact(key, {}, error_code='sessions_capture_failed'))
@@ -137,6 +154,7 @@ class SessionsSource:
         else:
             with self._lock:
                 self._retry.pop(key, None)
+                self._failed.discard(key)
         with self._lock:
             # <=50% capture duty under sustained hints, at most five passes/sec.
             self._next_capture = time.monotonic() + max(.2, time.monotonic() - started)

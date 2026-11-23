@@ -138,6 +138,44 @@ def test_elapsed_display_deadline_does_not_spin_idle_minute(source):
     assert len(calls) == captures
 
 
+@pytest.mark.parametrize('reason', ['reader_error', 'invalid_type', 'bytes', 'elapsed'])
+def test_capture_failure_reason_is_safe_bounded_and_recovers(source, caplog, reason):
+    owner, clock, _ = source
+    secret = 'private-selector-and-exception'
+    selector = {'id': secret}
+    def fail(*_):
+        if reason == 'reader_error':
+            raise RuntimeError(secret)
+        if reason == 'invalid_type':
+            return secret
+        if reason == 'elapsed':
+            clock[0] += 6
+            return b'valid'
+        return b'x' * 5000
+    owner.reader = fail
+    owner.demand('sessions', selector)
+    with caplog.at_level('WARNING', logger='hermes_cli.sessions_native_source'):
+        step(owner, clock)
+        assert isinstance(owner.store.snapshot(owner.source.scope).view('sessions', selector), Unavailable)
+        clock[0] += 40
+        step(owner, clock)
+        messages = [r.getMessage() for r in caplog.records if r.name == 'hermes_cli.sessions_native_source']
+        assert len(messages) == 1
+        assert f'reason={reason}' in messages[0]
+        assert 'elapsed_seconds=' in messages[0] and 'encoded_bytes=' in messages[0]
+        assert secret not in messages[0]
+        clock[0] += 40
+        owner.reader = lambda *_: b'recovered'
+        step(owner, clock)
+        assert isinstance(owner.store.snapshot(owner.source.scope).view('sessions', selector), Ready)
+        owner.reader = fail
+        owner.invalidate()
+        clock[0] += 40
+        step(owner, clock)
+        messages = [r.getMessage() for r in caplog.records if r.name == 'hermes_cli.sessions_native_source']
+        assert len(messages) == 2
+
+
 def test_expiry_watch_failure_and_close(source):
     owner, clock, _ = source
     owner.demand('sessions', {'id': 'one'})
