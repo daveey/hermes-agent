@@ -346,8 +346,12 @@ def _remove(conn, receipt, owner, days, board, refusals=None):
             if skip_logged(refusals, key, path, since, tid):
                 return 0
         try:
+            def owner_unchanged():
+                with kb.write_txn(conn):  # local pickup shares this lock
+                    return _safe(conn, receipt, path)
+
             archive = sa.archive_workspace(path, kb.kanban_home() / "archive" / "scratch" / board / tid,
-                                           task_id=tid, completed_at=since)
+                                           task_id=tid, completed_at=since, owner_check=owner_unchanged)
         except (OSError, ValueError, sa.ArchiveRefused, subprocess.SubprocessError) as exc:
             if refusals is not None:
                 refusals.record(key, path, since, str(exc))

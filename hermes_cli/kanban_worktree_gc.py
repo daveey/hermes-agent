@@ -293,25 +293,6 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
 
     owner = conn.execute("SELECT workspace_kind, workspace_path, completed_at FROM tasks WHERE id=?",
                          (task_id,)).fetchone()
-    archive_dir = kb.kanban_home() / "archive" / "scratch" / _board_slug(conn) / task_id
-    if refusals is not None:
-        from hermes_cli.kanban_scratch_backoff import skip_logged
-        if skip_logged(refusals, task_id, path, completed_at, task_id):
-            return 0
-    try:
-        final = sa.archive_workspace(path, archive_dir, task_id=task_id, completed_at=completed_at)
-    except (sa.ArchiveRefused, OSError, subprocess.SubprocessError, ValueError) as exc:
-        log.info("Keeping aged scratch workspace for task %s: %s (%s)", task_id, path, exc)
-        entry = None
-        if refusals is not None:
-            refusals.record(task_id, path, completed_at, str(exc))
-            entry = refusals.entries.get(task_id)
-        from hermes_cli.kanban_scratch_backoff import report_archive_refused
-        report_archive_refused(path, task_id, entry, exc)
-        return 0
-    if refusals is not None:
-        refusals.clear(task_id)
-    ws.release_lsp_clients(str(path))
 
     def _row_path(row):
         # Same expression as candidate selection; raw-row equality below still fences mutation.
@@ -326,6 +307,32 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
                 and ws._is_terminal_task(conn, task_id) and not ws._has_active_children(conn, task_id)
                 and not ws._defer_shared_workspace_cleanup(conn, task_id, path)
                 and not defer_owned_job_cleanup(task_id, tree))
+
+    def owner_unchanged():
+        # Re-checked right before the archive changes the tree (foreign ownership adoption).
+        with kb.write_txn(conn):
+            return guard(path)
+
+    archive_dir = kb.kanban_home() / "archive" / "scratch" / _board_slug(conn) / task_id
+    if refusals is not None:
+        from hermes_cli.kanban_scratch_backoff import skip_logged
+        if skip_logged(refusals, task_id, path, completed_at, task_id):
+            return 0
+    try:
+        final = sa.archive_workspace(path, archive_dir, task_id=task_id, completed_at=completed_at,
+                                     owner_check=owner_unchanged)
+    except (sa.ArchiveRefused, OSError, subprocess.SubprocessError, ValueError) as exc:
+        log.info("Keeping aged scratch workspace for task %s: %s (%s)", task_id, path, exc)
+        entry = None
+        if refusals is not None:
+            refusals.record(task_id, path, completed_at, str(exc))
+            entry = refusals.entries.get(task_id)
+        from hermes_cli.kanban_scratch_backoff import report_archive_refused
+        report_archive_refused(path, task_id, entry, exc)
+        return 0
+    if refusals is not None:
+        refusals.clear(task_id)
+    ws.release_lsp_clients(str(path))
 
     def finalize():
         kb._append_event(conn, task_id, "workspace_archived", {"path": str(path), "archive": str(final)})

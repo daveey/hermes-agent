@@ -902,16 +902,19 @@ def _omission_plans(workspace: Path, repos: list[Path], payload: Path) -> tuple[
 
 
 def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
-                      completed_at: Optional[int]) -> ArchivedPath:
+                      completed_at: Optional[int],
+                      owner_check: Optional[Callable[[], bool]] = None) -> ArchivedPath:
     """Archive every standalone repo in *workspace* to *archive_dir*; return the final dir (an :class:`ArchivedPath`
     whose ``snapshot`` the caller must re-check at detach with :func:`check_snapshot`).
 
     Built in a ``.partial`` sibling and renamed into place, so a failure leaves
     no half archive that looks complete. Raises :class:`ArchiveRefused` (or
     ``OSError``) on any failure; the caller then keeps the workspace.
+    *owner_check* (the caller's owner re-check, run in its own short txn) gates the one step that
+    changes the tree: foreign-owned entries are adopted only while it still returns True.
     """
     from hermes_cli.kanban_scratch_archive_ownership import adopt
-    adopt(workspace)  # root-owned build output: record owners, then chown to the worker user (sudo only)
+    adopt(workspace, owner_check)  # root-owned build output: record owners, then chown to the worker user (sudo only)
     layout = _discover(workspace)
     repos, markers = layout.repos, layout.markers
     try:

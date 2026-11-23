@@ -8,36 +8,51 @@ even a readable root-owned directory cannot be emptied by the worker user, so
 removal after a successful archive would leave a half-deleted tree.
 
 When the worker user has passwordless sudo (``sudo -n``), :func:`adopt` records
-every entry not owned by the worker user (relative path, uid, gid, mode, type)
-into :data:`RECORD_NAME` at the workspace root, then ``chown -R -P`` the tree to
-the worker user. The record is written before the chown and is archived with the
-payload, so the original ownership is restorable. Nothing else changes: the
-normal archive, verification and guarded removal run unprivileged afterwards.
+every entry whose uid or gid is not the worker's (relative path, uid, gid, mode,
+type) into :data:`RECORD_NAME` at the workspace root, then gives those entries
+(and only those) to the worker user with ``find -xdev ... -exec chown -h`` and
+adds owner read/write (and search, for directories) so the unprivileged archive
+and removal can finish. The record is in place before any owner or mode changes
+and is archived with the payload, so original owners and modes are restorable.
+The normal archive, verification and guarded removal then run unchanged.
 
-Refused (``ArchiveRefused``; the tree is kept): any mount point at or below the
-workspace (a chroot with a bind-mounted /dev or host directory must never be
-chowned through), a failed find/tee/chown, or an unparseable earlier record.
-Without passwordless sudo, or when already running as root, it does nothing.
+The caller's *owner_check* runs immediately before the first change: a card
+resumed since GC selected the tree is never touched. Refused (``ArchiveRefused``;
+the tree is kept unchanged): the owner check fails, any mount point at or below
+the workspace, a foreign-owned regular file with more than one hard link (chown
+acts on the inode, which may live outside the tree), a record path that is not a
+regular file (a planted symlink must never be written through as root), an
+unparseable earlier record, or a failed find/cat/mv. A failure after the record
+is written leaves the tree adopted in part with its record at the root; a later
+pass merges new entries by path. Without passwordless sudo, or as root, nothing
+changes. ``find -xdev`` never crosses into another filesystem.
 """
 from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Callable, Optional
 
 RECORD_NAME = ".hermes-foreign-ownership-v1.json"
 _TIMEOUT = 1800
 _run = subprocess.run  # tests replace it
 
 
-def _sudo(*args: str, input: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    proc = _run(["sudo", "-n", *args], input=input, capture_output=True, timeout=_TIMEOUT)
+def _refused(msg: str) -> Exception:
+    from hermes_cli.kanban_scratch_archive import ArchiveRefused
+    return ArchiveRefused(f"foreign ownership adoption: {msg}")
+
+
+def _sudo(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    proc = _run(["sudo", "-n", *args], capture_output=True, timeout=_TIMEOUT)
     if check and proc.returncode != 0:
-        from hermes_cli.kanban_scratch_archive import ArchiveRefused
         err = (proc.stderr or b"").decode("utf-8", "replace").strip()[:300]
-        raise ArchiveRefused(f"foreign ownership adoption: {args[0]} failed (rc={proc.returncode}): {err}")
+        raise _refused(f"{args[0]} failed (rc={proc.returncode}): {err}")
     return proc
 
 
@@ -82,9 +97,49 @@ def _parse(out: bytes) -> list[dict]:
     return rows
 
 
-def adopt(workspace: Path) -> list[dict]:
-    """Record then chown every foreign-owned entry of *workspace*; return the new records (may be empty)."""
-    from hermes_cli.kanban_scratch_archive import ArchiveRefused
+def _earlier(root: str) -> list[dict]:
+    record = os.path.join(root, RECORD_NAME)
+    if _sudo("find", root, "-maxdepth", "1", "-name", RECORD_NAME, "!", "-type", "f", "-print", "-quit").stdout.strip():
+        raise _refused(f"{RECORD_NAME} is not a regular file")
+    read = _sudo("cat", "--", record, check=False)
+    if read.returncode != 0:
+        return []
+    try:
+        return list(json.loads(read.stdout)["entries"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise _refused(f"unreadable {RECORD_NAME}: {exc!r}") from exc
+
+
+def _write_record(root: str, body: bytes) -> None:
+    # Written by the worker user beside the workspace, then renamed in as root: rename replaces
+    # whatever sits at the name and never writes through a link.
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(root)}.ownership-", dir=os.path.dirname(root))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+        _sudo("mv", "-T", "-f", "--", tmp, os.path.join(root, RECORD_NAME))
+    finally:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+
+
+def _grant_owner_access(root: str, rows: list[dict]) -> None:
+    # Now worker-owned, so no sudo: an entry the worker cannot read or (for a directory) empty
+    # would refuse the scan or leave a detached tree behind. Parents come first (find pre-order).
+    for row in rows:
+        path = root if row["path"] == "." else os.path.join(root, row["path"])
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+            continue
+        need = stat.S_IRWXU if stat.S_ISDIR(st.st_mode) else stat.S_IRUSR | stat.S_IWUSR
+        if st.st_mode & need != need:
+            os.chmod(path, stat.S_IMODE(st.st_mode) | need)
+
+
+def adopt(workspace: Path, owner_check: Optional[Callable[[], bool]] = None) -> list[dict]:
+    """Record, then give the worker user every foreign-owned entry of *workspace*; return the new records."""
     if not sys.platform.startswith("linux") or not hasattr(os, "geteuid"):
         return []
     uid, gid = os.geteuid(), os.getegid()  # windows-footgun: ok -- Linux-only, hasattr guard above
@@ -96,25 +151,23 @@ def adopt(workspace: Path) -> list[dict]:
     except (OSError, subprocess.SubprocessError):
         return []
     root = os.path.realpath(workspace)
-    probe = _sudo("find", root, "-xdev", "!", "-uid", str(uid), "-print", "-quit")
-    if not probe.stdout.strip():
+    foreign = ["(", "!", "-uid", str(uid), "-o", "!", "-gid", str(gid), ")"]
+    if not _sudo("find", root, "-xdev", *foreign, "-print", "-quit").stdout.strip():
         return []
     mounts = mounts_below(Path(root))
     if mounts:
-        raise ArchiveRefused(f"foreign ownership adoption: mount point(s) inside workspace: {mounts[:3]}")
-    listing = _sudo("find", root, "-xdev", "!", "-uid", str(uid), "-printf", "%U %G %m %y %P\\0")
-    rows = _parse(listing.stdout)
-    record = Path(root) / RECORD_NAME
-    earlier: list[dict] = []
-    read = _sudo("cat", "--", str(record), check=False)
-    if read.returncode == 0:
-        try:
-            earlier = json.loads(read.stdout)["entries"]
-        except (ValueError, KeyError, TypeError) as exc:
-            raise ArchiveRefused(f"foreign ownership adoption: unreadable {RECORD_NAME}: {exc!r}") from exc
+        raise _refused(f"mount point(s) inside workspace: {mounts[:3]}")
+    linked = _sudo("find", root, "-xdev", *foreign, "-type", "f", "-links", "+1", "-print", "-quit").stdout.strip()
+    if linked:
+        raise _refused(f"foreign-owned file with several hard links: {linked[:200]!r}")
+    earlier = _earlier(root)
+    if owner_check is not None and not owner_check():
+        raise _refused("the workspace owner changed since it was selected; left untouched")
+    rows = _parse(_sudo("find", root, "-xdev", *foreign, "-printf", "%U %G %m %y %P\\0").stdout)
     known = {e["path"] for e in earlier}
     merged = earlier + [r for r in rows if r["path"] not in known and r["path"] != RECORD_NAME]
-    body = json.dumps({"version": 1, "adopted_to": [uid, gid], "entries": merged}, indent=1).encode() + b"\n"
-    _sudo("tee", "--", str(record), input=body)
-    _sudo("chown", "-R", "-P", "--no-dereference", f"{uid}:{gid}", "--", root)
+    _write_record(root, json.dumps({"version": 1, "adopted_to": [uid, gid], "entries": merged},
+                                   indent=1).encode() + b"\n")
+    _sudo("find", root, "-xdev", *foreign, "-exec", "chown", "-h", f"{uid}:{gid}", "--", "{}", "+")
+    _grant_owner_access(root, [r for r in rows if r["path"] != RECORD_NAME])
     return rows
