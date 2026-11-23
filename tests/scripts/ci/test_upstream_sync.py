@@ -19,6 +19,41 @@ from scripts.ci import upstream_sync as sync
 UPSTREAM_URL = "https://github.com/NousResearch/hermes-agent.git"
 
 
+@pytest.mark.parametrize("stage", ["stage", "publish"])
+def test_push_timeout_covers_hook_and_transfer(monkeypatch, tmp_path, stage):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(sync.subprocess, "run", run)
+    ref = "refs/heads/sync/upstream-test"
+    sync._push(tmp_path, "HEAD", ref, stage)
+    argv, kwargs = calls.pop()
+    assert argv == ["git", "-C", str(tmp_path), "push", "-q", "origin", f"HEAD:{ref}"]
+    assert kwargs["timeout"] >= 2400
+    assert kwargs["timeout"] == sync.PUSH_TIMEOUT_S
+    assert kwargs["env"][sync.GATE_ENV] == stage
+    sync._run(tmp_path, "status")
+    assert calls.pop()[1]["timeout"] == 600
+
+
+@pytest.mark.parametrize("stage", ["stage", "publish"])
+def test_push_timeout_reports_stage_and_limit(monkeypatch, tmp_path, stage):
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(sync.subprocess, "run", run)
+    ref = "refs/heads/sync/upstream-test"
+    with pytest.raises(sync.GateError) as error:
+        sync._push(tmp_path, "HEAD", ref, stage)
+    message = str(error.value)
+    assert "push" in message and stage in message and ref in message
+    assert str(sync.PUSH_TIMEOUT_S) in message
+    assert isinstance(error.value.__cause__, subprocess.TimeoutExpired)
+
+
 def git(cwd, *args, env=None):
     return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True,
                           env=env).stdout.strip()

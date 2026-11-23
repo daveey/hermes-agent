@@ -58,6 +58,7 @@ BRANCH_PREFIX = "sync/upstream-"
 # The job names tests.yml gives the full suite (called as job "Full suite"); all must succeed.
 REQUIRED_JOBS = (*(f"Run tests ({n}/8)" for n in range(1, 9)), "e2e")
 RED_BACKOFF_S = 6 * 3600
+PUSH_TIMEOUT_S = 2400  # upstream-wide pre-push checks can take over 600 s before transfer starts
 STALE_PENDING_S = 6 * 3600  # a run queued this long never got runners: it no longer holds the slot
 # Set on the gate's own pushes; the pre-push guard lets exactly those through.
 GATE_ENV = "HERMES_UPSTREAM_SYNC_GATE"
@@ -90,9 +91,9 @@ def is_protection_refusal(text: str) -> bool:
     return any(mark in low for mark in PROTECTION_MARKS)
 
 
-def _run(repo, *args, env=None):
+def _run(repo, *args, env=None, timeout=600):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          env=env, timeout=600, check=False)
+                          env=env, timeout=timeout, check=False)
 
 
 def git(repo, *args, env=None) -> str:
@@ -266,7 +267,10 @@ def _adds_nothing(repo, head, main) -> bool:
 
 def _push(repo, src: str, ref: str, stage: str) -> None:
     """Push ``src`` to ``ref`` as the gate. A protection refusal raises Refused with GitHub's words."""
-    push = _run(repo, "push", "-q", "origin", f"{src}:{ref}", env=_gate_env(stage))
+    try:
+        push = _run(repo, "push", "-q", "origin", f"{src}:{ref}", env=_gate_env(stage), timeout=PUSH_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise GateError(f"git push ({stage}) to {ref} timed out after {PUSH_TIMEOUT_S} seconds") from exc
     if push.returncode:
         lines = [line.strip() for line in (push.stderr or push.stdout or "").splitlines() if line.strip()]
         remote = [line for line in lines if line.startswith("remote:")]
