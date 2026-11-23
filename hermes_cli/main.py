@@ -2493,11 +2493,9 @@ def cmd_dashboard(args):
     _attach_to_host_backend(args, _headless_backend)
     _route_named_profile_dashboard(args, _headless_backend, _ssh_owner_nonce, _token_file)
 
-    # Apply the final process/profile policy after dashboard routing, but before
-    # importing the web server or opening dashboard state. Applying it before a
-    # named-profile re-exec could leak that profile's higher limit into the
-    # machine/default dashboard, whose lower policy intentionally cannot undo it.
-    # This also covers Desktop SSH's isolated `serve` child, which does not route.
+    # Apply final nofile policy after routing/re-exec, before web imports/state;
+    # this includes isolated Desktop SSH serves. A higher named-profile limit
+    # must not leak into the default dashboard, whose lower limit cannot undo it.
     from hermes_cli.resource_limits import apply_nofile_soft_limit
 
     apply_nofile_soft_limit()
@@ -2513,6 +2511,8 @@ def cmd_dashboard(args):
         _before_wait = _update_gate.checkout_fingerprint()
         _update_gate.reexec_if_checkout_moved(_update_gate.wait_for_update_clear(), _before_wait)
 
+    from hermes_cli.serve_producer_admission import supported_launch
+    supported_launch('serve' if _headless_backend else 'dashboard')
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)
 
@@ -2700,11 +2700,8 @@ def _chat_runs_at_gateway(args) -> bool:
 
 def _prepare_agent_startup(args) -> None:
     """Discover plugins/MCP/hooks for commands that can run an agent turn."""
-    # --yolo chokepoint: HERMES_YOLO_MODE must be set before any discovery
-    # below imports tools.approval, which freezes _YOLO_MODE_FROZEN at import.
-    # main() sets it earlier too, but other launchers (Termux fast-CLI) reach
-    # here directly, so the guarantee lives where the import is triggered.
-    # See #7994.
+    # Set YOLO before discovery freezes tools.approval; direct Termux launchers
+    # also reach this chokepoint without main(). See #7994.
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
     if args.command in {None, "chat"} and _bypass_chat_launch(args):
@@ -2719,6 +2716,8 @@ def _prepare_agent_startup(args) -> None:
     if not (args.command in _AGENT_COMMANDS or _agent_subcommand_selected(args)):
         return
 
+    from hermes_cli.serve_producer_admission import supported_launch
+    supported_launch('gateway' if args.command == 'gateway' else 'agent_startup')
     _accept_hooks = bool(getattr(args, "accept_hooks", False))
     if not (_is_tui_chat_launch(args) or _chat_runs_at_gateway(args)):
         # The TUI backend and the gateway (chat turns, plugin commands, pre_command) discover their own.

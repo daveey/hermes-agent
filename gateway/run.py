@@ -1,15 +1,15 @@
-"""Gateway runner - entry point for messaging platform integrations.
-
-Provides ``start_gateway()`` (start all configured adapters) and ``GatewayRunner`` (lifecycle).
+"""Gateway runner: ``start_gateway()`` starts adapters; ``GatewayRunner`` owns lifecycle.
 Run via ``python -m gateway.run`` or ``python cli.py --gateway``."""
 
-# hermes_bootstrap must be the very first import (UTF-8 stdio on Windows; no-op on POSIX).
+# Before all agent imports; bootstrap repairs Windows stdio and activates PM.
 try:
     import hermes_bootstrap
 except ModuleNotFoundError as exc:  # a partial ``hermes update`` can leave the bootstrap unregistered
     if exc.name != "hermes_bootstrap" and not "hermes_bootstrap".startswith(f"{exc.name}."):
         raise  # the bootstrap exists but cannot load: skipping it would skip PM activation
 
+from hermes_cli.serve_producer_admission import supported_launch as _producer_launch
+_producer_launch('gateway')
 import asyncio
 import concurrent.futures
 import dataclasses

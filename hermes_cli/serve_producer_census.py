@@ -107,6 +107,13 @@ class LinuxProcessCensus:
             raise CensusUnavailable('missing boot identity')
         return value
 
+    def namespace_id(self) -> str:
+        """PID numbers are meaningful only inside the same kernel PID namespace."""
+        value = os.readlink(self.root / 'self/ns/pid')
+        if not value.startswith('pid:[') or not value.endswith(']') or not value[5:-1].isdecimal():
+            raise CensusUnavailable('invalid pid namespace')
+        return value
+
     def pids(self) -> tuple[int, ...]:
         return tuple(sorted(int(name) for name in _bounded_names(self.root, MAX_PROCESSES, numeric=True)))
 

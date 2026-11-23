@@ -29,6 +29,9 @@ import types
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from hermes_cli.serve_producer_admission import supported_launch as _producer_launch
+_producer_launch('plugin_host')
+
 from hermes_cli.plugin_host_wire import (
     Channel, Opaque, PROTOCOL_VERSION, PluginHostUnsupported, bind_serving_request, declared_member, decode,
     describe_signature, encode, is_async_callable, restore_arguments, serving_request,

@@ -79,6 +79,8 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     ``force``: a ``gateway restart --force --detach`` replacement keeps the ``--force`` its old owner
     needed (a named profile under a multiplexer), or it exits on the run-side guard.
     """
+    from hermes_cli.serve_producer_admission import supported_launch
+    supported_launch('gateway_spawner', timeout=min(10, remaining(deadline)))
     from hermes_dir_acl import TOKEN_ELEVATION_TYPE_DEFAULT, process_elevation_type, process_is_elevated
     # Only a split (UAC) token has a normal twin to lock out. With none (UAC off, the built-in
     # Administrator) every window of this user is elevated and attaches to this gateway.

@@ -7,6 +7,9 @@ import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
 
+from hermes_cli.serve_producer_admission import supported_launch as _producer_launch
+_producer_launch('tui_gateway')
+
 import json
 import logging
 import signal
