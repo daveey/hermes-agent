@@ -93,7 +93,9 @@ def _dispatch_result(raw_result):
     except ValueError:
         result = None
     if (isinstance(result, dict) and result.get('created') is False
+            and result.get('adopted') is not True
             and isinstance(result.get('code'), str) and result['code'].strip()):
+        # Successful adoption creates no card but still awaits origin binding.
         # Definitive no-write refusals cannot be repaired by replaying this envelope.
         return {**result, 'status': 'rejected', 'handoff_complete': False}
     if not isinstance(result, dict) or result.get('handoff_complete') is not False:

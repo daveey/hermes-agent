@@ -208,8 +208,14 @@ def test_owner_entry_adopts_existing_task_and_replays(world, monkeypatch, capsys
     result = invoke(request, monkeypatch, capsys)
     assert result.get('adopted') is True, result
     assert result['created'] is False
+    assert result.get('status', 'pending') == 'pending'
+    assert result['code'] == 'origin_bind_pending'
     assert result['handoff_complete'] is False
-    assert invoke(request, monkeypatch, capsys)['origin_creation'] == result['origin_creation']
+    replay = invoke(request, monkeypatch, capsys)
+    assert replay.get('status', 'pending') == 'pending'
+    assert replay['code'] == 'origin_bind_pending'
+    assert replay['origin_creation'] == result['origin_creation']
+    assert replay['origin_creation']['binding']['origin'] == world['args']['origin']
     with kbc.connect_closing() as conn:
         assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
         assert dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()) == before
