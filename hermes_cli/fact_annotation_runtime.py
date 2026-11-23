@@ -6,6 +6,7 @@ health before draining legacy; failed readiness never installs a native lookup.
 """
 from contextvars import copy_context
 from pathlib import Path
+import threading
 import time
 
 from hermes_cli import fact_annotation_capture as capture
@@ -33,7 +34,10 @@ class AnnotationRuntime:
         self.engines = {scope: ReducerEngine(self.store, scope) for scope in self.scopes.values()}
         self.handles, self.bindings = {}, {}
         self.owner = self.local = self.registry = None
+        self._lock = threading.RLock()
         self._stopped = False
+        self._native_profiles = set()
+        self._closed = False
         self._stop, self._start = stop_legacy, start_legacy
         self.life = IncrementalLifecycle({(scope, 'annotations') for scope in self.scopes.values()})
         sources = []
@@ -49,21 +53,26 @@ class AnnotationRuntime:
                 handle = self.local.acquire(scope, lifecycle=self.life)
                 self.handles[name] = handle
                 self.bindings[name] = annotations.AnnotationFacts(handle, scope,
-                    stop_legacy=self._pause, start_legacy=self._resume, view_facts=True)
+                    stop_legacy=lambda name=name: self._pause(name),
+                    start_legacy=lambda name=name: self._resume(name), view_facts=True)
             self.registry = AnnotationRegistry(self.bindings, fallback_profile)
         except BaseException:
             self.close()
             raise
 
-    def _pause(self):
-        if not self._stopped:
-            self._stopped = True
-            self._stop()
+    def _pause(self, profile):
+        with self._lock:
+            self._native_profiles.add(profile)
+            if not self._stopped:
+                self._stopped = True
+                self._stop()
 
-    def _resume(self):
-        if self._stopped:
-            self._start()
-            self._stopped = False
+    def _resume(self, profile):
+        with self._lock:
+            self._native_profiles.discard(profile)
+            if self._stopped and not self._native_profiles:
+                self._start()
+                self._stopped = False
 
     @staticmethod
     def _sources(engine, scope, home, gateway):
@@ -123,6 +132,8 @@ class AnnotationRuntime:
         return self
 
     def close(self):
+        if self._closed:
+            return
         if self.registry is not None:
             self.registry.close()
         for name, binding in self.bindings.items():
@@ -135,3 +146,4 @@ class AnnotationRuntime:
             handle.close()
         if self.local is not None:
             self.local.close()
+        self._closed = True

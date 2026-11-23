@@ -34,6 +34,19 @@ SOURCES = {
     'subagent': frozenset(('subagent.activity', 'subagent.registry')),
 }
 _current = ContextVar('annotation_facts', default=None)
+_seed_collector = ContextVar('annotation_startup_seed_collector', default=None)
+
+
+@contextmanager
+def collect_startup_seeds(collector):
+    """Authorized startup discards these undecorated bodies; no request uses it."""
+    token = _seed_collector.set(collector)
+    try:
+        yield
+    finally:
+        _seed_collector.reset(token)
+
+
 _active_lock = threading.Condition()
 _active_bindings = set()
 _legacy_inflight = 0
@@ -264,6 +277,10 @@ def install_lookup(lookup):
 
 def annotate(family, rows, legacy, **kwargs):
     """Request seam; binding is installed by the authorized host lifecycle."""
+    collector = _seed_collector.get()
+    if collector is not None:
+        collector(rows)
+        return rows
     binding = _current.get()
     lookup = _native_lookup
     if binding is None and lookup is not None:

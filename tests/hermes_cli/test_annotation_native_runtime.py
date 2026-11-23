@@ -40,6 +40,7 @@ def test_runtime_two_profile_readiness_canonical_entries_and_rollback(kanban_roo
     def stop():
         counts['stop'] += 1
     def start():
+        assert all(binding._mode == 'legacy' for binding in runtime.bindings.values())
         counts['start'] += 1
     runtime = AnnotationRuntime(homes, fallback_profile='default', gateway='fixture',
                                 stop_legacy=stop, start_legacy=start)
