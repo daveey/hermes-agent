@@ -40,11 +40,25 @@ class PushResult:
 
 
 def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=False, seen=None):
+    """Serialize the complete session/send, not only individual SQL writes."""
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from hermes_cli.kanban_sync_guard import sender_lock
+    path = _main_db_file(conn)
+    if path is None:
+        raise ValueError('sender requires an on-disk board')
+    with sender_lock(path):
+        return _push(conn, hub, board, gateway, primary=primary, max_batches=max_batches,
+                     before_head=before_head, seen=seen)
+
+
+def _push(conn, hub, board, gateway, *, primary, max_batches, before_head, seen):
     """Select only the journal-bound transport; never auto-enroll or fall back."""
     from hermes_cli import kanban_sync_client as client
     client.refuse_if_schema_ahead(conn)
     from hermes_cli.kanban_replay_admission import guard
     guard(conn)
+    if (sync.sync_state(conn) or {}).get('mode') == 'off':
+        raise ValueError('sync is detached; sender disabled')
     if (sync.sync_state(conn) or {}).get('journal_id') is not None:
         from hermes_cli import kanban_replay_existence as existence
         existence.guard(conn)

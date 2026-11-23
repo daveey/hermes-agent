@@ -4,7 +4,23 @@ from pathlib import Path
 
 
 class SyncRoundBusy(RuntimeError):
-    """A sync round or detach already owns this board's synchronization fence."""
+    """A sync round, sender or detach already owns this board's fence."""
+
+
+@contextmanager
+def sender_lock(path: Path | str):
+    """Own the full send/session, including direct callers outside sync rounds.
+
+    Separate from the round lock: a round calls push while holding its own lock.
+    Detach acquires round then sender, never the reverse. No nested admission or
+    process-local bypass is supported. Old processes still require explicit drain.
+    """
+    from hermes_cli.kanban_db_connect import _dispatch_tick_lock
+    canonical = Path(path).resolve()
+    with _dispatch_tick_lock(canonical.with_name(canonical.name + ".sender")) as held:
+        if not held:
+            raise SyncRoundBusy("board sender is busy; retry after it finishes")
+        yield
 
 
 @contextmanager

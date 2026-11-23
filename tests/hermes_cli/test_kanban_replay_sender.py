@@ -359,7 +359,11 @@ def test_record_rollback_reopens_and_recovers_without_resend(live, monkeypatch):
         restarted.close()
 
 
-def test_two_connections_takeover_sends_same_pending_and_fences_predecessor(live):
+def test_unfenced_predecessor_takeover_keeps_same_pending_and_fences_stale_session(live):
+    # Exercise the receiver-session defense against bytes from an older sender
+    # without local admission. Public push now refuses an overlapping local sender;
+    # that does not remove the protocol obligation to reject stale remote bytes.
+    from hermes_cli.kanban_replay_sender import _push_strict
     kb.create_task(live, title='two sender takeover', assignee='worker')
     path = Path(live.execute('PRAGMA database_list').fetchone()[2])
     successor = kbc.connect(path)
@@ -382,7 +386,8 @@ def test_two_connections_takeover_sends_same_pending_and_fences_predecessor(live
     receiver = Takeover()
     try:
         with pytest.raises(ValueError, match='^stream_session_stale$'):
-            client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+            _push_strict(live, receiver, 'default', 'macbook', primary=False,
+                         max_batches=1, before_head=False, seen={})
         assert receiver.successor_result.applied == 1
         assert len(receiver.sent) == 1
         stale, sent = receiver.stale_attempt, receiver.sent[0]
