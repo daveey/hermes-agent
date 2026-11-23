@@ -155,24 +155,56 @@ def _write_record(root: str, body: bytes) -> None:
             os.unlink(tmp)
 
 
-def _grant_owner_access(root: str, rows: list[dict]) -> None:
-    # Now worker-owned, so no sudo: an entry the worker cannot read or (for a directory) empty
-    # would refuse the scan or leave a detached tree behind. Parents come first (find pre-order).
-    # Only entries the worker owns are touched (chmod by another user fails anyway).
+_PATH_FLAGS = getattr(os, "O_PATH", 0) | os.O_NOFOLLOW
+
+
+def _open_entry(root: str, rel: str) -> int:
+    """An O_PATH descriptor for *rel* below *root*, never following a link in any component."""
+    parts = [] if rel == "." else rel.split("/")
+    fd = os.open(root, _PATH_FLAGS | os.O_DIRECTORY)
+    try:
+        for i, part in enumerate(parts):
+            flags = _PATH_FLAGS | (os.O_DIRECTORY if i < len(parts) - 1 else 0)
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _grant_owner_access(root: str, rows: list[dict], gate: Optional[Callable[[], bool]] = None) -> None:
+    """Give the worker owner rw (and x on directories) on recorded entries it owns.
+
+    No sudo: an entry the worker cannot read or (for a directory) empty would refuse the scan or
+    leave a detached tree behind. Parents come first (find pre-order), so a directory is opened up
+    before its children are reached. Every component is opened ``O_PATH|O_NOFOLLOW`` from the root
+    descriptor, so a link swapped in anywhere is never followed; vanished entries, links and
+    entries the worker does not own are skipped. *gate* (the caller's owner re-check) runs once,
+    before the first change, and a False answer refuses with the tree unchanged.
+    """
     uid = os.geteuid()  # windows-footgun: ok -- only reached from adopt (Linux)
+    gated = gate is None
     for row in rows:
-        path = root if row["path"] == "." else os.path.join(root, row["path"])
         try:
-            st = os.lstat(path)
-        except FileNotFoundError:
-            continue
-        if st.st_uid != uid:
-            continue
-        if stat.S_ISLNK(st.st_mode) or not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
-            continue
-        need = stat.S_IRWXU if stat.S_ISDIR(st.st_mode) else stat.S_IRUSR | stat.S_IWUSR
-        if st.st_mode & need != need:
-            os.chmod(path, stat.S_IMODE(st.st_mode) | need)
+            fd = _open_entry(root, row["path"])
+        except OSError:
+            continue  # vanished, or a link/non-directory in some component: never followed
+        try:
+            st = os.fstat(fd)
+            if st.st_uid != uid or not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                continue
+            need = stat.S_IRWXU if stat.S_ISDIR(st.st_mode) else stat.S_IRUSR | stat.S_IWUSR
+            if st.st_mode & need == need:
+                continue
+            if not gated:
+                if not gate():
+                    raise _refused("the workspace owner changed since it was selected; left untouched")
+                gated = True
+            os.chmod(f"/proc/self/fd/{fd}", stat.S_IMODE(st.st_mode) | need)  # the opened inode itself
+        finally:
+            os.close(fd)
 
 
 def adopt(workspace: Path, owner_check: Optional[Callable[[], bool]] = None) -> list[dict]:
@@ -191,7 +223,7 @@ def adopt(workspace: Path, owner_check: Optional[Callable[[], bool]] = None) -> 
     _sweep_temp_records(root)
     foreign = ["(", "!", "-uid", str(uid), "-o", "!", "-gid", str(gid), ")"]
     if not _sudo("find", root, "-xdev", *foreign, "-print", "-quit").stdout.strip():
-        _grant_owner_access(root, _recorded(root))  # finish a pass interrupted after its chown
+        _grant_owner_access(root, _recorded(root), owner_check)  # finish a pass interrupted after its chown
         return []
     mounts = mounts_below(Path(root))
     if mounts:

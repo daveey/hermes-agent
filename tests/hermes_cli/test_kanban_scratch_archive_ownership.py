@@ -69,7 +69,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(own.os, "getegid", lambda: 1000)
     monkeypatch.setattr(own.sys, "platform", "linux")
     monkeypatch.setattr(own, "mounts_below", lambda root: [])
-    monkeypatch.setattr(own, "_grant_owner_access", lambda root, rows: None)
+    monkeypatch.setattr(own, "_grant_owner_access", lambda root, rows, gate=None: None)
 
     def make(**kw):
         f = FakeSudo(**kw)
@@ -296,11 +296,11 @@ def test_pass_interrupted_after_chown_is_finished_by_the_next_pass(board, monkey
     real = own._grant_owner_access
     calls = []
 
-    def interrupted(root, rows):
+    def interrupted(root, rows, gate=None):
         calls.append(len(rows))
         if len(calls) == 1:
             raise OSError("killed between chown and grant")
-        return real(root, rows)
+        return real(root, rows, gate)
     monkeypatch.setattr(own, "_grant_owner_access", interrupted)
     try:
         base._gc()
@@ -318,14 +318,45 @@ def test_pass_interrupted_after_chown_is_finished_by_the_next_pass(board, monkey
 def test_card_resumed_after_selection_is_left_untouched(board, monkeypatch):
     from hermes_cli import kanban_worktree_gc as gc
 
+    import inspect
+
     _tid, path = base._plain_task(_root_owned_locked_tree)
-    monkeypatch.setattr(gc.ws, "_is_terminal_task", lambda conn, task_id: False)
+    real = gc.ws._is_terminal_task
+    reached = []
+
+    def terminal(conn, task_id):
+        # Terminal when GC selects the tree; resumed by the time the archive re-checks before adopting.
+        if any(f.function == "owner_unchanged" for f in inspect.stack()[1:4]):
+            reached.append(task_id)
+            return False
+        return real(conn, task_id)
+    monkeypatch.setattr(gc.ws, "_is_terminal_task", terminal)
     try:
         base._gc()
+        assert reached  # the archive's own re-check ran, and said no
         assert path.exists() and not (path / own.RECORD_NAME).exists()
         assert os.lstat(path / "rootfs" / "etc" / "shadow").st_uid == 0
     finally:
         _cleanup(path)
+
+
+def test_finishing_grant_is_gated_and_never_follows_a_swapped_parent(tmp_path):
+    root = tmp_path / "ws"
+    (root / "d").mkdir(parents=True)
+    (root / "d" / "f").write_text("x")
+    os.chmod(root / "d" / "f", 0)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f").write_text("y")
+    os.chmod(outside / "f", 0o400)
+    rows = [{"path": "d/f", "type": "f"}, {"path": "e/f", "type": "f"}]
+    (root / "e").symlink_to(outside)
+    with pytest.raises(sa.ArchiveRefused, match="owner changed"):
+        own._grant_owner_access(str(root), rows, gate=lambda: False)
+    assert stat.S_IMODE(os.lstat(root / "d" / "f").st_mode) == 0  # refused before any change
+    own._grant_owner_access(str(root), rows, gate=lambda: True)
+    assert stat.S_IMODE(os.lstat(root / "d" / "f").st_mode) == 0o600
+    assert stat.S_IMODE(os.lstat(outside / "f").st_mode) == 0o400  # the link in a parent was not followed
 
 
 @real_sudo
