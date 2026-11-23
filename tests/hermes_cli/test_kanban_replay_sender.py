@@ -771,7 +771,7 @@ def test_parent_backoff_does_not_allocate_child_or_hide_independent_task(live):
     assert journal.snapshot(live)['settled'] == '1'
 
 
-@pytest.mark.parametrize('flag', ['primary', 'before_head'])
+@pytest.mark.parametrize('flag', ['primary'])
 def test_unintegrated_push_modes_refuse_before_network(live, flag):
     kb.create_task(live, title='mode custody', assignee='worker')
     receiver = Receiver()

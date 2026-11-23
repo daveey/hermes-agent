@@ -29,10 +29,11 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
     from hermes_cli import kanban_sync_client as client
     client.refuse_if_schema_ahead(conn)
     if (sync.sync_state(conn) or {}).get('journal_id') is not None:
-        if primary or before_head:
+        if primary:
             raise ValueError('tracer push mode not integrated')
         try:
-            return _push_strict(conn, hub, board, gateway, max_batches=max_batches)
+            return _push_strict(conn, hub, board, gateway, max_batches=max_batches,
+                                before_head=before_head, seen={} if seen is None else seen)
         except (OSError, ValueError, client.HubError):
             from hermes_cli.kanban_replay_episodes import interrupt
             interrupt(conn)
@@ -41,7 +42,7 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
                                max_batches=max_batches, before_head=before_head, seen=seen)
 
 
-def _push_strict(conn, hub, board, gateway, *, max_batches):
+def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
     from hermes_cli import kanban_sync_client as client
     root = f'/v2/boards/{quote(board, safe="")}/replay/'
     out = client.PushResult()
@@ -156,8 +157,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         from time import time
         rows = []
         if journal.pending_wire(conn) is None:
-            rows, _, _ = select_pending(conn, hub, board, {}, now=int(time()), limit=1, before_head=False,
+            rows, _, _ = select_pending(conn, hub, board, seen, now=int(time()), limit=1, before_head=before_head,
                                         hold_rejected=True)
+
         membership = refresh_capacity()
         with write_txn(conn):
             decision = journal.recover(conn, remote, record)
@@ -187,8 +189,16 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                     intent = envelopes.outbound(conn, row, lambda: strip_stale_push(conn, wire_ops.translate(
                         client._full_row_if_unseen(conn, row), client._next_hlc(conn, gateway))), supported=True)
                 encoded = journal.issue(conn, intent)
-            source()  # Validate retained source custody on RETRY as well as final recovery.
+            row = source()  # Validate retained source custody on RETRY as well as final recovery.
         wire = json.loads(encoded)
+        if before_head:
+            # Issuance is not permission to overwrite an unread run end or terminal
+            # task. Judge even saved unissued envelopes by their frozen wire.
+            from hermes_cli.kanban_sync_backlog import sendable_before_head
+            candidate = dict(row, fields=wire.get('fields', {}))
+            allowed, _ = sendable_before_head(conn, hub, board, [candidate], seen)
+            if not allowed:
+                break
         wire['replay']['session'] = remote['session']
         hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
         out.sent += 1
