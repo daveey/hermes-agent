@@ -759,6 +759,12 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
     data (a hub refusal, an exception). The prose checks (``text_wall``, ``soak_wait``) judge an agent's own words
     and are skipped; the declared clock still needs its why."""
     # [daveey] A probe that matches comment authors misses relayed replies (hub:gw:<gw>): author_probe.
+    from hermes_cli.kanban_wait_info import owner_device_step
+    step = owner_device_step(wake_check)
+    if step and not system:
+        raise AwaitingError(HUMAN_WAIT, (
+            f"{step} Use kanban_block(kind='needs_input', human_request={{...}}) with a physical "
+            "step and resolved_check; an availability probe is not an external producer."))
     from hermes_cli.kanban_comment_origin import check_park
     check_park(conn, task_id, wake_check)
     declared = normalize(awaiting)

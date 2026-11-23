@@ -9,7 +9,8 @@ names the producer of each wait and marks the ones only an agent can end:
   or, for older parks, from the wake check (``hermes kanban wait-check task t_x`` -> ``card t_x``).
 - ``agent_owned``: nothing outside the agents will end this wait. Transient/capability/assignment blocks, triage
   (gave up / block loop), continuation_exhausted, and a schedule with no named producer.
-- ``wait_state``: ``human`` (a validated ask: the user's move), ``stalled`` (agent-owned for longer than
+- ``wait_state``: ``human`` (a validated ask, or legacy device-access attention with ``owner_step``;
+  attention is not approval/consent), ``stalled`` (agent-owned for longer than
   ``STALL_AFTER_S``), or ``waiting`` (anything else parked).
 - ``premise``: a stable key of the reason (status, kind and the reason text, never timestamps), so a wake that
   fires "once per premise" does not fire again when the same card re-parks on the same reason.
@@ -22,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import time
 from typing import Any, Optional
 
@@ -98,6 +100,34 @@ def _awaiting_label(awaited: dict[str, Any]) -> str:
 
 def _clock_label(wake_at: float) -> str:
     return "the clock until " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(wake_at))
+
+
+def owner_device_step(wake_check: Any) -> Optional[str]:
+    """Recognize legacy paired-device availability probes, not passive capture producers.
+
+    This is a compatibility classification, not a claim that unlocking fixes a transport.
+    New owner-device waits must use a validated human_request with a resolved_check.
+    Do not inspect arbitrary scripts or execute the probe while deriving attention.
+    """
+    if not isinstance(wake_check, str):
+        return None
+    try:
+        tokens = shlex.split(wake_check)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    executable = tokens[0].rsplit("/", 1)[-1]
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", executable):
+        tokens = tokens[1:]
+        while tokens and tokens[0] in ("-S", "-I", "-B", "-u", "-E", "-s", "-O", "-OO"):
+            tokens = tokens[1:]
+    if tokens and "://" not in tokens[0] and re.fullmatch(
+            r"probe_(?:paired_)?(?:phone|iphone|ipad|device)_(?:available|visibility)\.py",
+            tokens[0].rsplit("/", 1)[-1]):
+        return ("Confirm paired-device access for the phone/device, or report that this availability "
+                "check is wrong. Unlocking or proximity alone may not make it visible.")
+    return None
 
 
 def producer_from_wake_check(cmd: Any) -> Optional[tuple[str, str]]:
@@ -177,6 +207,17 @@ def describe_contained(info: dict[str, Any], *, now: Optional[float] = None) -> 
             "premise": f"contained:{hashlib.sha1(key.encode()).hexdigest()[:12]}"}
 
 
+def _human_attention(status: str, human: bool, payload: dict, since: Any) -> Optional[dict[str, Any]]:
+    step = owner_device_step(payload.get("wake_check")) if status == "scheduled" and not human else None
+    if not human and not step:
+        return None
+    result = {"wait_state": "human", "waiting_on": "you", "waiting_since": since, "agent_owned": False,
+              "agent_owned_certain": True, "premise": None}
+    if step:
+        result.update(waiting_on="you: " + step, owner_step=step)
+    return result
+
+
 def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: Any = None,
              park_kind: Any = None, since: Any = None, awaiting: Any = None, reason: Any = None,
              now: Optional[float] = None) -> Optional[dict[str, Any]]:
@@ -205,9 +246,9 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
                 "waiting_since": since_s, "agent_owned": agent_owned, "agent_owned_certain": certain,
                 "premise": premise_key(state_kind, status, reason, awaited, reason_code) if agent_owned else None}
 
-    if human:
-        return {"wait_state": "human", "waiting_on": "you", "waiting_since": since_s, "agent_owned": False,
-                "agent_owned_certain": True, "premise": None}
+    attention = _human_attention(status, human, payload, since_s)
+    if attention is not None:
+        return attention
     if exhausted and status in ("blocked", "triage"):
         return out("continuation_exhausted", "an agent to split the work (continuation budget exhausted)", True)
     if status == "triage":
