@@ -113,6 +113,7 @@ import { isPeerInstanceWindow, windowProfileOverride } from '@/store/windows'
 
 import { isRemoteUpdatePausedBootError, RemoteUpdateWait } from '../remote-update-wait'
 
+import { BootTimeoutRecovery, isBackendReadinessTimeout } from './boot-timeout-recovery'
 import { stashGatewaySurvivor, survivorIsStale, takeGatewaySurvivor } from './gateway-hmr-survivor'
 import { notifyPrimaryReauth } from './primary-reauth-notice'
 import { useConnectionsRegistry } from './use-connections-registry'
@@ -150,8 +151,8 @@ const WAKE_RECONNECT_HOLDOFF_MS = 15_000
 // The renderer re-attempts the whole boot with the same full-jitter backoff the
 // post-boot reconnect loop uses, up to this many attempts. Retries are bounded
 // and end in the real recovery affordance (the boot-failure overlay with
-// Retry / Settings), never an infinite spinner. Local failures and confirmed
-// reauth rejections never enter this loop.
+// Retry / Settings), never an infinite spinner. Readiness timeouts instead keep
+// their recovery overlay visible while probing; reauth never retries.
 const BOOT_RETRY_MAX_ATTEMPTS = 5
 // Base delay for boot retries. Deliberately slower than the socket reconnect
 // loop's 300ms: each attempt may rebuild an SSH master + remote dashboard.
@@ -444,6 +445,7 @@ export function useGatewayBoot({
     let bootRetryAttempt = 0
     let bootRetryTimer: ReturnType<typeof setTimeout> | null = null
     const remoteUpdateWait = new RemoteUpdateWait()
+    const timeoutRecovery = new BootTimeoutRecovery()
 
     const clearBootRetryTimer = () => {
       if (bootRetryTimer !== null) {
@@ -893,6 +895,7 @@ export function useGatewayBoot({
         // token is returned and must follow the normal boot-failure path.
         switchToken = beginGatewaySwitch()
         const ownsSwitch = () => !cancelled && switchToken !== null && isCurrentGatewaySwitch(switchToken)
+        timeoutRecovery.invalidate()
         clearReconnectTimer()
         clearBootRetryTimer()
         clearLivenessReprobeTimer()
@@ -1042,6 +1045,12 @@ export function useGatewayBoot({
         return
       }
 
+      if (payload.phase === 'bootstrap.reset') {
+        timeoutRecovery.expedite()
+
+        return
+      }
+
       // Soft switch / post-boot startHermes re-emits progress — ignore so the
       // cold-boot CONNECTING overlay stays down. A boot that ended in failure
       // is concluded too: replaying its steps would take the recovery overlay
@@ -1088,18 +1097,18 @@ export function useGatewayBoot({
       })
       .catch(() => undefined)
 
-    setDesktopBootStep({
-      phase: 'renderer.boot',
-      message: translateNow('boot.steps.startingDesktopConnection'),
-      progress: 6
-    })
+    function startBootProgress() {
+      setDesktopBootStep({
+        phase: 'renderer.boot',
+        message: translateNow('boot.steps.startingDesktopConnection'),
+        progress: 6
+      })
+    }
 
-    // HMR adoption: in a dev hot update, the previous effect instance parked its
-    // still-open socket instead of closing it (see the cleanup below). Re-adopt
-    // it so an edit doesn't drop the live agent session. A stale (closed) parked
-    // socket is discarded and we boot fresh. No-op in production: import.meta.hot
-    // is undefined there, so this folds to `null` and the whole survivor module
-    // dead-code-eliminates out of the bundle.
+    startBootProgress()
+
+    // HMR reuses the parked open socket to preserve live sessions; stale sockets
+    // boot fresh. Production has no import.meta.hot and eliminates this module.
     const survivor = import.meta.hot ? takeGatewaySurvivor() : null
     const adoptedFromHmr = Boolean(survivor && !survivorIsStale(survivor))
 
@@ -1600,7 +1609,36 @@ export function useGatewayBoot({
       })
     })
 
-    async function boot() {
+    function ownsBoot(revision: number) {
+      return !cancelled && revision === timeoutRecovery.revision
+    }
+
+    async function resolveBootBackend(recovering: boolean, revision: number) {
+      const conn = await withTimeout(
+        getWindowBackend(true),
+        recovering ? RECONNECT_ATTEMPT_TIMEOUT_MS : BACKEND_BOOT_WAIT_TIMEOUT_MS,
+        'Timed out connecting to Hermes backend'
+      )
+
+      if (!ownsBoot(revision)) {
+        return null
+      }
+      timeoutRecovery.stop()
+
+      if (recovering) {
+        bootFailed = false
+        resumeDesktopBootForRetry(translateNow('boot.steps.connectingGateway'))
+      }
+
+      return conn
+    }
+
+    function remoteDial(conn: HermesConnection, wsUrl: string) {
+      return conn.mode === 'remote' && isGatewayWebSocketUrl(wsUrl)
+    }
+
+    async function boot(recoveringTimeout = false) {
+      const revision = timeoutRecovery.revision
       const selectionRevision = currentProfileSelectionRevision()
       // Where this boot attempt got to — a historical fact, not a late read of
       // gateway.connectionState. A socket can close after a successful dial;
@@ -1615,13 +1653,9 @@ export function useGatewayBoot({
         // round-trip must not hang "Starting Hermes…" forever. Initial boot
         // rides out a full backend cold spawn, so it gets the shared 45s
         // backend-boot budget, not the 20s reconnect budget.
-        const conn = await withTimeout(
-          getWindowBackend(true),
-          BACKEND_BOOT_WAIT_TIMEOUT_MS,
-          'Timed out connecting to Hermes backend'
-        )
+        const conn = await resolveBootBackend(recoveringTimeout, revision)
 
-        if (cancelled) {
+        if (!conn) {
           return
         }
 
@@ -1642,7 +1676,7 @@ export function useGatewayBoot({
         const profileLookup = lookupPrimaryProfile(conn)
         const primaryProfile = await profileLookup.catch(() => normalizeProfileKey(primaryProfileOverride(conn)))
 
-        if (cancelled) {
+        if (!ownsBoot(revision)) {
           return
         }
 
@@ -1680,7 +1714,7 @@ export function useGatewayBoot({
         // Only a valid WebSocket dial against a remote descriptor counts as a
         // transient renderer-side failure; URL and capability failures stay
         // terminal at their own boundaries.
-        if (conn.mode === 'remote' && isGatewayWebSocketUrl(wsUrl)) {
+        if (remoteDial(conn, wsUrl)) {
           stage = 'dialing'
         }
 
@@ -1712,14 +1746,14 @@ export function useGatewayBoot({
 
               await gateway.connect(url)
             },
-            isCancelled: () => cancelled,
+            isCancelled: () => !ownsBoot(revision),
             initialUrl: wsUrl
           })
         }
 
         stage = 'connected'
 
-        if (cancelled) {
+        if (!ownsBoot(revision)) {
           return
         }
 
@@ -1755,7 +1789,7 @@ export function useGatewayBoot({
           })
         ])
 
-        if (cancelled) {
+        if (!ownsBoot(revision)) {
           return
         }
 
@@ -1770,9 +1804,20 @@ export function useGatewayBoot({
         // launch is the common path, so it must warn too, not only softSwitch.
         void warnIfTerminalBackendUnavailable()
       } catch (err) {
-        if (!cancelled) {
+        if (ownsBoot(revision)) {
           const message = err instanceof Error ? err.message : String(err)
-          // [daveey] A remote's own update pauses SSH startup: poll past the bounded budget until it exits.
+
+          if (isBackendReadinessTimeout(err, stage)) {
+            bootFailed = true
+            failDesktopBoot(message)
+            setSessionsLoading(false)
+            timeoutRecovery.schedule(() => void boot(true))
+
+            return
+          }
+
+          timeoutRecovery.stop()
+          // A remote update pauses SSH startup: poll until it exits or its budget expires.
           const updatePaused = isRemoteUpdatePausedBootError(err)
           const updateDelay = updatePaused ? remoteUpdateWait.next() : null
 
@@ -1868,14 +1913,19 @@ export function useGatewayBoot({
       void boot()
     }
 
+    function clearBootTimers() {
+      clearReconnectTimer()
+      clearBootRetryTimer()
+      clearLivenessReprobeTimer()
+      timeoutRecovery.stop()
+    }
+
     return () => {
       cancelled = true
       offPrimaryRecovery()
       offSwitchLifecycle()
       endGatewaySwitch()
-      clearReconnectTimer()
-      clearBootRetryTimer()
-      clearLivenessReprobeTimer()
+      clearBootTimers()
       clearInterval(pruneTimer)
       offWorking()
       offAttention()

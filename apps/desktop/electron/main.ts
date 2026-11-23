@@ -105,6 +105,7 @@ import {
   resolveLinuxPasswordStore
 } from './bootstrap-platform'
 import { decideBootstrapRepair } from './bootstrap-repair-guard'
+import { broadcastBootstrapReset } from './bootstrap-reset-windows'
 import { runBootstrap } from './bootstrap-runner'
 import { bootstrapSnapshot } from './bootstrap-state'
 import {
@@ -11595,7 +11596,7 @@ async function startHermes(requestedProfile?: string, inheritsPrimary = false) {
     // on "session expired" until a full restart, defeating reconnect, the
     // "Sign out & sign in" reload, and the wake-recovery revalidate path.
     // A supervisor-owned respawn never latches (see the predicate).
-    if (shouldLatchBackendStartFailure({ attemptedRemote })) {
+    if (shouldLatchBackendStartFailure({ attemptedRemote, error })) {
       backendStartFailure = error instanceof Error ? error : new Error(message)
     }
 
@@ -13992,9 +13993,7 @@ ipcMain.handle('hermes:backend:recycle', async (_event, profile) => {
   return { ok: true }
 })
 ipcMain.handle('hermes:bootstrap:reset', async () => {
-  // Renderer's "Reload and retry" path. Clear the latched failure and
-  // reset connection state so the next startHermes() call restarts the
-  // full backend flow (including a fresh runBootstrap pass).
+  // Clear the shared latch; every timed-out renderer may resume in place.
   rememberLog('[bootstrap] reset requested by renderer; clearing latched failure')
   remoteUpdatePause.clear('reload and retry')
   await teardownPrimaryBackendAndWait()
@@ -14003,6 +14002,7 @@ ipcMain.handle('hermes:bootstrap:reset', async () => {
   remoteReauthFailure = null
   getFirstRunSetupGate().resetForRetry()
   resetBootstrapSnapshot()
+  broadcastBootstrapReset(BrowserWindow.getAllWindows(), bootProgressState)
 
   return { ok: true }
 })

@@ -22,7 +22,10 @@
  * without booting Electron or reading main.ts source text.
  */
 
+import { isBackendReadinessTimeout } from '@hermes/shared'
+
 export interface BackendStartFailureContext {
+  error?: unknown
   /**
    * True when the boot that just failed was resolving/dialing a REMOTE (or
    * cloud) primary backend rather than spawning a local child.
@@ -44,10 +47,11 @@ export interface BackendStartFailureContext {
  * A supervisor-owned respawn never latches either: it already has its own
  * bounded crash-loop budget, so a pre-ready child exit must not become a
  * permanent local boot latch before that budget can run. Initial and
- * user-driven starts keep the fail-closed latch.
+ * user-driven starts keep the fail-closed latch except for readiness timeouts:
+ * a service that missed the startup deadline may still answer a later probe.
  */
 export function shouldLatchBackendStartFailure(context: BackendStartFailureContext): boolean {
-  return !context.attemptedRemote && !context.supervisorRecovery
+  return !context.attemptedRemote && !context.supervisorRecovery && !isBackendReadinessTimeout(context.error)
 }
 
 export interface RemoteReauthFailureContext {
