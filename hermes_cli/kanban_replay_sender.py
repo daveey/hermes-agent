@@ -5,6 +5,7 @@ parent-first transport, but still refuses unintegrated modes/control/disposition
 Provenance, drainage and all custody consumers must pass before it can ship.
 """
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -80,6 +81,18 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
 
     membership = None
     current_row = None
+    lagged = set()
+
+    @contextmanager
+    def settlement():
+        # This process-local receipt protects dispatcher copy eviction. Never
+        # publish it from record(): its owning transaction may still roll back.
+        from hermes_cli import kanban_replica_lag as lag
+        with write_txn(conn):
+            yield
+        if lagged:
+            lag.acked(client.shadow_path(board), lagged)
+            lagged.clear()
 
     def refresh_current_row():
         """Read current state separately; never enrich the historical slot verdict."""
@@ -192,6 +205,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
             retire_parent(conn, row['row_uid'], remote=remote)
         else:
             conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
+        from hermes_cli import kanban_replica_lag as lag
+        wire = json.loads(journal.pending_wire(conn))
+        lagged.update(lag.acked_task_ids([dict(row, fields=wire.get('fields', {}))]))
         setattr(out, status, getattr(out, status) + 1)
 
     for _ in range(max_batches):
@@ -204,7 +220,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
 
         membership = refresh_capacity()
         current_row = refresh_current_row()
-        with write_txn(conn):
+        with settlement():
             decision = journal.recover(conn, remote, record)
             if decision['action'] == 'record':
                 break  # recovery settles exactly one; no newly selected intent this turn
@@ -248,7 +264,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, before_head, seen):
         remote = hub._call('GET', root + 'inspect')['slot']
         membership = refresh_capacity()
         current_row = refresh_current_row()
-        with write_txn(conn):
+        with settlement():
             decision = journal.recover(conn, remote, record)
         if decision['action'] != 'record':
             break
