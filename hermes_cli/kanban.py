@@ -1495,7 +1495,21 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2], comment=comment)),
             awaiting=awaiting, reason=reason)
         from hermes_cli.kanban_reason_comment import human_answer_refusal
-        return _bulk_apply(ids, op, _parked_msg(conn, "Scheduled", suffix),
+        from hermes_cli import kanban_awaiting as kaw
+        parked = op
+
+        def verified(tid):
+            """A park that reports success but leaves the card where it was is a failure, not "Scheduled"."""
+            if not parked(tid):
+                return False
+            task = kb.get_task(conn, tid)
+            if (task is not None and task.status == "scheduled") or kaw.escalated_owner(conn, tid):
+                return True
+            refused[tid] = (f"cannot schedule {tid}: the park was accepted but the card is still "
+                            f"{task.status if task else 'missing'}, so nothing changed")
+            return False
+
+        return _bulk_apply(ids, verified, _parked_msg(conn, "Scheduled", suffix),
                            lambda tid: (refused.get(tid) or human_answer_refusal(conn, tid, "schedule")
                                         or f"cannot schedule {tid}"), conn=conn)
 

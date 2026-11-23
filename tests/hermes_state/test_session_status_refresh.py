@@ -551,3 +551,18 @@ def test_linked_work_and_ask_transitions_publish_one_revision_each(db, board):
     assert {s["generation"] for s in seen} == {seen[0]["generation"]}
     assert all(s["coverage"]["state"] == "complete" for s in seen)
     assert refresh(db, "manual") == seen[-1]
+
+
+def test_an_acknowledged_failed_process_is_not_listed_in_failures(db, receipts):
+    """``process_manage poll acknowledge=true`` says the exit was handled: it leaves ``failures`` and the verdict."""
+    registry = registry_module.process_registry
+    dead = ProcessSession(id="proc_dead", command="launch", cwd="/", task_id="task", parent_session_id="chat",
+                          exited=True, exit_code=1, started_at=time.time() - 5)
+    registry._finished[dead.id] = dead
+    turn(db)
+    failed = refresh(db, "manual")
+    assert [f["id"] for f in failed["failures"]] == ["process:proc_dead"]
+    assert registry.poll("proc_dead", acknowledge=True)["status"] == "exited"
+    status = refresh(db, "manual")
+    assert status["failures"] == []
+    assert_done(status)

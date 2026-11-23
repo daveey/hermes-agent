@@ -174,8 +174,11 @@ def _process_items(db: Any, tip: str) -> list[dict]:
             state = "running"
         else:
             state = "succeeded" if row.get("exit_code") == 0 else "failed"
-        items.append({"kind": "process", "id": f"process:{row['session_id']}", "state": state,
-                      "at": float(row.get("exited_at") or 0)})
+        item = {"kind": "process", "id": f"process:{row['session_id']}", "state": state,
+                "at": float(row.get("exited_at") or 0)}
+        if state == "failed" and process_registry.is_completion_consumed(row["session_id"]):
+            item["acknowledged"] = True  # the agent read this exit (poll acknowledge / wait / log): handled
+        items.append(item)
     return items
 
 
@@ -258,6 +261,8 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
     control_asks, control_waits = read("controls", lambda: _control_items(tip), ([], []))
     subagents, lost_before = read("subagents", lambda: _subagent_items(db, ids, since), ([], []))
     processes = read("processes", lambda: _process_items(db, tip), [])
+    acknowledged = {p["id"] for p in processes if p.get("acknowledged")}
+    processes = [p for p in processes if p["id"] not in acknowledged]
     goals = read("goals", lambda: _goal_items(db, ids), [])
     # Work that failed before this generation's request is retained failure, cleared only by this
     # generation's own successful completion; it is not this generation's linked work.
@@ -280,6 +285,8 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
                          **({"coverage": "unknown", "reason": errors[name]} if name in errors
                             else {"coverage": "complete"})}
     base = deepcopy(prior) if prior is not None else {"status_version": STATUS_VERSION}
+    # An acknowledged failed exit is handled work: it leaves the retained failures too.
+    base["failures"] = [f for f in base.get("failures") or () if f.get("id") not in acknowledged]
     known = {failure.get("id") for failure in base.get("failures") or ()}
     base["failures"] = list(base.get("failures") or ()) + [
         {"id": item["id"], "generation": max(0, generation - 1), "state": item["state"]}

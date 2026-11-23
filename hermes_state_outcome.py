@@ -368,12 +368,15 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         status = str(card.get("status") or "")
         wait = card.get("wait") if isinstance(card.get("wait"), dict) else {}
         human = card_is_open_human_ask(status, card.get("block_kind"), request)
-        if human:
+        explained = card.get("retained_wait") if isinstance(card.get("retained_wait"), str) else None
+        if human and not explained:
             req = request if isinstance(request, dict) else {}
             decisions.append({"id": f"card:{tid}", "question": _str(req.get("action")) or _str(card.get("title")),
                               "choices": _choices(req.get("choices")), "card_id": tid, "state": "open"})
             continue
         item = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid, "state": status}
+        if explained:
+            item["waiting_on"] = explained  # retained scope stop: an open parent or recorded wait, agent work
         eta = wait.get("until") or wait.get("eta")
         if isinstance(eta, (int, float)) and not isinstance(eta, bool):
             item["eta"] = float(eta)

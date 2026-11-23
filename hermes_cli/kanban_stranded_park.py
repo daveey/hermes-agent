@@ -327,6 +327,9 @@ def _excluded(conn: sqlite3.Connection, row: dict, now: int, *, age: int, defer:
         return True
     if kind in ("time", "lane_gate") or (kind == "dependency" and _dependency_open(conn, tid)):
         return True
+    from hermes_cli.kanban_retained_wait import explanation
+    if row["status"] == "triage" and explanation(conn, tid, generated_only=False):
+        return True  # a retained card its open parent or recorded wait explains owns no ask (t_01a1ee476b0f4c0b)
     return _armed_wake(conn, tid) or _agent_owned(conn, tid, age=age, defer=defer)
 
 

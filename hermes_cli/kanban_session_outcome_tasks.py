@@ -87,6 +87,8 @@ def _read_lean_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ..
     with closing(_open_ro(path, timeout=0.5)) as conn, _execution_transaction(conn):
         conn.row_factory = sqlite3.Row
         found = select_listed_local_tasks(conn, ids, statuses)
+        from hermes_cli.kanban_retained_wait import annotate as _retained_wait
+        _retained_wait(conn, found)  # a retained triage card an open parent or recorded wait explains is no ask
         try:
             for tid, info in _local_wait_info(conn, found).items():
                 found[tid]["wait"] = info
