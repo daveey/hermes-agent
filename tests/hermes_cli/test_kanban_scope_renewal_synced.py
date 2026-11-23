@@ -35,6 +35,8 @@ class Hub:
         return {'results': [{'client_op_id': ops[0]['client_op_id'], 'status': 'applied'}]}
 
     def row_evidence(self, board, table, uid):
+        if table == 'task_chat_links':
+            return {'state': 'absent'}
         wire = self.sent[-1]
         payload = {'version': 1, 'episode': wire['episode'], 'mandate_comment_uid': wire['mandate_comment_uid'],
                    'mandate_body_sha256': hashlib.sha256(wire['mandate_body'].encode()).hexdigest(),

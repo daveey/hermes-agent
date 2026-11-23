@@ -73,7 +73,7 @@ def caller_identity(environs: Sequence[Mapping[str, str]]) -> tuple[set, set]:
 
 
 def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, environs: Sequence[Mapping[str, str]],
-                  gateway: str, profile: str) -> Actor:
+                  gateway: str, profile: str, canonical_owner=None) -> Actor:
     """The renewing authority, or :class:`RenewalRefused`. The stopped card's own runs are refused first."""
     from hermes_cli.kanban_archive_scope import _creator_task_id
     kind, session, evidence = writer
@@ -97,10 +97,42 @@ def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, envi
         if own != creator or row is None or row[0] != "running" or session not in _sessions(conn, own):
             raise RenewalRefused("not_scope_authority", f"task {own} is not {task_id}'s running creator task")
         return Actor("agent", session, "creator_task", own, gateway, profile)
-    if owning_link(conn, task_id, gateway=gateway, profile=profile, session=session) is None:
+    if (owning_link(conn, task_id, gateway=gateway, profile=profile, session=session) is None
+            and (canonical_owner is None or not canonical_owner(session))):
         raise RenewalRefused("not_scope_authority", f"this session is not {task_id}'s owning chat (an unreleased "
                              "created chat link); shepherd/touch subscriptions and unrelated agents cannot renew")
     return Actor("agent", session, "chat", f"@session:{profile}@{gateway}/{session}", gateway, profile)
+
+
+def _canonical_owner(conn, board, task_id, gateway, profile, session) -> bool:
+    """Read missing replica authority, never synthesize/project a link or accept an observer.
+
+    Chat links can live only on the home and canonical Board. Legacy NULL profiles use a different UID
+    from explicit default profiles; both mean default, never a wildcard for another profile.
+    """
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    from hermes_cli.kanban_chat_links import link_uid
+    state = sync.sync_state(conn)
+    if not state or sync.board_mode(conn) == "off":
+        return False
+    hub = client.Hub(client.load_identity())
+    try:
+        for candidate in ((profile, None) if profile == "default" else (profile,)):
+            uid = link_uid(task_id, gateway, candidate, session, "created")
+            proof = hub.row_evidence(board or state["board_id"], "task_chat_links", uid)
+            row = proof.get("row") if isinstance(proof, dict) and proof.get("state") == "live" else None
+            if (isinstance(row, dict) and row.get("uid") == uid and row.get("task_id") == task_id
+                    and row.get("kind") == "created" and row.get("released") == 0
+                    and row.get("deleted_at") is None and row.get("chat_gateway") == gateway
+                    and (row.get("chat_profile") or "default") == profile and row.get("chat_session") == session):
+                return True
+        return False
+    except (client.HubError, client.SyncUnavailable, OSError, TimeoutError) as exc:
+        raise RenewalRefused("board_unavailable", "canonical owning-chat evidence could not be read; "
+                             "nothing was renewed") from exc
+    finally:
+        hub.close()
 
 
 def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict, mode: str,
@@ -162,8 +194,11 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
     with ExitStack() as scope:
         from hermes_cli.kanban_shadow_view import open_card
         _, evidence, _ = open_card(conn, scope, task_id)
+        gateway, profile = gateway_names()[0], get_active_profile_name() or "default"
         actor = resolve_actor(evidence, task_id, writer=writer, environs=[*(ancestry or ()), env],
-                              gateway=gateway_names()[0], profile=get_active_profile_name() or "default")
+                              gateway=gateway, profile=profile,
+                              canonical_owner=lambda session: _canonical_owner(
+                                  conn, board, task_id, gateway, profile, session))
         return _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor)
 
 
