@@ -89,16 +89,60 @@ def merge(payload: dict, live, tenant, include_archived, workflow_template_id, c
             return payload
     # Never retain projections: clock/config/profile diagnostics are current on every poll.
     remote = board_read.project(rows, include_archived, diagnostics_from_inputs)
+    return merge_fields(payload, remote, rows['homes'], rows['done_total'], cap)
+
+
+def capture(live, replica, payload, tenant, include_archived, workflow_template_id, current_step_key, done_limit):
+    """Capture a supplied authorized replica; never discover or suppress read errors.
+
+    Both caller-owned transactions must remain pinned through selection, related
+    rows and ownership metadata. Independent databases retain separate vectors.
+    """
+    from plugins.kanban.dashboard import board_fact_capture
+    import time
+
+    if not live.in_transaction or not replica.in_transaction:
+        raise ValueError('shadow capture requires caller-owned read transactions')
+    observed_at = time.time()
+    live_ids = frozenset(r[0] for r in live.execute('SELECT id FROM tasks')) | frozenset(
+        t['id'] for col in payload['columns'] for t in col['tasks'])
+    live_done = tuple((t['id'], t['completed_at']) for col in payload['columns']
+                      if col['name'] == 'done' for t in col['tasks'])
+    cap = int(done_limit or 0)
+    filters = dict(tenant=tenant, include_archived=include_archived,
+                   workflow_template_id=workflow_template_id, current_step_key=current_step_key)
+    ids, total = _selection(replica, filters, live_ids, live_done, cap)
+    rows = board_read.materialize(replica, tenant, include_archived, workflow_template_id,
+                                  current_step_key, cap, selected_ids=ids)
+    rows['done_total'] = total
+    homes = shadow_view.homes_of(replica, [t.id for t, _fields, _extra in rows['cards']])
+    return {'capture': board_fact_capture.capture_rows(rows, include_archived=include_archived,
+                                                      observed_at=observed_at),
+            'homes': homes, 'done_total': total, 'cap': cap}
+
+
+def project_captured(payload, captured):
+    """The canonical merge over detached inputs, without SQL, discovery or clocks."""
+    from plugins.kanban.dashboard import board_fact_capture
+
+    captured = board_fact_capture._plain(captured)
+    payload = board_fact_capture._plain(payload)
+    remote = board_fact_capture.project(captured['capture'])
+    return merge_fields(payload, remote, captured['homes'], captured['done_total'], captured['cap'])
+
+
+def merge_fields(payload, remote, homes, done_total, cap):
+    """Canonical in-place merge shared by legacy reads and detached projections."""
     by_name = {c['name']: c for c in remote['columns']}
     for col in payload['columns']:
         extra = by_name.get(col['name'])
         if extra is None:
             continue
-        col['tasks'] = col['tasks'] + [shadow_view.mark(t, rows['homes'].get(t['id'])) for t in extra['tasks']]
+        col['tasks'] = col['tasks'] + [shadow_view.mark(t, homes.get(t['id'])) for t in extra['tasks']]
         if col['name'] == 'done':
             col['tasks'].sort(key=lambda d: d['id'], reverse=True)
             col['tasks'].sort(key=lambda d: (d['completed_at'] is None, -(d['completed_at'] or 0)))
-            total = col.get('total', 0) + rows['done_total']
+            total = col.get('total', 0) + done_total
             if cap > 0:
                 col['tasks'] = col['tasks'][:cap]
             col['total'] = total

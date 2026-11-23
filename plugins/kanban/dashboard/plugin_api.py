@@ -269,8 +269,6 @@ def get_board(
 def _get_board_uncached(tenant, include_archived, board, workflow_template_id, current_step_key, done_limit=_BOARD_DONE_LIMIT):
     """Board payload: retained SQL rows (re-read only after a commit, see board_rows) projected
     with the current clock, config, profiles on disk and hub replica."""
-    from plugins.kanban.dashboard import board_rows
-
     board = _resolve_board(board)
     done_limit = int(done_limit or 0)
 
@@ -1984,9 +1982,9 @@ async def stream_events(ws: WebSocket):
         await tail.shutdown()
 
 
-from plugins.kanban.dashboard.board_prewarm import LegacyLifecycle
+from plugins.kanban.dashboard import board_counts, board_fact_capture, board_legacy, board_prewarm, board_rows, board_snapshot
 
-start_legacy = partial(LegacyLifecycle, sys.modules[__name__])
+start_legacy = partial(board_prewarm.LegacyLifecycle, sys.modules[__name__])
 
 
 bind_facts = partial(board_fact_views.bind_api, api=sys.modules[__name__])

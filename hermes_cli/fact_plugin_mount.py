@@ -35,16 +35,23 @@ class PluginLifecycles:
             self._bindings[key] = (ctx, dict(kwargs))
 
     def start(self, api_path, module):
+        from hermes_cli._startup_fast import project_root_str
         key = Path(api_path).resolve()
         with self._lock:
             if self._closed or key in self._handles:
                 raise RuntimeError("plugin lifecycle custody retained or closed")
             binding = self._bindings.get(key)
             if binding is None:
-                hook = getattr(module, "start_legacy", None)
-                if hook is None:
-                    return
-                handle = hook()
+                if key == Path(project_root_str()) / 'plugins/kanban/dashboard/plugin_api.py':
+                    # The trusted bundled mount supplies canonical serializers;
+                    # the core owns sources and scope, never a plugin-side cache.
+                    from hermes_cli.fact_board_startup import start
+                    handle = start(module)
+                else:
+                    hook = getattr(module, "start_legacy", None)
+                    if hook is None:
+                        return
+                    handle = hook()
             else:
                 ctx, kwargs = binding
                 handle = module.bind_facts(ctx, **kwargs)

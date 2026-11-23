@@ -441,11 +441,10 @@ def _dir_exists_cached(path: str) -> bool:
     return hit
 
 
-def _build_project_tree(
-    db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool
+def _project_tree_from_inputs(
+    db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool, builder
 ) -> tuple[dict, str | None]:
-    """Gather inputs and run the one authoritative builder. Returns (tree, active_id)."""
-    from tui_gateway import project_tree
+    """Gather normalized inputs once for canonical rendering or detached capture."""
     _DIR_EXISTS_CACHE.clear()
     sessions, projects, discovered, active_id = _project_tree_inputs(
         db, session_limit, include_discovered=include_discovered)
@@ -464,11 +463,25 @@ def _build_project_tree(
     git_probe.warm_roots(
         [str(f.get("path") or "") for p in projects for f in (p.get("folders") or [])]
         + [str(r.get("root") or "") for r in discovered])
-    tree = project_tree.build_tree(
+    tree = builder(
         projects, sessions, discovered, resolve, preview_limit=preview_limit,
         hydrate=hydrate, is_junk_root=_is_repo_junk, is_junk_cwd=_is_session_cwd_junk,
         exists=_dir_exists_cached)
     return tree, active_id
+
+
+def _build_project_tree(db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool):
+    """Legacy builder; keep the direct caller contract and one canonical render."""
+    from tui_gateway import project_tree
+    return _project_tree_from_inputs(db, preview_limit=preview_limit, hydrate=hydrate,
+        session_limit=session_limit, include_discovered=include_discovered, builder=project_tree.build_tree)
+
+
+def _capture_project_tree(db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool):
+    """Owner-worker capture using exactly the legacy normalization/probe closure."""
+    from tui_gateway import project_tree_capture
+    return _project_tree_from_inputs(db, preview_limit=preview_limit, hydrate=hydrate,
+        session_limit=session_limit, include_discovered=include_discovered, builder=project_tree_capture.capture)
 
 
 def register(server) -> None:

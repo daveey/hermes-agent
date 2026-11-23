@@ -24,6 +24,11 @@ def capture(conn, *, tenant=None, include_archived=False, workflow_template_id=N
     observed_at = time.time()
     rows = board_read.materialize(conn, tenant, include_archived, workflow_template_id,
                                   current_step_key, done_limit)
+    return capture_rows(rows, include_archived=include_archived, observed_at=observed_at)
+
+
+def capture_rows(rows, *, include_archived, observed_at):
+    """Detach related-row materialization before publishing any owner input."""
     diagnostics = board_read.diagnostics_from_inputs(rows['diag_inputs'])
     ages = {}
     for task, _fields, _extra in rows['cards']:
@@ -32,8 +37,13 @@ def capture(conn, *, tenant=None, include_archived=False, workflow_template_id=N
         except Exception:  # health: allow BLE001 -- preserve canonical malformed age fallback
             ages[task.id] = {'created_age_seconds': None, 'started_age_seconds': None,
                              'time_to_complete_seconds': None}
+    cards = []
+    for _task, fields, extra in rows['cards']:
+        fields = dict(fields)
+        board_read.preview_list_body(fields)  # idempotent canonical preview before bounded input publication
+        cards.append((fields, extra))
     return {
-        'rows': {'cards': [(fields, extra) for _task, fields, extra in rows['cards']],
+        'rows': {'cards': cards,
                  'done_total': rows['done_total'], 'tenants': rows['tenants'],
                  'latest_event_id': rows['latest_event_id']},
         'include_archived': include_archived, 'diagnostics_per_task': diagnostics,
