@@ -1,5 +1,6 @@
 """Real capture transactions associate status with their own lifecycle evidence."""
 import json
+import sqlite3
 
 import pytest
 
@@ -113,7 +114,8 @@ def test_identity_replacement_revokes_capture_instead_of_transferring_it(board):
     replacement = kb.create_task(conn, title="replacement")
     assert conn.execute("SELECT COUNT(*) FROM kanban_sync_status_origins").fetchone()[0] == 2
     conn.execute("PRAGMA recursive_triggers=OFF")
-    conn.execute("UPDATE OR REPLACE tasks SET id=? WHERE id=?", (target, replacement))
+    # Raw sqlite3 writer: the board factory refuses REPLACE (PR4045).
+    sqlite3.Connection.execute(conn, "UPDATE OR REPLACE tasks SET id=? WHERE id=?", (target, replacement))
     assert conn.execute("SELECT title FROM tasks WHERE id=?", (target,)).fetchone()[0] == "replacement"
     assert conn.execute("SELECT COUNT(*) FROM kanban_sync_status_origins").fetchone()[0] == 0
 

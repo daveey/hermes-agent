@@ -14,10 +14,17 @@ class ProtectedRowReplaceError(sqlite3.IntegrityError):
     """A caller attempted destructive replacement of a task or run identity."""
 
 
+# Mirror SQLite's tokenizer (tokenize.c): whitespace is ASCII space/tab/LF/FF/CR plus
+# a UTF-8 BOM where a token starts (CC_BOM -> TK_SPACE). Inside an identifier every
+# non-ASCII character, the BOM included, is an identifier character: ``tasksé`` is one
+# identifier, while ``\ufefftasks`` is whitespace + ``tasks``.
+_WS = ' \t\n\f\r\ufeff'
+_ID_START = '[A-Za-z_\u0080-\ufefe\uff00-\U0010ffff]'
+_ID_CHAR = '[A-Za-z_0-9$\u0080-\U0010ffff]'
 _TOKENS = re.compile(
     r"--[^\n]*(?:\n|$)|/\*.*?(?:\*/|$)|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^]]*\]|"
-    r"[A-Za-z_][A-Za-z_0-9$]*|[^\s]", re.DOTALL,
+    + _ID_START + _ID_CHAR + "*|[^" + _WS + "]", re.DOTALL,
 )
 
 

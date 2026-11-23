@@ -100,7 +100,10 @@ def test_insert_or_replace_is_marked_by_the_insert_trigger(board):
     row = dict(board.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
     row["title"] = "replaced"
     cols = ", ".join(row)
-    _write(board, f"INSERT OR REPLACE INTO tasks ({cols}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+    # Raw sqlite3 writer: the board factory refuses REPLACE (PR4045); the trigger must still mark it.
+    with kbc.write_txn(board):
+        sqlite3.Connection.execute(board, f"INSERT OR REPLACE INTO tasks ({cols}) VALUES ({', '.join('?' * len(row))})",
+                                   tuple(row.values()))
     changed, _ = tc.changed_since(board, cursor)
     assert changed == {tid}
 

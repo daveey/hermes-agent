@@ -53,7 +53,8 @@ def test_reused_task_id_does_not_resurrect_receipt(store):
     _, conn, task, _ = store
     # REPLACE's implicit delete does not run delete triggers unless recursive_triggers is on.
     conn.execute("PRAGMA recursive_triggers=OFF")
-    conn.execute("INSERT OR REPLACE INTO tasks SELECT * FROM tasks WHERE id=?", (task,))
+    # Raw sqlite3 writer: the board factory refuses REPLACE (PR4045); receipts must still hold.
+    sqlite3.Connection.execute(conn, "INSERT OR REPLACE INTO tasks SELECT * FROM tasks WHERE id=?", (task,))
     assert native._receipt(conn, task) is None
 
 
@@ -68,7 +69,7 @@ def test_update_replace_cannot_transfer_receipt(store):
     _, conn, task, _ = store
     other = kb.create_task(conn, title="untrusted replacement")
     conn.execute("PRAGMA recursive_triggers=OFF")
-    conn.execute("UPDATE OR REPLACE tasks SET id=? WHERE id=?", (task, other))
+    sqlite3.Connection.execute(conn, "UPDATE OR REPLACE tasks SET id=? WHERE id=?", (task, other))  # raw writer
     assert native._receipt(conn, task) is None
 
 

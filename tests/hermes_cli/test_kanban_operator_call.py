@@ -57,8 +57,10 @@ class Fleet:
                 for tid in own:
                     row = src.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
                     cols = row.keys()
-                    self.rep.execute(f"INSERT OR REPLACE INTO tasks ({','.join(cols)}) VALUES "
-                                     f"({','.join('?' * len(cols))})", tuple(row))
+                    # Upsert, not REPLACE: the board factory refuses REPLACE on tasks (PR4045).
+                    self.rep.execute(f"INSERT INTO tasks ({','.join(cols)}) VALUES "
+                                     f"({','.join('?' * len(cols))}) ON CONFLICT(id) DO UPDATE SET "
+                                     + ','.join(f"{c}=excluded.{c}" for c in cols if c != "id"), tuple(row))
                     for r in src.execute("SELECT * FROM task_runs WHERE task_id = ?", (tid,)).fetchall():
                         rc = [k for k in r.keys() if k != "id"]
                         if not self.rep.execute("SELECT 1 FROM task_runs WHERE uid = ?", (r["uid"],)).fetchone():
