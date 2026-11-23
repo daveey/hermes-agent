@@ -118,7 +118,7 @@ def valid_awaiting(value) -> bool:
     kind = value.get('kind')
     if kind == 'clock':
         return True
-    field = {'card': 'ref', 'ci': 'ref', 'deploy': 'ref', 'chat': 'why', 'external': 'ref'}
+    field = {'card': 'ref', 'ci': 'ref', 'deploy': 'ref', 'chat': 'why', 'external': 'ref', 'resource': 'ref'}
     if not isinstance(kind, str) or kind not in field:
         return False
     named = value.get(field[kind])

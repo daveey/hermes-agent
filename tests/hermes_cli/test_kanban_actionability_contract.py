@@ -330,6 +330,8 @@ def test_review_carrier_pending_custody_composition(delivery):
     ({'kind': 'ci'}, False), ({'kind': 'ci', 'ref': ''}, False),
     ({'kind': 'ci', 'ref': ' '}, False), ({'kind': 'ci', 'ref': 'r'}, True),
     ({'kind': 'card', 'ref': 't'}, True), ({'kind': 'deploy', 'ref': 'd'}, True),
+    ({'kind': 'resource', 'ref': 'governor: pool', 'why': 'recorded load'}, True),
+    ({'kind': 'resource'}, False),
     ({'kind': 'chat', 'why': 'question'}, True), ({'kind': 'chat', 'ref': 'chat'}, False),
     ({'kind': 'external', 'ref': 'ticket'}, True),
     ({'kind': 'external', 'why': 'vendor'}, True),
