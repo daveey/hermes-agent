@@ -9,7 +9,15 @@ from tests.hermes_cli.test_kanban_pace_reroute import board as board  # noqa: PL
 
 @pytest.mark.parametrize('placement', [None, 'worker-first-v1'])
 @pytest.mark.parametrize('reason', ['llm_paced', 'llm_pacing'])
-def test_pacing_queue_note_precedes_worker_placement(board, placement, reason):
+def test_pacing_queue_note_precedes_worker_placement(board, placement, reason, monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban_dispatch_skip as skips
+
+    # Exercise the dated (non-today) view regardless of the machine's UTC date.
+    monkeypatch.setattr(skips, 'time', SimpleNamespace(
+        time=lambda: 0, gmtime=time.gmtime, strftime=time.strftime))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='held card', assignee='coach')
         if placement:
