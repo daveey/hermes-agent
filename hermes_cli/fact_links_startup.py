@@ -9,11 +9,10 @@ import asyncio
 import os
 import threading
 
-from hermes_cli.fact_capture import CaptureBudget
 from hermes_cli.fact_content_owner import ContentOwner
 from hermes_cli.fact_contract import Scope, SourceId
 from hermes_cli.fact_reducers import ReducerEngine
-from hermes_cli.fact_remote_links import LinksFacts, RemoteLinksSource
+from hermes_cli.fact_remote_links import LinksBudget, LinksFacts, RemoteLinksSource
 from hermes_cli.fact_store import FactStore
 
 _lock = threading.RLock()
@@ -56,7 +55,7 @@ class LinksRuntime:
         source = RemoteLinksSource(engine, SourceId(self.scope, 'remote.links', 'origin'), self.origin)
         try:
             self.owner = ContentOwner({self.scope: engine}, [], operational=[source],
-                                      budget=CaptureBudget(max_seconds=5))
+                                      budget=LinksBudget())
         except BaseException as exc:
             # ContentStartupError carries an owner whose failed close must be retried.
             self.owner = getattr(exc, 'owner', None)

@@ -15,10 +15,27 @@ import json
 import threading
 import time
 
-from hermes_cli.fact_capture import CaptureBudgetExceeded
+from hermes_cli.fact_capture import CaptureBudget, CaptureBudgetExceeded
 from hermes_cli.fact_contract import Fact, FactKey, freeze
 
 _current = ContextVar('remote_links_facts', default=None)
+
+
+@dataclass(frozen=True)
+class LinksBudget(CaptureBudget):
+    """Bound the complete external inventory, independently of task-page limits.
+
+    Links include retained legacy associations, not merely open tasks. Keep
+    explicit row/byte/time ceilings and never publish a truncated generation.
+    """
+    max_keys: int = 16384
+    max_seconds: float = 15
+    max_bytes: int = 16 * 1024 * 1024
+
+    def __post_init__(self):
+        if not (1 <= self.max_keys <= 16384 and 0 < self.max_seconds <= 15
+                and 1 <= self.max_bytes <= 16 * 1024 * 1024):
+            raise ValueError('invalid links capture budget')
 
 
 class LinksUnavailable(RuntimeError):
