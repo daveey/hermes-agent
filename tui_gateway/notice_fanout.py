@@ -393,6 +393,7 @@ def _remote_change_pass(session_db: Callable, origin_db: Optional[Callable] = No
     global _remote_memo
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli import fact_links_health
+    from tui_gateway import notice_links_health
     origin = activity._origin_scope()
     health_generation = fact_links_health.pending(origin)
     out = FanoutResult()
@@ -464,15 +465,7 @@ def _remote_change_pass(session_db: Callable, origin_db: Optional[Callable] = No
     committed = state.ack_remote(acked)
     if not committed:
         out.retry()
-    recovered_all = True
-    if health_generation is not None:
-        from tui_gateway import notice_links_health
-        done, recovered_all = notice_links_health.recover(origin, set(previous.keys() | snapshot.keys()), origin_db)
-        for chat, tip in done:
-            out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
-                        "status": None, "skipped": None, "source": "remote"})
-        if not recovered_all:
-            out.retry()
+    recovered_all = notice_links_health.recover_into(out, origin, health_generation, set(previous.keys() | snapshot.keys()), origin_db)
     if committed and inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
         # Only certify a projection if its cursor stayed still THROUGH fingerprint collection. A later
         # fingerprint must not describe a write the projection never saw.

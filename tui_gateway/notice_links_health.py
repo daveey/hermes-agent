@@ -65,3 +65,16 @@ def recover(origin: tuple, skip: set[str], opener: Optional[Callable] = None) ->
         logger.warning("links-health outcome recovery failed", exc_info=True)
         complete = False
     return done, complete
+
+
+def recover_into(out: Any, origin: tuple, generation: Optional[int], skip: set[str], opener: Optional[Callable] = None) -> bool:
+    """Executor-side step: only while a health generation is pending. True when nothing is left to retry."""
+    if generation is None:
+        return True
+    done, complete = recover(origin, skip, opener)
+    for chat, tip in done:
+        out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
+                    "status": None, "skipped": None, "source": "remote"})
+    if not complete:
+        out.retry()
+    return complete
