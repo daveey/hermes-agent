@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 from pathlib import Path
 import threading
+import uuid
 
 import pytest
 
@@ -129,6 +130,31 @@ def test_concurrent_retry_after_terminal_episode_retains_all_nine_reasons(kanban
         assert {e['reason'] for e in events[1:]} == {f"evidence {n}" for n in range(9)}
         assert {e['owner_task_id'] for e in events[1:]} == {owners[0]}
         assert conn.execute("SELECT count(*) FROM tasks WHERE status NOT IN ('done','archived') AND id != ?", (tid,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("with_uid", [False, True])
+def test_delayed_older_episode_does_not_replace_latest_open_owner(kanban_home, monkeypatch, with_uid):
+    monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        first = _escalate(conn, tid, "first")
+        _finish(conn, first)
+        successor = _escalate(conn, tid, "successor")
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, kaw.ESCALATED_EVENT,
+                             {"owner_task_id": first, "awaiting": RECORD, "reason": "late old delivery"})
+            rows = conn.execute("SELECT id FROM task_events WHERE task_id=? AND kind=? ORDER BY id", (tid, kaw.ESCALATED_EVENT)).fetchall()
+            if with_uid:
+                conn.execute("ALTER TABLE task_events ADD COLUMN uid TEXT")
+                # The older event arrives last. Both origin clocks share a second;
+                # UUID time, not local arrival or random UUID suffix, selects the successor.
+                for row, ms in zip(rows, (1, 9, 2), strict=True):
+                    uid = str(uuid.UUID(int=((1700000000 * 1000 + ms) << 80) | (7 << 76) | (2 << 62)))
+                    conn.execute("UPDATE task_events SET created_at=?,uid=? WHERE id=?", (1700000000, uid, row[0]))
+            else:
+                for row, second in zip(rows, (1700000000, 1700000001, 1700000000), strict=True):
+                    conn.execute("UPDATE task_events SET created_at=? WHERE id=?", (second, row[0]))
+        assert _escalate(conn, tid, "retry") == successor
 
 
 @pytest.mark.parametrize("finish_each", [False, True])

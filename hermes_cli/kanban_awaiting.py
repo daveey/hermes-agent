@@ -1214,12 +1214,16 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
     # The first owner keeps the legacy key after completion. Later owners used to be keyless,
     # so retries never found an OPEN successor. The source ledger binds target, premise and episode
     # without title matching; its latest matching owner is authoritative, including terminal owners.
-    existing = conn.execute(
-        "SELECT t.id, t.status FROM task_events e JOIN tasks t "
+    from hermes_cli.kanban_sync_divergence import _event_order
+    uid = "e.uid" if "uid" in {r[1] for r in conn.execute("PRAGMA table_info(task_events)")} else "NULL"
+    episodes = conn.execute(
+        "SELECT t.id, t.status, e.id, e.created_at, " + uid + " FROM task_events e JOIN tasks t "
         "ON t.id = json_extract(e.payload, '$.owner_task_id') "
         "WHERE e.task_id = ? AND e.kind = ? "
-        "AND json_extract(e.payload, '$.awaiting.premise') = ? ORDER BY e.id DESC LIMIT 1",
-        (task_id, ESCALATED_EVENT, record['premise'])).fetchone()
+        "AND json_extract(e.payload, '$.awaiting.premise') = ?",
+        (task_id, ESCALATED_EVENT, record['premise'])).fetchall()
+    existing = max(episodes, key=lambda row: _event_order(
+        {"id": row[2], "created_at": row[3], "uid": row[4]}), default=None)
     if existing is None:
         existing = conn.execute("SELECT id, status FROM tasks WHERE idempotency_key = ?", (key,)).fetchone()
     owner = existing[0] if existing and existing[1] not in ("done", "archived") else None
