@@ -43,6 +43,10 @@ def recover(conn, hub, board: str, run_uid: str) -> dict:
                'source_result_event_uid':source['uid'], 'restriction_event_uid':restriction_uid,
                'episode_uid':episode_uid, 'verified_safety_terminal':True}
     with kb.write_txn(conn):
+        from hermes_cli.kanban_replay_journal import issued_operation
+        # Canonical safety proof is not the exact retained transport verdict.
+        if issued_operation(conn) == owned['op_id']:
+            raise ValueError('release still in replay custody; recover exact transport before safety confirmation')
         conn.execute("UPDATE kanban_failure_commands SET canonical_receipt_json=?,delivery_state='confirmed' WHERE run_uid=? AND op_id=?",
                      (transport.canonical(receipt), run_uid, owned['op_id']))
         conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (owned['op_id'],))
