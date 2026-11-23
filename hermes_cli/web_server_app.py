@@ -135,7 +135,8 @@ async def standalone_lifespan(app: "FastAPI"):
     try:
         from hermes_cli.kanban_annotation_prewarm import start_annotation_prewarm
 
-        start_annotation_prewarm()
+        if getattr(app.state, 'annotation_facts', None) is None:
+            start_annotation_prewarm()
     except Exception:
         logger.warning("kanban annotation prewarm did not start", exc_info=True)
     # One process per home keeps the published annotation current for the others (kanban_annotation_host). [daveey]
@@ -143,7 +144,8 @@ async def standalone_lifespan(app: "FastAPI"):
         from hermes_cli.kanban_annotation_host import start_holder
         from hermes_cli.process_identity import is_desktop_owned_backend as _desktop_owned
 
-        start_holder("serve" if _desktop_owned() else "dashboard")
+        if getattr(app.state, 'annotation_facts', None) is None:
+            start_holder("serve" if _desktop_owned() else "dashboard")
     except Exception:
         logger.warning("kanban annotation holder did not start", exc_info=True)
 
@@ -319,8 +321,9 @@ async def app_lifespan(app: FastAPI):
     from hermes_cli.fact_links_startup import lifespan as links_lifespan
     from hermes_cli.sessions_native_startup import lifespan as sessions_lifespan
     from hermes_cli.fact_tree_startup import lifespan as tree_lifespan
+    from hermes_cli.fact_annotation_lifespan import lifespan as annotation_lifespan
     try:
-        async with links_lifespan(app), sessions_lifespan(app), tree_lifespan(app), plugin_lifespan(app), lifespan(app):
+        async with links_lifespan(app), annotation_lifespan(app), sessions_lifespan(app), tree_lifespan(app), plugin_lifespan(app), lifespan(app):
             yield
     finally:
         host_attach.enable_stale_while_revalidate(False)

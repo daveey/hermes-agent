@@ -20,6 +20,7 @@ from tui_gateway import methods_groups, startup_resume
 
 def _quiet_boot(monkeypatch):
     """Lifespan side effects are not this test. Keep them from touching a live host."""
+    monkeypatch.setenv('HERMES_FACTS_ANNOTATION', '0')
     monkeypatch.setattr(web_server, "_warm_gateway_module", lambda: None)
     monkeypatch.setattr(web_server, "_eager_reconcile_own_session_db", lambda: None)
     monkeypatch.setattr(free_tier_bootstrap, "start_background_bootstrap", lambda: None)

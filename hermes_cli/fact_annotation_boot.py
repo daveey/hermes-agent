@@ -36,7 +36,7 @@ def seeds(runtime, readers=None):
     return {name: list(rows.values()) for name, rows in selected.items()}
 
 
-def prepare():
+def prepare(*, on_created=None):
     from hermes_cli import kanban_annotation_host as host
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli.process_identity import is_desktop_owned_backend
@@ -47,6 +47,8 @@ def prepare():
     runtime = AnnotationRuntime(roster, fallback_profile=get_active_profile_name(),
         gateway=activity._origin_scope()[0], stop_legacy=host.suspend_holder,
         start_legacy=lambda: host.resume_holder(role))
+    if on_created is not None:
+        on_created(runtime)
     try:
         runtime.start(seeds(runtime))
     except BaseException:

@@ -167,6 +167,7 @@ def test_real_app_lifespan_and_middleware(profiles_on_disk, monkeypatch):
     # and registered HTTP middleware must compose through the real app entry.
     monkeypatch.setattr(web_server_app, 'standalone_lifespan', quiet_services)
     monkeypatch.setenv('HERMES_FACTS_LINKS', '0')
+    monkeypatch.setenv('HERMES_FACTS_ANNOTATION', '0')  # annotations have separate real composition coverage
     monkeypatch.setenv('HERMES_FACTS_SESSIONS', '1')
     helpers._seed_session(profiles_on_disk['default'], 'app-entry', source='cli')
     with TestClient(web_server.app) as client:
