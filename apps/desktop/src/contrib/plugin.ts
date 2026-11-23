@@ -119,6 +119,8 @@ export interface PluginFileDialogOptions {
 }
 
 export interface PluginContext {
+  /** Optional on older hosts; usable once, only during this activation's synchronous register. */
+  bindSessionTasksDiagnostic?: (surface: object) => void
   /** The resolved plugin source tag, e.g. `'plugin:cost-meter'`. */
   readonly source: string
   /** Register one contribution (id namespaced, source stamped). */
@@ -429,7 +431,8 @@ export function declaredCapabilities(plugin: Pick<HermesPlugin, 'capabilities'>)
 export function createPluginContext(
   pluginId: string,
   onDispose?: (dispose: () => void) => void,
-  capabilities: readonly string[] = []
+  capabilities: readonly string[] = [],
+  bindSessionTasksDiagnostic: (surface: object) => void = () => { throw new Error('No runtime activation owns this binding') }
 ): PluginContext {
   const source = `plugin:${pluginId}`
   const scope = (c: PluginContribution): Contribution => ({ ...c, id: `${pluginId}:${c.id}`, source })
@@ -442,6 +445,7 @@ export function createPluginContext(
 
   return {
     source,
+    bindSessionTasksDiagnostic,
     register: c => track(registry.register(scope(c))),
     registerMany: cs => track(registry.registerMany(cs.map(scope))),
     registerSettingsPage: page => track(registry.register(scope(settingsPageContribution(page)))),

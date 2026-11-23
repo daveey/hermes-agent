@@ -39,7 +39,8 @@ import { INSTALL_ORIGIN, PACKAGE_MARKER } from '@hermes/shared'
 import { atom } from 'nanostores'
 
 import { isReadFileErrorResult } from '@/lib/desktop-fs'
-import { installPluginSdk, sdkImportMap } from '@/sdk/runtime'
+import { identifyBytes } from '@/sdk/loaded-assets'
+import { beginSdkCapture, capturedSdkDependencies, installPluginSdk, sdkImportMap } from '@/sdk/runtime'
 import { notifyError } from '@/store/notifications'
 import { forgetPluginPreviewAccess } from '@/store/plugin-preview-grants'
 
@@ -53,6 +54,7 @@ import {
   type PluginKind,
   publishPlugin
 } from './plugins-store'
+import { sessionTasksActivation } from './session-tasks-identity'
 
 interface LoadOptions {
   /** Root-level default-enable CAP: `false` ships the plugin opt-in (inventory
@@ -71,6 +73,7 @@ interface LoadOptions {
 
 /** Live runtime plugins: id -> disposers (unload/reload support). */
 const loaded = new Map<string, (() => void)[]>()
+const invalidators = new WeakMap<(() => void)[], () => void>()
 
 /** Module evaluation deadline. A top-level `await` that never settles (a dead
  *  host, a gateway that is not up) would otherwise hang `import()` forever —
@@ -81,7 +84,11 @@ const IMPORT_TIMEOUT_MS = 10_000
 // a dynamic `import('…')`. Deliberately loose — a sentence ending in `from`, a
 // quoted example, a commented-out import all match it — so a match is honoured
 // only when it sits in CODE (see `codeRanges`), never in a string or comment.
-const importSpecifierRe = () => /(from\s*|import\s*\(\s*|import\s+)(['"])([^'"]+)\2/g
+const importSpecifierRe = () => {
+  const gap = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)`
+
+  return new RegExp(`(from${gap}*|import${gap}*\\(${gap}*|import${gap}+)(['"])([^'"]+)\\2`, 'g')
+}
 
 /** Character ranges of *source* that are code — string, template-literal and
  *  comment text excluded (template `${…}` interpolations ARE code). The
@@ -369,8 +376,15 @@ function unsupportedImports(source: string): string[] {
   return [...unsupported]
 }
 
+// Reserve an ID while provenance IO is pending. Same-file reload supersedes its
+// predecessor; another file cannot steal the first claim across the await.
+const pendingIdentities = new Map<string, { file: string | undefined }>()
+
 export function unloadRuntimePlugin(id: string): void {
+  pendingIdentities.delete(id)
   const disposers = loaded.get(id)
+
+  if (disposers) {invalidators.get(disposers)?.()}
 
   // Released BEFORE the disposers run, and each disposer in its own
   // try/catch: a disposer with its own bug must not wedge the registry
@@ -390,12 +404,81 @@ export function unloadRuntimePlugin(id: string): void {
 }
 
 /** Evaluate + register one runtime plugin. Returns its id, or null on failure. */
-export async function loadRuntimePlugin(
+function invalidateRuntimeFile(file?: string): void {
+  if (!file) {return}
+
+  for (const [id, disposers] of loaded) {
+    if ($pluginRecords.get()[id]?.file === file) {invalidators.get(disposers)?.()}
+  }
+}
+
+async function runtimeIdentity(source: string, rewritten: string, pluginId: string) {
+  const ranges = codeRanges(source)
+
+  const specifiers = [...source.matchAll(importSpecifierRe())]
+    .filter(match => inCode(ranges, match.index ?? 0)).map(match => match[3])
+
+  const dynamic = [...source.matchAll(/\bimport\b/g)].some(match =>
+    inCode(ranges, match.index ?? 0) && /^\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)\s*)*\(/.test(source.slice((match.index ?? 0) + 6)))
+
+  const supported = new Set(['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'])
+  const dependencies = pluginId === 'session-tasks' ? await capturedSdkDependencies(specifiers) : { dependencies: [], reason: null }
+  try {
+    const [originalIdentity, rewrittenIdentity] = await Promise.all([identifyBytes(source), identifyBytes(rewritten)])
+    const dependencyReason = dynamic || specifiers.some(specifier => !supported.has(specifier)) ? 'UNSUPPORTED_DEPENDENCIES' : dependencies.reason
+
+    return {dependencies, originalIdentity, rewrittenIdentity, dependencyReason}
+  } catch {
+    // Diagnostic evidence is optional for loading, never optional for MATCH.
+    // Retain lengths but no fabricated digest when WebCrypto is unavailable or
+    // refuses the operation (older/non-secure renderer contexts).
+    return { dependencies, originalIdentity: {sha256:'', byteLength:new TextEncoder().encode(source).byteLength},
+      rewrittenIdentity: {sha256:'', byteLength:new TextEncoder().encode(rewritten).byteLength},
+      dependencyReason:'DIAGNOSTIC_IDENTITY_UNAVAILABLE' }
+  }
+}
+
+function reserveRuntimeIdentity(pluginId: string, options: LoadOptions) {
+  const owner = $pluginRecords.get()[pluginId]
+  const pending = pendingIdentities.get(pluginId)
+
+  if ((owner && owner.file !== options.file) || (pending && pending.file !== options.file)) {
+    throw new Error(`duplicate id "${pluginId}", already loaded from ${owner?.file ?? pending?.file ?? owner?.kind}`)
+  }
+
+  const claim = { file: options.file }
+  pendingIdentities.set(pluginId, claim)
+
+  return claim
+}
+
+function runtimePlugin(mod: { default?: HermesPlugin }, origin: string): HermesPlugin {
+  const plugin = mod.default
+
+  if (!plugin?.id || typeof plugin.register !== 'function') {
+    throw new Error(`${origin} has no valid default HermesPlugin export`)
+  }
+
+  return plugin
+}
+
+export function loadRuntimePlugin(source: string, origin: string, options: LoadOptions = {}): Promise<null | string> {
+  return evaluateRuntimePlugin(source, origin, options).then(result => result.id)
+}
+
+/** Cancellation is not a failed file: disk callers must preserve the last
+ * committed inventory/handle instead of dropping a newer or disabled owner. */
+async function evaluateRuntimePlugin(
   source: string,
   origin: string,
-  options: LoadOptions = {}
-): Promise<null | string> {
+  options: LoadOptions = {},
+  isCurrent: () => boolean = () => true
+): Promise<{ id: null | string; cancelled?: true }> {
   installPluginSdk()
+
+  // A new evaluation for the owned file invalidates the old evidence before
+  // its first await, even if reading/importing the replacement later fails.
+  invalidateRuntimeFile(options.file)
 
   try {
     const unsupported = unsupportedImports(source)
@@ -407,7 +490,9 @@ export async function loadRuntimePlugin(
       )
     }
 
-    const url = URL.createObjectURL(new Blob([rewriteSpecifiers(source)], { type: 'text/javascript' }))
+    const rewritten = rewriteSpecifiers(source)
+    const url = URL.createObjectURL(new Blob([rewritten], { type: 'text/javascript' }))
+    const endCapture = beginSdkCapture()
 
     let mod: { default?: HermesPlugin }
     let deadline: ReturnType<typeof setTimeout> | undefined
@@ -426,15 +511,13 @@ export async function loadRuntimePlugin(
         })
       ])
     } finally {
+      endCapture()
       clearTimeout(deadline)
       URL.revokeObjectURL(url)
     }
 
-    const plugin = mod.default
-
-    if (!plugin?.id || typeof plugin.register !== 'function') {
-      throw new Error(`${origin} has no valid default HermesPlugin export`)
-    }
+    if (!isCurrent()) {return {id:null, cancelled:true}}
+    const plugin = runtimePlugin(mod, origin)
 
     // A disk/runtime copy of a plugin that now ships BUNDLED (e.g. a
     // standalone install of hermes-bots predating its adoption in-tree) must
@@ -455,20 +538,24 @@ export async function loadRuntimePlugin(
         status: 'disabled'
       })
 
-      return null
+      return {id:null}
     }
 
     // Two files claiming one id (a standalone install beside a unified-package
     // copy): the FIRST loaded owns the id. Silently letting the second win
     // disposed the first's registrations and made each file's hot-reload flip
     // ownership; instead the later file errors on its own folder row.
-    const owner = $pluginRecords.get()[plugin.id]
+    const claim = reserveRuntimeIdentity(plugin.id, options)
+    let identity: Awaited<ReturnType<typeof runtimeIdentity>>
 
-    if (owner && owner.file !== options.file) {
-      throw new Error(`duplicate id "${plugin.id}", already loaded from ${owner.file ?? owner.kind}`)
+    try {
+      identity = await runtimeIdentity(source, rewritten, plugin.id)
+      if (pendingIdentities.get(plugin.id) !== claim || !isCurrent()) {return {id:null, cancelled:true}}
+    } finally {
+      if (pendingIdentities.get(plugin.id) === claim) {pendingIdentities.delete(plugin.id)}
     }
-
     const capabilities = declaredCapabilities(plugin)
+    const { dependencies, originalIdentity, rewrittenIdentity, dependencyReason } = identity
 
     const record = {
       id: plugin.id,
@@ -503,15 +590,21 @@ export async function loadRuntimePlugin(
       // Registered BEFORE register() runs so a throw mid-way is disposable.
       loaded.set(plugin.id, disposers)
 
+      const activation = sessionTasksActivation({ pluginId:plugin.id, origin, path:options.file, module:mod, sourceText:{original:source, rewritten},
+        original:originalIdentity, rewritten:rewrittenIdentity, dependencies:dependencies.dependencies, dependencyReason })
+
+      invalidators.set(disposers, () => activation.invalidate())
+
       let result: unknown
 
       try {
-        result = trackGatewayEventDisposers(
+        result = activation.run(() => trackGatewayEventDisposers(
           dispose => disposers.push(dispose),
-          () => plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose), capabilities))
-        )
+          () => plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose), capabilities, activation.bind))
+        ))
       } catch (error) {
         failRegistration(error)
+        activation.invalidate('REGISTRATION_REJECTED')
 
         return
       }
@@ -521,11 +614,17 @@ export async function loadRuntimePlugin(
       // An `async register()` that rejects would otherwise be an unhandled
       // rejection beside a row that says "loaded".
       if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
-        void Promise.resolve(result).catch((error: unknown) => {
+        void Promise.resolve(result).then(() => {
+          activation.settle()
+        }).catch((error: unknown) => {
           if (loaded.get(plugin.id) === disposers) {
             failRegistration(error)
           }
+
+          activation.invalidate('REGISTRATION_REJECTED')
         })
+      } else {
+        activation.settle()
       }
     }
 
@@ -539,8 +638,9 @@ export async function loadRuntimePlugin(
       activate()
     }
 
-    return plugin.id
+    return {id:plugin.id}
   } catch (error) {
+    if (!isCurrent()) {return {id:null, cancelled:true}}
     console.error(`[plugins] runtime load failed (${origin})`, error)
     notifyError(error, `Plugin "${origin}" failed to load`)
     publishPlugin({
@@ -554,7 +654,7 @@ export async function loadRuntimePlugin(
       error: error instanceof Error ? error.message : String(error)
     })
 
-    return null
+    return {id:null}
   }
 }
 
@@ -763,19 +863,31 @@ async function readPluginSourceText(file: string): Promise<string> {
 /** Returns false when the entry file could not be read (vanished mid-read) so
  *  the caller can reconcile/unload the registration instead of retaining a
  *  live ghost for a missing entry. */
+const diskLoads = new WeakMap<DiskPlugin, object>()
+
 async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
+  const attempt = {}
+  diskLoads.set(entry, attempt)
+  const isCurrent = () => diskLoads.get(entry) === attempt && disk.get(entry.file) === entry
   const prevId = entry.id
+  const previous = prevId ? loaded.get(prevId) : undefined
+
+  if (previous) {invalidators.get(previous)?.()}
 
   try {
     const text = await readPluginSourceText(entry.file)
-    entry.loadedSource = text
+    if (!isCurrent()) {return true}
 
-    const id = await loadRuntimePlugin(text, entry.origin, {
+    const result = await evaluateRuntimePlugin(text, entry.origin, {
       defaultEnabled: entry.defaultEnabled,
       file: entry.file,
       packageName: entry.packageName,
       packageOrigin: entry.packageOrigin
-    })
+    }, isCurrent)
+
+    if (result.cancelled) {return true}
+    const id = result.id
+    entry.loadedSource = text
 
     // loadRuntimePlugin only disposes the NEW id, so the previous incarnation
     // is unloaded here when the file no longer yields it: a hot-edit that
@@ -798,6 +910,7 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
 
     return true
   } catch (error) {
+    if (!isCurrent()) {return true}
     // An oversize source is a REAL failure the user must see (the silent
     // shape was the bug: a truncated file evaluated as a syntax error, or
     // worse, as half a plugin). It is a completed read of an existing file,
