@@ -608,7 +608,8 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
         # its info row; a machine removed from the Board has neither (``_removed_owner``). Read once per projection,
         # inside the try so a failed read still closes the replica connection (review 5965756952).
         listed = _listed_gateways(source if fresh else None)
-        with closing(_ro(path)) as conn:
+        from hermes_cli.kanban_origin_batch import read_pass
+        with read_pass(), closing(_ro(path)) as conn:
             from hermes_cli.kanban_origin_legacy import aliases_for_projection
             from hermes_cli import kanban_origin_structure as structure
 

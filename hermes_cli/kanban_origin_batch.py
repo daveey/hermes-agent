@@ -7,12 +7,22 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
+
+
+def _enabled():
+    return os.environ.get('HERMES_ORIGIN_BATCH_READS', '1').lower() not in ('0', 'false', 'off', 'no')  # health: allow HX002 -- reversible emergency read batching
+
+
+def read_pass():
+    """Reuse guarded opens only within projection; each local borrow rolls back."""
+    from hermes_cli.kanban_ro_batch import batch
+    return batch() if _enabled() else nullcontext()
 
 
 def task_rows(source, bindings):
     """None selects the legacy keyed-query path; errors never become absence."""
-    enabled = os.environ.get('HERMES_ORIGIN_BATCH_READS', '1').lower() not in ('0', 'false', 'off', 'no')  # health: allow HX002 -- reversible emergency read batching
-    if not enabled:
+    if not _enabled():
         return None
     wanted = sorted({(b['owner']['gateway'], b['task_record_key']) for b in bindings})
     if not wanted or source is None:
