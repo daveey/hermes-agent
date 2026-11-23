@@ -308,16 +308,8 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
             workers = self._deferred_agent_workers = {}
         workers[future] = agent
 
-        def _discard_worker(done_future: asyncio.Future) -> None:
-            workers.pop(done_future, None)
-            # Workers that outlive their starting coroutine have no later waiter: consume the
-            # terminal exception so asyncio emits no unhandled-future warning.
-            # See #98973.
-            if not done_future.cancelled():
-                with suppress(Exception):
-                    done_future.exception()
-
-        future.add_done_callback(_discard_worker)
+        from gateway.run_deferred_workers import discard_deferred_worker
+        future.add_done_callback(lambda done: discard_deferred_worker(self, workers, done))
 
     def _interrupt_deferred_agent_workers(self, reason: str) -> int:
         """Request cancellation of detached executor-backed agent work."""

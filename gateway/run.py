@@ -4298,6 +4298,7 @@ def _start_gateway_housekeeping(
     """Background thread for gateway-only periodic chores (NOT cron). Separate from the cron trigger
     so chores run under any ``CronScheduler`` provider (external scale-to-zero has no 60s loop).
     Cadences are ticks of ``interval``; inner gates own the real cadence."""
+    from gateway.run_runtime_heartbeat import runtime_heartbeat
     from gateway.run_checkpoint_prune import CHORE_LABEL as PRUNE_LABEL, CheckpointPruneWorker
     from gateway.run_delivery_queue_watch import DRAIN_LABEL, DeliveryQueueWatch, wait_for_next_tick
     from gateway.runtime_ownership import process_ownership
@@ -4306,11 +4307,9 @@ def _start_gateway_housekeeping(
     from hermes_cli.plugins_idle_tasks import IdleTaskFence
     prune_worker = CheckpointPruneWorker(logger, start=process_ownership.start_writer)
     chores: list[tuple[int, str, Any]] = [
-        # First every tick: re-stamp ``updated_at`` in gateway_state.json so it is a real heartbeat.
-        # ``hermes gateway status`` / ``/api/status`` warn when it ages past 2x ``interval`` with the
-        # PID alive — the thread (or a chore blocked on the loop) wedged (#113372). Runs first so a
-        # wedged chore stops the NEXT stamp instead of a slow one delaying this tick's.
-        (1, "Runtime heartbeat", _write_runtime_status_quiet)]
+        # First stamp thread liveness (#113372), then request a coalesced loop-side recount.
+        # Neither a wedged loop nor stale busy state may mask the other's observation.
+        (1, "Runtime heartbeat", runtime_heartbeat(runner, loop))]
     if adapters is not None or runner is not None:
         # Restart-safe cron workers run outside the gateway cgroup and queue their final send for
         # whichever gateway is live; drained here (not the scheduler tick) so external providers get it too.
