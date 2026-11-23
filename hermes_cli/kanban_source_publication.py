@@ -46,11 +46,23 @@ def _config(repo: Path, config: list[str], *args: str, budget=None):
     return result["stdout"].rstrip("\n") if result["rc"] == 0 else ""
 
 
-def _default_target(repo: Path, config: list[str], budget=None) -> str | None:
-    branch = refs.run_git(repo, [*config, "symbolic-ref", "--quiet", "--short", "HEAD"], budget=budget)
+def _branch_name(repo: Path, config: list[str], budget=None) -> str | None:
+    """Full refs avoid tag collisions; empty means detached, None means unknown."""
+    branch = refs.run_git(repo, [*config, "symbolic-ref", "--quiet", "HEAD"], budget=budget)
     if branch["status"] != "ok" or branch["rc"] not in (0, 1):
         return None
-    name = branch["stdout"].strip()
+    if branch["rc"] == 1:
+        return ""
+    ref = branch["stdout"].strip()
+    if not ref.startswith("refs/heads/") or not ref.removeprefix("refs/heads/"):
+        return None
+    return ref.removeprefix("refs/heads/")
+
+
+def _default_target(repo: Path, config: list[str], budget=None) -> str | None:
+    name = _branch_name(repo, config, budget)
+    if name is None:
+        return None
     keys = ([f"branch.{name}.pushRemote"] if name else []) + ["remote.pushDefault"]
     if name:
         keys.append(f"branch.{name}.remote")
@@ -94,6 +106,31 @@ def reject_configured_push(repo: Path, *, budget: GitBudget | None = None,
     return None
 
 
+def _reject_implicit_push(repo: Path, config: list[str]) -> str | None:
+    """Check implicit destinations using the push's own configuration overrides."""
+    mode = _config(repo, config, "--get", "push.default")
+    if mode is None:
+        return "unknown"
+    mode = mode or "simple"
+    if mode == "matching":
+        return "broad"
+    if mode not in {"nothing", "current", "upstream", "tracking", "simple"}:
+        return "unknown"
+    name = _branch_name(repo, config)
+    if name is None:
+        return "unknown"
+    if not name:
+        return None
+    merges = _config(repo, config, "--get-all", f"branch.{name}.merge")
+    if merges is None:
+        return "unknown"
+    if mode in {"upstream", "tracking", "simple"}:
+        for spec in merges.splitlines():
+            if refused := reject_refspec(spec):
+                return refused
+    return None
+
+
 def reject_publish_argv(argv: list[str], *, repo: Path | None = None,
                         remote: str | None = None) -> str | None:
     """Parse once: globals, options, target, then refspecs. No data is a config key."""
@@ -114,7 +151,9 @@ def reject_publish_argv(argv: list[str], *, repo: Path | None = None,
     if repo is not None:
         if target is None:
             return "unknown"
-        return reject_configured_push(repo, remote=target, config=push.config)
+        if refused := reject_configured_push(repo, remote=target, config=push.config):
+            return refused
+        return _reject_implicit_push(repo, push.config) if not push.specs else None
     # Lexical callers have no repo: only explicitly supplied target config applies.
     if push.config:
         if not target:
@@ -125,7 +164,7 @@ def reject_publish_argv(argv: list[str], *, repo: Path | None = None,
                 return "unknown"
             if mirror == "true":
                 return "mirror"
-    return None
+    return "unknown" if not push.specs else None
 
 
 def remote_transport(url: str) -> str:

@@ -177,3 +177,137 @@ def test_abbreviated_glob_configured_mirror_and_boolean_opt_in(tmp_path: Path):
     colon_path = pub.prove(src, oid)
     assert colon_path["status"] == "not_published"
     assert colon_path["reason"] == "local_remote"
+
+
+@pytest.fixture
+def push_pair(tmp_path, monkeypatch):
+    """Review reproductions use only real Git and disposable local bare remotes."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    src, bare = _pair(tmp_path)
+    _git(src, "branch", "-M", "main")
+    _git(src, "config", "branch.main.remote", "origin")
+    _git(src, "config", "branch.main.merge", "refs/heads/main")
+    return src, bare
+
+
+def _guard_reason(src, argv):
+    from hermes_cli.kanban_source_removal import PublishRefused, guard_publish
+    try:
+        guard_publish(src, argv)
+    except PublishRefused as exc:
+        return exc.reason
+    return None
+
+
+@pytest.mark.parametrize("option", [["--repo=safe"], ["--repo", "safe"]])
+def test_push_repo_option_with_positional_refuses(push_pair, tmp_path, option):
+    src, bare = push_pair
+    safe = tmp_path / "safe.git"
+    _git(src, "init", "--bare", str(safe))
+    _git(src, "remote", "add", "safe", str(safe))
+    _git(src, "config", "remote.origin.mirror", "true")
+    custody = "refs/hermes-source-custody/fixture"
+    _git(src, "update-ref", custody, "HEAD")
+    argv = ["push", *option, "origin"]
+    reason = _guard_reason(src, argv)
+    # Counterfactual oracle: bypassing the guard leaks into this LOCAL fixture.
+    _git(src, *argv)
+    assert custody in _git(bare, "for-each-ref", "--format=%(refname)").stdout.splitlines()
+    assert reason == "unknown"
+
+
+@pytest.mark.parametrize("mode,override,tag", [
+    ("upstream", None, False), ("tracking", None, False),
+    ("current", "default", False), ("upstream", "merge", False),
+    ("upstream", None, True),
+])
+def test_push_implicit_custody_destination_refuses(push_pair, mode, override, tag):
+    src, bare = push_pair
+    custody = "refs/hermes-source-custody/fixture"
+    _git(src, "config", "push.default", mode)
+    if override == "merge":
+        # branch.merge is multivalued: -c adds, rather than replaces, its value.
+        _git(src, "config", "--unset", "branch.main.merge")
+    else:
+        _git(src, "config", "branch.main.merge", custody)
+    config = []
+    if override == "default":
+        config = ["-c", "push.default=upstream"]
+    elif override == "merge":
+        config = ["-c", f"branch.main.merge={custody}"]
+    if tag:
+        _git(src, "tag", "main")
+    argv = [*config, "push"]
+    reason = _guard_reason(src, argv)
+    _git(src, *argv)
+    assert custody in _git(bare, "for-each-ref", "--format=%(refname)").stdout.splitlines()
+    assert reason == "custody_namespace"
+
+
+def test_push_tag_collision_preserves_pushremote_check(push_pair, tmp_path):
+    src, _ = push_pair
+    mirror = tmp_path / "mirror.git"
+    _git(src, "init", "--bare", str(mirror))
+    _git(src, "remote", "add", "backup", str(mirror))
+    _git(src, "config", "remote.backup.mirror", "true")
+    _git(src, "config", "branch.main.pushRemote", "backup")
+    _git(src, "tag", "main")
+    assert _guard_reason(src, ["push"]) == "mirror"
+
+
+@pytest.mark.parametrize("mode,argv", [
+    (None, ["push", "origin", "HEAD:refs/heads/main"]),
+    ("upstream", ["push"]), (None, ["push"]),
+    (None, ["push", "--repo=safe"]),
+])
+def test_push_ordinary_real_remote_controls(push_pair, mode, argv):
+    src, bare = push_pair
+    if mode:
+        _git(src, "config", "push.default", mode)
+    _git(src, "remote", "add", "safe", str(bare))
+    assert _guard_reason(src, argv) is None
+    _git(src, *argv)
+    assert _git(bare, "for-each-ref", "--format=%(refname)").stdout.splitlines() == ["refs/heads/main"]
+
+
+@pytest.mark.parametrize("mode,expected", [("invalid-mode", "unknown"), ("matching", "broad")])
+def test_push_default_unknown_and_matching_refuse(push_pair, mode, expected):
+    src, _ = push_pair
+    _git(src, "config", "push.default", mode)
+    assert _guard_reason(src, ["push"]) == expected
+
+
+@pytest.mark.parametrize("argv", [["push"], ["push", "origin"], ["push", "--repo=safe"]])
+def test_push_lexical_implicit_destination_unknown(argv):
+    assert pub.reject_publish_argv(argv) == "unknown"
+
+
+@pytest.mark.parametrize("mode", [None, "simple", "upstream", "tracking"])
+def test_push_checks_all_merge_values_and_path_target(push_pair, mode):
+    src, bare = push_pair
+    if mode:
+        _git(src, "config", "push.default", mode)
+    _git(src, "config", "--add", "branch.main.merge", "refs/hermes-source-custody/second")
+    assert _guard_reason(src, ["push", str(bare)]) == "custody_namespace"
+
+
+@pytest.mark.parametrize("mode", ["nothing", "current"])
+def test_push_non_upstream_modes_allow_custody_merge(push_pair, mode):
+    src, _ = push_pair
+    _git(src, "config", "branch.main.merge", "refs/hermes-source-custody/unused")
+    _git(src, "config", "push.default", mode)
+    assert _guard_reason(src, ["push"]) is None
+
+
+def test_push_detached_head_has_no_branch_check(push_pair):
+    src, _ = push_pair
+    _git(src, "checkout", "--detach")
+    assert _guard_reason(src, ["push", "origin"]) is None
+
+
+def test_push_non_head_symbolic_ref_unknown(push_pair):
+    src, _ = push_pair
+    _git(src, "update-ref", "refs/other/fixture", "HEAD")
+    _git(src, "symbolic-ref", "HEAD", "refs/other/fixture")
+    assert _guard_reason(src, ["push", "origin"]) == "unknown"

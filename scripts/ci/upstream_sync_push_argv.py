@@ -96,7 +96,9 @@ def parse(argv: list[str]) -> Push:
         else:
             positional.append(arg)
     if repo_option is not None:
-        result.target, result.specs = repo_option, positional
+        if positional:
+            result.refusal = "unknown"
+        result.target = repo_option
     elif positional:
         result.target, result.specs = positional[0], positional[1:]
     return result
