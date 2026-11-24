@@ -10,3 +10,14 @@ def sweep(conn, result, guard_notice, parent_unclaimed):
     guard_notice.sweep_remote_guard_holds(conn, result)
     drain_owner(conn)
     parent_unclaimed.safe_sweep(conn)  # A capped host is when a parent starves.
+    _start_spend_reviews(conn)
+
+
+def _start_spend_reviews(conn):
+    """Spend-stop reviews run outside the worker queue, so a full host never delays a budget decision."""
+    import logging
+    from hermes_cli.kanban_spend_reviewer import start_due
+    try:
+        start_due(conn)
+    except Exception:  # health: allow BLE001 -- held stops stay held; the next tick retries
+        logging.getLogger(__name__).warning("kanban: starting spend reviews failed", exc_info=True)

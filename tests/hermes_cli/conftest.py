@@ -19,6 +19,29 @@ def _admitting_hub_judge(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _spend_reviewer_off(request, monkeypatch):
+    """Spend stops route to their chat or decision card, as before the reviewer, unless a test opts in. [daveey]
+
+    The reviewer judges with a live model from a daemon thread; the routing suites pin what happens once it is
+    off or has escalated. Reviewer behaviour is tested with the ``spend_reviewer`` fixture.
+    """
+    if "spend_reviewer" in request.fixturenames:
+        return
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (False, reviewer.DEFAULT_MAX_GRANTS))
+
+
+@pytest.fixture
+def spend_reviewer(monkeypatch):
+    """The reviewer on, its judge a scripted double: append verdict dicts to the returned list."""
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    verdicts: list = []
+    monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (True, reviewer.DEFAULT_MAX_GRANTS))
+    monkeypatch.setattr(reviewer, "judge", lambda ctx: verdicts.pop(0) if verdicts else None)
+    return verdicts
+
+
+@pytest.fixture(autouse=True)
 def _isolate_kanban_worker_process_registries(monkeypatch):
     """Spawn doubles and exit classifications belong to one test, not the next tick's test.
 

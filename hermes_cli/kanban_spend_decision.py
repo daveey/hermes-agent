@@ -20,6 +20,9 @@ def ensure_producer(conn, task_id: str) -> None:
         if repair is None:
             return
         episode, payload, route, live = repair
+        from hermes_cli import kanban_spend_reviewer as reviewer
+        if not live and reviewer.queue(conn, task_id, episode):
+            return  # an immediate review decides first; it routes the stop here only if it escalates
         if not live:
             route = producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
         kb._append_event(conn, task_id, NOTICE, {**payload, "episode": episode, "producer": route})
@@ -32,6 +35,9 @@ def _producer_repair(conn, task_id):
     if stop is None:
         return None
     episode = stop.get("uid") or str(stop["id"])
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    if reviewer.holds(conn, task_id, episode):
+        return None
     previous = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=? "
                             "AND json_extract(payload,'$.episode')=? ORDER BY id DESC LIMIT 1",
                             (task_id, NOTICE, episode)).fetchone()

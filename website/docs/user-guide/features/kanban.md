@@ -732,6 +732,25 @@ release a spend hold. Only a recorded manual promote (after splitting or
 re-scoping, if needed) or archive releases it; a promote starts a new budget
 window. Changing status or disabling the budget does not clear an existing hold.
 
+An ordinary stop is reviewed at once (`hermes_cli/kanban_spend_reviewer.py`)
+instead of waiting for the creator chat or a queued decision card: the next
+dispatcher tick starts a short subscription-model review outside the worker
+queue (`spend_review_queued` / `spend_review_started`). It reads the card, the
+stop and the stopped window's runs and comments, and either grants N more runs
+or escalates. Code checks a grant again under the write lock: N is at most the
+allowance that just ran out, the reviewer must quote progress verbatim from
+that window's run summaries or non-system comments, no human commented after
+the stop, there is no open parent, and the card has had fewer than
+`kanban.spend_review_max_grants` (default 2) reviewer grants since anyone else
+decided. A grant promotes the card into a fresh window of exactly N runs
+(`spend_review_granted`, plus the usual `spend_budget_set` and
+`promoted_manual`) and archives an open decision card for that stop. Anything
+else escalates (`spend_review_escalated` and a comment), and the stop is then
+routed to the creator chat or a decision card as before. A stop already routed
+there but undecided after 30 minutes gets the same single review. Scope and
+safety stops are never reviewed; `kanban.spend_review: false` turns the
+reviewer off.
+
 An over-budget card that **published** an OPEN PR on
 `softmax-universe/daveey-hermes` targeting `main` is spared from a new spend
 triage. Publication is evidenced by its own run's `published_pr` metadata or
