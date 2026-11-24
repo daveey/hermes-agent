@@ -64,7 +64,8 @@ def test_many_profiles_share_one_native_thread_and_keep_callback_context(tmp_pat
 @pytest.mark.parametrize('operation', ['replace', 'wait'])
 def test_rearm_error_is_reported_then_repaired_in_subscriber_context(
         tmp_path, monkeypatch, operation):
-    path = tmp_path / 'source.db'
+    path = tmp_path / 'watched' / 'source.db'
+    path.parent.mkdir()
     path.write_text('initial')
     failed = threading.Event()
     repaired = threading.Event()
@@ -90,7 +91,12 @@ def test_rearm_error_is_reported_then_repaired_in_subscriber_context(
     monkeypatch.setattr(native.FileEvents, operation, fail_once)
     try:
         armed.set()
-        cue_path(path).write_text('restore hint')
+        if operation == 'replace':
+            # A write retains coverage; moving a watched directory loses it and
+            # must still exercise the real rearm/error/retry path.
+            path.parent.rename(path.parent.with_name(path.parent.name + '-moved'))
+        else:
+            cue_path(path).write_text('restore hint')
         assert failed.wait(5)
         assert repaired.wait(5)
         watch.check()

@@ -26,6 +26,7 @@ def test_queue_overflow_invalidates_every_snapshot(tmp_path, monkeypatch):
 
         monkeypatch.setattr(module.os, 'read', read)
         assert events.wait(0)
+        assert events.coverage_lost
         assert not events.control_only
 
 @pytest.mark.parametrize('mask', [0x400, 0x800, 0x2000, 0x8000])

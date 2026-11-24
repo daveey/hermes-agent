@@ -113,7 +113,10 @@ class _NativeOwner:
         try:
             if not repair and not watch._events.wait(0):
                 return
-            watch._events.replace(watch._paths, directories=watch._directories)
+            # Ordinary writes keep the installed watches. Reinstall only after
+            # overflow, unmount, or a watch that inotify dropped.
+            if repair or watch._events.coverage_lost:
+                watch._events.replace(watch._paths, directories=watch._directories)
             with watch._lock:
                 watch._error = None
             watch._retry_at = None

@@ -46,6 +46,7 @@ class FileEvents:
         self._directories: set[int] = set()
         self._controls: dict[int, set[str]] = {}
         self.control_only = False
+        self.coverage_lost = False
         self._wake_lock = threading.Lock()
 
     def _open(self):
@@ -109,6 +110,7 @@ class FileEvents:
             raise
         old, self._fd = self._fd, fd
         self._names, self._directories, self._controls = names, directory_wds, control_names
+        self.coverage_lost = False
         os.close(old)
 
     def wake(self):
@@ -135,6 +137,7 @@ class FileEvents:
         readable = self._readable(timeout)
         changed = self._wake_read in readable
         self.control_only = not changed
+        self.coverage_lost = False
         if changed:
             os.read(self._wake_read, 65536)
         if self._fd not in readable:
@@ -153,9 +156,14 @@ class FileEvents:
                 offset += _HEADER.size
                 name = os.fsdecode(data[offset:offset + length].split(b'\0', 1)[0])
                 offset += length
-                source = bool(mask & (_OVERFLOW | _LOST)) or wd in self._directories or (
+                lost = bool(mask & (_OVERFLOW | _LOST))
+                self.coverage_lost |= lost
+                source = lost or wd in self._directories or (
                     name in self._names.get(wd, ())
                 )
+                # Ancestor creation/retargeting can expose a previously absent
+                # directory. Refresh coverage for structural changes, not writes.
+                self.coverage_lost |= source and bool(mask & (0x40 | 0x80 | 0x100 | 0x200))
                 control = name in self._controls.get(wd, ())
                 changed |= source or control
                 self.control_only &= not source

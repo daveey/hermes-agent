@@ -16,7 +16,14 @@ def test_new_watch_after_timed_out_last_remove_stays_live(tmp_path, monkeypatch)
     watch = native.NativeSourceWatch((a,), lambda: None)
     owner = watch._owner
     original = native.FileEvents.replace
+    real_wait = native.FileEvents.wait
     armed = True
+
+    def wait_loss(self, timeout=None):
+        changed = real_wait(self, timeout)
+        if changed and self is getattr(watch, '_events', None):
+            self.coverage_lost = True
+        return changed
 
     def delayed_rearm(events, *args, **kwargs):
         nonlocal armed
@@ -26,6 +33,7 @@ def test_new_watch_after_timed_out_last_remove_stays_live(tmp_path, monkeypatch)
             assert release.wait(15)
         return original(events, *args, **kwargs)
 
+    monkeypatch.setattr(native.FileEvents, 'wait', wait_loss)
     monkeypatch.setattr(native.FileEvents, 'replace', delayed_rearm)
     result = {}
     successor = None
