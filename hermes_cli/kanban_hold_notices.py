@@ -90,15 +90,19 @@ def sweep(conn) -> None:
     for (tid,) in conn.execute("SELECT id FROM tasks WHERE status='triage'").fetchall():
         if tid in foreign:
             continue
-        hold = current(conn, tid)
-        if hold is None:
-            continue
-        # New recipients/restrictions are revisions even when the base episode
-        # was delivered. Unchanged polls remain read-only.
-        if previous(conn, tid, hold[1]) is not None and all(conn.execute(
-                'SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND platform=? AND chat_id=?',
-                (tid, platform, chat)).fetchone() for platform, chat in destinations(conn, tid)):
-            continue
-        with kb.write_txn(conn):
-            if conn.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()[0] == 'triage':
-                publish(conn, tid)
+        try:
+            hold = current(conn, tid)
+            if hold is None:
+                continue
+            # New recipients/restrictions are revisions even when the base episode
+            # was delivered. Unchanged polls remain read-only.
+            if previous(conn, tid, hold[1]) is not None and all(conn.execute(
+                    'SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND platform=? AND chat_id=?',
+                    (tid, platform, chat)).fetchone() for platform, chat in destinations(conn, tid)):
+                continue
+            with kb.write_txn(conn):
+                row = conn.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()
+                if row is not None and row[0] == 'triage':
+                    publish(conn, tid)
+        except Exception:  # health: allow BLE001 -- rollback this publication, retain its hold and retry next tick
+            kb._log.warning('kanban: hold notice failed for %s; hold retained', tid, exc_info=True)
