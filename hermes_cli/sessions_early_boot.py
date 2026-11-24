@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import os
 import signal
 import sys
+import threading
 
 
 class EarlySessions:
@@ -57,15 +58,26 @@ def early_sessions(*, headless, isolated):
             raise SystemExit(128 + signum)
 
     try:
-        for signum in (signal.SIGTERM, signal.SIGINT):
-            previous[signum] = signal.signal(signum, stop)
+        # signal.signal is illegal off the main thread (serve_update_wait and
+        # other cmd_dashboard harnesses). CPython delivers signals to the main
+        # thread anyway, so skip rather than abort capture.
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    previous[signum] = signal.signal(signum, stop)
+                except (ValueError, OSError, RuntimeError):
+                    previous.pop(signum, None)
         owner.runtime.start_background()
         yield owner
     finally:
         try:
             owner.close()
         finally:
-            for signum, handler in previous.items():
-                # Do not remove a later installed exit-flush handler.
-                if signal.getsignal(signum) is stop:
-                    signal.signal(signum, handler)
+            if previous and threading.current_thread() is threading.main_thread():
+                for signum, handler in previous.items():
+                    # Do not remove a later installed exit-flush handler.
+                    try:
+                        if signal.getsignal(signum) is stop:
+                            signal.signal(signum, handler)
+                    except (ValueError, OSError, RuntimeError):
+                        pass

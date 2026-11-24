@@ -1,6 +1,7 @@
 """Early capture keeps one owner through import failures and app adoption."""
 from types import SimpleNamespace
 import signal
+import threading
 
 from fastapi import FastAPI
 import pytest
@@ -92,6 +93,32 @@ def test_ignored_signal_keeps_owner_adoptable(boot):
         assert calls.count('close') == 1
     finally:
         signal.signal(signal.SIGINT, original)
+
+
+def test_worker_thread_skips_signal_install_and_still_starts(boot):
+    calls, runtime = boot
+    original_term = signal.getsignal(signal.SIGTERM)
+    original_int = signal.getsignal(signal.SIGINT)
+    result = {}
+
+    def run():
+        with early.early_sessions(headless=True, isolated=True) as owner:
+            assert owner is not None
+            result['owner'] = owner
+            result['term'] = signal.getsignal(signal.SIGTERM)
+            result['int'] = signal.getsignal(signal.SIGINT)
+            assert owner.adopt() is runtime
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert result.get('owner') is not None
+    assert result['term'] is original_term
+    assert result['int'] is original_int
+    assert signal.getsignal(signal.SIGTERM) is original_term
+    assert signal.getsignal(signal.SIGINT) is original_int
+    assert calls.count('start') == calls.count('close') == 1
 
 
 def test_failed_drain_retains_owner():
