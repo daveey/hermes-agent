@@ -165,7 +165,16 @@ def execution_restricted(conn, task_id: str) -> bool:
 
 
 def restricted_since(conn, task_id: str) -> int | None:
-    """Execution fencing: the earliest restriction a scope renewal does not cover. Safety is never covered."""
+    """Execution fencing: the earliest restriction a scope renewal does not cover. Safety is never covered.
+    An owning-chat administrative stop (``kanban_stop_ended``) is never covered either, and never moves the
+    accounting floor."""
+    from hermes_cli.kanban_stop_ended import stopped_at
+    admin = stopped_at(conn, task_id)
+    since = _restricted_since(conn, task_id)
+    return min(t for t in (admin, since) if t is not None) if (admin, since) != (None, None) else None
+
+
+def _restricted_since(conn, task_id: str) -> int | None:
     import json
     from hermes_cli import kanban_scope_renewal as renewal
     renewed = renewal.covered(conn, task_id)
