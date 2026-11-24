@@ -26,7 +26,8 @@ def test_detail_annotates_compression_lineage(monkeypatch, count):
     from hermes_cli.web_routers import cron
     monkeypatch.setattr(cron, "cron_run_scheduler_owned", lambda *a: None)
 
-    def annotate(rows):
+    def annotate(rows, *, display=False):
+        assert display is True  # detail is a sidebar restore, not a strict lifecycle read
         assert rows[0]["_lineage_ids"] == ["root", "tip"]
         rows[0]["kanban_observed_at"] = 1234
         if count:

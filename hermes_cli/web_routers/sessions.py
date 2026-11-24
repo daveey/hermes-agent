@@ -206,11 +206,20 @@ def _session_kanban_tasks_read(ids: str):
     return {"tasks": session_kanban_tasks(wanted, stale_ok=True)}
 
 
+# Identical in-flight ``ids`` share one kanban-lane read (a Desktop poll burst). Distinct ``ids`` still
+# reach the lane so its size and queue deadline stay the bottleneck, not a second coalescer cap. [daveey]
+_session_kanban_tasks_admitted = coalesced_read(
+    _session_kanban_tasks_read, admission_key=lambda args: args["ids"], max_concurrent=64,
+    thread_runner=lane_runner("kanban"))
+
+
 @list_router.get("/api/session-kanban-tasks")
 async def get_session_kanban_tasks(request: Request, ids: str = Query(..., max_length=4000)):
     # Reads every board's linked cards: the kanban lane, so a slow board holds neither the shared pool nor the
-    # threads of the session lists. [daveey]
-    return await run_in_lane("kanban", _session_kanban_tasks_read, ids, request=request)
+    # threads of the session lists. Coalesced waiters share one worker; disconnect of one must not cancel it
+    # (``coalesced_read`` shields). Lane queue deadline still applies inside ``lane_runner``. [daveey]
+    _ = request
+    return await _session_kanban_tasks_admitted(ids)
 
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
@@ -669,8 +678,7 @@ async def get_session_stats(profile: Optional[str] = None):
     return await asyncio.to_thread(_with_db, profile, _stats, read_only=True)
 
 
-@manage_router.get("/api/sessions/{session_id}")
-async def get_session_detail(session_id: str, profile: Optional[str] = None):
+def _session_detail_read(session_id: str, profile: Optional[str] = None):
     def _detail(db):
         sid = _resolve_session_id(db, session_id)
         session = db.get_session(sid) if sid else None
@@ -681,9 +689,10 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
         session["profile"] = _serving_profile(profile)
         session["is_default_profile"] = session["profile"] == "default"
         # Older/open sidebar rows can be restored from detail rather than a
-        # recency page. They need fresh task evidence over the same lineage.
+        # recency page. They need the same display annotation as list rows over
+        # the same lineage, not a strict global re-read on every poll. [daveey]
         session["_lineage_ids"] = db.get_compression_chain(sid)
-        annotate_kanban_activity([session])
+        annotate_kanban_activity([session], display=True)
         # A cron run's liveness is scheduler ownership, not the 300s activity
         # window (#88443): a run inside a long tool call is still owned. A
         # unified-runtime run's local id names no job, so stamp its identity first.
@@ -696,7 +705,19 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
             session["scheduler_owned"] = owned
         return session
 
-    return await asyncio.to_thread(_with_db, profile, _detail, read_only=True)
+    return _with_db(profile, _detail, read_only=True)
+
+
+# Identical in-flight session_id+profile polls share one AnyIO worker. Distinct ids still
+# enter the pool; the cap is only so a burst of different chats is not serialized. [daveey]
+_session_detail_admitted = coalesced_read(
+    _session_detail_read, admission_key=lambda args: (args["session_id"], args["profile"]),
+    max_concurrent=32)
+
+
+@manage_router.get("/api/sessions/{session_id}")
+async def get_session_detail(session_id: str, profile: Optional[str] = None):
+    return await _session_detail_admitted(session_id, profile)
 
 
 @manage_router.get("/api/sessions/{session_id}/mutation-snapshot")

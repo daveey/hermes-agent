@@ -1,8 +1,21 @@
 """Warm linked-card reads must not enter blocking fingerprint/projection work."""
 import threading
 
+import pytest
+
 from hermes_cli import kanban_session_activity as activity
+from hermes_cli.kanban_links_refresh import ScopeRefresher
 from tests.waiting import wait_until
+
+
+@pytest.fixture(autouse=True)
+def isolated_refresher(monkeypatch):
+    # Cache reset does not reset process-lifetime admission cooldowns. Each test
+    # needs an independent owner, not a two-second wait against a prior test's floor.
+    owner = ScopeRefresher(lambda scope: activity._refresh_links_scope(scope), 16)
+    monkeypatch.setattr(activity, '_links_refresher', owner)
+    yield
+    wait_until(lambda: not owner.busy, what='isolated refresh cleanup')
 
 
 def test_scope_a_survives_scope_b_projection_lock(monkeypatch):

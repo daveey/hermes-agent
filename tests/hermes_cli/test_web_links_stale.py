@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sqlite3
 import threading
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,6 +12,7 @@ from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
 from hermes_cli import kanban_session_activity as activity
+from hermes_cli.kanban_links_refresh import ScopeRefresher
 from tests.waiting import wait_until
 
 
@@ -21,6 +23,9 @@ def reader_mode(request):
 
 @pytest.fixture(params=['core', 'user-steps'])
 def linked_client(request, monkeypatch, tmp_path, reader_mode):
+    # A fresh process-lifetime owner keeps parametrizations from sharing cooldowns.
+    monkeypatch.setattr(activity, '_links_refresher',
+                        ScopeRefresher(lambda scope: activity._refresh_links_scope(scope), 16))
     from hermes_cli import web_server as ws
     from hermes_cli import web_server_dashboard as dashboard
     from hermes_cli import kanban_db_sync
@@ -77,6 +82,11 @@ def test_http_warm_stale_does_not_wait_for_fingerprint(linked_client, monkeypatc
     first = client.get(endpoint, params={'ids': 's-chat'})
     assert first.status_code == 200, first.text
     assert first.json()['tasks'][0]['id'] == 'prior'
+    # A handler may request links more than once while warming (cards + rows),
+    # already starting a refresh. Exercise the *next eligible* stale read rather
+    # than requiring a second start inside the new three-second floor.
+    wait_until(lambda: not activity._links_refresher.busy, what='HTTP warm refresh')
+    monkeypatch.setattr(activity._links_refresher, '_clock', lambda: time.monotonic() + 3)
     entered, release, returned = threading.Event(), threading.Event(), threading.Event()
     responses = []
 

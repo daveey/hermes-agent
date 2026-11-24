@@ -2,6 +2,7 @@
 from contextvars import Context, copy_context
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
@@ -56,13 +57,21 @@ class ScopeRefresher:
 
     No projection IO runs under the condition. Each job owns its captured context,
     which is released before the worker goes idle. Repeated polls of an active or
-    queued scope coalesce. A full queue leaves last-good data intact; a later poll
-    retries admission. Cold and strict reads do not use this worker.
+    queued scope coalesce. Starts of each scope are at least three seconds apart;
+    a trailing queued check wakes at its deadline without further display polls.
+    Both the queue and cooldown history are capacity-bounded. If cooldown history
+    is full, new scopes wait for its earliest expiry rather than evicting a live
+    cooldown (which would let scope churn bypass the floor). A full queue leaves
+    last-good data intact; a later poll retries admission. Cold and strict reads
+    do not use this worker.
     """
 
-    def __init__(self, refresh: Callable[[tuple], None], capacity: int):
+    def __init__(self, refresh: Callable[[tuple], None], capacity: int, *,
+                 clock: Callable[[], float] = time.monotonic):
         self._refresh = refresh
         self._capacity = capacity
+        self._clock = clock
+        self._next_start: dict[tuple, float] = {}
         self._ready = threading.Condition()
         self._pending: dict[tuple, Context] = {}
         self._worker: threading.Thread | None = None
@@ -79,6 +88,7 @@ class ScopeRefresher:
             self._fenced.add(scope)
             if self._active != scope:
                 self._pending.pop(scope, None)
+                self._ready.notify_all()
                 return
             if not self._ready.wait_for(lambda: self._active != scope, timeout):
                 raise TimeoutError('remote links scope is still refreshing')
@@ -114,9 +124,18 @@ class ScopeRefresher:
     def _run(self) -> None:
         while True:
             with self._ready:
-                while not self._pending:
-                    self._ready.wait()
-                scope = next(iter(self._pending))
+                while True:
+                    now = self._clock()
+                    self._next_start = {key: due for key, due in self._next_start.items() if due > now}
+                    scope = next((key for key in self._pending
+                                  if key not in self._next_start and len(self._next_start) < self._capacity), None)
+                    if scope is not None:
+                        break
+                    # One deadline wait, not periodic polling. Empty workers retain
+                    # no context and need no wake until a new submission arrives.
+                    delay = min(self._next_start.values()) - now if self._pending else None
+                    self._ready.wait(delay)
+                self._next_start[scope] = now + 3.0
                 self._active = scope
                 context = self._pending[scope]
             try:
