@@ -389,14 +389,15 @@ def test_backfill_moves_cards_off_a_deleted_owner_chat(synced, monkeypatch):
     assert owner.backfill(synced, apply=True)["linked"] == 1
     rows = {tuple(r) for r in synced.execute(
         "SELECT chat_session, released FROM task_chat_links WHERE task_id=? AND kind='created'", (tid,))}
-    assert rows == {(old, 1), (owner.session_id("ci-main-watch", 2), 0)}
+    # the dead link stays (creating-chat links are never released on their own gateway); the live one owns it
+    assert rows == {(old, 0), (owner.session_id("ci-main-watch", 2), 0)}
     assert kca.has_authority(synced, tid, None, durable=True)
     assert owner.backfill(synced, apply=True)["ownerless"] == 0
 
 
 def test_dispatcher_maintenance_owns_ownerless_cards_hourly(kanban_home, monkeypatch, owner_backfill):
     from hermes_cli import kanban_dispatch_maintenance as maintenance
-    monkeypatch.setattr(owner, "_LAST_BACKFILL", {})
+    monkeypatch.setattr(owner, "_NEXT_BACKFILL", {})
     monkeypatch.setattr(owner, "enabled", lambda: False)
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="Made while off", assignee="default", created_by="self-heal")
@@ -436,3 +437,59 @@ def test_every_card_of_a_terminal_swarm_is_owned(kanban_home, monkeypatch):
         ids = [r[0] for r in conn.execute("SELECT id FROM tasks")]
         assert out and len(ids) >= 3
         assert all(kca.has_authority(conn, t, None, durable=True) for t in ids)
+
+
+def test_backfill_restores_an_archived_owner_chat_even_while_it_is_cached(synced):
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+    tid = kb.create_task(synced, title="Watcher card", assignee="default", created_by="ci-main-watch")
+    sid = owner.session_id("ci-main-watch")
+    db = SessionDB(db_path=get_hermes_home() / "state.db")
+    try:
+        db.set_session_archived(sid, True)
+    finally:
+        db.close()
+    assert owner.backfill(synced, apply=True)["linked"] == 1  # the cache is fresh: the backfill must still recheck
+    db = SessionDB(db_path=get_hermes_home() / "state.db")
+    try:
+        assert not db.get_session(sid)["archived"]
+    finally:
+        db.close()
+    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}}
+    assert sum(e.kind == owner.EVENT for e in kb.list_events(synced, tid)) == 1
+
+
+def test_an_owner_chat_of_another_gateway_is_not_judged_dead_here(synced, monkeypatch):
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    tid = kb.create_task(synced, title="Inherited", assignee="default", created_by="ci-main-watch")
+    with kb.write_txn(synced):
+        synced.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,"
+                       "released,created_at) VALUES ('u2',?,'worker-1',NULL,?,'created',0,0)",
+                       (tid, owner.session_id("ci-main-watch")))
+    monkeypatch.setattr(owner, "enabled", lambda: True)
+    assert owner._owner_refs(synced, tid, True) == ([], True)
+
+
+def test_the_dispatcher_backfill_links_in_batches_and_catches_up_sooner(kanban_home, monkeypatch, owner_backfill):
+    monkeypatch.setattr(owner, "_NEXT_BACKFILL", {})
+    monkeypatch.setattr(owner, "BACKFILL_BATCH", 2)
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    with kbc.connect_closing() as conn:
+        for n in range(3):
+            kb.create_task(conn, title=f"old {n}", assignee="default", created_by="self-heal")
+        monkeypatch.setattr(owner, "enabled", lambda: True)
+        assert owner.maybe_backfill(conn, now=0.0)["linked"] == 2
+        assert owner.maybe_backfill(conn, now=owner.BACKFILL_CATCHUP_S - 1) is None
+        assert owner.maybe_backfill(conn, now=owner.BACKFILL_CATCHUP_S)["linked"] == 1
+        assert owner.maybe_backfill(conn, now=owner.BACKFILL_CATCHUP_S + owner.BACKFILL_CATCHUP_S) is None
+
+
+def test_dispatcher_maintenance_hook_runs_the_backfill(kanban_home, monkeypatch, owner_backfill):
+    from hermes_cli import kanban_dispatch_maintenance as maintenance
+    monkeypatch.setattr(owner, "_NEXT_BACKFILL", {})
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Before owner chats", assignee="default", created_by="oom-detector")
+        monkeypatch.setattr(owner, "enabled", lambda: True)
+        maintenance._own_ownerless_cards(conn)
+        assert _links(conn, tid)[0]["chat_session"] == owner.session_id("oom-detector")
