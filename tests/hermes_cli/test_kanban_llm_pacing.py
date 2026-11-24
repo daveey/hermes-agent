@@ -204,7 +204,11 @@ def test_held_pool_names_the_reset_and_repeats_no_event(paced_board, monkeypatch
 
 @pytest.mark.parametrize("persisted", [True, False], ids=["shared-state", "memory-only"])
 def test_dispatch_reuses_usage_until_read_interval_expires(paced_board, monkeypatch, persisted):
-    monkeypatch.setenv("HOME", str(paced_board.parent))
+    # Keep the synthetic account home distinct from HERMES_HOME: the inherited
+    # board now carries a real creating chat, so consent reads its isolated state DB.
+    account_home = paced_board.parent / "account-home"
+    account_home.mkdir()
+    monkeypatch.setenv("HOME", str(account_home))
     monkeypatch.setattr(pd, "_CLASS_CACHE", {})
     monkeypatch.setattr(pd, "_WARNED", {})
     interval = 60

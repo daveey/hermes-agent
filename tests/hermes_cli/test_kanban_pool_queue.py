@@ -58,6 +58,8 @@ def hub(tmp_path, monkeypatch, svc):
     sync.consume_dispatcher_wake()
     gw = Gateway(tmp_path, HUB, svc, monkeypatch, pickup=False)
     gw.enter()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(gw.home))
     yield gw
     gw.conn.close()
     sync.set_lease_client(None)
@@ -254,6 +256,8 @@ def w2(tmp_path, monkeypatch, svc):
     sync.consume_dispatcher_wake()
     gw = Gateway(tmp_path, "worker-2", svc, monkeypatch, pickup="true")
     gw.enter()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(gw.home))
     yield gw
     gw.conn.close()
     sync.set_lease_client(None)
@@ -920,8 +924,8 @@ def on_w2(w2, monkeypatch):
 
 
 def _create(**card):
-    from tools import kanban_tools as kt
-    out = json.loads(kt._handle_create({"assignee": "default", "requires": [], **card}))
+    from tests.hermes_cli.test_kanban_worker_node import _tool_create
+    out = _tool_create({"assignee": "default", "requires": [], **card})
     assert out.get("ok"), out
     return out
 

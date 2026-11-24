@@ -54,6 +54,9 @@ def _count(conn):
 
 
 def _tool(handler, args):
+    if handler == "_handle_create":
+        from tests.hermes_cli.test_kanban_worker_node import _tool_create
+        return _tool_create(args)
     from tools import kanban_tools
     return json.loads(getattr(kanban_tools, handler)(args))
 

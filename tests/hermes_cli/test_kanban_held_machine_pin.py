@@ -55,8 +55,8 @@ def _count(conn):
 
 
 def _create(args):
-    from tools import kanban_tools
-    return json.loads(kanban_tools._handle_create({"title": "verify five fixes", "assignee": "default", **args}))
+    from tests.hermes_cli.test_kanban_worker_node import _tool_create
+    return _tool_create({"title": "verify five fixes", "assignee": "default", **args})
 
 
 def _refused(out):

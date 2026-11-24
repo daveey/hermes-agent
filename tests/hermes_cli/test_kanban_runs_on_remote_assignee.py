@@ -203,7 +203,7 @@ def test_remote_card_provider_less_pin_is_refused_naming_the_provider(gws, monke
 def test_tool_create_with_placement_on_an_enrolled_machine_creates_the_card(tmp_path, monkeypatch, svc):
     from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli import kanban_db_sync as sync
-    from tools import kanban_tools as kt
+    from tests.hermes_cli.test_kanban_worker_node import _tool_create
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
     sync.consume_dispatcher_wake()
     mac = Gateway(tmp_path, "macbook", svc, monkeypatch, pickup=False)
@@ -212,9 +212,9 @@ def test_tool_create_with_placement_on_an_enrolled_machine_creates_the_card(tmp_
         wn.set_registry_fetch(lambda: {"me": "macbook", "machines": list(machines.values())})
         _publish(monkeypatch, {HUB: {PROFILE: {"terminal", "file", "git"}}})
         monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-        out = json.loads(kt._handle_create({
+        out = _tool_create({
             "title": "design CI capacity", "assignee": PROFILE, "placement": HUB, "requires": NEEDS,
-            "model": "class:deep", "provider": "auto"}))
+            "model": "class:deep", "provider": "auto"})
         assert not out.get("error"), out
         tid = out["task_id"]
         assert out.get("runs_on") == [f"machine:{HUB}"], out
