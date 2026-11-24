@@ -93,11 +93,17 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
     from hermes_cli.kanban_db_notify import is_headless_session
     if creator_task_id:
         from hermes_cli import kanban_capability_registry as reg
-        from hermes_cli.kanban_creator_chats import resolve_chats
+        from hermes_cli.kanban_creator_chats import _replica_chats, resolve_chats
         self_gw = reg.self_gateway()
         has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
+        owners = resolve_chats(conn, creator_task_id) if has_links else []
+        if not owners:
+            # Pickup carries the task, not foreign chat links. Discover its existing
+            # owner in the board shadow, just as creator inheritance does. This is
+            # only a route: the origin gateway still authenticates creator/run custody.
+            owners = _replica_chats(conn, creator_task_id)
         foreign = None
-        for owner in (resolve_chats(conn, creator_task_id) if has_links else []):
+        for owner in owners:
             gateway, session = owner["chat_gateway"], owner["chat_session"]
             if gateway and gateway != self_gw and foreign is None:
                 foreign = {"session_id": session, "origin_profile": owner.get("chat_profile") or "default",
