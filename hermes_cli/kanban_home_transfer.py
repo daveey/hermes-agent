@@ -149,6 +149,8 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
                     or conn.execute("SELECT 1 FROM kanban_sync_parent_envelopes LIMIT 1").fetchone()
                     or conn.execute("SELECT 1 FROM kanban_sync_omissions LIMIT 1").fetchone()):
                 raise ValueError("home preparation requires drained pending custody")
+            from hermes_cli.kanban_home_probe import require_source_probe
+            require_source_probe(conn, task_id, source)
             conn.execute(f"INSERT INTO {_TABLE}(task_id,source,destination,nonce,expected_version) VALUES (?,?,?,?,?)",
                          tuple(record.values()))
     except BaseException:

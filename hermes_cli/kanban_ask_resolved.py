@@ -427,7 +427,10 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
         if filed is None:
             continue
         filed_id, payload, filed_at = int(filed[0]), kb._json_dict(filed[1]), int(filed[2] or 0)
-        host = payload.get("probe_host")
+        from hermes_cli import kanban_home_probe
+        host = kanban_home_probe.host(conn, tid, filed_id, payload.get("probe_host"))
+        if host == kanban_home_probe.UNKNOWN:
+            continue
         if host and own and host != own:
             # Another gateway runs this ask's probe. On its home board, say once when that host went silent;
             # a worker node's copy of another gateway's card is left alone. Never run it here, never unblock.

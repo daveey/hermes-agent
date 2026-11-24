@@ -379,6 +379,13 @@ def _lost_wake(conn: sqlite3.Connection, task_id: str, payload: dict, note: str)
     return woke
 
 
+def _settled_park(conn: sqlite3.Connection, task_id: str, park_id: int, payload: dict) -> bool:
+    """Clock-only/invalid probes and superseded parks need no restoration."""
+    return (not payload.get("wake_check") or not isinstance(payload.get("wake_at"), (int, float))
+            or conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? AND kind IN ('claimed','spawned') "
+                            "LIMIT 1", (task_id,park_id)).fetchone() is not None)
+
+
 def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
     """Lint every ``scheduled`` card whose latest park carries a wake_check but has no probe on this board.
 
@@ -430,15 +437,14 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
         if _RESTORE_SEEN.get(key) == park_id:
             continue
         cmd = payload.get("wake_check")
-        if not cmd or not isinstance(payload.get("wake_at"), (int, float)):
-            _RESTORE_SEEN[key] = park_id  # a clock-only park: nothing to restore until it parks again
+        if _settled_park(conn, tid, park_id, payload):
+            _RESTORE_SEEN[key] = park_id  # only a newer park reopens a settled probe
             continue
-        if conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('claimed', 'spawned') "
-                        "LIMIT 1", (tid, park_id)).fetchone():
-            _RESTORE_SEEN[key] = park_id  # G2e: events never go away; only a newer park (a new id) reopens this
-            continue  # a later run's park has not reached this board yet
         every = normalize_every(payload.get("check_every"))
-        host = payload.get("probe_host")
+        from hermes_cli import kanban_home_probe
+        host = kanban_home_probe.host(conn, tid, park_id, payload.get("probe_host"))
+        if host == kanban_home_probe.UNKNOWN:
+            continue  # committed move, but the original probe host has not arrived yet
         copy = tid in foreign
         base = {"wake_check": cmd, "check_every": every, "probe_host": host}
         if host and own and host != own:

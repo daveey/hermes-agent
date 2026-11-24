@@ -343,6 +343,11 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     # would silently erase that binding and every other local column. Keep the
     # row even when the directory is currently absent; existence is not custody.
     keep += " AND NOT (workspace_kind IN ('dir', 'worktree') AND workspace_path IS NOT NULL)"
+    # A finalized live-home source retains its open replica even if an execution
+    # probe row is lost. Its immutable handoff receipt is the fallback custody for
+    # legacy hostless probes; this is not home or execution/lease affinity.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_home_finalized1'").fetchone():
+        keep += " AND NOT (status NOT IN ('done','archived') AND EXISTS (SELECT 1 FROM kanban_home_finalized1 h WHERE h.task_id=tasks.id))"
     rows = conn.execute(
         "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ? AND claim_lock IS NULL "
         "AND status != 'running'" + keep, (own,)).fetchall()
