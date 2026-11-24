@@ -23,7 +23,7 @@ def source():
         return CapturedInput({'local': {'answer': selector['n']}}, ((source_id, 'native-token'),), time.time())
 
     source_id = SourceId(scope, 'board.input', 'local')
-    adapter = BoardInputSource(engine, source_id, capture, max_selectors=2)
+    adapter = BoardInputSource(engine, source_id, capture, max_selectors=2, min_gap_seconds=0)  # pacing: own tests
     adapter.watch(woke.set)
     yield adapter, engine, calls, woke
     adapter.close()

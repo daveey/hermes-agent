@@ -5,8 +5,11 @@ share one transaction; shadow and catalog databases retain independent source
 observations. External policy/roster/clock evidence is bounded-refresh, not a
 claim of an atomic cross-database snapshot or instantaneous external truth.
 """
+from collections import OrderedDict
 from contextlib import closing
+import os
 import sqlite3
+import threading
 import time
 
 from dataclasses import asdict
@@ -21,11 +24,55 @@ def _observation(conn):
             'schema': conn.execute('PRAGMA schema_version').fetchone()[0]}
 
 
+# (board file, its identity, selector) -> (change cursor, rows) of the last capture: the next one reads only what
+# moved. A replaced file has a new identity, so it starts from a full read, as the legacy route's dropped observer.
+_RETAINED: OrderedDict = OrderedDict()
+_RETAINED_MAX = 8  # as board_rows.MAX_ENTRIES
+_retained_lock = threading.Lock()
+
+
+def _local(api, live, board, selector):
+    """The board's own rows, incrementally from the last capture of the same query (as ``board_rows``)."""
+    from hermes_cli import kanban_db
+    path = str(kanban_db.kanban_db_path(board=board))
+    try:
+        stat = os.stat(path)
+    except OSError:
+        key = None  # no identity to vouch for retained rows: read in full, retain nothing
+    else:
+        key = (path, stat.st_dev, stat.st_ino, tuple(sorted(selector.items())))
+    with _retained_lock:
+        hit = _RETAINED.get(key) if key is not None else None
+    try:
+        changed, cursor = changes.changed_since(live, hit[0] if hit else None)
+        local, rows = api.board_fact_capture.capture_incremental(live, hit[1] if hit else None, changed, **selector)
+    except BaseException:
+        with _retained_lock:
+            _RETAINED.pop(key, None)  # a failed read never seeds the next delta
+        raise
+    if key is None:
+        return local
+    with _retained_lock:
+        _RETAINED[key] = (cursor, rows)
+        _RETAINED.move_to_end(key)
+        while len(_RETAINED) > _RETAINED_MAX:
+            _RETAINED.popitem(last=False)
+    return local
+
+
+def retire(paths) -> None:
+    """Drop retained rows of closed board files (``BoardRuntime.close``), as ``board_rows.retire``."""
+    paths = {str(path) for path in paths}
+    with _retained_lock:
+        for key in [key for key in _RETAINED if key[0] in paths]:
+            del _RETAINED[key]
+
+
 def _board(api, board, selector):
     observed_at = time.time()
     with closing(api._conn(board=board)) as live:
         live.execute('BEGIN')
-        local = api.board_fact_capture.capture(live, **selector)
+        local = _local(api, live, board, selector)
         observations = {'local': _observation(live)}
         shadow = None
         try:

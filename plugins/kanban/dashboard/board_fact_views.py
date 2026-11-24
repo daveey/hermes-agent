@@ -178,7 +178,8 @@ def response(view: str, selector: Mapping, *, board=None, decoded=False):
     v1, bound = selected
     if bound is None:
         return None
-    result = bound if isinstance(bound, v1.Unavailable) else bound.read(view, selector)
+    # A scope still activating is Pending (BoardRuntime.provider): not a view, so it answers 503 like Unavailable.
+    result = bound if isinstance(bound, (v1.Unavailable, v1.Pending)) else bound.read(view, selector)
     if result is None:
         return None
     if isinstance(result, v1.Ready):
@@ -246,7 +247,7 @@ def legacy(board):
     v1, bound = selected
     if bound is None:
         return nullcontext()
-    if isinstance(bound, v1.Unavailable):
+    if isinstance(bound, (v1.Unavailable, v1.Pending)):
         raise HTTPException(503, detail={"code": "facts_unavailable", "reason": bound.reason})
     return bound.legacy()
 

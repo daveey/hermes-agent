@@ -19,12 +19,27 @@ def capture(conn, *, tenant=None, include_archived=False, workflow_template_id=N
     Call on the auxiliary capture worker, never on the shared feed. Failure
     propagates for source health; it is not an authoritative empty board.
     """
+    return capture_incremental(conn, None, None, tenant=tenant, include_archived=include_archived,
+                               workflow_template_id=workflow_template_id, current_step_key=current_step_key,
+                               done_limit=done_limit)[0]
+
+
+def capture_incremental(conn, prev, changed, *, tenant=None, include_archived=False, workflow_template_id=None,
+                        current_step_key=None, done_limit=80):
+    """``capture`` from the last rows of the same query: ``(captured, rows)``. [daveey]
+
+    ``prev`` and ``changed`` (task ids from ``kanban_task_change.changed_since`` in this same read transaction) take
+    ``board_read.materialize``'s delta, exactly as the legacy route's ``board_rows.incremental`` does: displayed
+    and changed cards re-read by key instead of every row of the board. Each row step releases the GIL, so in a
+    contended process (the hub dashboard backend) a full read of the hub's board took minutes; the delta reads a
+    few hundred. ``rows`` is retained by the caller for the next capture and never mutated.
+    """
     if not conn.in_transaction:
         raise ValueError('board capture requires a caller-owned read transaction')
     observed_at = time.time()
     rows = board_read.materialize(conn, tenant, include_archived, workflow_template_id,
-                                  current_step_key, done_limit)
-    return capture_rows(rows, include_archived=include_archived, observed_at=observed_at)
+                                  current_step_key, done_limit, prev=prev, changed=changed)
+    return capture_rows(rows, include_archived=include_archived, observed_at=observed_at), rows
 
 
 def capture_rows(rows, *, include_archived, observed_at):

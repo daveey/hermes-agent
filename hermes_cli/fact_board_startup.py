@@ -137,6 +137,8 @@ class BoardRuntime:
                     failures.append(exc)
             if failures:
                 raise ExceptionGroup('board shutdown incomplete', failures)
+            from hermes_cli import kanban_db
+            board_native_inputs.retire(kanban_db.kanban_db_path(board=board) for board in getattr(self, 'boards', ()))
             views = self.api.board_fact_views
             if views._installed is not None and views._installed[1] == self.provider:
                 views._installed = self._previous
