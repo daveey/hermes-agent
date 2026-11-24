@@ -110,9 +110,9 @@ def test_private_hold_only_replaces_a_missing_deadline_never_the_next_step():
                'run_evidence_known': True, 'run': {'id': 1, 'status': 'running', 'ended_at': None}}
     plain = project(running, now=1000)
     named = project({**running, 'private_hold': 'parent t_p stop_undecided'}, now=1000)
-    assert 'escalation_deadline_missing' in plain['violations']
-    assert named['violations'] == [v if v != 'escalation_deadline_missing' else 'private_hold'
-                                   for v in plain['violations']]
+    # A live executor needs no administrative deadline, but a named private hold still shows.
+    assert plain['violations'] == [] and plain['escalation']['state'] == 'not_required'
+    assert named['violations'] == ['private_hold'] and named['escalation']['state'] == 'unavailable'
     assert (named['action'], named['blocker'], named['release'], named['owner']) == (
         plain['action'], plain['blocker'], plain['release'], plain['owner'])
     assert named['instruction'].endswith('Private hold: parent t_p stop_undecided')

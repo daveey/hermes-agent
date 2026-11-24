@@ -234,6 +234,13 @@ def project(facts: dict, *, now: int) -> dict:
         row['escalation']['state'] = 'unavailable'
         row['instruction'] = f"{row.get('instruction') or ''} Private hold: {facts['private_hold']}".strip()
         row['evidence_state'] = 'unknown'
+    elif (not deadline and not invalid_creation and not row['blocker']
+          and row['owner']['kind'] == 'assignee' and row['owner'].get('refs')
+          and task['status'] in ('ready', 'running') and row['action'] == 'execute_current_scope'):
+        # A runnable card (queued for admission, or a live executor) is not an administrative
+        # wait: it needs no deadline. UNKNOWN eligibility and every hold above still show, and an
+        # exact confirmed contract deadline still composes onto it (kanban_actionability_confirmed).
+        row['escalation']['state'] = 'not_required'
     elif not deadline:
         row['violations'].append('escalation_deadline_missing')
         row['escalation']['state'] = 'unavailable'

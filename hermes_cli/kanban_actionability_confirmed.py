@@ -97,8 +97,11 @@ def compose(reader, task, facts, row, *, now):
     """
     if (row['status'] not in NONTERMINAL or facts.get('pending_command')):
         return row
-    needs_deadline = (not row['escalation']['at'] and row['escalation']['state'] == 'unavailable'
-                      and bool({'escalation_deadline_missing', 'private_hold'} & set(row['violations'])))
+    # A runnable row needs no administrative deadline, but an exact confirmed one still applies.
+    needs_deadline = not row['escalation']['at'] and (
+        row['escalation']['state'] == 'not_required' or (
+            row['escalation']['state'] == 'unavailable'
+            and bool({'escalation_deadline_missing', 'private_hold'} & set(row['violations']))))
     needs_owner = row['owner']['kind'] == 'unavailable' and 'owner_missing' in row['violations']
     if row['escalation']['state'] == 'not_applicable' or (
             not needs_deadline and not needs_owner and 'escalation_overdue' not in row['violations']):

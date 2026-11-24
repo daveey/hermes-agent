@@ -103,10 +103,16 @@ def test_unconfirmed_damaged_or_stale_contract_does_not_hide_violation(live, cha
     with kbc.write_txn(live):
         for sql, params in changes[change]:
             live.execute(sql, params)
+    # The ordinary ready fixture is runnable, so its missing deadline is no violation
+    # (not_required). Custody is the point: no unconfirmed or stale contract may fill it,
+    # and every card that still waits keeps its missing-deadline violation.
+    waits = change in ('status', 'dependency')
     for row in (describe(live, tid, now=source['created_at']),
                 next(r for r in report(live, now=source['created_at'])['rows'] if r['task_id'] == tid)):
         assert row['escalation']['at'] is None
-        assert 'escalation_deadline_missing' in row['violations']
+        assert wire['contract_uid'] not in row['source_refs']
+        assert ('escalation_deadline_missing' in row['violations']) is waits
+        assert row['escalation']['state'] == ('unavailable' if waits else 'not_required')
         assert row['evidence_state'] == 'unknown'
 
 
