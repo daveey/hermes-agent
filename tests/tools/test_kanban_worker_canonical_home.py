@@ -33,7 +33,7 @@ def pool_labels(monkeypatch, gws):
     ({'skills': ['session-status-panel', 'inspecting-hermes-desktop-dom'],
       'body': 'Inspect the Desktop DOM'}, ['pool:worker', 'capability:tailnet-exec']),
     ({'runs_on': ['pool:worker', 'capability:core-ship']},
-     ['pool:worker', 'capability:core-ship']),
+     ['capability:core-ship', 'pool:worker']),
     ({'placement': 'macbook', 'body': 'Read the existing packaged Desktop on macbook'},
      ['machine:macbook']),
 ])

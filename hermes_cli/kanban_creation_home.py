@@ -46,7 +46,8 @@ def plan(args, *, cfg, gateway, machine_ok):
             or args.get('workspace_path') or args.get('project_id') or args.get('project')):
         return args, {'where': 'refuse', 'pin': 'hub',
                       'why': 'publish host-local source before forwarding to the canonical creation home'}
-    labels = args.get('runs_on')
+    from hermes_cli.kanban_worker_node import normalize_runs_on
+    labels = normalize_runs_on(args.get('runs_on'))
     pin = placement.canonical_pin(args.get('placement') or 'auto', gateway, cfg)
     if labels is None and pin not in ('', 'auto'):
         execution = gateway if pin in ('local', 'here') else pin
