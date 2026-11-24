@@ -93,3 +93,18 @@ def test_invalid_frozen_wire_is_not_a_source(tmp_path,field,value):
     path,op,wire,*_=helpers.fixture_db(tmp_path)
     wire[field]=value
     assert source.discover(path,'default',op,wire) is None
+
+
+def test_direct_message_id_order_cannot_be_replaced_by_timestamps(tmp_path):
+    from hermes_cli import kanban_rejected_retain_source as source
+    _, op, wire, admission, session, messages = helpers.fixture_db(tmp_path)
+    messages[3]['id'] = 25
+    assert source._source(admission, session, messages, 'default', op, wire) == []
+
+
+def test_unrelated_non_json_terminal_notice_does_not_veto_a_source(tmp_path):
+    from hermes_cli import kanban_rejected_retain_source as source
+    _, op, wire, admission, session, messages = helpers.fixture_db(tmp_path)
+    notice = copy.deepcopy(messages[-1])
+    notice.update(id=50, timestamp=50.0, content='ordinary non-JSON terminal notice')
+    assert len(source._source(admission, session, messages + [notice], 'default', op, wire)) == 1

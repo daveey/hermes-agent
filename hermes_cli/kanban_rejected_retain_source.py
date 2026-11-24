@@ -163,7 +163,9 @@ def discover(state_path: Path, board: str, op: dict, wire: dict) -> dict | None:
                 or type(wire['payload']['version']) is not int or wire['payload']['version'] != 1
                 or not _command(op, op, wire)):
             return None
-        conn = sqlite3.connect(Path(state_path).resolve().as_uri() + '?mode=ro', uri=True)
+        # This recheck can run under a board write transaction; never wait on state.db.
+        conn = sqlite3.connect(  # noqa: kanban-lockguard (state.db, read-only)
+            Path(state_path).resolve().as_uri() + '?mode=ro', uri=True, timeout=0)
         conn.row_factory = sqlite3.Row
         conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_BYTES)
         conn.execute('PRAGMA query_only=ON')
