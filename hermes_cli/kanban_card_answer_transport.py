@@ -38,8 +38,9 @@ class Records:
         self._opener = urllib.request.build_opener(_NoRedirect())
 
     def read(self, request_id: str) -> dict:
+        raw = self.raw(request_id)
         try:
-            body = json.loads(self.raw(request_id))
+            body = json.loads(raw)
         except (ValueError, UnicodeError):
             raise AnswerRefused('courier_record_invalid') from None
         record = body.get('request') if isinstance(body, dict) else None

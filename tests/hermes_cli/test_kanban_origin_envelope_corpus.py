@@ -35,7 +35,8 @@ def test_production_owner_plan_matches_base(world, monkeypatch, sample):
     # chat-bound. Freeze unrelated route/auth fixture evidence, not create data.
     request = {**world, 'args': {**world['args'], 'create': create}}
     expected = {'tool': 'kanban_create', 'args': {**create, 'board': 'default'}}
-    def capture(name, args, intent, selfwork_context=None):
+    def capture(name, args, intent, selfwork_context=None, selfwork_exception=None):
+        assert selfwork_exception is None
         assert intent['origin'] == world['args']['origin']
         return {'tool': name, 'args': args}
     monkeypatch.setattr(owner, '_dispatch_owner_tool', capture)
