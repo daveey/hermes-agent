@@ -148,6 +148,52 @@ def test_replica_card_uses_run_outcome_and_human_request():
     assert (kwi.describe_replica(human, now=NOW) or {})["wait_state"] == "human"
 
 
+@pytest.mark.parametrize("inferred", [False, True])
+def test_chat_backed_scheduled_owner_is_a_live_producer(tmp_path, monkeypatch, inferred):
+    import subprocess
+    from hermes_cli import kanban_awaiting as awaiting_gate
+
+    # Historical park2085077: admitted chat waits name their question in why, not ref.
+    awaited = {"kind": "chat", "why": "Owning-chat exact source sequencing disposition",
+               "inferred": inferred}
+    park = {"awaiting": awaited, "wake_check": "python3 /fixture/source-artifact-v24.py"}
+    info = d("scheduled", park=park, since=NOW - 30 * H)
+    assert info["agent_owned"] is False
+    assert info["wait_state"] == "waiting" and info["premise"] is None
+    assert info["waiting_on"] == "owning chat (Owning-chat exact source sequencing disposition)"
+    card = {"status": "scheduled", "awaiting": awaited,
+            "run": {"outcome": "scheduled", "ended_at": NOW - 30 * H}}
+    assert (kwi.describe_replica(card, now=NOW) or {})["agent_owned"] is False
+    db = tmp_path / "kanban.db"
+    _board(db, [{"id": "t_01a194b9de51e620", "status": "scheduled", "session": "s_owner",
+                 "events": [("scheduled", park, int(NOW - 30 * H))]}])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    rc, out = kwc.check_local("task", "t_01a194b9de51e620")
+    assert rc == 1 and "agent-owned park" not in out and "orphan producer" not in out
+    # Real remote-response parser, with only its transport simulated.
+    monkeypatch.setattr(kwc.subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, rc, stdout=out, stderr=""))
+    awaiting_gate.confirm_remote({"kind": "card", "ref": "t_01a194b9de51e620", "gateway": "hub"})
+
+
+@pytest.mark.parametrize("kind,why", [("chat", ""), ("unknown", "question"), ("human", "decision")])
+def test_unbacked_or_hidden_wait_still_has_no_producer(kind, why):
+    assert d("scheduled", awaiting={"kind": kind, "why": why}, since=NOW - 30 * H)["agent_owned"] is True
+
+
+@pytest.mark.parametrize("status,kind,human,expected", [
+    ("blocked", "time", False, "owning chat (question)"),
+    ("blocked", "transient", False, "an agent to clear a transient block"),
+    ("blocked", "dependency", False, "a parent card"),
+    ("blocked", None, False, "an agent to clear an untyped block"),
+    ("blocked", "needs_input", True, "you"),
+    ("triage", None, False, "triage"),
+])
+def test_chat_classification_does_not_override_block_or_human_precedence(status, kind, human, expected):
+    info = d(status, block_kind=kind, human=human, awaiting={"kind": "chat", "why": "question"})
+    assert info["waiting_on"] == expected
+
+
 # ---- session activity: sidebar count + strip rows --------------------------------------------------------------
 def _board(path: Path, cards: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

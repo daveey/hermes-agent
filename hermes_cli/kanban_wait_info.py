@@ -281,6 +281,26 @@ def _human_attention(status: str, human: bool, payload: dict, since: Any) -> Opt
     return result
 
 
+def _chat_producer(awaited: Optional[dict]) -> Optional[str]:
+    """Admitted chat producers identify a subscribed question, not a ref."""
+    if awaited and awaited["kind"] == "chat" and awaited["why"]:
+        return f"owning chat ({awaited['why'][:80]})"
+    return None
+
+
+def _blocked_wait(kind: Optional[str]) -> Optional[tuple]:
+    if kind in AGENT_BLOCK_KINDS:
+        return f"blocked:{kind}", f"an agent to clear a {kind} block", True
+    if kind == "dependency":
+        return "dependency", "a parent card", False
+    if kind is None:
+        return "blocked:untyped", "an agent to clear an untyped block", True, False
+    if kind != "time":
+        # Another human kind without a validated ask is not an agent-owned park.
+        return f"blocked:{kind}", f"an unvalidated ask ({kind})", False
+    return None
+
+
 def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: Any = None,
              park_kind: Any = None, since: Any = None, awaiting: Any = None, reason: Any = None,
              now: Optional[float] = None) -> Optional[dict[str, Any]]:
@@ -328,17 +348,13 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
             return out("triage:block_loop", "a human or shared blocker (block loop)", False)
         return out("triage:intake", "triage", False)
     if status == "blocked":
-        if kind in AGENT_BLOCK_KINDS:
-            return out(f"blocked:{kind}", f"an agent to clear a {kind} block", True)
-        if kind == "dependency":
-            return out("dependency", "a parent card", False)
-        if kind is None:
-            return out("blocked:untyped", "an agent to clear an untyped block", True, certain=False)
-        if kind != "time":
-            # another human kind without a validated ask: the user's move, just not visible. (An ask-less
-            # needs_input is agent-owned, handled above; a validated ask returns early as ``human``.)
-            return out(f"blocked:{kind}", f"an unvalidated ask ({kind})", False)
+        if blocked := _blocked_wait(kind):
+            return out(*blocked)
     # scheduled, or blocked kind=time: a park. Who produces what it waits for?
+    if chat := _chat_producer(awaited):
+        # Admitted chat waits name their question rather than a ref. Preserve the
+        # producer through local/replica classification and remote confirmation.
+        return out("scheduled", chat, False)
     if awaited and awaited["inferred"] and not (awaited["kind"] == "card" and awaited["ref"]):
         # Core's guess from the park text (every park on the "no producer, no park" core records one): an inferred
         # clock/external wait is just the legacy wake mechanism, judged below like a park with no ``awaiting``.
