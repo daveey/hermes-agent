@@ -10080,7 +10080,7 @@ async function ensureBackend(
   profile,
   opts: { inheritsPrimary?: boolean; passive?: boolean; request?: { method?: string; path?: string } } = {}
 ) {
-  const request = primaryBootRequest(profile, primaryProfileKey(), opts.inheritsPrimary)
+  const request = primaryBootRequest(opts.inheritsPrimary ? undefined : profile, primaryProfileKey(), opts.inheritsPrimary)
   const key = request.key
   const passive = Boolean(opts.passive)
 
