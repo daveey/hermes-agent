@@ -19,7 +19,8 @@ def _freeze(value):
     return (type(value), value)
 
 
-def coalesced_read(func, *, thread_runner=run_sync, admission_key=None, max_concurrent=1):
+def coalesced_read(func, *, thread_runner=run_sync, admission_key=None, max_concurrent=1,
+                   overflow_to_runner=False):
     """Return an async, in-flight-only wrapper around a synchronous read.
 
     Identical home + bound arguments share one in-flight result. Arguments must
@@ -33,6 +34,9 @@ def coalesced_read(func, *, thread_runner=run_sync, admission_key=None, max_conc
     per kanban board): one read per group at a time, at most ``max_concurrent``
     groups at once, so a slow read of one resource does not queue reads of
     another while a burst still holds a bounded number of workers. [daveey]
+    ``overflow_to_runner`` limits coalescing bookkeeping, not the downstream
+    runner's admission: excess distinct keys enter that runner immediately,
+    retaining its original queue deadline instead of waiting for a shared slot.
     """
     if max_concurrent < 1:
         raise ValueError("max_concurrent must be >= 1")
@@ -59,6 +63,9 @@ def coalesced_read(func, *, thread_runner=run_sync, admission_key=None, max_conc
         pending, admission, groups = states.setdefault(loop, ({}, asyncio.Semaphore(max_concurrent), {}))
         task = pending.get(key)
         if task is None:
+            if overflow_to_runner and len(pending) >= max_concurrent:
+                # Do not postpone the lane's queue clock behind another semaphore.
+                return await thread_runner(partial(func, *args, **kwargs))
             group_slot = None if group is None else groups.setdefault(group, asyncio.Semaphore(1))
 
             async def execute():

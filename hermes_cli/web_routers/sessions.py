@@ -209,7 +209,7 @@ def _session_kanban_tasks_read(ids: str):
 # Identical in-flight ``ids`` share one kanban-lane read (a Desktop poll burst). Distinct ``ids`` still
 # reach the lane so its size and queue deadline stay the bottleneck, not a second coalescer cap. [daveey]
 _session_kanban_tasks_admitted = coalesced_read(
-    _session_kanban_tasks_read, admission_key=lambda args: args["ids"], max_concurrent=64,
+    _session_kanban_tasks_read, admission_key=lambda args: args["ids"], max_concurrent=64, overflow_to_runner=True,
     thread_runner=lane_runner("kanban"))
 
 
