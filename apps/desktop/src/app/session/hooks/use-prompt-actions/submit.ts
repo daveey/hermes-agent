@@ -61,13 +61,13 @@ import {
 } from './prepared-submissions'
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import { captureSubmissionDestination, destinationAfterCreate, sameAuthorityPublishedOwner } from './submission-destination'
-import { submitAcrossGatewayRestart } from './submit-across-restart'
 import {
   backendRefusesSubmissionId,
   noteSubmissionIdAccepted,
   noteSubmissionIdRefused,
   submissionIdentityEpoch
 } from './submission-identity-support'
+import { submitAcrossGatewayRestart } from './submit-across-restart'
 import {
   acquireSubmitInFlight,
   gatewayReason,
@@ -1277,6 +1277,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                     owner: destination.owner, driftReason: sessionDriftReason,
                     onUncertain: () => { restartReplayUncertain = true }
                   }, () => requestGateway<SubmitReceipt>('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS))
+
                   noteSubmissionIdAccepted(destination.scopeKey)
 
                   return receipt
