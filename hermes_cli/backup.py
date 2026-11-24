@@ -1443,7 +1443,7 @@ def _create_quick_snapshot_locked(
     # smaller keep value so large state.db copies do not accumulate indefinitely.
     # The policy for an incomplete snapshot (#68805) lives in backup_prune.
     prune_after_snapshot(
-        root, _QUICK_DEFAULT_KEEP if keep is None else keep, failed_dbs, oversized_skipped
+        root, _QUICK_DEFAULT_KEEP if keep is None else keep, failed_dbs, oversized_skipped, snap_id
     )
 
     logger.info(

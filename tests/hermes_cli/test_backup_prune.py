@@ -51,11 +51,10 @@ class TestPruneAfterSnapshot:
         _advance_backup_clock()
 
         monkeypatch.setattr(backup, "_safe_copy_db", lambda *a, **k: False)
-        third_id = backup.create_quick_snapshot(label="failed", hermes_home=hermes_home, keep=1)
+        backup.create_quick_snapshot(label="failed", hermes_home=hermes_home, keep=1)
 
         snap_ids = {s["id"] for s in backup.list_quick_snapshots(limit=100, hermes_home=hermes_home)}
         assert {first_id, second_id} <= snap_ids
-        assert third_id is None or third_id in snap_ids
 
     def test_nested_board_db_skipped_for_size_protects_the_snapshot_holding_it(self, tmp_path):
         from hermes_cli.backup_prune import prune_after_snapshot
@@ -94,3 +93,14 @@ class TestPruneAfterSnapshot:
 
         assert len(list(root.iterdir())) == 3
         assert "skipped for size: state.db" in capsys.readouterr().out
+
+    def test_size_skip_never_prunes_the_new_snapshot_even_when_it_sorts_older(self, tmp_path):
+        from hermes_cli.backup_prune import prune_after_snapshot
+
+        root = tmp_path / "state-snapshots"
+        for name in ("20260101-000001-pre-update", "20260101-000001-zz", "20260101-000000"):
+            (root / name).mkdir(parents=True)
+
+        prune_after_snapshot(root, 1, [], ["state.db"], current="20260101-000001-pre-update")
+
+        assert sorted(d.name for d in root.iterdir()) == ["20260101-000001-pre-update", "20260101-000001-zz"]

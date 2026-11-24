@@ -45,7 +45,8 @@ def _prune_quick_snapshots(
 
 
 def prune_after_snapshot(
-    root: Path, keep: int, failed_dbs: Sequence[str], oversized_skipped: Sequence[str]
+    root: Path, keep: int, failed_dbs: Sequence[str], oversized_skipped: Sequence[str],
+    current: Optional[str] = None,
 ) -> None:
     """Prune after a new quick snapshot landed in ``root``.
 
@@ -73,9 +74,10 @@ def prune_after_snapshot(
     if not oversized_skipped:
         _prune_quick_snapshots(root, keep=keep)
         return
-    # max(keep, 1): an incomplete snapshot never prunes itself (keep=0 did nothing here before).
+    # An incomplete snapshot never prunes itself: keep is at least 1 (0 or a negative keep did nothing
+    # here before), and ``current`` (the snapshot just made) is exempt wherever its name sorts.
     _prune_quick_snapshots(
         root,
         keep=max(keep, 1),
-        protect=lambda d: any((d / rel).is_file() for rel in oversized_skipped),
+        protect=lambda d: d.name == current or any((d / rel).is_file() for rel in oversized_skipped),
     )
