@@ -39,6 +39,16 @@ def prepare_destination(conn):
         conn.execute("DELETE FROM kanban_sync_outbox")
 
 
+def complete_feed(conn, record):
+    """Model the newer authenticated source-STOP feed, not a local release flag."""
+    fields = dict(next(r["fields"] for r in record["rows"] if r["table"] == "tasks"))
+    version = fields["version"] + 1
+    fields.update(home_generation=record["nonce"], home_transfer_pending=None, version=version)
+    change = sync.RemoteChange(seq=version, table="tasks", uid=record["task"], op="upsert",
+        fields=fields, version=version, hlc=fields.get("hlc", "1001-0-server"), origin_gateway="server")
+    sync.apply_remote_changes(conn, [change], new_cursor=version, observers=False)
+
+
 def materialize(conn, record):
     from hermes_cli.kanban_home_destination import materialize as apply
     with kbc.write_txn(conn):
@@ -123,7 +133,9 @@ def test_retry_rechecks_real_rows_not_just_saved_ack_and_preserves_later_work(bo
     materialize(board, record)
     assert materialize(board, record) == record["rows"]
     with kbc.write_txn(board):
+        board.execute("UPDATE kanban_sync_state SET applying=1")  # deliberate projection corruption, not admitted intent
         board.execute("UPDATE tasks SET title='corrupt local projection' WHERE id=?", (record["task"],))
+        board.execute("UPDATE kanban_sync_state SET applying=0")
         board.execute("DELETE FROM kanban_sync_outbox")
     with pytest.raises(ValueError, match="materialization"):
         materialize(board, record)

@@ -426,7 +426,10 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
     if not missing:
         return out
     foreign = foreign_ids(conn, own)
-    for tid in missing:
+    from itertools import filterfalse
+    from hermes_cli.kanban_home_transfer import frozen
+    # Never register, cache or diagnose a frozen handoff candidate.
+    for tid in filterfalse(lambda task: frozen(conn, task), missing):
         park = conn.execute(
             f"SELECT id, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
             "ORDER BY id DESC LIMIT 1", (tid, *kc.SCHEDULED_ENTRY_EVENTS)).fetchone()

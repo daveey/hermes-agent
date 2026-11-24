@@ -50,8 +50,12 @@ def test_source_stop_installs_epoch_and_changes_home_without_erasing_probe_histo
     assert [tuple(r) for r in board.execute("SELECT * FROM task_wake_checks WHERE task_id=?", (tid,))] == probes
     assert board.execute("SELECT count(*) FROM kanban_sync_outbox").fetchone()[0] == 0
     assert board.execute("SELECT nonce FROM kanban_home_generations1 WHERE task_id=?", (tid,)).fetchone()[0] == reply["nonce"]
-    # Retained foreign probe custody can write a wake later; capture has the new
-    # epoch, not permission to execute without the usual Board lease/hold gates.
+    # The local STOP precedes Board STOP: fresh intent is still refused until
+    # the independently newer authenticated completion feed arrives.
+    with pytest.raises(sqlite3.IntegrityError, match="home transfer pending"):
+        kb.add_comment(board, tid, "actor", "too early")
+    from tests.hermes_cli.test_home_destination_materialize import complete_feed
+    complete_feed(board, reply)
     kb.add_comment(board, tid, "actor", "fresh post-stop evidence")
     captures = board.execute("SELECT home_generations FROM kanban_sync_outbox WHERE table_name='task_comments'").fetchall()
     assert captures and all(json.loads(r[0]) == {tid:reply["nonce"]} for r in captures)
@@ -61,6 +65,9 @@ def test_retry_survives_reopen_and_never_rewinds_later_native_state(board):
     tid, reply = prepared(board)
     with kbc.write_txn(board):
         transfer.finalize_source(board, reply)
+    from tests.hermes_cli.test_home_destination_materialize import complete_feed
+    complete_feed(board, reply)
+    with kbc.write_txn(board):
         board.execute("UPDATE tasks SET title='later real work',sync_version=9 WHERE id=?", (tid,))
     path = board.execute("PRAGMA database_list").fetchone()[2]
     with sqlite3.connect(path) as other:

@@ -13,8 +13,9 @@ board = support.board
 
 
 def feed(conn, task, version=8, nonce="committed-nonce-0001", **extra):
-    fields = dict(id=task, title="canonical", status="scheduled", created_at=1,
+    fields: dict = dict(id=task, title="canonical", status="scheduled", created_at=1,
                   created_on="hub", home_generation=nonce, **extra)
+    fields.setdefault("home_transfer_pending", None)  # this helper models a completed transfer
     change = sync.RemoteChange(seq=version, table="tasks", uid=task, op="upsert", fields=fields,
                                version=version, hlc="1-0-server", origin_gateway="server")
     sync.apply_remote_changes(conn, [change], new_cursor=version, observers=False)
@@ -79,7 +80,7 @@ def test_own_echo_mirrors_epoch_without_reapplying_business_row(board):
     task = kb.create_task(board, title="local value must survive echo")
     op = board.execute("SELECT op_id FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=?", (task,)).fetchone()[0]
     change = sync.RemoteChange(seq=8, table="tasks", uid=task, op="upsert",
-        fields=dict(id=task, title="different echoed title", home_generation="committed-nonce-0001"),
+        fields=dict(id=task, title="different echoed title", home_generation="committed-nonce-0001", home_transfer_pending=None),
         version=8, hlc="1-0-server", origin_gateway="worker-a3", client_op_id=op)
     result = sync.apply_remote_changes(board, [change], new_cursor=8, observers=False)
     assert result.skipped_echo == 1

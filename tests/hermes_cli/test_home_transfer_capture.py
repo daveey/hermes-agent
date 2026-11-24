@@ -22,7 +22,7 @@ def generation(conn, task, nonce):
         # Disposable source mirror of a future authenticated committed handoff.
         # No production migration or activation API exists in this slice.
         conn.execute("CREATE TABLE IF NOT EXISTS kanban_home_generations1(task_id TEXT PRIMARY KEY, nonce TEXT NOT NULL)")
-        conn.execute("INSERT OR REPLACE INTO kanban_home_generations1(task_id,nonce) VALUES (?,?)", (task, nonce))
+        conn.execute("INSERT OR REPLACE INTO kanban_home_generations1(task_id,nonce,pending) VALUES (?,?,0)", (task, nonce))
 
 
 def captured(conn, table, uid=None):

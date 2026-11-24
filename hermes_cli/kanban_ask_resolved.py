@@ -401,6 +401,9 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
             "AND w.task_id IS NULL AND t.human_request LIKE '%\"resolved_check\"%'").fetchall()
     except sqlite3.OperationalError:
         return out
+    from hermes_cli.kanban_home_transfer import frozen
+    rows = [r for r in rows if not frozen(conn, r[0])]
+    missing = [r for r in missing if not frozen(conn, r[0])]
     stale = [r[0] for r in rows if resolved_check(r[2])[0] != r[1]]
     if stale:
         with kb.write_txn(conn):

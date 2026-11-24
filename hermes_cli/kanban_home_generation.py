@@ -20,6 +20,7 @@ def install(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS kanban_home_generations1 "
                  "(task_id TEXT PRIMARY KEY, nonce TEXT NOT NULL)")
     add_column_if_missing(conn, "kanban_home_generations1", "version", "version INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(conn, "kanban_home_generations1", "pending", "pending INTEGER NOT NULL DEFAULT 1")
     add_column_if_missing(conn, "kanban_sync_outbox", "home_generations", "home_generations TEXT")
     # Keep this independent from removable sync capture triggers. Do not retrofit
     # a generation onto an extant pending op even if its source row now has one.
@@ -42,12 +43,27 @@ def mirror_feed(conn: sqlite3.Connection, task: str, fields: Mapping, version: i
     if (not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", nonce)
             or type(version) is not int or version < 1):
         raise ValueError("invalid feed home generation")
-    old = conn.execute("SELECT nonce,version FROM kanban_home_generations1 WHERE task_id=?", (task,)).fetchone()
-    if old and (version < old[1] or (version == old[1] and nonce != old[0])):
+    old = conn.execute("SELECT nonce,version,pending FROM kanban_home_generations1 WHERE task_id=?", (task,)).fetchone()
+    # Absence is unknown/pending, never an implicit source-STOP certificate.
+    flag = fields.get("home_transfer_pending", nonce)
+    if flag is not None and flag != nonce:
+        raise ValueError("invalid feed home generation pending scope")
+    pending = int(flag is not None)
+    if old and (version < old[1] or (version == old[1] and (nonce != old[0] or pending != old[2]))):
         raise ValueError("feed home generation regressed")
-    conn.execute("INSERT INTO kanban_home_generations1(task_id,nonce,version) VALUES (?,?,?) "
-                 "ON CONFLICT(task_id) DO UPDATE SET nonce=excluded.nonce,version=excluded.version",
-                 (task, nonce, version))
+    conn.execute("INSERT INTO kanban_home_generations1(task_id,nonce,version,pending) VALUES (?,?,?,?) "
+                 "ON CONFLICT(task_id) DO UPDATE SET nonce=excluded.nonce,version=excluded.version,pending=excluded.pending",
+                 (task, nonce, version, pending))
+
+
+def pending(conn: sqlite3.Connection, task: str) -> bool:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_home_generations1'").fetchone():
+        return False
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(kanban_home_generations1)")}
+    if "pending" not in columns:
+        return bool(conn.execute("SELECT 1 FROM kanban_home_generations1 WHERE task_id=?", (task,)).fetchone())
+    row = conn.execute("SELECT pending FROM kanban_home_generations1 WHERE task_id=?", (task,)).fetchone()
+    return bool(row and row[0] != 0)
 
 
 def mirror_change(conn: sqlite3.Connection, change) -> None:
@@ -70,7 +86,9 @@ def capture_sql(table: str, ref: str) -> str:
         ids = f"{ref}.parent_id,{ref}.child_id"
     else:
         ids = f"{ref}.task_id"
-    return ("(SELECT NULLIF(json_group_object(task_id,nonce),'{}') "
+    return ("(SELECT CASE WHEN EXISTS(SELECT 1 FROM kanban_home_generations1 "
+            f"WHERE task_id IN ({ids}) AND pending != 0) "
+            "THEN RAISE(ABORT,'home transfer pending') ELSE NULLIF(json_group_object(task_id,nonce),'{}') END "
             f"FROM kanban_home_generations1 WHERE task_id IN ({ids}))")
 
 

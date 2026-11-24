@@ -169,7 +169,10 @@ def frozen(conn: sqlite3.Connection, task_id: str) -> bool:
     again under its ordinary future lease. SQL mutation fences remain separate.
     """
     import json
+    from hermes_cli.kanban_home_generation import pending
 
+    if pending(conn, task_id):
+        return True
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (_TABLE,)).fetchone():
         return False
     row = conn.execute(f"SELECT task_id,source,destination,nonce,expected_version FROM {_TABLE} WHERE task_id=?", (task_id,)).fetchone()

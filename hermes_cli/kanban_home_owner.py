@@ -65,7 +65,10 @@ def destination_step(conn, hub: Hub, board: str, identity: dict) -> dict:
     """
     identity = _identity(conn, hub, board, identity, "destination")
     record = _advance(hub, board, identity, "read")
-    if record["phase"] == "prepared":
+    if record["phase"] in ("prepared", "complete"):
+        # A complete response is historical custody, not a request to re-import
+        # an old manifest over later legitimate execution. Native eligibility
+        # releases only when the newer authenticated STOP feed arrives.
         return record
     with dbc.write_txn(conn):
         rows = destination.materialize(conn, record)

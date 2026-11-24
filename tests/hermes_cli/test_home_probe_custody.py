@@ -47,6 +47,7 @@ def test_explicit_hub_probe_still_registers_on_the_new_home(board):
     support.prepare_destination(board)
     record = probe_manifest(host="hub")
     support.materialize(board, record)
+    support.complete_feed(board, record)
     assert wake.restore_missing_checks(board, now=1001)["restored"] == [record["task"]]
     state = wake.get_state(board, record["task"])
     assert state is not None and state["cmd"] == "test -f ~/.hermes/source-only-ready"
@@ -91,6 +92,7 @@ def test_source_copy_survives_a_lost_execution_row_and_restores_there(board, ask
         transfer.prepare(board, tid, source=reply["source"], destination="hub", nonce=reply["nonce"], expected_version=7)
         transfer.finalize_source(board, reply)
         board.execute("DELETE FROM task_wake_checks WHERE task_id=?", (tid,))
+    support.complete_feed(board, reply)
     assert tid not in node.evict(board)
     assert kb.get_task(board, tid) is not None
     result = resolved.reconcile(board, now=1001) if ask else wake.restore_missing_checks(board, now=1001)
@@ -118,6 +120,7 @@ def test_receipt_fallback_only_applies_to_the_exact_historical_event(board):
     support.prepare_destination(board)
     record = probe_manifest()
     support.materialize(board, record)
+    support.complete_feed(board, record)
     tid = record["task"]
     with kbc.write_txn(board):
         board.execute("UPDATE task_events SET origin_gateway=NULL WHERE task_id=?", (tid,))
