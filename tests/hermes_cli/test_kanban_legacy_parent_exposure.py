@@ -33,6 +33,7 @@ def board(tmp_path, monkeypatch):
 def pending_parent(conn, *, missing_origin=False):
     tid = kb.create_task(conn, title='parent', assignee='worker')
     with kbc.write_txn(conn):
+        kb._append_event(conn, tid, 'fixture_support', {})
         conn.execute("UPDATE kanban_sync_outbox SET state='rejected' WHERE table_name='tasks' AND row_uid=?", (tid,))
         if missing_origin:
             conn.execute('DELETE FROM kanban_sync_status_origins WHERE task_id=?', (tid,))

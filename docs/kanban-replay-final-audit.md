@@ -4,6 +4,45 @@ Audit source: `c4d622710f234c158dac068280b2e3f23df00e66`, with the additional
 condition controls in this commit. This is an implementation evidence inventory,
 not an independent exact-head review, activation grant, or D completion.
 
+## Legacy HTTP correction after independent review6035459985
+
+The active legacy HTTP path previously refused intentionally unsaved synthetic
+parents when status-origin capability or captured origin was absent. The three
+reviewer loopback cases reproduced two failures and one successful captured-parent
+control. Legacy batching now explicitly declares supporting parents to the HTTP
+exposure writer. For an unsaved, non-frozen declared parent, its related pending
+children retain the full supporting wire exposure before POST (both endpoints of
+links are included). This is exposure custody only: no parent envelope, origin,
+capture tuple or certified identity is synthesized. Legacy retry still rebuilds a
+fresh parent from current state; unknown child histories remain unknown.
+
+Persisted sources still own their normal exposure. Missing/undeclared/frozen
+sources and missing supporting children refuse; replay sends cannot use legacy
+parent declarations. The refusal is an OSError-derived board-local custody error,
+so actual sync rounds continue to a later healthy board. Tests include accepted
+legacy replies, committed-before-HTTP observations, lost replies/reopen/rebuild
+and preserved exposure prefixes, link parents and six refusal controls. The
+13-case expanded file passes after correction. Six final source controls fail at
+intended tests: support omitted and non-isolating error type fail by actual
+exceptions; undeclared, frozen, unrelated-child and replay relaxations fail
+assertions. Source restored. An initial blanket unrelated-child mutant was
+masked by treating the parent itself as a missing child; the final control
+excludes self and specifically relaxes only child membership. It is not counted
+as a kill of the original blanket mutation. Initial fixture setup mistakes and a
+health-ladder refusal are not product RED or green check receipts.
+
+Exposure readers must not assume every entry's wire ID equals its containing
+source ID: unknown child histories can carry supporting parent wires. All related
+pending children retain the support exposure, so partial child settlement does
+not remove the remaining children's evidence. This remains pending-only storage,
+not an immortal operation ledger or complete migration evidence. No activation,
+deployment, runtime hook, SQLite authorizer or reentrancy work.
+
+Current-main bootstrap-WAL test correction is integrated, preserving its comment
+and checkpoint before warming; the overlapping branch comment is not restored.
+The integrated head still requires full tests, green required CI and a fresh
+independent exact-head review before canonical dormant landing.
+
 ## Verified additions
 
 The CI creator-empty recovery consumer now preserves every original schema object
