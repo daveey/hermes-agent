@@ -286,7 +286,11 @@ describe('useComposerSubmit external request routing', () => {
         expect(requestComposerSubmit('continue', { target: 'main' })).toBe(true)
       })
 
-      expect(onSubmit).toHaveBeenCalledExactlyOnceWith('continue', expect.objectContaining({ attachments: [] }))
+      // `unsent: 'elsewhere'`: a refused request goes to the queue, so the notice must not say "back in the composer".
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+        'continue',
+        expect.objectContaining({ attachments: [], unsent: 'elsewhere' })
+      )
       expect(clearDraft).not.toHaveBeenCalled()
       expect(loadIntoComposer).not.toHaveBeenCalled()
       expect(stashAt).not.toHaveBeenCalled()
@@ -344,7 +348,8 @@ describe('useComposerSubmit external request routing', () => {
       expect(visibleMain.onSubmit).toHaveBeenCalledWith('ship this branch', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'session-a'
+        composerScope: 'session-a',
+        unsent: 'elsewhere'
       })
     )
     expect(visibleMain.onSubmit).toHaveBeenCalledTimes(1)
@@ -363,7 +368,8 @@ describe('useComposerSubmit external request routing', () => {
       expect(tile.onSubmit).toHaveBeenCalledWith('ship project B', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'tile-session'
+        composerScope: 'tile-session',
+        unsent: 'elsewhere'
       })
     )
     expect(main.onSubmit).not.toHaveBeenCalled()
@@ -379,7 +385,8 @@ describe('useComposerSubmit external request routing', () => {
       expect(second.onSubmit).toHaveBeenCalledWith('ship exactly one session', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'session-second'
+        composerScope: 'session-second',
+        unsent: 'elsewhere'
       })
     )
     expect(first.onSubmit).not.toHaveBeenCalled()
@@ -399,7 +406,8 @@ describe('useComposerSubmit external request routing', () => {
       expect(visibleB.onSubmit).toHaveBeenCalledWith('ship session B', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'session-b'
+        composerScope: 'session-b',
+        unsent: 'elsewhere'
       })
     )
     expect(hiddenA.onSubmit).not.toHaveBeenCalled()

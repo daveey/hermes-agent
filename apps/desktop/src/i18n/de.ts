@@ -5496,7 +5496,11 @@ export const deOverrides = {
     sessionUnavailable: 'Session nicht verfügbar',
     createSessionFailed: 'Neue Session konnte nicht erstellt werden',
     promptFailed: 'Prompt fehlgeschlagen',
-    promptNotSent: 'Nachricht nicht gesendet. Sie steht wieder im Eingabefeld.',
+    promptNotSent: 'Nachricht nicht gesendet.',
+    promptNotQueued: 'Nachricht nicht eingereiht.',
+    promptSendUnconfirmed: 'Es ließ sich nicht bestätigen, ob die Nachricht gesendet wurde.',
+    promptBackInComposer: 'Sie steht wieder im Eingabefeld.',
+    promptStillInComposer: 'Sie steht noch im Eingabefeld.',
     providerCredentialRequired:
       'Fügen Sie Anmeldedaten für einen Anbieter hinzu, bevor Sie Ihre erste Nachricht senden.',
     emptySlashCommand: 'leerer Slash-Befehl',

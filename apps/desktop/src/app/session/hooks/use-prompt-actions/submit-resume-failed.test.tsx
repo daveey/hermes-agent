@@ -23,16 +23,20 @@ import {
 import { useSessionActions } from '../use-session-actions'
 import { resumeFailedToastId } from '../use-session-actions/resume-latches'
 
-import { actRender, Harness, type HarnessHandle } from './index-test-utils'
+import { actRender, Harness, type HarnessHandle, RUNTIME_SESSION_ID } from './index-test-utils'
 import { clearStoredJournal } from './prepared-submissions-test-utils'
 import { resetRejectedOptimisticSendsForTests } from './rejected-optimistic-sends'
 import { clearSingleFlightSessionResumeState } from './single-flight-resume'
 import { resetSubmissionIdSupportForTests } from './submission-identity-support'
+import type { SubmitTextOptions } from './utils'
 
 // Incident 2026-11-23 ~23:00 PST: the hub was starved, every `session.resume` timed out after
 // 30s, and a send into a chat with no live runtime ended without a word: the text went back to
 // the composer draft, and the chat's own resume retry painted the typed message back as a bubble
 // from its start-of-resume snapshot. Two messages looked delivered that were never sent.
+// In the app the routed resume is `resumeSession`, which swallows its own failure (it repaints,
+// toasts "Resume failed" and resolves), so the send then waited out a second 30s timeout on its
+// own `session.resume` before it gave up.
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -75,8 +79,25 @@ const STORED_MESSAGES = [
 ]
 
 type Gateway = <T>(method: string, params?: Record<string, unknown>) => Promise<T>
-type ResumeSession = (storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>
 
+type ResumeSession = (
+  storedSessionId: string,
+  replaceRoute?: boolean,
+  ownerRoute?: undefined,
+  options?: { authoritativeSnapshot?: boolean }
+) => Promise<unknown>
+
+const RESUMED = {
+  info: {},
+  message_count: STORED_MESSAGES.length,
+  messages: STORED_MESSAGES,
+  resumed: STORED_SESSION_ID,
+  session_id: 'runtime-1',
+  session_key: STORED_SESSION_ID
+}
+
+const copy = en.desktop
+const NOT_SENT_BACK_IN_COMPOSER = `${copy.promptNotSent} ${copy.promptBackInComposer}`
 const resumeTimeout = () => new Error('request timed out after 30s: session.resume')
 
 function deferred<T>() {
@@ -91,8 +112,7 @@ function deferred<T>() {
   return { promise, reject, resolve }
 }
 
-/** The chat's own resume (use-route-resume's retry): the real `resumeSession`, whose failed-resume
- *  repaint carries the local pending turn it saw when it started. */
+/** One window surface running the real `resumeSession` for the chat. */
 function ChatResume({ onReady, requestGateway }: { onReady: (resume: ResumeSession) => void; requestGateway: Gateway }) {
   const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
   const stateMapRef = ref(new Map<string, ClientSessionState>())
@@ -124,10 +144,18 @@ function ChatResume({ onReady, requestGateway }: { onReady: (resume: ResumeSessi
   })
 
   useEffect(() => {
-    onReady(actions.resumeSession)
+    onReady(actions.resumeSession as ResumeSession)
   }, [actions.resumeSession, onReady])
 
   return null
+}
+
+async function mountChatResume(requestGateway: Gateway): Promise<ResumeSession> {
+  let resume: null | ResumeSession = null
+  render(<ChatResume onReady={r => (resume = r)} requestGateway={requestGateway} />)
+  await waitFor(() => expect(resume).not.toBeNull())
+
+  return resume!
 }
 
 const messageIds = () => $messages.get().map(message => message.id)
@@ -136,21 +164,32 @@ const resumeCalls = (gateway: { mock: { calls: unknown[][] } }) =>
   gateway.mock.calls.filter(([method]) => method === 'session.resume').length
 
 const errorNotices = () => $notifications.get().filter(notice => notice.kind === 'error')
+/** Error notices other than `resumeSession`'s own "Resume failed" toast for the chat. */
+const noticesFromSend = () => errorNotices().filter(notice => notice.id !== resumeFailedToastId(STORED_SESSION_ID))
 
 /** A foreground send into a chat whose runtime binding is gone, parked on the resume that must
- *  rebind it. `routed` parks on the high-level route resume (`resumeStoredSession`); `direct` lets
- *  that one return without a runtime and parks on submit's own `session.resume` RPC. */
+ *  rebind it.
+ *  `routed`: the route resume is the real `resumeSession` (as wired in the app); its
+ *  `session.resume` RPC is the one that times out.
+ *  `direct`: the route resume returned without publishing a runtime and without a failure, so
+ *  submit's own `session.resume` RPC is the one that times out. */
 async function sendIntoUnboundChat(path: 'direct' | 'routed') {
-  const routedResume = deferred<void>()
-  const directResume = deferred<{ session_id: string }>()
+  const resumeRpc = deferred<never>()
   const submits: Record<string, unknown>[] = []
   const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
-  // The first send parks on the deferred resumes; the retry meets a hub that answers again.
+  // The first send parks on the deferred RPC; the retry meets a hub that answers again.
   let hubAnswers = false
+
+  // The route resume's own gateway (routed path only).
+  const routeGateway = vi.fn((method: string) =>
+    method === 'session.resume' && !hubAnswers ? resumeRpc.promise : Promise.resolve(RESUMED as never)
+  )
+
+  const routeResume = path === 'routed' ? await mountChatResume(routeGateway as unknown as Gateway) : null
 
   const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
     if (method === 'session.resume') {
-      return (hubAnswers ? { session_id: 'rt-rebound' } : directResume.promise) as never
+      return (hubAnswers ? { session_id: 'rt-rebound' } : resumeRpc.promise) as never
     }
 
     if (method === 'prompt.submit') {
@@ -159,8 +198,6 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed') {
 
     return {} as never
   })
-
-  const resumeStoredSession = vi.fn(async () => (hubAnswers ? undefined : routedResume.promise))
 
   let prompt: HarnessHandle | null = null
   await actRender(
@@ -172,7 +209,7 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed') {
       onReady={handle => (prompt = handle)}
       refreshSessions={async () => undefined}
       requestGateway={requestGateway}
-      resumeStoredSession={resumeStoredSession}
+      resumeStoredSession={async id => void (await routeResume?.(id, true))}
       selectedStoredSessionIdRef={selectedStoredSessionIdRef}
       storedSessionId={STORED_SESSION_ID}
     />
@@ -183,60 +220,95 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed') {
     // The composer names every send; `false` is its signal to restore the draft under this id.
     sent = prompt!.submitTextRaw(TEXT, { submission_id: SUBMISSION_ID })
   })
-  await waitFor(() => expect(resumeStoredSession).toHaveBeenCalledWith(STORED_SESSION_ID))
+  await waitFor(() => expect(resumeCalls(path === 'routed' ? routeGateway : requestGateway)).toBe(1))
   expect(messageIds()).toContain(BUBBLE_ID)
 
-  if (path === 'direct') {
-    await act(async () => routedResume.resolve())
-    await waitFor(() => expect(resumeCalls(requestGateway)).toBe(1))
+  return {
+    failResume: () =>
+      act(async () => {
+        resumeRpc.reject(resumeTimeout())
+
+        return sent
+      }),
+    requestGateway,
+    retry: () => {
+      hubAnswers = true
+
+      return prompt!.submitText(TEXT, { submission_id: SUBMISSION_ID })
+    },
+    selectedStoredSessionIdRef,
+    submits
   }
-
-  const failResume = () =>
-    act(async () => {
-      ;(path === 'routed' ? routedResume : directResume).reject(resumeTimeout())
-
-      return sent
-    })
-
-  const retry = () => {
-    hubAnswers = true
-
-    return prompt!.submitText(TEXT, { submission_id: SUBMISSION_ID })
-  }
-
-  return { failResume, requestGateway, retry, selectedStoredSessionIdRef, submits }
 }
 
-/** Starts the chat's own resume while the bubble is on screen; its RPC never answers. */
-async function startChatResume() {
-  const chatResumeRpc = deferred<never>()
+/** Another surface's resume of the same chat (use-route-resume's retry), started while the typed
+ *  message is on screen, so its start-of-resume snapshot holds the bubble. `session.resume` is
+ *  single-flight per chat: `joins` shares the RPC already in flight and fails with it; otherwise
+ *  it asks for an authoritative snapshot, which queues its own RPC behind that one. */
+async function startConcurrentChatResume(joins: boolean) {
+  const ownRpc = deferred<typeof RESUMED>()
 
   const requestGateway = vi.fn((method: string) =>
-    method === 'session.resume' ? chatResumeRpc.promise : Promise.resolve({} as never)
-  ) as unknown as Gateway & ReturnType<typeof vi.fn>
+    method === 'session.resume' ? ownRpc.promise : Promise.resolve({} as never)
+  )
 
-  let resume: null | ResumeSession = null
-  render(<ChatResume onReady={r => (resume = r)} requestGateway={requestGateway} />)
-  await waitFor(() => expect(resume).not.toBeNull())
+  const resume = await mountChatResume(requestGateway as unknown as Gateway)
 
   let settled!: Promise<unknown>
   await act(async () => {
-    settled = resume!(STORED_SESSION_ID, true)
+    settled = resume(STORED_SESSION_ID, true, undefined, joins ? undefined : { authoritativeSnapshot: true })
   })
 
-  return {
-    /** The chat's resume fails too and repaints from the REST transcript. `session.resume` is
-     *  single-flight per chat: on the routed path this resume sent its own RPC, which times out
-     *  here; on the direct path it joined submit's RPC and failed with it. */
-    failAndRepaint: () =>
-      act(async () => {
-        if (resumeCalls(requestGateway) > 0) {
-          chatResumeRpc.reject(resumeTimeout())
-        }
+  const settle = (answer: () => void) => async () => {
+    if (!joins) {
+      await waitFor(() => expect(resumeCalls(requestGateway)).toBe(1))
+    }
 
-        await settled
-      })
+    await act(async () => {
+      // A joined resume never sent an RPC of its own: it already failed with the shared one.
+      if (!joins) {
+        answer()
+      }
+
+      await settled
+    })
   }
+
+  return {
+    /** It times out too and repaints from the REST transcript. */
+    failAndRepaint: settle(() => ownRpc.reject(resumeTimeout())),
+    /** The hub answers it and it repaints from the resumed runtime. */
+    succeedAndRepaint: settle(() => ownRpc.resolve(RESUMED))
+  }
+}
+
+/** One send whose `session.resume` is refused at once, with the caller's options. */
+async function sendWithResumeDown(options: SubmitTextOptions) {
+  const requestGateway = vi.fn(async (method: string) => {
+    if (method === 'session.resume') {
+      throw resumeTimeout()
+    }
+
+    return {} as never
+  })
+
+  let prompt: HarnessHandle | null = null
+  await actRender(
+    <Harness
+      activeSessionId={null}
+      activeSessionIdRef={{ current: null }}
+      onReady={handle => (prompt = handle)}
+      refreshSessions={async () => undefined}
+      requestGateway={requestGateway}
+      storedSessionId={STORED_SESSION_ID}
+    />
+  )
+
+  const accepted = await prompt!.submitText(TEXT, options)
+
+  expect(resumeCalls(requestGateway)).toBe(1)
+
+  return accepted
 }
 
 beforeEach(() => {
@@ -277,21 +349,20 @@ describe('a send whose session.resume times out', () => {
     '%s resume: says the message was not sent, and a failed-resume repaint does not show it as a bubble',
     async path => {
       const send = await sendIntoUnboundChat(path)
-      // Snapshots the transcript while the typed message is still an optimistic bubble.
-      const chat = await startChatResume()
+      const chat = await startConcurrentChatResume(path === 'direct')
       clearNotifications()
 
       // `false` is what makes the composer put the words back into the draft under SUBMISSION_ID.
       expect(await send.failResume()).toBe(false)
 
-      // Exactly one notice from the send. (On the direct path the chat's resume shared the
-      // failed RPC, so its own "Resume failed" toast may already be up beside it.)
-      const fromSend = errorNotices().filter(notice => notice.id !== resumeFailedToastId(STORED_SESSION_ID))
-      expect(fromSend).toHaveLength(1)
-      expect(fromSend[0]).toMatchObject({ title: en.desktop.promptNotSent })
-      expect(fromSend[0]?.message).toContain('timed out')
+      // Exactly one notice from the send, beside resumeSession's own "Resume failed" toast.
+      expect(noticesFromSend()).toHaveLength(1)
+      expect(noticesFromSend()[0]).toMatchObject({ title: NOT_SENT_BACK_IN_COMPOSER })
+      expect(noticesFromSend()[0]?.message).toContain('timed out')
       expect(send.submits).toEqual([])
       expect(messageIds()).not.toContain(BUBBLE_ID)
+      // One timeout, not two: a failed route resume is not followed by submit's own resume.
+      expect(resumeCalls(send.requestGateway)).toBe(path === 'routed' ? 0 : 1)
 
       await chat.failAndRepaint()
 
@@ -306,18 +377,92 @@ describe('a send whose session.resume times out', () => {
     }
   )
 
+  it('a resume that succeeds after the send was rejected does not show it as a bubble either', async () => {
+    const send = await sendIntoUnboundChat('routed')
+    const chat = await startConcurrentChatResume(false)
+
+    expect(await send.failResume()).toBe(false)
+    expect(messageIds()).not.toContain(BUBBLE_ID)
+
+    await chat.succeedAndRepaint()
+
+    expect(JSON.stringify($messages.get())).toContain('earlier answer')
+    expect(messageIds()).not.toContain(BUBBLE_ID)
+    expect(JSON.stringify($messages.get())).not.toContain(TEXT)
+  })
+
   it.each(['routed', 'direct'] as const)(
     '%s resume: a session switch during the resume still aborts without a notification',
     async path => {
       const send = await sendIntoUnboundChat(path)
+      clearNotifications()
 
       // The user opened another chat while the resume was pending.
       send.selectedStoredSessionIdRef.current = 'stored-other'
 
       expect(await send.failResume()).toBe(false)
 
-      expect($notifications.get()).toEqual([])
+      expect(noticesFromSend()).toEqual([])
       expect(send.submits).toEqual([])
     }
   )
+})
+
+describe('the notice says where the words are', () => {
+  const queued = { fromQueue: true, sessionId: null, storedSessionId: STORED_SESSION_ID } as const
+
+  it.each<[string, SubmitTextOptions, string[]]>([
+    ['a composer send is back in the draft', {}, [NOT_SENT_BACK_IN_COMPOSER]],
+    // use-composer-submit: a rejected external request goes to the queue, not into the draft.
+    ['an external request names no place', { unsent: 'elsewhere' }, [copy.promptNotSent]],
+    // use-composer-queue queueCurrentDraft: the draft was never cleared.
+    [
+      'a busy Enter the server queue did not take is still in the composer',
+      { ...queued, unsent: 'kept' },
+      [`${copy.promptNotQueued} ${copy.promptStillInComposer}`]
+    ],
+    ['a drain of a queued entry stays quiet: the entry stays in its queue', queued, []],
+    ['a hidden send is machine text', { displayKind: 'hidden' }, [copy.promptFailed]]
+  ])('%s', async (_label, options, titles) => {
+    expect(await sendWithResumeDown({ submission_id: SUBMISSION_ID, ...options })).toBe(false)
+
+    expect(errorNotices().map(notice => notice.title)).toEqual(titles)
+  })
+
+  it('a retry of a send whose earlier outcome is unknown does not claim it was not sent', async () => {
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+
+    const runtimeIdByStoredSessionIdRef = { current: new Map([[STORED_SESSION_ID, RUNTIME_SESSION_ID]]) }
+
+    const requestGateway = vi.fn(async (method: string) => {
+      // The first attempt reaches the backend and its answer never comes back; then the runtime
+      // binding is lost and the hub stops answering resumes.
+      throw method === 'prompt.submit' ? new Error('request timed out after 1800s: prompt.submit') : resumeTimeout()
+    })
+
+    let prompt: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionIdRef={activeSessionIdRef}
+        onReady={handle => (prompt = handle)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(await prompt!.submitText(TEXT, { submission_id: SUBMISSION_ID })).toBe(false)
+    activeSessionIdRef.current = null
+    runtimeIdByStoredSessionIdRef.current.clear()
+    clearNotifications()
+    const resumesBefore = resumeCalls(requestGateway)
+
+    expect(await prompt!.submitText(TEXT, { submission_id: SUBMISSION_ID })).toBe(false)
+
+    expect(resumeCalls(requestGateway)).toBe(resumesBefore + 1)
+    expect(errorNotices().map(notice => notice.title)).toEqual([
+      `${copy.promptSendUnconfirmed} ${copy.promptBackInComposer}`
+    ])
+  })
 })

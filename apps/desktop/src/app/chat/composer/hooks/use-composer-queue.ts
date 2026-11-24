@@ -444,6 +444,7 @@ export function useComposerQueue({
           fromQueue: true,
           sessionId: sessionId ?? null,
           storedSessionId: activeQueueSessionKey,
+          unsent: 'kept',
           ...(submissionId ? { submission_id: submissionId } : {})
         })
       )

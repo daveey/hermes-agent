@@ -36,33 +36,59 @@ function markOptimisticSendRejected(optimisticId: string): void {
   }
 }
 
+interface UnsentCopy {
+  promptBackInComposer: string
+  promptFailed: string
+  promptNotQueued: string
+  promptNotSent: string
+  promptSendUnconfirmed: string
+  promptStillInComposer: string
+}
+
+interface UnsentSend {
+  copy: UnsentCopy
+  /** `sessionDriftReason()`: the user moved to another chat. */
+  drift: null | string
+  optimisticId: string
+  options: undefined | { displayKind?: 'hidden'; fromQueue?: boolean; unsent?: 'elsewhere' | 'kept' }
+  /** This identity was sent before and its outcome never came back. */
+  uncertain: boolean
+}
+
+/** What happened to the words, then where they are now (see `SubmitTextOptions.unsent`). */
+function unsentNotice({ copy, options, uncertain }: UnsentSend): string {
+  if (options?.displayKind === 'hidden') {
+    // Machine text: dropped, never restored anywhere.
+    return copy.promptFailed
+  }
+
+  const kept = options?.unsent === 'kept'
+  const what = uncertain ? copy.promptSendUnconfirmed : kept ? copy.promptNotQueued : copy.promptNotSent
+
+  if (options?.unsent === 'elsewhere') {
+    return what
+  }
+
+  return `${what} ${kept ? copy.promptStillInComposer : copy.promptBackInComposer}`
+}
+
 /**
  * The chat has no live runtime and rebinding one failed (a starved hub times
- * `session.resume` out after 30s), so this send never left. The composer
+ * `session.resume` out after 30s), so this attempt never left. The composer
  * restores the words into the draft when submit returns `false`; without a
  * notice the user sees nothing and takes the message for delivered.
  *
  * Call before the abort drops the bubble. A deliberate session switch (`drift`)
- * stays silent, and so does a queued entry (`quiet`): it stays in its queue, it
- * is not "back in the composer". A `hidden` send is machine text that is
- * dropped, never restored.
+ * stays silent, and so does a drain of an entry that stays in its queue
+ * (`fromQueue` without `unsent: 'kept'`): the queue shows it and retries it.
  */
-export function rejectSendOnFailedResume(
-  err: unknown,
-  send: {
-    copy: { promptFailed: string; promptNotSent: string }
-    drift: null | string
-    hidden: boolean
-    optimisticId: string
-    quiet: boolean
-  }
-): void {
+export function rejectSendOnFailedResume(err: unknown, send: UnsentSend): void {
   markOptimisticSendRejected(send.optimisticId)
 
   if (send.drift) {
     console.warn('[submit-drift-abort]', send.drift, { phase: 'resume-failed' })
-  } else if (!send.quiet) {
-    notifyError(err, send.hidden ? send.copy.promptFailed : send.copy.promptNotSent)
+  } else if (!send.options?.fromQueue || send.options.unsent === 'kept') {
+    notifyError(err, unsentNotice(send))
   }
 }
 

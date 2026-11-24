@@ -128,7 +128,7 @@ describe('useComposerQueue park integration', () => {
 
     try {
       await act(async () => { await hook.result.current.queueCurrentDraft() })
-      expect(onSubmit).toHaveBeenCalledWith('durable queue', expect.objectContaining({ fromQueue: true, storedSessionId: SESSION_KEY }))
+      expect(onSubmit).toHaveBeenCalledWith('durable queue', expect.objectContaining({ fromQueue: true, storedSessionId: SESSION_KEY, unsent: 'kept' }))
       expect(draftRef.current).toBe('durable queue')
       expect(getQueuedPrompts(SESSION_KEY)).toEqual([])
       onSubmit.mockResolvedValue(true)

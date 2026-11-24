@@ -49,6 +49,7 @@ import { cronRunWriteGateApplies, refreshCronRunWriteGate } from '../../../cron/
 import type { ClientSessionState } from '../../../types'
 import { routeTargetFromToken, sessionContextDrift } from '../session-context-drift'
 import type { CreateBackendSessionForSend } from '../use-session-actions/create-overrides'
+import { takeResumeFailure } from '../use-session-actions/resume-latches'
 import { resolveSessionOwner, resolveSessionProfile } from '../use-session-actions/utils'
 
 import {
@@ -855,17 +856,23 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // Resolves to the adopted runtime id (null when not adopted yet), or
       // false when the submit must stop.
       const resumeRoutedStoredSession = async (routedId: string): Promise<false | null | string> => {
+        // The app's resume swallows its own failure (it toasts and resolves) and
+        // leaves the error for the caller: read it, or this send would wait out
+        // a second `session.resume` timeout below before saying anything.
+        let failure: undefined | { error: unknown }
+
+        takeResumeFailure(routedId)
+
         try {
           await resumeStoredSession(routedId)
-        } catch (err) {
+          failure = getRuntimeIdForStoredSession(routedId) ? undefined : takeResumeFailure(routedId)
+        } catch (error) {
+          failure = { error }
+        }
+
+        if (failure) {
           // Not sent: say so (a session switch stays silent), then drop the bubble.
-          rejectSendOnFailedResume(err, {
-            copy,
-            drift: sessionDriftReason(),
-            hidden: options?.displayKind === 'hidden',
-            optimisticId,
-            quiet: Boolean(queueAdmission || options?.fromQueue)
-          })
+          rejectSendOnFailedResume(failure.error, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: Boolean(retained) })
 
           return abortForSessionSwitch(null)
         }
@@ -988,13 +995,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // drain this abort is a no-op on foreground state (both helpers are
           // targetIsCurrentView-guarded) and simply drops the queued send. A
           // foreground send is not sent either: say so, then drop the bubble.
-          rejectSendOnFailedResume(err, {
-            copy,
-            drift: sessionDriftReason(),
-            hidden: options?.displayKind === 'hidden',
-            optimisticId,
-            quiet: Boolean(queueAdmission || options?.fromQueue)
-          })
+          rejectSendOnFailedResume(err, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: Boolean(retained) })
 
           return abortForSessionSwitch(null)
         }

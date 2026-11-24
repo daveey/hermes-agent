@@ -20,6 +20,21 @@ export function clearResumeLatches(storedSessionId: string): void {
   setResumeFailedSessionId(retire)
   setResumeExhaustedSessionId(retire)
   setResumeReattachSessionId(retire)
+  resumeFailureByStoredSessionId.delete(storedSessionId)
+}
+
+// resumeSession swallows its failure: it repaints what it can, toasts and
+// resolves. A caller that needed the runtime (a send into an unbound chat)
+// reads the error here instead of finding out from a second resume.
+const resumeFailureByStoredSessionId = new Map<string, { error: unknown }>()
+
+/** The error the latest resume attempt of this session ended on, once. */
+export function takeResumeFailure(storedSessionId: string): undefined | { error: unknown } {
+  const failure = resumeFailureByStoredSessionId.get(storedSessionId)
+
+  resumeFailureByStoredSessionId.delete(storedSessionId)
+
+  return failure
 }
 
 // One backoff for both resume self-heals (use-route-resume's stranded retry and
@@ -57,6 +72,8 @@ export function notifyResumeFailed(
   storedSessionId: string,
   options: ResumeAttemptOptions | undefined
 ): void {
+  resumeFailureByStoredSessionId.set(storedSessionId, { error })
+
   if (!options?.reattach) {
     notifyError(error, fallback, { id: resumeFailedToastId(storedSessionId) })
   }
