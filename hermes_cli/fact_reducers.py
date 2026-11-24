@@ -145,7 +145,11 @@ class ReducerEngine:
         for key in sorted(dirty, key=lambda item: (self._order[item.kind], item.id)):
             fact, edges[key] = self._reduce(key, snapshot, now)
             old = base.get(key)
-            staged[key] = replace(fact, rev=base.rev + 1) if fact and _changed(old, fact) else old if fact else None
+            if _changed(old, fact):
+                staged[key] = replace(fact, rev=base.rev + 1) if fact else None
+            # Unchanged outputs remain visible through the base snapshot. Do
+            # not send them through FactStore's wire validation/encoding again;
+            # still install newly discovered edges after successful publication.
         revision = self.store.publish((fact for fact in staged.values() if fact is not None),
                                       deleted_keys=(key for key, fact in staged.items() if fact is None))
         self._install_edges(edges)
