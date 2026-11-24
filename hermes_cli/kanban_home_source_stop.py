@@ -102,8 +102,7 @@ def finalize_source(conn: sqlite3.Connection, record: dict) -> dict:
             # and home update share ONE write transaction: no peer can capture
             # intent between the receipt insertion and epoch installation.
             conn.execute("INSERT INTO kanban_home_finalized1(task_id,nonce,receipt) VALUES (?,?,?)", (task, nonce, encoded))
-            if not epoch:
-                conn.execute("INSERT INTO kanban_home_generations1(task_id,nonce) VALUES (?,?)", (task, nonce))
+            generation.mirror_feed(conn, task, {"home_generation": nonce}, fields["version"])
             applying = conn.execute("SELECT applying FROM kanban_sync_state").fetchone()[0]
             conn.execute("UPDATE kanban_sync_state SET applying=1")
             conn.execute("UPDATE tasks SET created_on=?,sync_version=? WHERE id=?",

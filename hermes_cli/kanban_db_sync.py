@@ -1330,6 +1330,9 @@ class ApplyResult:
     # [daveey] Every card whose status this page changed, with the new status (a shadow copy too: it fires no
     # observers, but the sync client re-probes the parks that name these cards, ``kanban_awaited_card_wake``).
     status_changed: dict[str, str] = field(default_factory=dict)
+    # A cooperative home manifest is inert history, not a newly originating
+    # task/event. SQL admission/certification remains active in this mode.
+    historical_import: bool = False
 
 
 def _repair_revision(conn: sqlite3.Connection) -> Optional[int]:
@@ -1408,6 +1411,8 @@ def apply_remote_changes(
 def _apply_one(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> None:
     if ch.table not in SYNCED_COLUMNS:
         raise ValueError(f"apply_remote_changes: unknown table {ch.table!r}")
+    from hermes_cli.kanban_home_generation import mirror_change
+    mirror_change(conn, ch)
     if ch.client_op_id:
         from hermes_cli.kanban_replay_journal import issued_operation
         if ch.client_op_id == issued_operation(conn):
@@ -1489,8 +1494,9 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         conn.execute(f"INSERT INTO tasks ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                      (ch.uid, *cols.values(), ch.version))
         changed = set(cols)
-        from hermes_cli.kanban_restore_chat_subs import note_restored_task
-        note_restored_task(conn, ch.uid, cols.get("created_on"), own)  # our own card back from the Board
+        if not result.historical_import:
+            from hermes_cli.kanban_restore_chat_subs import note_restored_task
+            note_restored_task(conn, ch.uid, cols.get("created_on"), own)  # our own card back from the Board
     else:
         changed = {c for c, v in cols.items() if old[c] != v}
         if "status" in changed and old["status"] in ("done", "archived") and cols["status"] not in ("done", "archived"):
@@ -1600,6 +1606,8 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     names = ["uid", *cols]
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))
+    if result.historical_import:
+        return True  # no source-intent/restore-subscription replay on a home move
     if table == "task_events" and task_id:
         from hermes_cli.kanban_actionability_intents import capture
         capture(conn, ch.uid)
