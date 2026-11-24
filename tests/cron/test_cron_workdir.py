@@ -401,8 +401,8 @@ def test_build_job_prompt_inline_script_receives_configured_workdir(monkeypatch,
     workdir.mkdir()
     observed: dict = {}
 
-    def run_script(script_path, workdir=None, cancel_event=None, interpreter=None):
-        observed["script_workdir"] = workdir
+    def run_script(script_path, workdir=None, cancel_event=None, interpreter=None, job_id=None):
+        observed["script_workdir"], observed["job_id"] = workdir, job_id
         return True, "collected data"
 
     monkeypatch.setattr(scheduler_script, "_run_job_script", run_script)
@@ -411,4 +411,5 @@ def test_build_job_prompt_inline_script_receives_configured_workdir(monkeypatch,
          "workdir": str(workdir)})
 
     assert observed["script_workdir"] == str(workdir)
+    assert observed["job_id"] == "inline"  # cards the script creates are owned by this job's owner chat
     assert "collected data" in prompt
