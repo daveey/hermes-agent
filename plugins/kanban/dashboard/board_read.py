@@ -32,9 +32,16 @@ def _placeholders(ids: list) -> str:
 def _rows_by_task(conn: sqlite3.Connection, table: str, row_ids: list) -> dict[str, tuple]:
     by_task: dict[str, list] = {tid: [] for tid in row_ids}
     if row_ids:
+        # Only per-task arrival order is consumed. Sorting SELECT * in SQLite
+        # builds a temporary B-tree containing every payload/metadata byte, often
+        # spilling to disk on a cold board. Sort row references after grouping
+        # instead; the task index need not have arrival-id order (backfills can
+        # have older timestamps). No history or scalar columns are discarded.
         for row in conn.execute(
-                f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
+                f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)})", tuple(row_ids)):
             by_task.setdefault(row["task_id"], []).append(row)
+        for rows in by_task.values():
+            rows.sort(key=lambda row: row["id"])
     return {tid: (kd.EventHistory(v) if table == "task_events"
                   else tuple(MappingProxyType(dict(row)) for row in v)) for tid, v in by_task.items()}
 
