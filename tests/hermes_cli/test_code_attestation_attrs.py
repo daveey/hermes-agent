@@ -217,7 +217,7 @@ def test_attrs_output_guards_refuse_causal_skew(tmp_path, case):
     assert any(reason.startswith('attrs-') for reason in result['unknowns']), result
 
 
-@pytest.mark.parametrize('case', ['valid', 'installer', 'module', 'digest'])
+@pytest.mark.parametrize('case', ['valid', 'noncall-position', 'installer', 'module', 'digest'])
 def test_attrs_descriptor_registration_requires_each_identity(tmp_path, case):
     result = run(tmp_path, SEAM + textwrap.dedent(f'''
         # Registration is an earlier boundary than output validation. Assert its
@@ -234,9 +234,21 @@ def test_attrs_descriptor_registration_requires_each_identity(tmp_path, case):
         elif case == 'digest':
             source += b'\\n# unreviewed source\\n'
             module = compile(source, str(path), 'exec', dont_inherit=True)
+        if case == 'noncall-position':
+            # Exercise the opcode predicate independently of current compiler
+            # position allocation: a non-CALL with the same reviewed AST span
+            # must not become an admitted producer site.
+            get_instructions = ca.dis.get_instructions
+            def observed_instructions(code, **kwargs):
+                instructions = tuple(get_instructions(code, **kwargs))
+                yield from instructions
+                if code.co_qualname == '_compile_and_eval':
+                    call = next(i for i in instructions if i.opname == 'CALL')
+                    yield call._replace(opname='LOAD_CONST', offset=max(i.offset for i in instructions) + 2)
+            ca.dis.get_instructions = observed_instructions
         a._attrs_generator(path, module, source)
         descriptors = list(a._generators.values())
-        if case == 'valid':
+        if case in ('valid', 'noncall-position'):
             assert len(descriptors) == 1
             assert descriptors[0].name == 'attrs:_compile_and_eval'
             instructions = {{i.offset: i for i in ca.dis.get_instructions(
