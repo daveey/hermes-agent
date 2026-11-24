@@ -22,11 +22,13 @@ from tests.hermes_cli import test_kanban_containment_actor as support
 from tests.hermes_cli import test_kanban_spend_budget as helpers
 from tests.hermes_cli import test_kanban_spend_budget_hold as hold_helpers
 from tests.hermes_cli import test_kanban_spend_decision_routing as routing
+from tests.hermes_cli import test_kanban_stranded_park as park_tests
 from tests.hermes_cli.test_kanban_spend_route_repair import _route, _stop
 
 kanban_home = helpers.kanban_home
 board = support.board
 own_gateway = routing.own_gateway
+desk_gateway = park_tests.own_gateway
 
 CAUSES = ["capability_unavailable", "scope_stopped", "safety_refusal"]
 RETAIN = dict(summary="Cannot finish from here", next_step="Owner supplies the missing prerequisite",
@@ -135,6 +137,41 @@ def test_stop_with_a_cause_and_no_live_chat_is_unavailable_and_files_no_card(kan
         # ``hermes kanban stranded`` reads the stored ask as the owner.
         assert "owner_missing" not in describe(conn, tid)["violations"]
         assert _cards(conn) == [] and decision.pending(conn, tid)
+        # Only while the card is still parked: forced out of triage, the stored request owns nothing.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
+        assert "owner_missing" in describe(conn, tid)["violations"]
+
+
+@pytest.mark.parametrize("desk", [f"{park_tests.OWN}/default/desk-chat", "remote/default/desk"], ids=["local", "remote"])
+@pytest.mark.parametrize("cause", CAUSES)
+def test_the_desk_chat_the_sweep_binds_is_an_observer_not_a_returned_owner(kanban_home, desk_gateway, monkeypatch,
+                                                                           cause, desk):
+    """The sweep's ``shepherd`` link and subscription for kanban.triage_owner_chat are live but own nothing:
+    the recheck must not take the write lock for them, ever."""
+    import time
+    with kbc.connect_closing() as conn:
+        tid = _stop(conn, cause)
+        decision.ensure_producer(conn, tid)
+        park_tests._session(kanban_home, "desk-chat")
+        stranded._LAST_RUN.clear()
+        assert stranded.sweep_stranded_parks(conn, now=int(time.time()) + 3 * 3600,
+                                             cfg={"kanban": {"triage_owner_chat": desk}}) == [tid]
+        reasons = [r[0] for r in conn.execute("SELECT json_extract(delivery_metadata,'$.reason') FROM "
+                                              "kanban_notify_subs WHERE task_id=?", (tid,))]
+        assert reasons == ["shepherd"]
+        assert conn.execute("SELECT COUNT(*) FROM task_chat_links WHERE task_id=? AND kind='shepherd' "
+                            "AND released=0", (tid,)).fetchone()[0] == 1
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("an observer chat must not make the route recheck take the write lock")
+        monkeypatch.setattr(kb, "write_txn", forbidden)
+        for _ in range(4):
+            decision._RECHECKED.clear()
+            assert decision._producer_repair(conn, tid) is None
+            decision.repair_triage_routes(conn, skip=set())
+            decision.ensure_producer(conn, tid)
+        assert [n.payload["producer"] for n in _notices(conn, tid)] == [{"kind": "unavailable"}]
 
 
 @pytest.mark.parametrize("cause", CAUSES)

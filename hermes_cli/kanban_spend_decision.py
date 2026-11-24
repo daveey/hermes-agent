@@ -297,8 +297,11 @@ _RECHECKED: dict[tuple[str, str], float] = {}
 
 
 def _chat_returned(conn, task_id: str, *, paced: bool) -> bool:
-    """Read-only: does an ownerless stop's card have a live owning chat now? ``paced`` (the dispatcher's unlocked
-    pre-check) asks at most once per ``_RECHECK_SECONDS`` per card: each answer may open a state.db."""
+    """Read-only: would ``producer`` route this ownerless stop to a chat now? Only an owning chat counts: an
+    observer (the desk chat the stranded-park sweep binds as ``shepherd``, a ``touch``) is never the route, and
+    saying yes for one would take the write lock every recheck to find the same ``unavailable``. ``paced`` (the
+    dispatcher's unlocked pre-check) asks at most once per ``_RECHECK_SECONDS`` per card: each answer may open a
+    state.db."""
     import time
     from hermes_cli.kanban_db_connect import _main_db_file
     from hermes_cli.kanban_origin import gateway_names
@@ -317,10 +320,16 @@ def _chat_returned(conn, task_id: str, *, paced: bool) -> bool:
         return False
     own, bound = gateway_names()[0], []
     with Liveness(idle=settings()[1]) as liveness:
-        # ``bind`` only records: a chat ``producer`` would bind is live. ``producer`` itself decides the route.
-        return _chat_route(conn, task_id, task, own, get_active_profile_name(), lambda *chat: bound.append(chat),
-                           lambda gw, profile, session: local_chat_dead(gw, profile, session, own=own,
-                                                                        liveness=liveness)) or bool(bound)
+        # ``bind`` only records the live chats ``producer`` would subscribe; True is a live owning subscription.
+        if _chat_route(conn, task_id, task, own, get_active_profile_name(), lambda *chat: bound.append(chat),
+                       lambda gw, profile, session: local_chat_dead(gw, profile, session, own=own,
+                                                                    liveness=liveness)):
+            return True
+    # ``producer`` binds with INSERT OR IGNORE: only a chat with no subscription yet becomes an owning one. An
+    # existing row was judged above, and an observer's row (OBSERVER_SUB_REASONS) stays an observer's.
+    return any(conn.execute("SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND platform=? AND chat_id=? "
+                            "AND thread_id=''", (task_id, platform, chat_id)).fetchone() is None
+               for platform, chat_id in bound)
 
 
 def _chat_route(conn, task_id, task, own, active, bind, dead) -> bool:

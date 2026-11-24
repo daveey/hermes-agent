@@ -188,8 +188,9 @@ def project(facts: dict, *, now: int) -> dict:
         if all(d.get('administrative_owner', {}).get('kind') == 'unavailable' for d in deps):
             row['violations'].append('dependency_recovery_unavailable')
     if row['owner']['kind'] == 'unavailable':
-        # A stopped card whose human request is stored (the stranded-park ask) is owned by that ask.
-        if not (facts.get('stop') and facts.get('human_step')):
+        # A stopped card still parked with its human request stored (the stranded-park ask) is owned by that
+        # ask. In any other status the stored request is not what the card waits on.
+        if not (facts.get('stop') and facts.get('human_step') and task['status'] in ('triage', 'blocked')):
             row['violations'].append('owner_missing')
     elif row['owner']['kind'] == 'unknown' or not row['owner'].get('refs'):
         row['evidence_state'] = 'unknown'
