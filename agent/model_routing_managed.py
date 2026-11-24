@@ -70,7 +70,8 @@ def allowed_pins(config):
     """Sorted model names an exact pin may name under ``config``'s managed policy."""
     policy = config["model_routing"]
     return sorted({route["model"] for level in policy.get("routes", {})
-                   for route in eligible_routes(policy, level) if route["billing"] == "subscription"})
+                   for route in eligible_routes(policy, level)
+                   if route["billing"] == "subscription" or level == "carbon"})
 
 
 def pin_policy(model, provider, config):
@@ -78,7 +79,7 @@ def pin_policy(model, provider, config):
     policy = config["model_routing"]
     matches = [(level, route) for level in policy.get("routes", {})
                for route in eligible_routes(policy, level)
-               if route["billing"] == "subscription" and route["model"] == model
+               if (route["billing"] == "subscription" or level == "carbon") and route["model"] == model
                and provider in (None, "", "auto", route["provider"])]
     if len(matches) != 1:
         raise ManagedPinRejectedError(model, provider, allowed_pins(config))
