@@ -18,6 +18,9 @@ scope = f.scope
 def test_replica_bookkeeping_does_not_repeat_plan_or_backfill(live, ledger, kanban_home, spies, scope):
     replica = ksc.open_shadow(f.BOARD, f.ME)
     try:
+        # Settle bootstrap WAL pages before warming the cache, as in the row controls.
+        # Schema growth must not turn cursor writes into a main-file rewrite signal.
+        replica.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         settled = f._settled(live, ledger, kanban_home, spies)
         for i in range(4):
             with kbc.write_txn(replica):
