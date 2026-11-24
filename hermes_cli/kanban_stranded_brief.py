@@ -52,7 +52,17 @@ def request(conn, row, entry, age, evidence):
     tid = row['id']
     held = pending(conn, tid)
     restricted = execution_restricted(conn, tid)
-    if administrative:
+    # The stopped card an Unblock releases (kanban_release): this card, or the one this decision card was filed for.
+    from hermes_cli import kanban_release
+    stopped, runs = kanban_release.held(conn, tid), kanban_release.default_runs()
+    if stopped:
+        resume = (f'Release {"the stopped work" if administrative else "this card"} to finish its acceptance: {runs} '
+                  'more runs under a goal-level scope; it can be stopped again. Safety holds still apply.')
+        drop = ('Dismiss this decision notice; source work stays stopped with no further spend; reopen to reconsider.'
+                if administrative else
+                'Archive this card and leave its work unfinished; no further spend; reopen to reconsider.')
+        recommendation = 'B - avoid authorizing more work without a bounded proposal.'
+    elif administrative:
         resume = ('Return the decision to an agent to record your direction; source work stays stopped, '
                   'with no further spend until separately authorized.')
         drop = 'Dismiss this decision notice; source work stays stopped with no further spend; reopen to reconsider.'
@@ -68,7 +78,9 @@ def request(conn, row, entry, age, evidence):
         recommendation = 'B - leave work stopped rather than restart it without a current owner or plan.'
     # Preserve the existing Unblock/Archive transition contract. Explicit choices currently turn
     # even an archive-valued answer into an unblock; describe the two real controls in the brief.
-    release = (f"Unblock = ask the owner to record a bounded decision; the button cannot release this hold. "
+    release = (f"Unblock = release it to finish with {runs} more runs under a goal-level scope "
+               f"(`hermes kanban release {stopped}`); safety holds still apply" if stopped else
+               f"Unblock = ask the owner to record a bounded decision; the button cannot release this hold. "
                f"For an ordinary budget stop use `hermes kanban promote {tid} --reason '<what changed>'`; "
                "scope renewal and safety gates still apply" if held or restricted else
                "Unblock = return this decision to an agent (not permission to run the source work)" if administrative else

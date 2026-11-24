@@ -230,7 +230,7 @@ def execution_refusal(conn, task_id: str) -> str | None:
     if execution_restricted(conn, task_id):
         from hermes_cli.kanban_scope_renewal import ROUTE
         return ('Scope stopped; promotion, comments, timers and review do not release it. To renew the scope: '
-                + ROUTE.format(task=task_id) + '.')
+                + ROUTE.format(task=task_id) + '. ' + _one_step(task_id) + '.')
     return None
 
 
@@ -241,14 +241,21 @@ def unblock_refusal(conn, task_id: str) -> str | None:
     if refusal := execution_refusal(conn, task_id):
         return refusal
     return (f"cannot unblock {task_id}: spend-budget decision pending; split or re-scope the work, "
-            f"then use `hermes kanban promote {task_id} --reason <what changed>`, or archive it")
+            f"then use `hermes kanban promote {task_id} --reason <what changed>`, or archive it. "
+            + _one_step(task_id))
+
+
+def _one_step(task_id) -> str:
+    from hermes_cli.kanban_release import ONE_STEP
+    return ONE_STEP.format(task=task_id or '<task>')
 
 
 def notice(payload: dict) -> str:
     if payload.get('cause') == 'scope_stopped':
         from hermes_cli.kanban_scope_renewal import ROUTE
         return ('Scope stopped without execution authority. No generic promotion, comment, timer or review releases it. '
-                'Only an explicit scope renewal does: ' + ROUTE.format(task=payload.get('task_id') or '<task>') + '.')
+                'Only an explicit scope renewal does: ' + ROUTE.format(task=payload.get('task_id') or '<task>') + '. '
+                + _one_step(payload.get('task_id')) + '.')
     if payload.get('cause') == 'safety_refusal':
         retried = payload.get('refused_providers')
         head = ('Provider safety refusal retained' if not retried else
@@ -260,7 +267,8 @@ def notice(payload: dict) -> str:
                 'the work without declaring incomplete acceptance satisfied. Do not rerun the refused work.')
     return (str(payload.get("reason") or "Spend budget reached") + ". Held in triage until a recorded decision: "
             "split or re-scope the work, then manually promote it, or archive it. "
-            "Do not requeue unchanged; the stale-triage sweep cannot release this hold.")
+            "Do not requeue unchanged; the stale-triage sweep cannot release this hold. "
+            + _one_step(payload.get('task_id')) + '.')
 
 
 def producer(conn, task_id: str, note: str) -> dict:
@@ -394,7 +402,7 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
         return {'kind': 'unavailable'}
     stop = pending_episode(conn, task_id)
     listed = _json.loads(stop['payload'] or '{}').get('refused_providers') if stop is not None and safety else None
-    guidance = notice({'reason': note, **({'cause': 'safety_refusal' if safety else 'scope_stopped'} if stopped else {}),
+    guidance = notice({'reason': note, 'task_id': task_id, **({'cause': 'safety_refusal' if safety else 'scope_stopped'} if stopped else {}),
                        **({'refused_providers': listed} if listed else {})})
     action = ('\n\nRecord the administrative scope/authority decision without execution release. '
               'Do not run the original work here. Administrative acceptance is decision recorded; authority unavailable, not root-work completion.' if stopped else

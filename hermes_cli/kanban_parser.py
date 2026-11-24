@@ -689,6 +689,16 @@ _SPECS = [
         _cmd("list", [_json_flag()], help="Live, expired and revoked grants"),
     ]), help="Human operator only: grant a chat session (a triage or desk chat) the right to renew-scope cards "
              "it does not own. The delegate still writes its own mandate; safety stops stay closed"),
+    _cmd("release", [
+        _TASK_ID,
+        _bulk_ids("release"),
+        _arg("--runs", type=int, default=None,
+             help="More runs the card gets (default: kanban.release_runs, 10), on top of the runs already counted"),
+        _arg("--note", default=None, help="Text appended to the mandate comment as its own paragraph"),
+        _json_flag(),
+    ], help="Release spend- or scope-stopped cards to finish in one step: a goal-level mandate comment, the scope "
+            "renewal, a spend budget of spent + N runs and the promotion (a card with an open parent waits in "
+            "todo). Same authority as renew-scope; safety and containment holds are refused"),
     _cmd("spend-budget", [
         _TASK_ID,
         _arg("--seen", dest="seen_comment_id", type=int, help="Newest decision comment read; refuse replacing an unread spend-stop budget decision."),

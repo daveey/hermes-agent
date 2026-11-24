@@ -124,7 +124,10 @@ def test_spend_stop_on_dead_chat_gets_request_and_desk(kanban_home, own_gateway)
         request = json.loads(raw)
         assert request["interaction"] == "approval" and "Situation: Bounded work" in request["scope"]
         assert request["action"].startswith("Decide how to handle: Bounded work")
-        assert f"hermes kanban promote {tid} --reason" in request["action"]
+        assert ("Unblock = release it to finish with 10 more runs under a goal-level scope "
+                f"(`hermes kanban release {tid}`); safety holds still apply") in request["action"]
+        assert "cannot release this hold" not in request["action"]
+        assert "A) Unblock: Release this card to finish its acceptance: 10 more runs" in request["scope"]
         assert request["why_human"].startswith("Tried:") and "Only you can:" in request["why_human"]
         assert "spend_budget_triaged" in request["evidence"] and "runs=" in request["evidence"]
         assert "choices" not in request
@@ -606,19 +609,22 @@ def test_archive_answer_archives_and_unblock_answer_resumes(kanban_home, own_gat
         assert task.status not in ("triage", "blocked", "archived") and task.human_request is None
 
 
-def test_spend_pending_unblock_answer_routes_to_promote(kanban_home, own_gateway):
-    """The Unblock button cannot release a pending spend decision (kanban_card_answer refuses it), so the ask names
-    the promote route; archive still works from the button, and promote releases the card."""
+def test_spend_pending_unblock_ask_names_release_and_release_frees_the_card(kanban_home, own_gateway):
+    """The ask on a spend-stopped card names the one-step release, and that release frees the card. A remote
+    Desktop answer (kanban_card_answer) is a plain unblock and still refuses a pending spend decision: only the
+    local Desktop click (the user-steps mirror) and the command release."""
     from hermes_cli import kanban_card_answer as ca
+    from hermes_cli import kanban_release
     with kbc.connect_closing() as conn:
         tid = _spend_stopped_on_dead_chat(conn, kanban_home)
         assert _sweep(conn, now=_later(3), cfg={}) == [tid]
-        assert f"hermes kanban promote {tid} --reason" in json.loads(_row(conn, tid)[2])["action"]
+        assert f"`hermes kanban release {tid}`" in json.loads(_row(conn, tid)[2])["action"]
         # The fence's spend_decision_pending refusal surfaces from apply() as ask_changed_or_held.
         with pytest.raises(ca.AnswerRefused, match="ask_changed_or_held|spend_decision_pending"):
             _answer(conn, tid, "unblock")
         assert _row(conn, tid)[0] == "triage" and _row(conn, tid)[2]
-        assert kb.promote_task(conn, tid, actor="operator", reason="rescoped")[0]
+        out = kanban_release.release(conn, tid, writer=kanban_release.human_writer("test-operator"))
+        assert out["outcome"] == "released", out
         assert kb.get_task(conn, tid).status == "ready"
 
 

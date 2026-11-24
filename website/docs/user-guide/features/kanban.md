@@ -751,6 +751,19 @@ there but undecided after 30 minutes gets the same single review. Scope and
 safety stops are never reviewed; `kanban.spend_review: false` turns the
 reviewer off.
 
+`hermes kanban release <id> [--ids <id>...] [--runs N] [--note TEXT]` is the one-step release of a
+spend or scope stop. Per card it writes one goal-level mandate comment (finish the card's
+acceptance; stop only on a provider safety refusal, a step that needs David physically, the same
+error three times, or the run budget), renews the scope when the stop is a scope stop, sets the
+card's budget to the runs already counted plus `N` (default `kanban.release_runs`, 10) with no
+cache-read limit, promotes it, and archives the open decision cards filed for that stop. A decision
+card's id releases the card it was filed for. A card with an open parent is not promoted: its
+decision is recorded and it waits in `todo` as a dependency wait. The caller must be whoever
+`renew-scope` accepts (a human operator, the owning chat, the creator task); a run of the stopped
+card is refused. A provider safety restriction (`safety_restricted`) and a containment hold
+(`containment_hold`) are refused, a card no stop holds is `not_held`, and a rerun is
+`already_released`; a refusal writes nothing. Only a card whose home is this board is released.
+
 An over-budget card that **published** an OPEN PR on
 `softmax-universe/daveey-hermes` targeting `main` is spared from a new spend
 triage. Publication is evidenced by its own run's `published_pr` metadata or
@@ -1587,6 +1600,9 @@ hermes kanban renew-scope <id> --episode <stop uid> --mandate-comment <comment i
 hermes kanban delegate grant --session <session id|'*'> [--gateway G] [--profile P] [--hours H] --reason <text>
 hermes kanban delegate revoke --session <session id|'*'> [--gateway G] [--profile P] --reason <text>
 hermes kanban delegate list [--json]                   # human operator: let a chat renew cards it does not own
+hermes kanban release <id> [--ids <id>...] [--runs N] [--note TEXT] [--json]
+                                                       # one step: mandate comment + renew-scope + spend-budget
+                                                       # (spent + N runs) + promote; open parents wait in todo
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
 hermes kanban link <parent_id> <child_id>
