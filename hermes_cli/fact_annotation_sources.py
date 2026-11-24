@@ -11,6 +11,13 @@ from hermes_cli.fact_contract import Fact, FactKey, freeze
 from hermes_cli.fact_source_watch import NativeSourceWatch
 from hermes_cli.fact_wire import encode
 
+# [daveey] Hub 2026-11-24: every annotation family watches state.db, processes, config and the kanban directory, and
+# the kanban family's capture is a complete multi-board read plus links publication. Unpaced, each unrelated write
+# (every turn message, every board write) ran it again on the shared ``fact-change-feed`` thread (~35% of a core;
+# 309 of 321 py-spy samples). A paced source coalesces a burst of hints into one trailing pass, exactly as the
+# clock-only content sources do. Other families are cheap and stay on the leading edge; review demand must be prompt.
+KANBAN_CAPTURE_INTERVAL = 5.0
+
 
 class NativeAnnotationOwner(ContentOwner):
     def __init__(self, engines, bindings, *, budget, operational=()):
@@ -62,6 +69,8 @@ class NativeAnnotationSource(AnnotationMembershipSource):
         self._lock = threading.Lock()
         self._unsubscribe = None
         self._next_wall = 0
+        # Paced by the shared feed (``ChangeFeed.register`` reads it); 0 = every wake is a pass.
+        self.min_interval = KANBAN_CAPTURE_INTERVAL if family == 'kanban' else 0
 
     def watch(self, wake):
         if self._watch is not None:

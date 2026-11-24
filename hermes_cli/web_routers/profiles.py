@@ -41,13 +41,22 @@ from hermes_cli.web_deps import late
 from hermes_cli.config import get_process_hermes_home
 from hermes_cli.isolated_scope import scope_to_launch_profile
 from hermes_cli.profiles import ProfileIdentitySettlementPending
-from hermes_cli.kanban_session_activity import annotate_kanban_activity, one_annotation_snapshot
-from hermes_cli.cron_session_activity import annotate_cron_activity
-from hermes_cli.goal_session_activity import annotate_goal_activity
-from hermes_cli.process_session_activity import annotate_background_activity
-from hermes_cli.subagent_session_activity import annotate_subagent_activity
-from hermes_cli.turn_session_activity import annotate_turn_activity
-from hermes_cli.review_session_activity import annotate_review_wait
+from hermes_cli.kanban_session_activity import annotate_kanban_activity as _raw_annotate_kanban_activity, one_annotation_snapshot
+from hermes_cli.cron_session_activity import annotate_cron_activity as _raw_annotate_cron_activity
+from hermes_cli.goal_session_activity import annotate_goal_activity as _raw_annotate_goal_activity
+from hermes_cli.process_session_activity import annotate_background_activity as _raw_annotate_background_activity
+from hermes_cli.subagent_session_activity import annotate_subagent_activity as _raw_annotate_subagent_activity
+from hermes_cli.turn_session_activity import annotate_turn_activity as _raw_annotate_turn_activity
+from hermes_cli.review_session_activity import annotate_review_wait as _raw_annotate_review_wait
+from hermes_cli.kanban_annotation_facts import best_effort as _best_effort
+# [daveey] Optional enrichment: an unavailable fact projection never fails the list/sidebar (see best_effort).
+annotate_kanban_activity = _best_effort(_raw_annotate_kanban_activity, "kanban")
+annotate_cron_activity = _best_effort(_raw_annotate_cron_activity, "cron")
+annotate_goal_activity = _best_effort(_raw_annotate_goal_activity, "goal")
+annotate_background_activity = _best_effort(_raw_annotate_background_activity, "background")
+annotate_subagent_activity = _best_effort(_raw_annotate_subagent_activity, "subagent")
+annotate_turn_activity = _best_effort(_raw_annotate_turn_activity, "turn")
+annotate_review_wait = _best_effort(_raw_annotate_review_wait, "review")
 from hermes_cli.web_server_profiles import (
     _fallback_profile_dicts, _hub_action_name,
 )

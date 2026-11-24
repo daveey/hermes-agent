@@ -11,8 +11,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from functools import wraps
+import logging
 import threading
 import time
+
+_log = logging.getLogger(__name__)
 
 FIELDS = {
     'kanban': frozenset(('kanban_active', 'kanban_blocked', 'kanban_unseen',
@@ -161,7 +164,13 @@ class AnnotationFacts:
                 if self._needs_restart:
                     raise AnnotationUnavailable('legacy annotation rollback incomplete')
                 return _legacy_call(rows, legacy, **kwargs)
-            return self._apply(family, rows, **kwargs)
+            try:
+                return self._apply(family, rows, **kwargs)
+            except AnnotationUnavailable:
+                raise
+            except Exception as exc:  # health: allow BLE001 -- any fact-subsystem fault is "unavailable", never a request fault
+                _log.warning("annotation facts failed for %s", family, exc_info=True)
+                raise AnnotationUnavailable('annotation facts failed') from exc
 
     def _apply(self, family, rows, **kwargs):
         from hermes_cli.fact_annotation_views import selector_for
@@ -316,3 +325,24 @@ def consumer(family):
             return annotate(family, rows, legacy, **kwargs)
         return wrapped
     return decorate
+
+
+def best_effort(annotator, family):
+    """Request-boundary wrapper: an unavailable annotation never fails the list it decorates. [daveey]
+
+    Annotations are optional enrichment of rows the session DB already served. A missing/expired/overflowed
+    fact projection leaves the rows as read (kanban rows are marked ``kanban_unknown`` so no client renders
+    "no work"). It never re-opens a legacy reader behind an active owner fence: ``annotate`` already refused
+    that, and a refusal publishes no partial mutation, so the rows are exactly as the caller built them.
+    ``annotate`` itself stays fail-closed for its own callers and tests."""
+    @wraps(annotator)
+    def wrapped(rows, **kwargs):
+        try:
+            return annotator(rows, **kwargs)
+        except AnnotationUnavailable as exc:
+            _log.warning("%s annotation unavailable (%s); serving rows without it", family, exc)
+            if family == 'kanban':
+                from hermes_cli.kanban_activity_projection import project_kanban_unknown
+                return project_kanban_unknown(rows, now=time.time())
+            return rows
+    return wrapped

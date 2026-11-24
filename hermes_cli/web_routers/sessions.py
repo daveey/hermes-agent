@@ -27,13 +27,22 @@ from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli.web_thread_lanes import lane_runner, run_in_lane
 from hermes_cli import loop_accounting as _la  # [daveey] per-route pass accounting
 from hermes_cli.web_json_response import encoded_in_thread, native_json_response, per_request_response
-from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
-from hermes_cli.cron_session_activity import annotate_cron_activity
-from hermes_cli.goal_session_activity import annotate_goal_activity
-from hermes_cli.process_session_activity import annotate_background_activity, stop_session_process
-from hermes_cli.subagent_session_activity import annotate_subagent_activity
-from hermes_cli.turn_session_activity import annotate_turn_activity
-from hermes_cli.review_session_activity import annotate_review_wait
+from hermes_cli.kanban_session_activity import annotate_kanban_activity as _raw_annotate_kanban_activity, session_tasks as session_kanban_tasks
+from hermes_cli.cron_session_activity import annotate_cron_activity as _raw_annotate_cron_activity
+from hermes_cli.goal_session_activity import annotate_goal_activity as _raw_annotate_goal_activity
+from hermes_cli.process_session_activity import annotate_background_activity as _raw_annotate_background_activity, stop_session_process
+from hermes_cli.subagent_session_activity import annotate_subagent_activity as _raw_annotate_subagent_activity
+from hermes_cli.turn_session_activity import annotate_turn_activity as _raw_annotate_turn_activity
+from hermes_cli.review_session_activity import annotate_review_wait as _raw_annotate_review_wait
+from hermes_cli.kanban_annotation_facts import best_effort as _best_effort
+# [daveey] Optional enrichment: an unavailable fact projection never fails the list/sidebar (see best_effort).
+annotate_kanban_activity = _best_effort(_raw_annotate_kanban_activity, "kanban")
+annotate_cron_activity = _best_effort(_raw_annotate_cron_activity, "cron")
+annotate_goal_activity = _best_effort(_raw_annotate_goal_activity, "goal")
+annotate_background_activity = _best_effort(_raw_annotate_background_activity, "background")
+annotate_subagent_activity = _best_effort(_raw_annotate_subagent_activity, "subagent")
+annotate_turn_activity = _best_effort(_raw_annotate_turn_activity, "turn")
+annotate_review_wait = _best_effort(_raw_annotate_review_wait, "review")
 from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_server_sessions import _session_latest_descendant
 from hermes_cli.web_models import (
@@ -203,7 +212,13 @@ def _session_kanban_tasks_read(ids: str):
     list them for the open chat without loading the whole board. [daveey]"""
     wanted = [s.strip() for s in ids.split(",") if s.strip()][:50]
     # The Desktop linked-card strip: serve the last remote-links projection rather than wait on a rebuild.
-    return {"tasks": session_kanban_tasks(wanted, stale_ok=True)}
+    from hermes_cli.fact_remote_links import LinksUnavailable
+    try:
+        return {"tasks": session_kanban_tasks(wanted, stale_ok=True)}
+    except LinksUnavailable as exc:
+        # [daveey] An unavailable links projection is a retryable dependency outage, not a server fault and
+        # never a successful empty list: honest 503 (the strip keeps its last cards), not a 500 traceback.
+        raise HTTPException(status_code=503, detail="remote links unavailable", headers={"Retry-After": "5"}) from exc
 
 
 # Identical in-flight ``ids`` share one kanban-lane read (a Desktop poll burst). Distinct ``ids`` still

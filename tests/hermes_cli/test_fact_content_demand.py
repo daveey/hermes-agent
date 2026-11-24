@@ -179,3 +179,50 @@ def test_dependency_failure_retries_when_its_read_input_changes():
     engine.publish([Fact(key, {}, health='fresh')], now=2)
     assert isinstance(engine.store.snapshot(scope).view('title', {}), Ready)
     source.close()
+
+
+def test_demand_lru_evicts_bound_views_and_never_exceeds_the_bound():
+    """[daveey] Demand retention is an LRU, not a ratchet: the owner's bound set stays at ``max_keys`` however many
+    distinct selectors are ever asked for, and the live working set keeps being served."""
+    from hermes_cli.fact_demand_source import DemandSource
+    scope = Scope('install', 'profile')
+    facts = FactStore()
+    engine = ReducerEngine(facts, scope)
+    engine.register(view_reducer([Projection('title', (), lambda *args: (), lambda *args: {'ok': True})]))
+    source = DemandSource(engine, max_keys=3, max_selector_bytes=128)
+    source.watch(lambda: None)
+
+    def drain():
+        cursor = None
+        while True:
+            capture = source.capture(cursor, None)
+            source.commit(capture)
+            cursor = capture.after
+            if capture.key is None and not capture.more:
+                return
+
+    keys = {n: view_key(scope, 'title', {'n': n}) for n in range(8)}
+    for n in range(3):
+        source.demand('title', {'n': n})
+    drain()
+    assert engine._bound == {keys[0], keys[1], keys[2]}
+    source.demand('title', {'n': 0})  # touch: 1 is now the least recently demanded
+    source.demand('title', {'n': 3})
+    drain()
+    assert engine._bound == {keys[0], keys[2], keys[3]}
+    for n in range(4, 8):
+        source.demand('title', {'n': n})
+        drain()
+        assert len(engine._bound) <= 3 and len(source._accepted) == 3 and not source._evicted
+    assert engine._bound == {keys[5], keys[6], keys[7]}
+    # An evicted selector is simply demanded again and re-bound; its fact was never deleted.
+    source.demand('title', {'n': 0})
+    drain()
+    assert keys[0] in engine._bound and isinstance(facts.snapshot(scope).view('title', {'n': 0}), Ready)
+    # Unserved demands are never evicted to make room: that would drop them silently.
+    unserved = DemandSource(engine, max_keys=2, max_selector_bytes=128)
+    unserved.watch(lambda: None)
+    unserved.demand('title', {'u': 1})
+    unserved.demand('title', {'u': 2})
+    with pytest.raises(ValueError, match='capacity'):
+        unserved.demand('title', {'u': 3})
