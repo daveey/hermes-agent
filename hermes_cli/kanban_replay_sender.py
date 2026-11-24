@@ -80,9 +80,13 @@ def _push(conn, hub, board, gateway, *, primary, max_batches, before_head, seen)
             from hermes_cli.kanban_replay_episodes import interrupt
             interrupt(conn)
             raise ReplayFault(str(exc)) from exc
-        except (OSError, client.HubError):
+        except (OSError, client.HubError, client.Resync) as exc:
             from hermes_cli.kanban_replay_episodes import interrupt
             interrupt(conn)
+            if isinstance(exc, client.Resync):
+                # Only feed reads own cursor resynchronization. A strict endpoint
+                # 410 is transport failure; let ordinary rounds keep pulling.
+                raise client.HubError(410, str(exc)) from exc
             raise
     return client._push_legacy(conn, hub, board, gateway, primary=primary,
                                max_batches=max_batches, before_head=before_head, seen=seen)
@@ -217,7 +221,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         from hermes_cli.kanban_replay_existence import CurrentRowHold
         try:
             evidence = hub.row_evidence(board, 'tasks', row['row_uid'])
-        except (OSError, client.HubError) as exc:
+        except (OSError, client.HubError, client.Resync) as exc:
             raise CurrentRowHold(f'synthetic parent current row unavailable: {exc}', transient=True) from exc
         state = evidence.get('row')
         if (evidence.get('board') != board or evidence.get('table') != 'tasks' or
@@ -408,12 +412,12 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
                 reply = send_ops(conn, [wire], identity)
             else:
                 reply = recovery.call(hub, 'POST', root + 'ops', dict(identity, ops=[wire]))
-        except (OSError, client.HubError):
+        except (OSError, client.HubError, client.Resync):
             # Inspect immediately, but leave recording/ACK to the next serialized
             # turn. A lost mutation reply never authorizes a blind resend.
             try:
                 reconcile(journal.snapshot(conn), recovery.call(hub, 'GET', root + 'inspect')['slot'])
-            except (OSError, client.HubError):
+            except (OSError, client.HubError, client.Resync):
                 pass  # Offline inspection preserves the original transport error/custody.
             raise
         out.sent += 1
@@ -438,7 +442,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
 
 def _ack_settled(conn, hub, root, identity, remote):
     settled = journal.snapshot(conn)
-    if settled['settled'] != '0' and remote['a'] != settled['settled']:
+    # An exact retained successor can already be ACKed by another copy. Its
+    # authenticated prefix must never be moved back to our settled predecessor.
+    if int(remote['a']) < int(settled['settled']):
         expected = dict(remote, a=settled['settled'])
         remote = recovery.call(hub, 'POST', root + 'ack', dict(identity, session=remote['session'],
             generation=settled['generation'], ack=dict(sequence=settled['settled'],

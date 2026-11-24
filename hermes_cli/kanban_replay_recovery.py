@@ -143,7 +143,7 @@ def turn(conn, board):
     token = _SAMPLE.set(sample)
     try:
         yield
-    except (OSError, client.HubError) as exc:
+    except (OSError, client.HubError, client.Resync) as exc:
         _failed(conn, board, exc, sample['started'])
         raise
     else:

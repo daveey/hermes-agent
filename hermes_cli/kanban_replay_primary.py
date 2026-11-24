@@ -24,10 +24,10 @@ class PrimarySettlement:
         if verdict['status'] not in ('applied', 'merged', 'rejected', 'deferred'):
             raise ValueError('primary replay disposition not integrated')
         from hermes_cli.kanban_replay_existence import CurrentRowHold
-        from hermes_cli.kanban_sync_client import HubError
+        from hermes_cli.kanban_sync_client import HubError, Resync
         try:
             evidence = self.hub.row_evidence(self.board, row['table_name'], row['row_uid'])
-        except (OSError, HubError) as exc:
+        except (OSError, HubError, Resync) as exc:
             raise CurrentRowHold(f'primary replay live current row unavailable: {exc}', transient=True) from exc
         image = evidence.get('row')
         if (evidence.get('board') != self.board or evidence.get('table') != row['table_name'] or

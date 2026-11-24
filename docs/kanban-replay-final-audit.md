@@ -1,5 +1,37 @@
 # Sender final audit: remaining gates (not approval)
 
+## Exact-successor ACK and strict HTTP410 corrections
+
+Review6038016773 at28589d8cedf059118b23e6cfac21f882d4b2e030 reproduced
+regressing predecessor ACKs when another copy had already ACKed the retained
+successor. The sender now ACKs only a remote prefix strictly behind durable local
+settlement; reconciliation still validates the entire identity first. Four public
+sender cases cover successor recovery with equal/ahead remote ACKs and idle
+behind/equal controls. They require no uncertain resend, exact source pruning and
+no redundant or regressing ACK. The ahead case was assertion-RED before correction.
+
+Production Hub HTTP410 raises Resync rather than HubError. Strict transport now
+accounts that exception in the same durable recovery episode, inspects immediately
+after an uncertain mutation (including when inspection also returns410), and
+interrupts its episode. At the strict public boundary only, Resync becomes
+HubError(410): ordinary pre-pull send isolation then keeps pulling. Feed Resync
+semantics are unchanged. Mandatory synthetic-parent and primary evidence reads
+turn410 into their existing transient exact-identity CurrentRowHold, with bounded
+backoff/eight-attempt pause. Optional observation handling remains unchanged.
+
+Nine real loopback HTTP cases exercise410/503 inspection controls, eight-attempt
+pause/no ninth I/O, uncertain accepted mutation/reopen/repair without resend,
+synthetic and ordinary primary evidence custody, and actual sync_board pull
+progress. Initial runs reproduced real Resync escaping; a503 after-pull failure
+was corrected in the fixture expectation, not hidden as production RED. Six final
+source controls are killed on the same restored test bytes: ACK inequality and
+omitted immediate inspection fail assertions; omitted transport accounting,
+synthetic hold, primary hold and strict error normalization fail through their
+actual expected-boundary exceptions. No infrastructure errors count as kills.
+Final source/test hashes, full consumer gate and required CI are in the PR/card
+receipt; these local proofs are not live Board or throughput acceptance. Fresh
+independent exact-head review and canonical dormant landing remain mandatory.
+
 Audit source: `c4d622710f234c158dac068280b2e3f23df00e66`, with the additional
 condition controls in this commit. This is an implementation evidence inventory,
 not an independent exact-head review, activation grant, or D completion.
