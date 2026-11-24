@@ -634,6 +634,7 @@ CREATE TABLE IF NOT EXISTS session_admissions (
     outcome TEXT,
     owner_epoch INTEGER,
     generation INTEGER,
+    settled_at REAL,
     UNIQUE (principal_id, target_session_id, request_id),
     CHECK (status != 'started' OR (owner_epoch IS NOT NULL AND generation IS NOT NULL))
 );
@@ -858,6 +859,22 @@ WHEN EXISTS (SELECT 1 FROM session_admissions WHERE target_session_id = old.id)
   OR EXISTS (SELECT 1 FROM worker_executions WHERE session_id = old.id)
 BEGIN
     SELECT RAISE(ABORT, 'Refused to delete a session that has gateway runtime history: state.db was upgraded by a newer Hermes, and this older Hermes cannot delete such sessions. Downgrading is unsupported. Run hermes update to go back to the newer release, or restore the pre-update snapshot: https://hermes-agent.nousresearch.com/docs/getting-started/updating#rolling-back-to-an-older-release');
+END;
+DROP TRIGGER IF EXISTS session_admissions_settled_at_update;
+CREATE TRIGGER IF NOT EXISTS session_admissions_settled_at_update
+AFTER UPDATE OF status ON session_admissions
+WHEN new.status = 'terminal' AND old.status IS NOT 'terminal'
+BEGIN
+    -- [daveey] When the admission settled, whoever settled it (old builds included): its stored result's
+    -- transcript copy is compacted once this is past the exact-retry horizon (hermes_state_result_horizon).
+    UPDATE session_admissions SET settled_at = CAST(strftime('%s', 'now') AS REAL) WHERE seq = new.seq;
+END;
+DROP TRIGGER IF EXISTS session_admissions_settled_at_insert;
+CREATE TRIGGER IF NOT EXISTS session_admissions_settled_at_insert
+AFTER INSERT ON session_admissions
+WHEN new.status = 'terminal' AND new.settled_at IS NULL
+BEGIN
+    UPDATE session_admissions SET settled_at = CAST(strftime('%s', 'now') AS REAL) WHERE seq = new.seq;
 END;
 DROP TRIGGER IF EXISTS messages_transcript_revision_update;
 CREATE TRIGGER IF NOT EXISTS messages_transcript_revision_update

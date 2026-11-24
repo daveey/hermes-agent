@@ -529,6 +529,8 @@ class SessionMaintenanceMixin:
             from hermes_state_mutation_retirement import prune_retired_tombstones, retire_prunable
             session_ids = retire_prunable(conn, sorted(session_ids))
             prune_retired_tombstones(conn)  # every prune pass also reclaims expired deletion tombstones
+            from hermes_state_result_horizon import compact_settled_results
+            compact_settled_results(conn)  # and drops live sessions' result transcript copies past the horizon
             if not session_ids:
                 return 0
             # Batched: a cron-heavy store prunes tens of thousands of ids in one call.
