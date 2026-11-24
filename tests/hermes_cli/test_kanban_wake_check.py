@@ -81,6 +81,47 @@ def _assert_condition_wake(conn, tid, flag: Path) -> None:
     assert "build 559 seen" in kb.build_worker_context(conn, tid)
 
 
+@pytest.mark.parametrize('spent', [False, True])
+def test_last_budgeted_run_is_reserved_for_own_condition(kanban_home, tmp_path, spent):
+    """A generic wake cannot spend the final run while the terminal log probe is false."""
+    from hermes_cli import kanban_spend_budget as budget
+    from hermes_cli.kanban_continuation import _wake_parks
+    flag = tmp_path / 'terminal-exit'
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        if spent:
+            with kb.write_txn(conn):
+                conn.execute('UPDATE task_runs SET started_at=? WHERE task_id=?', (int(time.time()) - 120, tid))
+        budget.set_override(conn, tid, runs=2 if spent else 1, by='owner', reason='one authorized settlement run')
+        assert kb.schedule_task(conn, tid, reason='SCHEDULED_UNTIL=2099-01-01T00:00:00Z',
+                                wake_check=_probe(flag), check_every=120)
+        count = conn.execute('SELECT count(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0]
+        assert _wake_parks(conn, 4070908801)[0] == []
+        assert kb.get_task(conn, tid).status == 'scheduled'
+        assert kwc.get_state(conn, tid) is not None
+        assert len(_events(conn, tid, 'terminal_run_reserved')) == 1
+        flag.write_text('bb land: exit 0\n')
+        kwc.run_due_wake_checks(conn, now=int(time.time()) + 121, wait=True)
+        assert kb.get_task(conn, tid).status == 'ready'
+        assert _events(conn, tid, 'condition_met')[-1].payload['output'] == 'bb land: exit 0'
+        assert conn.execute('SELECT count(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == count
+        assert budget.hold(conn, tid) is None  # original limit remains, no extra grant
+
+
+@pytest.mark.parametrize('kind', ['wake_check_stale', 'wake_check_broken', 'wake_probe_lost', 'condition_met'])
+def test_terminal_reservation_never_swallows_probe_repair_or_terminal(kanban_home, tmp_path, kind):
+    from hermes_cli import kanban_spend_budget as budget
+    from hermes_cli.kanban_terminal_run import reserve
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        budget.set_override(conn, tid, runs=1, by='owner', reason='bounded')
+        assert kb.schedule_task(conn, tid, reason='SCHEDULED_UNTIL=2099-01-01T00:00:00Z',
+                                wake_check=_probe(tmp_path / 'terminal'), check_every=120)
+        with kb.write_txn(conn):
+            assert not reserve(conn, tid, kind)
+        assert not _events(conn, tid, 'terminal_run_reserved')
+
+
 def test_kanban_schedule_wake_check_wakes_when_probe_passes(kanban_home, tmp_path, monkeypatch) -> None:
     from tools import kanban_tools as kt
 

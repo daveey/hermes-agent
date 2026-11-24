@@ -8,12 +8,20 @@ on a clock is not a stuck tick (:func:`all_clock_held`).
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time
 from datetime import UTC, datetime
 from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _env_seconds(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
 
 # Guard reasons whose hold ends at a deadline the dispatcher can compute from the card's own runs.
 CLOCK_REASONS = frozenset({

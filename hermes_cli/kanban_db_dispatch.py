@@ -44,7 +44,7 @@ from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import skip_reap
 from hermes_cli.kanban_db_dispatch_quiet import QuietResultFields
 from hermes_cli.kanban_admission_pools import host_remaining, lane_rows, pickup_budget, pool_admits, pool_take
-from hermes_cli.kanban_db_dispatch_clock import record_clock_hold as _record_clock_hold
+from hermes_cli.kanban_db_dispatch_clock import record_clock_hold as _record_clock_hold, _env_seconds
 from hermes_cli.kanban_db_dispatch_rerun import reopened_after
 from hermes_cli import kanban_db_dispatch_custody as _custody
 from hermes_cli.kanban_db_dispatch_pid import _pid_alive  # re-export
@@ -110,12 +110,6 @@ DEFAULT_GUARD_HOLD_CAP_SECONDS = 30 * 60
 DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
 _GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
 _GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch", "model_pin_not_in_routing_registry", "subscription_quota_reset"})
-
-def _env_seconds(name: str, default: int) -> int:
-    try:
-        return max(0, int(os.environ.get(name, "") or default))
-    except ValueError:
-        return default
 
 
 def guard_hold_cap_seconds(reason: str) -> Optional[int]:
@@ -1942,15 +1936,17 @@ def _run_reclaim_phase(
     failure_limit: int,
     reconcile_orphans: bool,
     board: Optional[str] = None, dry_run: bool = False,
+    wake_protection=None,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote. Each sweep is a ``dispatch.<sweep>`` pass."""
-    _la.timed("dispatch.reap_worker_zombies", reap_worker_zombies)
-    result.reaped_terminal_workers = _la.timed("dispatch.reap_terminal_workers", reap_terminal_workers, conn)
-    result.stopped_run_scopes = _la.timed("dispatch.stopped_scope_units", _worker_scope.stopped_scope_units, conn, board=board)  # orphans of ended runs [daveey]
-    _la.timed("dispatch.requeue_custody", _requeue_custody.sweep, conn)  # requeued runs' persisted jobs: release or bound
+    timed = wake_protection.timed if wake_protection is not None else _la.timed
+    timed("dispatch.reap_worker_zombies", reap_worker_zombies)
+    result.reaped_terminal_workers = timed("dispatch.reap_terminal_workers", reap_terminal_workers, conn)
+    result.stopped_run_scopes = timed("dispatch.stopped_scope_units", _worker_scope.stopped_scope_units, conn, board=board)  # orphans of ended runs [daveey]
+    timed("dispatch.requeue_custody", _requeue_custody.sweep, conn)  # requeued runs' persisted jobs: release or bound
     # Stop requests and owner card archives other gateways sent (kanban_owner_archive_relay), before the reclaim sweeps. [daveey]
     from hermes_cli.kanban_owner_archive_relay import apply_remote_archives
-    result.remote_archived = _la.timed("dispatch.apply_remote_archives", apply_remote_archives, conn)
+    result.remote_archived = timed("dispatch.apply_remote_archives", apply_remote_archives, conn)
     # [daveey] Before any stale check: a long gap since the last pass is a host suspend, which the
     # heartbeat backstop, the stale sweep and max_runtime must not count (``kanban_suspend_ledger``).
     _record_dispatch_pass(conn, dry_run=dry_run)
@@ -1958,29 +1954,30 @@ def _run_reclaim_phase(
     # a proven empty running set may skip these sweeps, never a prior no-op.
     has_running = conn.execute("SELECT 1 FROM tasks WHERE status = 'running' LIMIT 1").fetchone() is not None
     if has_running:
-        result.reclaimed = _la.timed("dispatch.release_stale_claims", _kb.release_stale_claims, conn, failure_limit=failure_limit)
+        result.reclaimed = timed("dispatch.release_stale_claims", _kb.release_stale_claims, conn, failure_limit=failure_limit)
         if reconcile_orphans:
-            result.reconciled_orphans = _la.timed("dispatch.reconcile_orphaned_running", reconcile_orphaned_running, conn)
+            result.reconciled_orphans = timed("dispatch.reconcile_orphaned_running", reconcile_orphaned_running, conn)
     if reconcile_orphans:
-        _la.timed("dispatch.close_dangling_runs", close_dangling_runs, conn)  # ended/non-running tasks can still retain a running run
-        result.released_leftover_claims = _la.timed("dispatch.release_leftover_local_claims", release_leftover_local_claims, conn)  # not gated: not running [daveey]
+        timed("dispatch.close_dangling_runs", close_dangling_runs, conn)  # ended/non-running tasks can still retain a running run
+        result.released_leftover_claims = timed("dispatch.release_leftover_local_claims", release_leftover_local_claims, conn)  # not gated: not running [daveey]
     if has_running:
-        result.stale = _la.timed("dispatch.detect_stale_running", detect_stale_running, conn, stale_timeout_seconds=stale_timeout_seconds)
+        result.stale = timed("dispatch.detect_stale_running", detect_stale_running, conn, stale_timeout_seconds=stale_timeout_seconds)
     from hermes_cli.kanban_db_dispatch_claims import crash_sweep_due  # G2: runs while a local pid may have died
     if crash_sweep_due(conn, has_running):
-        result.crashed = _la.timed("dispatch.detect_crashed_workers", detect_crashed_workers, conn, board=board)
+        result.crashed = timed("dispatch.detect_crashed_workers", detect_crashed_workers, conn, board=board)
         result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
         result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
         result.reclaimed += len(getattr(detect_crashed_workers, "_last_owner_restarted", []))
     if has_running:
-        result.timed_out = _la.timed("dispatch.enforce_max_runtime", enforce_max_runtime, conn)
+        result.timed_out = timed("dispatch.enforce_max_runtime", enforce_max_runtime, conn)
     from hermes_cli.kanban_supervisor_requests import dispatcher_drain  # [daveey] non-worker executor
-    result.supervisor_requests = [] if dry_run else _la.timed("dispatch.dispatcher_drain", dispatcher_drain, conn, board=board)
+    result.supervisor_requests = [] if dry_run else timed("dispatch.dispatcher_drain", dispatcher_drain, conn, board=board)
     from hermes_cli.kanban_continuation import wake_due_continuations
-    result.woken_continuations = _la.timed("dispatch.wake_due_continuations", wake_due_continuations, conn)
-    result.promoted = _la.timed("dispatch.recompute_ready", _kb.recompute_ready, conn, failure_limit=failure_limit)
+    result.woken_continuations = [*getattr(result, "woken_continuations", []),
+                                  *_la.timed("dispatch.wake_due_continuations", wake_due_continuations, conn)]
+    result.promoted = timed("dispatch.recompute_ready", _kb.recompute_ready, conn, failure_limit=failure_limit)
     from hermes_cli.kanban_decision_maintenance import run as decision_upkeep
-    _la.timed("dispatch.decision_upkeep", decision_upkeep, conn, result, board=board, dry_run=dry_run)
+    timed("dispatch.decision_upkeep", decision_upkeep, conn, result, board=board, dry_run=dry_run)
 
 
 def _tick_spawn_budget(
@@ -2126,13 +2123,19 @@ def _dispatch_once_locked(
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
     result = DispatchResult()
+    from hermes_cli.kanban_dispatch_wake_protection import WakeProtection
+    wake_protection = WakeProtection(conn, result, dry_run=dry_run)
+    timed = wake_protection.timed
+    wake_protection.checkpoint()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board, dry_run=dry_run,
+        wake_protection=wake_protection,
     )
     if not dry_run:
         from hermes_cli.kanban_dispatch_maintenance import sweep
-        _la.timed("dispatch.maintenance", sweep, conn, result, _guard_notice, _parent_unclaimed)
+        timed("dispatch.maintenance", sweep, conn, result, _guard_notice, _parent_unclaimed,
+              checkpoint=wake_protection.checkpoint)
     from hermes_cli.kanban_gateway_drain import dispatch_paused
     if dispatch_paused():
         _kb._log.info('kanban dispatcher: scheduling paused — gateway draining or restart requested')
@@ -2140,7 +2143,7 @@ def _dispatch_once_locked(
     if not dry_run:
         from hermes_cli.kanban_worker_placement import dispatch_tick
         try:
-            _la.timed("dispatch.worker_placement", dispatch_tick, conn)
+            timed("dispatch.worker_placement", dispatch_tick, conn)
         except Exception:
             logger = _kb._log
             logger.warning("kanban worker placement failed; continuing local dispatch", exc_info=True)
@@ -2152,7 +2155,7 @@ def _dispatch_once_locked(
         return result
     from hermes_cli.kanban_dispatch_storage import finish_preclaim
     finish_preclaim(conn)  # pickup can claim/import work; never cancel its custody writes
-    may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
+    may_spawn, spawn_budget = timed("dispatch.spawn_budget", _tick_spawn_budget, conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
                                                  board=board, spawn_quota=spawn_quota)
     if not may_spawn:
         from hermes_cli.kanban_candidate_receipts import global_hold
@@ -2165,16 +2168,17 @@ def _dispatch_once_locked(
             sweep_stale_triage(conn, default_assignee=_resolve_default_assignee(default_assignee))
         except Exception:
             _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
-    unjudged = _kb._sync.worker_pickup(conn, pickup_budget(result, spawn_budget), dry_run, _profile_exists_fn) or ()
+    unjudged = timed("dispatch.worker_pickup", _kb._sync.worker_pickup, conn, pickup_budget(result, spawn_budget), dry_run, _profile_exists_fn) or ()
     # Placement filters executors, not home budget decisions; refused cards must still be checked below.
     # Otherwise a worker-only card has no decision owner: workers correctly skip foreign-copy budgets.
     from hermes_cli.kanban_hub_admission_claim import screened_lanes
-    all_ready, all_review, unjudged = screened_lanes(conn, dry_run, review_dispatch_enabled(), unjudged)
+    all_ready, all_review, unjudged = timed("dispatch.screened_lanes", screened_lanes, conn, dry_run, review_dispatch_enabled(), unjudged)
     result.admission_deferred = sorted(unjudged)
     from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows, hold_ineligible_budgets
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
     review_rows = _eligible_rows(conn, all_review, "review", result) if all_review else []
     hold_ineligible_budgets(conn, result, dry_run=dry_run)
+    wake_protection.checkpoint()
     result.lane_candidates = len(all_ready) + len(all_review)
     # Per-profile cap: busy rows are deferred, not misclassified as unassigned.
     # Resolve before lane reservation so it sees what the lane loop would refuse.
@@ -2200,6 +2204,7 @@ def _dispatch_once_locked(
 
     lane_by_id = {row["id"]: "review" for row in review_rows}
     rows = order_with_remote_waiters(conn, ready_rows + review_rows)
+    wake_protection.checkpoint()
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
@@ -2209,6 +2214,7 @@ def _dispatch_once_locked(
     spawned = 0
     from hermes_cli.kanban_candidate_receipts import note, lane_refused, capacity_tail
     for index, row in enumerate(rows):
+        wake_protection.checkpoint()
         if spawn_budget is not None and spawned >= spawn_budget:
             capacity_tail(rows[index:], lane_by_id, "spawn budget exhausted")
             break
@@ -2226,7 +2232,7 @@ def _dispatch_once_locked(
             if not row_assignee:
                 note(row["id"], "prefilter", "unassigned", stage="claim", status=lane)
                 continue
-        if _dispatch_lane_task(conn, row, row_assignee, result, lane=lane, **lane_kwargs):
+        if timed("dispatch.lane_task", _dispatch_lane_task, conn, row, row_assignee, result, lane=lane, **lane_kwargs):
             spawned += pool_take(result, row)
         else:
             lane_refused(row["id"], result, status=lane)
@@ -2265,13 +2271,7 @@ def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
     pin_hermes_tree_on_pythonpath(env, Path(_startup_fast.project_root_str()))
 
 
-def _absolute_hermes_path(path: str) -> str:
-    """Return an absolute filesystem path for a resolved Hermes shim."""
-    expanded = os.path.expanduser(path)
-    return expanded if os.path.isabs(expanded) else os.path.abspath(expanded)
-
-
-from hermes_cli.kanban_dispatch_paths import _looks_like_path, _is_windows_batch_shim
+from hermes_cli.kanban_dispatch_paths import _looks_like_path, _is_windows_batch_shim, _absolute_hermes_path
 
 
 def _path_search_names(command: str) -> list[str]:

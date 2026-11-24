@@ -116,6 +116,29 @@ def test_a_relayed_park_keeps_one_live_probe_and_its_wake_reaches_the_home_board
     assert "build 559 seen" in _events(home.conn, tid, "condition_met")[-1].payload["output"]
 
 
+def test_home_timer_reserves_final_run_for_relayed_probe(gws, tmp_path):
+    from hermes_cli import kanban_spend_budget as budget
+    from hermes_cli.kanban_continuation import _wake_parks
+    home, worker = gws
+    flag = tmp_path / 'terminal'
+    tid = _relayed_park(home, worker, flag)
+    home.round()
+    home.enter()
+    budget.set_override(home.conn, tid, runs=1, by='owner', reason='one settlement run')
+    assert kwc.get_state(home.conn, tid) is None
+    assert _wake_parks(home.conn, 4070908801)[0] == []
+    assert _status(home.conn, tid) == 'scheduled'
+    assert len(_events(home.conn, tid, 'terminal_run_reserved')) == 1
+    flag.write_text('bb land: exit 0\n')
+    worker.enter()
+    kwc.run_due_wake_checks(worker.conn, now=int(time.time()) + 301, wait=True)
+    worker.round()
+    home.round()
+    assert _status(home.conn, tid) == 'ready'
+    assert _events(home.conn, tid, 'condition_met')[-1].payload['output'] == 'bb land: exit 0'
+    assert budget.hold(home.conn, tid) is None
+
+
 def test_a_relayed_probe_reports_alive_to_the_home_board(gws, tmp_path):
     home, worker = gws
     tid = _relayed_park(home, worker, tmp_path / "flag")

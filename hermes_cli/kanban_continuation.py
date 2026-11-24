@@ -348,7 +348,10 @@ def _wake_parks(conn: sqlite3.Connection, now: Optional[int], passive_policy=Non
             # Invariant: every scheduled card has a wake or becomes blocked. [daveey]
             if not _enforce_wake_invariant(conn, tid, row[1], now, woken):
                 info = missing_wake(conn, tid)
-                pending.append(int(info["wake_at"]) if info and info.get("wake_at") is not None else now)
+                due = int(info["wake_at"]) if info and info.get("wake_at") is not None else now
+                if due <= now and _reserved_for(conn, tid, park):
+                    due = now + 120  # reserved final run: an expired implied timer must not stay hot
+                pending.append(due)
             continue
         from hermes_cli import kanban_passive_intake as passive
         quiet_until = passive.quiet_until(conn, tid, park, now, policy=passive_policy)
@@ -366,6 +369,10 @@ def _wake_parks(conn: sqlite3.Connection, now: Optional[int], passive_policy=Non
                 continue  # the park moved or was spent since the read above: the next tick reads it again
             if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=wake_at):
                 continue  # a stale copy: the card completed after it parked (t_01a1c7b27ca3b496) [daveey]
+            from hermes_cli.kanban_terminal_run import reserve
+            if reserve(conn, tid, CONTINUATION_WOKEN_EVENT):
+                pending[-1] = now + 120  # do not keep an expired generic timer hot
+                continue
             landing = kb._landing_status_after_parents(conn, tid)
             new_status = "review" if landing == "ready" and resume == "review" else landing
             cur = conn.execute(
@@ -380,6 +387,17 @@ def _wake_parks(conn: sqlite3.Connection, now: Optional[int], passive_policy=Non
 
 
 HUMAN_BLOCK_KINDS = ("needs_input", "capability")
+
+
+def _reserved_for(conn: sqlite3.Connection, tid: str, park: dict) -> bool:
+    """True when this card is still ``scheduled`` and its park holds a ``terminal_run_reserved`` mark.
+    Any other still-due case (skipped wake, moved park) keeps its immediate retry."""
+    if park.get("event_id") is None or conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ? AND status = 'scheduled'", (tid,)).fetchone() is None:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'terminal_run_reserved' "
+        "AND json_extract(payload, '$.park_event_id') IS ?", (tid, park["event_id"])).fetchone() is not None
 
 
 def missing_wake(conn: sqlite3.Connection, task_id: str, *, park: Optional[dict] = None) -> Optional[dict]:
@@ -439,6 +457,9 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
         if (again.get("event_id"), again.get("superseded")) != (park.get("event_id"), park.get("superseded")):
             return False  # a park arrived (or was spent) since the read above: the next tick reads it
         if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=info["wake_at"]):
+            return False
+        from hermes_cli.kanban_terminal_run import reserve
+        if reserve(conn, tid, CONTINUATION_WOKEN_EVENT):
             return False
         landing = kb._landing_status_after_parents(conn, tid)
         cur = conn.execute(

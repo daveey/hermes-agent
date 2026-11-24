@@ -5,6 +5,12 @@ import os
 import re
 
 
+def _absolute_hermes_path(path: str) -> str:
+    """Return an absolute filesystem path for a resolved Hermes shim."""
+    expanded = os.path.expanduser(path)
+    return expanded if os.path.isabs(expanded) else os.path.abspath(expanded)
+
+
 def _looks_like_path(value: str) -> bool:
     """Return true when a command override is an explicit path, not a name."""
     expanded = os.path.expanduser(value)
