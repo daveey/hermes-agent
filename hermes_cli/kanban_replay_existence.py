@@ -113,7 +113,7 @@ def resume(conn, expected_op, reason):
     """Explicit retry clears only a fault still bound to the exact pending slot."""
     if not reason.strip():
         raise ValueError('owner recovery reason required')
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         held = fault(conn)
         state = journal.snapshot(conn)
         pending = state['pending']

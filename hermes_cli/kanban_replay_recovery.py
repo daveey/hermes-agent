@@ -155,9 +155,22 @@ def turn(conn, board):
 def resume(conn, expected_op, reason):
     if not reason.strip():
         raise ValueError('owner recovery reason required')
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         held = fault(conn)
         if held is None or expected_op != held['op_id'] or _bound(held) != _identity(journal.snapshot(conn)):
             raise ValueError('transport recovery identity changed; inspect without discarding custody')
         conn.execute('DELETE FROM kanban_replay_transport_fault1 WHERE id=1')
+    return dict(action='retry_exact', op_id=expected_op, reason=reason[:500])
+
+
+def resume_all(conn, expected_op, reason):
+    """Release all same-operation retry holds atomically, or preserve every hold."""
+    from hermes_cli import kanban_replay_existence as existence
+    with write_txn(conn):
+        row_hold = existence.fault(conn)
+        transport_hold = fault(conn)
+        if row_hold is not None:
+            existence.resume(conn, expected_op, reason)
+        if transport_hold is not None or row_hold is None:
+            resume(conn, expected_op, reason)
     return dict(action='retry_exact', op_id=expected_op, reason=reason[:500])
