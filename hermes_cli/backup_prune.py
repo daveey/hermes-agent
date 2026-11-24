@@ -56,6 +56,13 @@ def prune_after_snapshot(
     cap never held it, and keeping them all leaked one snapshot per update (392 of
     them, 53 GB, behind a 22 GB state.db).
     """
+    if oversized_skipped:
+        print(
+            "  ⚠ DB file(s) skipped for size: "
+            + ", ".join(oversized_skipped)
+            + " — any older snapshot that contains them is kept"
+        )
+        logger.warning("Quick snapshot skipped oversized DB file(s): %s", ", ".join(oversized_skipped))
     if failed_dbs:
         logger.warning(
             "Skipping snapshot prune because %d DB(s) failed to capture "
@@ -66,14 +73,9 @@ def prune_after_snapshot(
     if not oversized_skipped:
         _prune_quick_snapshots(root, keep=keep)
         return
-    print(
-        "  ⚠ DB file(s) skipped for size: "
-        + ", ".join(oversized_skipped)
-        + " — older snapshots that contain them are kept"
-    )
-    logger.warning("Quick snapshot skipped oversized DB file(s): %s", ", ".join(oversized_skipped))
+    # max(keep, 1): an incomplete snapshot never prunes itself (keep=0 did nothing here before).
     _prune_quick_snapshots(
         root,
-        keep=keep,
+        keep=max(keep, 1),
         protect=lambda d: any((d / rel).is_file() for rel in oversized_skipped),
     )

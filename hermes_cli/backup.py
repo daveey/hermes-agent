@@ -1105,7 +1105,6 @@ _QUICK_STATE_FILES = (
 )
 
 
-
 def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
     home = hermes_home or get_hermes_home()
     return home / _QUICK_SNAPSHOTS_DIR
@@ -1299,10 +1298,9 @@ def _create_quick_snapshot_locked(
 
     manifest: dict[str, int] = {}  # rel_path -> file size
     failed_dbs: list[str] = []  # present *.db that could not be snapshotted
-    # #68805: track protected DB files skipped for size — they are snapshot
-    # incompleteness just like a failed copy, so pruning must be suppressed
-    # to preserve the older complete snapshot that may contain the only
-    # recoverable database.
+    # #68805: track protected DB files skipped for size — the snapshot is
+    # incomplete, so pruning must leave any older snapshot that still holds
+    # one of them (backup_prune.prune_after_snapshot).
     oversized_skipped: list[str] = []
 
     for rel in _QUICK_STATE_FILES:
@@ -1443,7 +1441,7 @@ def _create_quick_snapshot_locked(
     # Auto-prune. Defaults preserve historical manual /snapshot behavior; callers
     # with known high-churn safety snapshots (for example pre-update) can pass a
     # smaller keep value so large state.db copies do not accumulate indefinitely.
-    # Auto-prune policy (#68805 and the size-capped leak) lives in backup_prune.
+    # The policy for an incomplete snapshot (#68805) lives in backup_prune.
     prune_after_snapshot(
         root, _QUICK_DEFAULT_KEEP if keep is None else keep, failed_dbs, oversized_skipped
     )

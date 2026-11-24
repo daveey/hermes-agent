@@ -56,3 +56,41 @@ class TestPruneAfterSnapshot:
         snap_ids = {s["id"] for s in backup.list_quick_snapshots(limit=100, hermes_home=hermes_home)}
         assert {first_id, second_id} <= snap_ids
         assert third_id is None or third_id in snap_ids
+
+    def test_nested_board_db_skipped_for_size_protects_the_snapshot_holding_it(self, tmp_path):
+        from hermes_cli.backup_prune import prune_after_snapshot
+
+        root = tmp_path / "state-snapshots"
+        rel = "kanban/boards/demo/kanban.db"
+        for name, holds in (("20260101-000001", True), ("20260101-000002", False), ("20260101-000003", False)):
+            (root / name).mkdir(parents=True)
+            if holds:
+                (root / name / rel).parent.mkdir(parents=True)
+                (root / name / rel).write_bytes(b"db")
+
+        prune_after_snapshot(root, 1, [], [rel])
+
+        assert sorted(d.name for d in root.iterdir()) == ["20260101-000001", "20260101-000003"]
+
+    def test_size_skip_with_keep_zero_never_prunes_the_new_snapshot(self, tmp_path):
+        from hermes_cli.backup_prune import prune_after_snapshot
+
+        root = tmp_path / "state-snapshots"
+        for name in ("20260101-000001", "20260101-000002"):
+            (root / name).mkdir(parents=True)
+
+        prune_after_snapshot(root, 0, [], ["state.db"])
+
+        assert [d.name for d in root.iterdir()] == ["20260101-000002"]
+
+    def test_failed_and_oversized_keeps_everything_and_still_reports_the_size_skip(self, tmp_path, capsys):
+        from hermes_cli.backup_prune import prune_after_snapshot
+
+        root = tmp_path / "state-snapshots"
+        for name in ("20260101-000001", "20260101-000002", "20260101-000003"):
+            (root / name).mkdir(parents=True)
+
+        prune_after_snapshot(root, 1, ["kanban.db"], ["state.db"])
+
+        assert len(list(root.iterdir())) == 3
+        assert "skipped for size: state.db" in capsys.readouterr().out

@@ -1614,10 +1614,10 @@ class TestQuickSnapshot:
 
 
 
-    def test_oversized_db_suppresses_pruning(self, hermes_home, capsys):
-        """#68805: an oversized state.db skipped for size must suppress
-        pruning so the older complete snapshot (containing the only
-        recoverable database) is preserved.
+    def test_oversized_db_keeps_the_older_complete_snapshot(self, hermes_home, capsys):
+        """#68805: an oversized state.db skipped for size must not prune
+        the older complete snapshot (containing the only
+        recoverable database).
 
         Reproduces the reviewer's scenario: keep=1 + a state.db exceeding
         the size cap → the new snapshot omits state.db, failed_dbs stays
