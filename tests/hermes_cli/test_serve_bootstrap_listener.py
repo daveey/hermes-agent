@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 import pytest
 
 
-def request(port, path):
-    client = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+def request(port, path, host='127.0.0.1'):
+    client = http.client.HTTPConnection(host, port, timeout=2)
     try:
         client.request('GET', path)
         response = client.getresponse()
@@ -45,7 +45,8 @@ def test_listener_health_and_closed_application_gate_before_assembly():
 
 
 @pytest.mark.asyncio
-async def test_handoff_keeps_answering_until_real_asgi_lifespan_is_ready():
+@pytest.mark.parametrize('host', ['127.0.0.1', 'localhost'])
+async def test_handoff_keeps_answering_until_real_asgi_lifespan_is_ready(host):
     import uvicorn
     from fastapi import FastAPI
     from hermes_cli.serve_bootstrap_listener import BootstrapListener
@@ -64,7 +65,7 @@ async def test_handoff_keeps_answering_until_real_asgi_lifespan_is_ready():
     def health():
         return {'ok': True}
 
-    with BootstrapListener('127.0.0.1', 0) as listener:
+    with BootstrapListener(host, 0) as listener:
         config = uvicorn.Config(app, log_config=None)
         config.load()
         server = uvicorn.Server(config)
@@ -78,8 +79,10 @@ async def test_handoff_keeps_answering_until_real_asgi_lifespan_is_ready():
             release.set()
             await asyncio.wait_for(startup, 2)
             assert listener.stopped
-            status, body = await asyncio.to_thread(request, listener.port, '/api/health')
-            assert status == 200 and b'"ok":true' in body
+            for bound in listener.servers:
+                status, body = await asyncio.to_thread(
+                    request, listener.port, '/api/health', bound.server_address[0])
+                assert status == 200 and b'"ok":true' in body
         finally:
             release.set()
             await startup

@@ -1584,7 +1584,8 @@ def _on_server_started(
     if headless:
         # Auth-gated JSON-RPC/WS only — announce the bind, not a URL. flush:
         # a piped stdout otherwise surfaces this minutes after the sentinel.
-        print(f"  Hermes backend listening on {host}:{actual_port}", flush=True)
+        # stdout belongs to the machine sentinels, even before gateway import.
+        print(f"  Hermes backend listening on {host}:{actual_port}", file=sys.stderr, flush=True)
     else:
         from hermes_cli.url_utils import format_url_host
 

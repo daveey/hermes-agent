@@ -652,7 +652,10 @@ async def gateway_ws(ws: WebSocket) -> None:
     if not await _close_unless_sidecar_allowed(ws, allow_internal=True, socket=GATEWAY_SOCKET):
         return
     from hermes_cli.mcp_startup import start_deferred_mcp_discovery_now
-    from tui_gateway.ws import handle_ws
+    import importlib
+
+    # First-use gateway assembly must not stall REST readiness on this loop.
+    handle_ws = (await asyncio.to_thread(importlib.import_module, 'tui_gateway.ws')).handle_ws
 
     # First chat client of a standalone dashboard: fire the discovery armed at boot (no-op
     # otherwise). Off-loop: the first act is a config read + the ~350 ms `mcp` SDK import.

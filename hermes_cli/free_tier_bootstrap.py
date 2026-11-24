@@ -274,8 +274,13 @@ def _due_changed() -> None:
 
 def _broadcast(record: SetupRecord) -> None:
     try:
-        from tui_gateway.server import _broadcast_global_event
-        _broadcast_global_event(SETUP_READY_EVENT, record.as_payload())
+        import sys
+        server = sys.modules.get('tui_gateway.server')
+        broadcast = getattr(server, '_broadcast_global_event', None)
+        if broadcast is not None:
+            broadcast(SETUP_READY_EVENT, record.as_payload())
+        # No imported server means no connected clients. Future clients read the
+        # retained setup record; publishing it must not initialize the gateway.
     except Exception as exc:  # no serve process (plain CLI): nobody to tell
         logger.debug("setup.ready not broadcast: %s", exc)
 
