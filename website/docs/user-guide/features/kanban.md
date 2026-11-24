@@ -763,6 +763,9 @@ decision is recorded and it waits in `todo` as a dependency wait. The caller mus
 card is refused. A provider safety restriction (`safety_restricted`) and a containment hold
 (`containment_hold`) are refused, a card no stop holds is `not_held`, and a rerun is
 `already_released`; a refusal writes nothing. Only a card whose home is this board is released.
+The Desktop Unblock button on such a card's ask, or on its decision card's ask, makes the same release
+(locally through the user-steps mirror, remotely through `kanban_card_answer` on the card's home), recorded as
+a human act with the note `Desktop Unblock, operation <id>`; an ask with its own choices keeps the plain unblock.
 
 An over-budget card that **published** an OPEN PR on
 `softmax-universe/daveey-hermes` targeting `main` is spared from a new spend

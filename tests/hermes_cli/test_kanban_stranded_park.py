@@ -128,6 +128,8 @@ def test_spend_stop_on_dead_chat_gets_request_and_desk(kanban_home, own_gateway)
                 f"(`hermes kanban release {tid}`); safety holds still apply") in request["action"]
         assert "cannot release this hold" not in request["action"]
         assert "A) Unblock: Release this card to finish its acceptance: 10 more runs" in request["scope"]
+        assert "Recommend: A - release it to finish" in request["scope"]
+        assert "without a bounded proposal" not in request["scope"]
         assert request["why_human"].startswith("Tried:") and "Only you can:" in request["why_human"]
         assert "spend_budget_triaged" in request["evidence"] and "runs=" in request["evidence"]
         assert "choices" not in request
@@ -609,23 +611,88 @@ def test_archive_answer_archives_and_unblock_answer_resumes(kanban_home, own_gat
         assert task.status not in ("triage", "blocked", "archived") and task.human_request is None
 
 
-def test_spend_pending_unblock_ask_names_release_and_release_frees_the_card(kanban_home, own_gateway):
-    """The ask on a spend-stopped card names the one-step release, and that release frees the card. A remote
-    Desktop answer (kanban_card_answer) is a plain unblock and still refuses a pending spend decision: only the
-    local Desktop click (the user-steps mirror) and the command release."""
-    from hermes_cli import kanban_card_answer as ca
-    from hermes_cli import kanban_release
+def test_spend_pending_remote_unblock_answer_releases_the_card(kanban_home, own_gateway):
+    """The ask on a spend-stopped card names the one-step release, and the remote Desktop Unblock answer
+    (kanban_card_answer) is that release, recorded as the human act the verified Desktop operation is."""
     with kbc.connect_closing() as conn:
         tid = _spend_stopped_on_dead_chat(conn, kanban_home)
         assert _sweep(conn, now=_later(3), cfg={}) == [tid]
         assert f"`hermes kanban release {tid}`" in json.loads(_row(conn, tid)[2])["action"]
-        # The fence's spend_decision_pending refusal surfaces from apply() as ask_changed_or_held.
+        receipt = _answer(conn, tid, "unblock")
+        assert receipt["operationId"] == "desktop-op-unblock" and receipt["choice"] == "unblock"
+        assert kb.get_task(conn, tid).status == "ready" and not decision.pending(conn, tid)
+        (mandate,) = [r[0] for r in conn.execute(
+            "SELECT body FROM task_comments WHERE task_id=? AND body LIKE 'Released to finish%'", (tid,))]
+        assert mandate.endswith("Desktop Unblock, operation desktop-op-unblock")
+        written = [json.loads(r[0]) for r in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='commented'", (tid,))]
+        assert any(p.get("writer_kind") == "human" for p in written)
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='card_answer_released'",
+                            (tid,)).fetchone()[0] == 1
+
+
+def _retry(conn, tid, generation):
+    """The same Desktop operation delivered again, with the generation it was recorded against."""
+    from hermes_cli import kanban_card_answer as ca
+    request = {"ownerGateway": "owner", "ownerProfile": "default", "board": "default", "task": tid,
+               "generation": generation, "choice": "unblock", "operationId": "desktop-op-unblock"}
+    return ca.apply(conn, request, owner_gateway="owner", owner_profile="default", board="default",
+                    verify_source=lambda req: {"gateway": "origin", "recorded": True, "answer": req})
+
+
+def test_remote_unblock_retry_returns_the_receipt_and_a_lost_receipt_is_recorded(kanban_home, own_gateway):
+    from hermes_cli import kanban_card_answer as ca
+    from hermes_cli import kanban_release
+    with kbc.connect_closing() as conn:
+        done, crashed = _spend_stopped_on_dead_chat(conn, kanban_home), _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert sorted(_sweep(conn, now=_later(3), cfg={})) == sorted([done, crashed])
+        generation = ca.snapshot(conn, done)["generation"]
+        receipt = _answer(conn, done, "unblock")
+        assert _retry(conn, done, generation) == receipt
+        # The release landed and the process died before the receipt: the retry records it, releasing nothing more.
+        generation = ca.snapshot(conn, crashed)["generation"]
+        out = kanban_release.release(conn, crashed, writer=kanban_release.human_writer("desktop-operation:x"),
+                                     author="user-steps", note=kanban_release.desktop_note("desktop-op-unblock"))
+        assert out["outcome"] == "released"
+        recorded = _retry(conn, crashed, generation)
+        assert recorded["operationId"] == "desktop-op-unblock" and _retry(conn, crashed, generation) == recorded
+        assert conn.execute("SELECT COUNT(*) FROM task_comments WHERE task_id=? AND body LIKE 'Released to finish%'",
+                            (crashed,)).fetchone()[0] == 1
+
+
+def test_remote_custom_choice_answer_on_a_held_card_is_unchanged(kanban_home, own_gateway, monkeypatch):
+    from hermes_cli import kanban_card_answer as ca
+    from hermes_cli import kanban_release
+    monkeypatch.setattr(kanban_release, "release", lambda *a, **kw: pytest.fail("custom choices never release"))
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        ask = json.loads(_row(conn, tid)[2])
+        ask["choices"] = [{"label": "Unblock", "value": "unblock"}, {"label": "Later", "value": "later"}]
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET human_request=? WHERE id=?", (json.dumps(ask), tid))
         with pytest.raises(ca.AnswerRefused, match="ask_changed_or_held|spend_decision_pending"):
             _answer(conn, tid, "unblock")
-        assert _row(conn, tid)[0] == "triage" and _row(conn, tid)[2]
-        out = kanban_release.release(conn, tid, writer=kanban_release.human_writer("test-operator"))
-        assert out["outcome"] == "released", out
-        assert kb.get_task(conn, tid).status == "ready"
+        assert _row(conn, tid)[0] == "triage" and decision.pending(conn, tid)
+
+
+def test_remote_unblock_refused_by_safety_leaves_the_ask_and_records_the_reason(kanban_home, own_gateway):
+    from hermes_cli import kanban_card_answer as ca
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        kb._append_event(conn, tid, "decision_hold_restricted", {"cause": "safety_refusal"})
+        conn.commit()
+        for _ in range(2):  # a redelivery says it once
+            with pytest.raises(ca.AnswerRefused, match="release_refused: safety_restricted"):
+                _answer(conn, tid, "unblock")
+        status, _, raw = _row(conn, tid)
+        assert status == "triage" and json.loads(raw)["action"]
+        notes = [r[0] for r in conn.execute(
+            "SELECT body FROM task_comments WHERE task_id=? AND author='user-steps'", (tid,))]
+        assert len(notes) == 1 and "did not release" in notes[0] and "desktop-op-unblock" in notes[0]
+        assert not conn.execute("SELECT 1 FROM task_comments WHERE task_id=? AND body LIKE 'Released to finish%'",
+                                (tid,)).fetchone()
 
 
 # --- the stale-sweep deferral is bounded -----------------------------------------------------------------------------

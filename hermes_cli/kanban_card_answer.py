@@ -121,7 +121,8 @@ def _valid_receipt(conn, task, request, fingerprint, kind, receipt) -> bool:
 def _receipt(conn, request, fingerprint):
     task, operation_id = request["task"], request["operationId"]
     for row in conn.execute(
-        "SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN ('unblocked','archived','card_answer_recorded') ORDER BY id DESC",
+        "SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN "
+        "('unblocked','archived','card_answer_recorded','card_answer_released') ORDER BY id DESC",
         (task,),
     ):
         payload = _payload(row[1])
@@ -134,6 +135,47 @@ def _receipt(conn, request, fingerprint):
             raise AnswerRefused("operation_receipt_invalid")
         return receipt
     return None
+
+
+RELEASED = "card_answer_released"  # receipt of a default Unblock that released a spend/scope stop
+
+
+def _record_release(conn, request, fingerprint, receipt, note, provenance):
+    """The receipt and its decision comment in one transaction, after the release landed."""
+    with kb.write_txn(conn):
+        old = _receipt(conn, request, fingerprint)
+        if old is not None:
+            return old
+        kb.add_comment(conn, request["task"], "user-steps", note, writer_kind="agent", recorded_decision=provenance)
+        kb._append_event(conn, request["task"], RELEASED, {FIELD: receipt})
+    return _receipt(conn, request, fingerprint)
+
+
+def _release(conn, request, fingerprint, receipt, note, provenance, fence):
+    """A default Unblock on a card a spend or scope stop holds (or on the decision card filed for one) is the
+    user's authenticated Desktop operation: release the stopped card as that human act (``kanban_release``).
+    None when the card is not held that way; the caller then applies the plain unblock. A refused release
+    (provider safety, containment) leaves the ask in place and records the reason once per operation.
+
+    The courier delivers the answer to the card's home (``_owner``), so the bound card is local here; a decision
+    card whose stopped card lives on another board is refused by ``release`` (``no_such_task``) like any other."""
+    from hermes_cli import kanban_release
+    task, operation = request["task"], request["operationId"]
+    if kanban_release.held(conn, task) is None:
+        return None
+    error = fence(conn)
+    if error:
+        raise AnswerRefused(error)
+    out = kanban_release.release(conn, task, writer=kanban_release.human_writer("desktop-operation:" + operation),
+                                 author="user-steps", note=kanban_release.desktop_note(operation))
+    if out["outcome"] == "refused":
+        reason = (f"Desktop Unblock did not release {out['target']} ({out['refusal']}): {out['message']}"
+                  f"\nOperation: {operation}")
+        if not conn.execute("SELECT 1 FROM task_comments WHERE task_id=? AND author='user-steps' AND body=?",
+                            (task, reason)).fetchone():
+            kb.add_comment(conn, task, "user-steps", reason, system=True)
+        raise AnswerRefused(f"release_refused: {out['refusal']}")
+    return _record_release(conn, request, fingerprint, receipt, note, provenance)
 
 
 def _owner(conn, task, gateway, *, require_primary=False):
@@ -192,7 +234,18 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
             old = _receipt(conn, request, fingerprint)
             if old is not None:
                 return old
-            raise AnswerRefused("stale_ask")
+        # A release by this very operation that died before its receipt: the card left its ask because the
+        # click worked. Record the receipt now instead of refusing the retry.
+        from hermes_cli import kanban_release
+        if request.get("mode") != "comment" and request["choice"] == "unblock" and kanban_release.released_by(
+                conn, request["task"], kanban_release.desktop_note(request["operationId"])):
+            return _record_release(
+                conn, request, fingerprint,
+                {**request, "originGateway": origin, "fingerprint": fingerprint, "destination": "kanban_ask",
+                 "executionStarted": False, "decisionProvenance": "recorded_desktop_operation"},
+                "Choice recorded in Desktop (remote): " + encoded({"label": "Unblock", "value": "unblock"})
+                + "\nOperation: " + request["operationId"], {**request, "originGateway": origin})
+        raise AnswerRefused("stale_ask")
     options = current["ask"].get("choices") or [
         {"label": "Unblock", "value": "unblock"}, {"label": "Archive", "value": "archive"},
     ]
@@ -208,18 +261,24 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
                "decisionProvenance": "recorded_desktop_operation"}
     note = "Choice recorded in Desktop (remote): " + encoded(choices[0]) + "\nOperation: " + request["operationId"]
 
-    def fence(c):
+    def fence(c, releasing=False):
         _owner(c, request['task'], owner_gateway, require_primary=require_primary)
         from hermes_cli.kanban_spend_decision import pending
         from hermes_cli.kanban_containment_guard import pending as containment_pending
-        if containment_pending(c, request['task']):
+        if containment_pending(c, request['task']) and not releasing:  # release refuses it with the reason
             return "containment_hold"
-        if not archive and not informational and pending(c, request["task"]):
+        if not archive and not informational and not releasing and pending(c, request["task"]):
             return "spend_decision_pending"
         if _receipt(c, request, fingerprint):
             return "already_recorded"
         fresh = snapshot(c, request["task"])
         return None if fresh == current else "stale_ask"
+
+    if not archive and not informational and not current["ask"].get("choices") and request["choice"] == "unblock":
+        released = _release(conn, request, fingerprint, receipt, note, {**request, "originGateway": origin},
+                            lambda c: fence(c, releasing=True))
+        if released is not None:
+            return released
 
     transition = kb.archive_task if archive else kb.unblock_task
     from hermes_cli.kanban_reason_comment import RecordedDecisionComment

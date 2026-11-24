@@ -55,13 +55,20 @@ def request(conn, row, entry, age, evidence):
     # The stopped card an Unblock releases (kanban_release): this card, or the one this decision card was filed for.
     from hermes_cli import kanban_release
     stopped, runs = kanban_release.held(conn, tid), kanban_release.default_runs()
+    from hermes_cli.kanban_refusal_receipt import restricted as safety_restricted
+    unsafe = bool(stopped) and safety_restricted(conn, stopped)
     if stopped:
-        resume = (f'Release {"the stopped work" if administrative else "this card"} to finish its acceptance: {runs} '
+        resume = ('No release: a provider safety hold stays on the work; the click only records that refusal.'
+                  if unsafe else
+                  f'Release {"the stopped work" if administrative else "this card"} to finish its acceptance: {runs} '
                   'more runs under a goal-level scope; it can be stopped again. Safety holds still apply.')
         drop = ('Dismiss this decision notice; source work stays stopped with no further spend; reopen to reconsider.'
                 if administrative else
                 'Archive this card and leave its work unfinished; no further spend; reopen to reconsider.')
-        recommendation = 'B - avoid authorizing more work without a bounded proposal.'
+        # A scope or budget stop is a pause on work that already ran, not a finding against it: finishing is the
+        # default. Only a provider safety hold keeps the cautious line.
+        recommendation = ('B - avoid authorizing more work without a bounded proposal.' if unsafe else
+                          'A - release it to finish; the stop was a scope or budget stop, not a safety hold.')
     elif administrative:
         resume = ('Return the decision to an agent to record your direction; source work stays stopped, '
                   'with no further spend until separately authorized.')
@@ -78,7 +85,9 @@ def request(conn, row, entry, age, evidence):
         recommendation = 'B - leave work stopped rather than restart it without a current owner or plan.'
     # Preserve the existing Unblock/Archive transition contract. Explicit choices currently turn
     # even an archive-valued answer into an unblock; describe the two real controls in the brief.
-    release = (f"Unblock = release it to finish with {runs} more runs under a goal-level scope "
+    release = ("Unblock = no release: a provider safety hold stays and the click only records that refusal"
+               if unsafe else
+               f"Unblock = release it to finish with {runs} more runs under a goal-level scope "
                f"(`hermes kanban release {stopped}`); safety holds still apply" if stopped else
                f"Unblock = ask the owner to record a bounded decision; the button cannot release this hold. "
                f"For an ordinary budget stop use `hermes kanban promote {tid} --reason '<what changed>'`; "

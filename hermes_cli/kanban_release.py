@@ -51,6 +51,26 @@ def human_writer(evidence: str) -> tuple[str, None, str]:
     return ("human", None, str(evidence or "explicit"))
 
 
+def desktop_note(operation_id: str) -> str:
+    """The mandate note of a Desktop Unblock click; it identifies the operation that released the card."""
+    return "Desktop Unblock, operation " + str(operation_id)
+
+
+def released_by(conn: sqlite3.Connection, task_id: str, note: str) -> Optional[str]:
+    """The card a release carrying exactly ``note`` already released for ``task_id`` (or for the stop it is the
+    decision card of), else None. A caller that died between the release and its own receipt uses this on the
+    retry to record the receipt instead of releasing twice or refusing."""
+    tid = target(conn, task_id)
+    row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+    if row is None or row[0] in _HELD or not note or not note.strip():
+        return None
+    tail = "\n\n" + note.strip()
+    for (body,) in conn.execute("SELECT body FROM task_comments WHERE task_id=? ORDER BY id DESC", (tid,)):
+        if str(body or "").startswith(MARK) and str(body).endswith(tail):
+            return tid
+    return None
+
+
 def default_runs(cfg: Optional[dict] = None) -> int:
     """``kanban.release_runs`` (default 10): how many more runs a release grants."""
     if cfg is None:

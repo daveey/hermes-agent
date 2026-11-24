@@ -235,8 +235,31 @@ def test_brief_on_a_decision_card_says_unblock_releases_the_stopped_card(board):
     assert (f'Unblock = release it to finish with 10 more runs under a goal-level scope '
             f'(`hermes kanban release {tid}`); safety holds still apply') in request['action']
     assert 'A) Unblock: Release the stopped work to finish its acceptance: 10 more runs' in request['scope']
+    assert 'Recommend: A - release it to finish' in request['scope']
     # A decision card whose stopped card is no longer held keeps the plain "return to an agent" brief.
     with kb.write_txn(board):
         board.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
     plain = brief.request(board, card, None, 3 * 3600, 'events: spend_budget_triaged runs=15')
     assert 'kanban release' not in plain['action'] and 'return this decision to an agent' in plain['action']
+
+
+def test_brief_on_a_safety_restricted_card_keeps_the_cautious_line(board, monkeypatch):
+    from hermes_cli import kanban_stranded_brief as brief
+    tid, _, episode = scope.stopped(board, monkeypatch)
+    kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'safety_refusal', 'episode': episode})
+    board.commit()
+    row = dict(board.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+    request = brief.request(board, row, None, 3 * 3600, 'events: decision_hold_restricted')
+    assert 'Unblock = no release: a provider safety hold stays' in request['action']
+    assert 'Recommend: B - avoid authorizing more work without a bounded proposal.' in request['scope']
+    assert 'release it to finish' not in request['action'] + request['scope']
+
+
+def test_released_by_names_the_card_only_for_the_note_that_released_it(board):
+    tid = spend_stopped(board)
+    note = release.desktop_note('op-7')
+    assert note == 'Desktop Unblock, operation op-7' and release.released_by(board, tid, note) is None
+    run(board, tid, note=note)
+    assert release.released_by(board, tid, note) == tid
+    assert release.released_by(board, tid, release.desktop_note('op-8')) is None
+    assert release.released_by(board, tid, '') is None
