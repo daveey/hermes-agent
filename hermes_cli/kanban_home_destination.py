@@ -59,6 +59,23 @@ def _validate(conn: sqlite3.Connection, record: dict) -> str:
     return encoded
 
 
+def _ordered_rows(record: dict) -> list[dict]:
+    """Local event ids carry chronology; manifest UID order is not chronology.
+
+    Resolve run references first and insert events in the Board's canonical ord.
+    Keep the authenticated manifest bytes/order untouched for its immutable ACK.
+    """
+    def key(row):
+        table, fields = row["table"], row["fields"]
+        if table == "task_events":
+            order = fields.get("ord")
+            if type(order) is not int or order < 0:
+                raise ValueError("destination event order is unavailable")
+            return (2, order, row["uid"])
+        return ({"tasks": 0, "task_runs": 1}.get(table, 3), 0, row["uid"])
+    return sorted(record["rows"], key=key)
+
+
 def _readback(conn: sqlite3.Connection, record: dict) -> None:
     task = record["task"]
     expected = {table: set() for table in sync.SYNCED_TABLES}
@@ -105,6 +122,11 @@ def _readback(conn: sqlite3.Connection, record: dict) -> None:
             found = {r[0] for r in conn.execute(f"SELECT uid FROM {table} WHERE task_id=?", (task,))}
         if found != expected[table]:
             raise ValueError(f"destination materialization extra or missing rows: {table}")
+    event_order = [r["uid"] for r in _ordered_rows(record)
+                   if r["table"] == "task_events" and r["fields"].get("deleted_at") is None]
+    installed = [r[0] for r in conn.execute("SELECT uid FROM task_events WHERE task_id=? ORDER BY id", (task,))]
+    if installed != event_order:
+        raise ValueError("destination event chronology differs")
     generation = conn.execute("SELECT nonce FROM kanban_home_generations1 WHERE task_id=?", (task,)).fetchone()
     if not generation or generation[0] != record["nonce"]:
         raise ValueError("destination materialization epoch missing")
@@ -143,7 +165,7 @@ def materialize(conn: sqlite3.Connection, record: dict) -> list[dict]:
             changes = [sync.RemoteChange(seq=r["fields"].get("seq", 0), table=r["table"], uid=r["uid"],
                        op="delete" if r["fields"].get("deleted_at") is not None else "upsert", fields=r["fields"],
                        version=r["fields"]["version"], hlc=r["fields"]["hlc"], origin_gateway=r["fields"]["origin_gateway"])
-                       for r in record["rows"]]
+                       for r in _ordered_rows(record)]
             containment.prepare_apply(conn, changes)
             applying = conn.execute("SELECT applying FROM kanban_sync_state").fetchone()[0]
             conn.execute("UPDATE kanban_sync_state SET applying=1")

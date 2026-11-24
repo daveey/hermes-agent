@@ -65,6 +65,45 @@ def test_full_manifest_materializes_durably_without_replaying_status_or_cursor(b
         assert peer.execute("SELECT nonce FROM kanban_home_generations1 WHERE task_id=?", (task.id,)).fetchone()[0] == record["nonce"]
 
 
+def test_manifest_import_resolves_runs_before_events_and_orders_events_causally(board):
+    prepare_destination(board)
+    record = manifest()
+    event = record["rows"][2]
+    run = record["rows"][3]
+    event["uid"] = event["fields"]["uid"] = "a-later-event"
+    event["fields"].update(ord=2, run_uid=run["uid"])
+    earlier = copy.deepcopy(event)
+    earlier["uid"] = earlier["fields"]["uid"] = "z-earlier-event"
+    earlier["fields"].update(ord=1)
+    record["rows"].insert(3, earlier)  # actual Board snapshots sort event UIDs
+    materialize(board, record)
+    events = board.execute("SELECT uid,run_id FROM task_events WHERE task_id=? ORDER BY id", (record["task"],)).fetchall()
+    run_id = board.execute("SELECT id FROM task_runs WHERE uid=?", (run["uid"],)).fetchone()[0]
+    assert [tuple(row) for row in events] == [("z-earlier-event",run_id),("a-later-event",run_id)]
+
+
+def test_existing_event_ids_with_conflicting_order_refuse_ack_without_rewriting(board):
+    prepare_destination(board)
+    record = manifest()
+    later = record["rows"][2]
+    later["fields"]["ord"] = 2
+    earlier = copy.deepcopy(later)
+    earlier["uid"] = earlier["fields"]["uid"] = "earlier-event"
+    earlier["fields"]["ord"] = 1
+    record["rows"].insert(3, earlier)
+    # An existing feed replica can already have allocated local IDs in UID order.
+    changes = [sync.RemoteChange(seq=i+1, table=r["table"], uid=r["uid"],
+        op="delete" if r["fields"].get("deleted_at") is not None else "upsert", fields=r["fields"],
+        version=r["fields"]["version"], hlc=r["fields"]["hlc"], origin_gateway=r["fields"]["origin_gateway"])
+        for i,r in enumerate(record["rows"])]
+    sync.apply_remote_changes(board, changes, new_cursor=len(changes), observers=False)
+    before = [tuple(row) for row in board.execute("SELECT id,uid FROM task_events ORDER BY id")]
+    with pytest.raises(ValueError, match="event chronology"):
+        materialize(board, record)
+    assert [tuple(row) for row in board.execute("SELECT id,uid FROM task_events ORDER BY id")] == before
+    assert board.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_home_materialized1'").fetchone() is None
+
+
 def test_import_failure_rolls_back_task_epoch_children_and_ack_even_when_caught(board):
     prepare_destination(board)
     with kbc.write_txn(board):
@@ -168,7 +207,7 @@ def test_contained_history_requires_ordinary_canonical_evidence_and_keeps_hold(b
     hub = wire.Hub(op, stop, episode)
     # The transport double supplies canonical envelope bytes, not a production
     # attestation. Matching receipt verification remains ordinary admission.
-    fields = dict(hub.events[episode]["row"], version=1, hlc="1000-0-server", deleted_at=None, created_at=1)
+    fields = dict(hub.events[episode]["row"], version=1, hlc="1000-0-server", deleted_at=None, created_at=1, ord=2)
     hub.events[episode]["row"] = copy.deepcopy(fields)
     record["rows"].append(dict(table="task_events", uid=episode, fields=fields))
     change = sync.RemoteChange(seq=1, table="task_events", uid=episode, op="upsert", fields=fields,
