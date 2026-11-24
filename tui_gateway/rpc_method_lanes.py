@@ -66,7 +66,7 @@ class MethodLanes:
         except BaseException:
             self._finished(method)
             raise
-        future.add_done_callback(lambda _: self._done(method, on_done))
+        future.add_done_callback(lambda done: self._done(method, on_done, done))
 
     def _should_warn(self, method: str) -> bool:  # under the lock
         now = time.monotonic()
@@ -75,14 +75,22 @@ class MethodLanes:
         self._warned_at[method] = now
         return True
 
-    def _done(self, method: str, on_done: Callable[[], object]) -> None:
+    def _done(self, method: str, on_done: Callable[[], object], future) -> None:
         try:
             on_done()
         finally:
-            self._finished(method)
+            if future.cancelled():
+                # A cancel runs this callback on the cancelling thread. ``shutdown(cancel_futures=True)``
+                # cancels while holding the executor's own lock, and ``submit`` takes that lock: handing
+                # the slot over inline would deadlock the shutdown. Hand over from a thread of its own.
+                threading.Thread(target=self._finished, args=(method,), name="tui-rpc-lane-handoff",
+                                 daemon=True).start()
+            else:
+                self._finished(method)
 
     def _finished(self, method: str) -> None:
         """One call of *method* left the pool: hand its slot to the next waiting call, else free it."""
+        interrupt: BaseException | None = None  # a non-Exception from ``submit``: re-raised once the lane is settled
         while True:
             with self._lock:
                 queue = self._waiting.get(method)
@@ -94,16 +102,22 @@ class MethodLanes:
                     else:
                         self._running.pop(method, None)
                         self._warned_at.pop(method, None)
+                    if interrupt is not None:
+                        raise interrupt
                     return
                 submit, fn, on_done = queue.popleft()
             try:
                 future = submit(fn)
-            except Exception:  # the pool is shut down: the call never runs, its caller's cleanup still does
+            except BaseException as exc:  # the pool is shut down: the call never runs, its caller's cleanup still does
                 logger.warning("rpc pool: could not start a waiting %s call", method, exc_info=True)
+                if not isinstance(exc, Exception) and interrupt is None:
+                    interrupt = exc
                 try:
                     on_done()
                 except Exception:
                     logger.warning("rpc pool: cleanup failed for an unstarted %s call", method, exc_info=True)
                 continue
-            future.add_done_callback(lambda _, done=on_done: self._done(method, done))
+            future.add_done_callback(lambda done, hook=on_done: self._done(method, hook, done))
+            if interrupt is not None:
+                raise interrupt
             return

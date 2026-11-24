@@ -119,13 +119,50 @@ def test_cancelled_queued_future_releases_its_slot_to_the_next_waiting_call():
             lanes.run(submit, "slow", lambda: done.append("ran-0"), lambda: done.append(0))
             lanes.run(submit, "slow", ran.set, lambda: done.append(1))
             assert futures[0].cancel()
-            assert done[0] == 0  # cancelled before it started: cleanup ran, the waiting call was handed over
-            assert len(futures) == 2
+            assert done[0] == 0  # cancelled before it started: its cleanup ran on the cancelling thread
+            _wait_until(lambda: len(futures) == 2)  # the waiting call is handed over off that thread
         finally:
             release.set()
         blocker.result(10)
         assert ran.wait(10)
     assert done == [0, 1] and lanes.snapshot() == {}
+
+
+def test_calls_of_one_method_start_in_the_order_they_were_accepted():
+    lanes = MethodLanes(1)
+    started, finished = [], []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        gate = threading.Event()
+        lanes.run(pool.submit, "slow", lambda: (started.append(0), gate.wait(10)), lambda: finished.append(0))
+        for n in range(1, 6):
+            lanes.run(pool.submit, "slow", lambda n=n: started.append(n), lambda n=n: finished.append(n))
+        _wait_until(lambda: started == [0])
+        gate.set()
+        _wait_until(lambda: len(finished) == 6)
+    assert started == [0, 1, 2, 3, 4, 5] and finished == [0, 1, 2, 3, 4, 5]
+
+
+def test_shutdown_that_cancels_queued_calls_does_not_deadlock_with_waiters():
+    """``shutdown(cancel_futures=True)`` cancels under the executor's lock; the hand-off must not
+    call ``submit`` on that thread. Every accepted call still gets its done hook."""
+    lanes = MethodLanes(1)
+    release, done = threading.Event(), []
+    pool = ThreadPoolExecutor(max_workers=1)
+    blocker = pool.submit(release.wait, 10)  # the only worker is busy: the admitted call stays queued
+    try:
+        lanes.run(pool.submit, "slow", lambda: done.append("ran"), lambda: done.append(0))
+        lanes.run(pool.submit, "slow", lambda: done.append("ran"), lambda: done.append(1))
+        lanes.run(pool.submit, "slow", lambda: done.append("ran"), lambda: done.append(2))
+        stopper = threading.Thread(target=lambda: pool.shutdown(wait=False, cancel_futures=True), daemon=True)
+        stopper.start()
+        stopper.join(10)
+        assert not stopper.is_alive(), "shutdown deadlocked on the lane hand-off"
+        _wait_until(lambda: sorted(done) == [0, 1, 2])
+    finally:
+        release.set()
+    blocker.result(10)
+    _wait_until(lambda: lanes.snapshot() == {})
+    assert sorted(done) == [0, 1, 2]
 
 
 class Transport:
@@ -165,7 +202,8 @@ def test_dispatch_keeps_workers_free_for_other_methods(monkeypatch):
             assert server.dispatch({"id": "resume", "method": "test.resume"}, transport) is None
             first = transport.frames.get(timeout=10)
             assert first["id"] == "resume" and first["result"] == {"resumed": True}
-            assert server._method_lanes.snapshot() == {"test.slow": {"running": 2, "waiting": 6}}
+            # The resume frame is written before its lane entry is cleared (done callback): wait for that.
+            _wait_until(lambda: server._method_lanes.snapshot() == {"test.slow": {"running": 2, "waiting": 6}})
         finally:
             release.set()
         answered = sorted(transport.frames.get(timeout=10)["id"] for _ in range(8))
