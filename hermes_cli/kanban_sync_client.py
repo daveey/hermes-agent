@@ -1147,7 +1147,7 @@ def sync_all_once(hub: Optional[Hub] = None, *,
             # (no WARNING, the board is not marked failed, the outbox-age alarm keeps its last verdict).
             _log.debug("kanban sync: round for %s skipped (%s)", slug, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"SyncRoundBusy: {exc}", skipped=True))
-        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, RestoreRequired, ReplayFault, ValueError) as exc:
+        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, RestoreRequired, ReplayFault) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)%s", slug, type(exc).__name__, exc,
                          udf_errors.error_suffix(exc))
             from hermes_cli.kanban_sync_host_outage import classify  # one host card, not one per board [daveey]
