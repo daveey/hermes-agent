@@ -91,6 +91,7 @@ def try_cli(argv: list[str]) -> bool:
     if flags == ["--json"] and (root / "kanban" / "current").exists():
         return False  # canonical resolver handles current-board metadata and tombstones
     path = root / "kanban.db" if board == "default" else root / "kanban" / "boards" / board / "kanban.db"
+    # sqlite-sidecar-open: ok — read_answer opens SQLite through lockguard; plain file read is unrelated JSON
     result = read_answer(path, task_id)
     if result is None or result.get("board") != board:
         return False
