@@ -86,16 +86,17 @@ def test_unknown_empty_proof_falls_back_to_original_read(board, monkeypatch):
 def test_pending_answers_are_never_used_as_empty_deadline_proof(board, monkeypatch):
     path, conn = board
     _insert(conn, retry=100)
+    _insert(conn, "unanswered")
     now = [50]
     monkeypatch.setattr(age.time, "time", lambda: now[0])
     sendable = Mock(side_effect=lambda conn, hub, slug, rows, evidence: (rows, []))
     monkeypatch.setattr(client.backlog, "behind", lambda path: True)
     monkeypatch.setattr(client.backlog, "sendable_before_head", sendable)
-    assert age._sample(path) is None
-    assert sendable.call_args.args[3] == []
+    assert age._sample(path)[0] == "unanswered"
+    assert [r["op_id"] for r in sendable.call_args.args[3]] == ["unanswered"]
     now[0] = 100
-    assert age._sample(path) is None  # deferred rows do not alarm, but eligibility is recomputed
-    assert len(sendable.call_args.args[3]) == 1
+    assert age._sample(path)[0] == "unanswered"  # the deferred row's eligibility is recomputed, not cached
+    assert [r["op_id"] for r in sendable.call_args.args[3]] == ["op", "unanswered"]
     assert sendable.call_count == 2
 
 

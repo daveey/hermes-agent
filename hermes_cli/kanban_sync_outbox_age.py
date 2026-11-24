@@ -101,10 +101,14 @@ def _sample(path: Path) -> Optional[tuple[str, float]]:
         return None
     try:
         # Only an empty structural answer is reusable. A positive answer still
-        # follows the original clock/backlog/sendability path below.
+        # follows the original clock/backlog/sendability path below. The answer is
+        # always an unanswered row (``retry_after IS NULL``) out of a subset of the
+        # pending rows, so with none of those it is None whatever the clock or
+        # backlog say: a board whose pending ops are all Board-deferred skips the
+        # fresh schema open each round (Mac, t_01a203e5bc71cc65: 4.4 ms a round).
         from hermes_cli.kanban_sync_client import _WATCH
-        empty = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1",
-                             unchanged_ok=True)
+        empty = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' "
+                             "AND retry_after IS NULL LIMIT 1", unchanged_ok=True)
         if empty is not None and empty[1] is None:
             return None
         with kbc.connect_closing(path) as conn:
@@ -145,8 +149,12 @@ def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
                 mono: Callable[[], float] = time.monotonic, age: Callable[[Path], Optional[float]] = _age,
                 awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
     """Record round outcome and WARN after :data:`STALE_S` observed-awake seconds for one sendable op.
-    Returns the boards warned about. Never raises."""
-    awake = replica_age.fully_awake(awake_fn)
+    Returns the boards warned about. Never raises.
+
+    ``sync.detail/after_round.awake`` and ``.sample`` are inclusive diagnostics of this step's parts
+    (``kanban_sync_cpu.detail``, ``outer=False``): never sum them with steps."""
+    from hermes_cli import kanban_sync_cpu as sync_cpu
+    awake = sync_cpu.detail("awake", replica_age.fully_awake, awake_fn)
     warned: list[str] = []
     try:
         paths = dict(boards)
@@ -164,7 +172,7 @@ def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
                 if r.error:
                     observation.observe(path, None, mono())
                     continue
-                seen, seconds, now = _observed(path, mono, age, awake)
+                seen, seconds, now = sync_cpu.detail("sample", _observed, path, mono, age, awake)
                 if not awake or seen is None or now - seen.since < STALE_S:
                     continue
                 if seen.warned_at is not None and now - seen.warned_at < STALE_S:

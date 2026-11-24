@@ -219,8 +219,21 @@ def fully_awake(awake_fn: Optional[Callable[[], bool]] = None) -> bool:
         return True
 
 
+_BOOT: list[Optional[str]] = [None]  # this process's boot identity, once read
+
+
 def _boot_id() -> Optional[str]:
-    """This boot's identity (monotonic time is comparable across processes only within one boot), else None."""
+    """This boot's identity (monotonic time is comparable across processes only within one boot), else None.
+
+    A process never outlives its boot, so the first answer is kept: the outbox alarm asks once per board per
+    sync round, and the macOS read (ctypes ``find_library`` + sysctl) cost 0.68 ms each on the MacBook
+    (t_01a203e5bc71cc65). A failed read (None) is not kept and is retried next time."""
+    if _BOOT[0] is None:
+        _BOOT[0] = _read_boot_id()
+    return _BOOT[0]
+
+
+def _read_boot_id() -> Optional[str]:
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() or None
     except OSError:
