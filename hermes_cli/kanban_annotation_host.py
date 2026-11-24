@@ -360,12 +360,12 @@ def read_annotation_parts() -> tuple:
     attention, frozen. Every helper is looked up on that module (tests replace them there)."""
     from hermes_cli import kanban_session_activity as _ksa
 
-    snapshot = _ksa._all_counts(include_snapshot=True)
+    snapshot = _parts.measured(_parts.COUNTS, lambda: _ksa._all_counts(include_snapshot=True))
     active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys = snapshot[:9]
     execution = getattr(snapshot, "execution", {})
-    extra = _ksa._extra_waiting()
+    extra = _parts.measured("waiting", _ksa._extra_waiting)
     try:
-        attention = _ksa.attention_task_counts()
+        attention = _parts.measured(_parts.ATTENTION, _ksa.attention_task_counts)
     except Exception:
         log.debug("kanban attention unavailable", exc_info=True)
         attention = {}

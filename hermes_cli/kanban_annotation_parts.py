@@ -152,5 +152,19 @@ def failed(scope: tuple[str, ...]) -> None:
     _seen.pop(scope, None)
 
 
+def measured(part: str, read):
+    """Account inclusive part CPU without changing its cache policy or exception behavior.
+
+    ``served`` means cache-eligible, NOT a cache hit: TTL expiry can still read. Counts includes its nested
+    links work; do not add those counters together. Waiting sources have no force gate yet.
+    """
+    from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli import loop_accounting as la
+
+    mode = "forced" if ksa._revalidate.forced(ksa._origin_scope(), part) else "served"
+    with la.pass_(f"annotation.part.{part}.{mode}"):
+        return read()
+
+
 def reset() -> None:
     _seen.clear()
