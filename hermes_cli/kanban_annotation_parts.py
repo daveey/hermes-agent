@@ -16,8 +16,10 @@ inputs that part reads, and forces a part only when its key differs from the one
   seconds and that cache bounds them by its TTL instead. Keying links on them forced a
   full ledger projection under ``_links_lock`` on nearly every wake (91% of a hub backend's uptime in annotation
   refreshes, 2026-11-23), and every strict links reader, the Desktop action queue among them, queued behind it;
-- ``attention``: the boards' content revisions and the files the done checks declared (a declared board or sync
-  replica by its content revision, never its stat).
+- ``attention``: the boards' notify revisions (``revision``, not the projection counter) and the files the
+  done checks declared (a declared board or sync replica by that same notify revision, never its stat and never
+  the projection counter). A done check is plugin code and may select any event kind, so this key cannot be the
+  projection counter.
 
 Plain inputs are everything else the holder watches for the scope (state.db, the hub database, config files, the
 mutation cue), keyed by ``kanban_annotation_watch.signature`` (stat, header change counter, WAL-index header). A
@@ -79,12 +81,12 @@ def _replica_dir() -> str | None:
 def _done_key(scope: tuple[str, ...], wall: float) -> object:
     """The done checks' declared inputs; unequal to everything while any check is undeclared.
 
-    A declared board is left out: the attention key carries every board's content revision. A declared sync
-    replica is keyed by its content revision as well. Both files are rewritten several times a second by
-    bookkeeping (claims, heartbeats, pull stamps) that moves no row a reader selects, and a stat key over them
-    would rerun every done check on each of those writes. A replica whose revision cannot vouch (no counter and a
-    stat not yet settled, or unreadable) makes the key unequal to everything. Any other declared file is keyed by
-    its change signature."""
+    A declared board is left out: the attention key carries every board's notify revision. A declared sync
+    replica is keyed by that same counter (``revision``), not the projection counter: a done check is plugin
+    code and may select any event kind. Both files are rewritten several times a second by bookkeeping (claims,
+    heartbeats, pull stamps) that moves no row a reader selects, and a stat key over them would rerun every done
+    check on each of those writes. A replica whose revision cannot vouch (no counter and a stat not yet settled,
+    or unreadable) makes the key unequal to everything. Any other declared file is keyed by its change signature."""
     from hermes_cli import kanban_annotation_host as host
     from hermes_cli import kanban_session_activity as ksa
 
@@ -97,7 +99,7 @@ def _done_key(scope: tuple[str, ...], wall: float) -> object:
     paths -= {str(p) for p in ksa._board_db_paths()}
     shadow_dir = _replica_dir()
     replicas = sorted(p for p in paths if p.endswith(".db") and os.path.dirname(p) == shadow_dir)
-    content = tuple((p, ksa._projection_content_key(Path(p), ksa._revision.SHADOW_TABLES)) for p in replicas)
+    content = tuple((p, ksa._board_content_key(Path(p), ksa._revision.SHADOW_TABLES)) for p in replicas)
     if not ksa._revalidate.revalidatable(content, wall):
         return object()
     return (tuple(sorted(ksa._done_checks)), content, _signature(scope, paths - set(replicas)))
@@ -116,7 +118,7 @@ def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
     ledger = ksa._origin_ledger_fingerprint()
     plain = _plain_key(scope)
     return {COUNTS: (counts_local, shadows, ledger, plain), LINKS: (links_local, ledger),
-            ATTENTION: (links_local, _done_key(scope, wall))}
+            ATTENTION: (counts_local, _done_key(scope, wall))}
 
 
 def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[frozenset, dict[str, object] | None]:

@@ -113,9 +113,10 @@ def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool], *,
     name replaces it; the returned callable unregisters. Optional event callbacks
     have the same no-DB-read contract as ``register_waiting_source``; undeclared
     checks retain bounded fallback rather than silently missing external inputs.
-    A declared board or sync replica is keyed by its content revision (``kanban_activity_revision.LOCAL_TABLES`` /
-    ``SHADOW_TABLES``), not by its file: a check that reads a table outside those lists does not rerun on a write
-    to it until the attention cache's own bound. Other declared files are keyed by their stat."""
+    A declared board or sync replica is keyed by its notify revision (``revision``, not the projection counter;
+    ``kanban_activity_revision.LOCAL_TABLES`` / ``SHADOW_TABLES``), not by its file: a done check is plugin code
+    and may select any event kind. A check that reads a table outside those lists does not rerun on a write to it
+    until the attention cache's own bound. Other declared files are keyed by their stat."""
     from hermes_cli import kanban_session_activity as activity
     activity._host_copy.declare_events(name, fn, watch_paths, next_deadline, done_check=True)
     activity._done_checks[name] = fn

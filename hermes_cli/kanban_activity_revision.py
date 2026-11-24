@@ -78,9 +78,18 @@ BOOKKEEPING_COLUMNS: dict[str, frozenset[str]] = {
 # no longer re-reads every board's counts, the links projection and the attention pass (t_01a1cee98aaa8db1). Every
 # other kind, and any update or delete of an event row, still bumps.
 UNREAD_EVENT_KINDS = ("heartbeat",)
-# Kinds the links and annotation projection caches select (session-activity UNSEEN_KINDS). An insert of any
-# other kind still bumps ``revision`` (notify and the counts cache read it) but not ``projection_revision``.
-PROJECTION_EVENT_KINDS = ("blocked", "completed", "crashed", "gave_up", "status", "timed_out")
+# Kinds a reader still keyed on ``projection_revision`` selects. Attention is not on this key: a done check
+# is plugin code and may select any kind, so it compares ``revision``.
+# - the links fingerprint (and the annotation part that shares it): ``UNSEEN_KINDS``, plus the local-board
+#   reads in ``_project_remote_links`` -> ``observe_owner_task`` (``archived``, ``goal_verified``,
+#   ``pr_acceptance``, ``request_withdrawn``, ``scheduled``, ``continued``, ``decision_requested``, ``contained``)
+# - the shadow link-row memo: ``contained`` (``_authority``)
+# An insert of any other kind still bumps ``revision`` (notify, the counts cache and attention) but not
+# ``projection_revision``.
+PROJECTION_EVENT_KINDS = (
+    "archived", "blocked", "completed", "contained", "continued", "crashed", "decision_requested",
+    "gave_up", "goal_verified", "pr_acceptance", "request_withdrawn", "scheduled", "status", "timed_out",
+)
 _BUMP = f"UPDATE {REVISION_TABLE} SET revision = revision + 1 WHERE id = 1;"
 _BUMP_PROJECTION = (f"UPDATE {REVISION_TABLE} SET projection_revision = projection_revision + 1 WHERE id = 1;")
 # [daveey] P2 per-task change cursor (t_01a1d59d3ef805c4): which tasks each bump touched.

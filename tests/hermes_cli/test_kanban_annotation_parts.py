@@ -444,6 +444,45 @@ def test_a_scope_whose_counts_sit_in_a_saved_slot_is_not_renewed_before_its_age(
     assert world.counts == 2, 'fresh counts in a saved slot were read again'
 
 
+def test_a_created_event_alone_reruns_the_done_check(world):
+    """A done check is plugin code and may select ``created``. An event-only commit (a feed page
+    that lands the event after the task row) must rerun the check. It must not rebuild links.
+    """
+    from hermes_cli import kanban_activity_revision as revision
+
+    world.conn.execute(
+        "CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, "
+        "created_at INTEGER)")
+    revision.ensure_revision(world.conn, revision.LOCAL_TABLES)
+
+    def honest(card):
+        world.checks += 1
+        row = world.conn.execute(
+            "SELECT 1 FROM task_events WHERE kind='created' "
+            "AND json_extract(payload, '$.creator_task_id') = ?",
+            (card["id"],)).fetchone()
+        return row is None
+
+    # The host ignores a declared source whose function is not the registered check.
+    ksa._done_checks["fixture"] = honest
+    host._done_event_sources["fixture"] = (honest, lambda: [world.board], lambda: None)
+    _refresh()
+    assert world.checks == 1 and _published()[10] == {"s1": 1}
+    _refresh()
+    assert world.checks == 1, "a wake with no write reran the check"
+    world.conn.execute("INSERT INTO tasks VALUES ('follow', 'running', 's9')")
+    _refresh()
+    after_row, links_after_row = world.checks, world.links
+    assert after_row == 2, "the follow-up task row did not rerun the check"
+    world.conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'created', ?, 1)",
+        ("follow", '{"creator_task_id": "d1"}'))
+    _refresh()
+    assert world.checks == after_row + 1, "a created event alone did not rerun the done check"
+    assert _published()[10] == {}, "the holder kept publishing the card after its follow-up existed"
+    assert world.links == links_after_row, "a created event rebuilt the links projection"
+
+
 def test_links_key_is_the_links_cache_fingerprint(world, tmp_path, monkeypatch):
     """2026-11-23: the links part keyed on state.db and the hub database (written every few seconds), so the
     holder re-projected the origin ledger under ``_links_lock`` on nearly every wake and the Desktop action queue

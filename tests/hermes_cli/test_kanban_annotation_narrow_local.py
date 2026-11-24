@@ -312,6 +312,37 @@ def test_patched_rows_equal_a_full_read(world, seed):
     assert own.stats["board_patches"] > 0
 
 
+def test_a_contained_event_alone_refreshes_the_shadow_link_authority(world):
+    """The shadow link memo's enrich walk reads ``kind='contained'``. An event-only commit of that
+    kind must not keep serving the row without its authority.
+    """
+    import json
+
+    from hermes_cli import kanban_chat_links as links
+
+    sconn, shadow = world["sconn"], world["shadow"]
+    sconn.execute("ALTER TABLE tasks ADD COLUMN containment_episode TEXT")
+    sconn.execute("ALTER TABLE task_events ADD COLUMN uid TEXT")
+    sconn.execute("ALTER TABLE task_events ADD COLUMN payload TEXT")
+    sconn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, created_at, started_at, priority, block_kind, "
+        "human_request, created_on, lease_expires, containment_episode) VALUES "
+        "('p', 'parent', 'triage', 'w', 1, NULL, 0, NULL, NULL, 'owner', 100, 'ep1')")
+    sconn.execute("INSERT INTO task_links (parent_id, child_id) VALUES ('p', 'r1')")
+    links._reset_for_tests()
+
+    def authority():
+        rows, _pulled, _runs = links._read_replica(shadow, ME, PROFILE)
+        blocked = next(r for r in rows if r["id"] == "r1").get("blocked_upstream") or {}
+        return (blocked.get("contained") or {}).get("authority") or {}
+
+    assert authority().get("id", "") == ""
+    sconn.execute(
+        "INSERT INTO task_events (task_id, kind, uid, payload) VALUES ('p', 'contained', 'ep1', ?)",
+        (json.dumps({"policy": {"authority": {"task_id": "r2"}}}),))
+    assert authority() == {"id": "r2", "status": "running"}
+
+
 def test_shadow_link_memo_shares_one_key(world, monkeypatch):
     """``shadows_part`` and ``_read_replica`` share one slot. Different keys re-read an unchanged shadow."""
     from pathlib import Path

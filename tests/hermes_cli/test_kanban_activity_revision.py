@@ -109,8 +109,54 @@ def test_every_table_the_counts_read_moves_the_key(board, write):
     assert ksa._board_content_key(ksa._board_db_paths()[0]) != before
 
 
-def test_projection_kinds_match_the_unseen_reader():
-    assert set(rev.PROJECTION_EVENT_KINDS) == set(ksa.UNSEEN_KINDS)
+def test_a_created_event_does_not_move_the_links_key_a_contained_event_does(board):
+    """``created`` is a done-check kind (attention keys on the notify revision). ``contained`` is a
+    shadow-link kind (that memo keys on the projection revision).
+    """
+    tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
+    notify = ksa._activity_fingerprint()
+    links_key = ksa._links_fingerprint()
+    with kbc.write_txn(board):
+        board.execute(
+            "INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'created', 1)", (tid,))
+    assert ksa._activity_fingerprint() != notify
+    assert ksa._links_fingerprint() == links_key
+    links_key = ksa._links_fingerprint()
+    with kbc.write_txn(board):
+        board.execute(
+            "INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'contained', 2)", (tid,))
+    assert ksa._links_fingerprint() != links_key
+
+
+def test_projection_kinds_cover_the_unseen_reader_and_the_shadow_authority():
+    """Links select ``UNSEEN_KINDS``. The shadow memo also selects ``contained``. Attention is not on this key."""
+    assert set(ksa.UNSEEN_KINDS) <= set(rev.PROJECTION_EVENT_KINDS)
+    assert "contained" in rev.PROJECTION_EVENT_KINDS
+    assert "created" not in rev.PROJECTION_EVENT_KINDS
+
+
+# Kinds ``_project_remote_links`` -> ``observe_owner_task`` selects from the local board, which the links
+# fingerprint keys on ``projection_revision``. ``created`` is a done-check kind and stays off this key.
+_LINKS_PROJECTION_KINDS = (
+    "archived", "completed", "contained", "continued", "decision_requested", "goal_verified",
+    "pr_acceptance", "request_withdrawn", "scheduled",
+)
+
+
+def test_kinds_the_links_projection_selects_move_its_key_created_does_not(board):
+    assert set(_LINKS_PROJECTION_KINDS) <= set(rev.PROJECTION_EVENT_KINDS)
+    tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
+    links_key = ksa._links_fingerprint()
+    with kbc.write_txn(board):
+        board.execute(
+            "INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'created', 1)", (tid,))
+    assert ksa._links_fingerprint() == links_key, "a created event rebuilt the links projection"
+    for n, kind in enumerate(_LINKS_PROJECTION_KINDS, start=2):
+        links_key = ksa._links_fingerprint()
+        with kbc.write_txn(board):
+            board.execute(
+                "INSERT INTO task_events (task_id, kind, created_at) VALUES (?, ?, ?)", (tid, kind, n))
+        assert ksa._links_fingerprint() != links_key, kind
 
 
 def test_an_unread_event_wakes_notify_but_not_the_links_or_annotation_key(board):
@@ -326,9 +372,9 @@ def test_an_unchanged_schema_checks_trigger_coverage_once(board, monkeypatch):
     assert ksa._board_content_key(path)[0] == "stat" and len(scans) == 2
 
 
-def test_event_only_park_or_wake_moves_the_counts_key_not_the_links_key(board):
-    """A park or wake event committed after its task row (a feed page boundary) is an event the counts
-    read selects and the links projection does not. The counts cache must not keep the pre-event execution.
+def test_event_only_park_moves_the_counts_key_and_the_links_key(board):
+    """A park event committed after its task row (a feed page boundary) is an event both caches select.
+    Counts read it for execution state. The links projection's ``publish_ask`` selects ``scheduled``.
     """
     import time
 
@@ -346,7 +392,7 @@ def test_event_only_park_or_wake_moves_the_counts_key_not_the_links_key(board):
     with kbc.write_txn(board):
         kb._append_event(board, tid, "scheduled", payload)
     assert ksa._activity_fingerprint() != fp0
-    assert ksa._links_fingerprint() == links0
+    assert ksa._links_fingerprint() != links0
     reads1, _ = ksa._read_board(path, parked=True, stalled=True)
     assert reads0["execution"] != reads1["execution"]
     after = ksa._all_counts(include_snapshot=True)
