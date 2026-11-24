@@ -45,8 +45,12 @@ def test_listener_health_and_closed_application_gate_before_assembly():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('host', ['127.0.0.1', 'localhost'])
+@pytest.mark.parametrize('host', ['127.0.0.1', 'localhost', '::'])
 async def test_handoff_keeps_answering_until_real_asgi_lifespan_is_ready(host):
+    if host == '::':
+        from tests.hermes_cli.test_serve_bootstrap_addresses import ipv6_loopback_available
+        if not ipv6_loopback_available():
+            pytest.skip('IPv6 loopback unavailable')
     import uvicorn
     from fastapi import FastAPI
     from hermes_cli.serve_bootstrap_listener import BootstrapListener
@@ -73,7 +77,8 @@ async def test_handoff_keeps_answering_until_real_asgi_lifespan_is_ready(host):
         startup = asyncio.create_task(listener.startup(server))
         try:
             await asyncio.wait_for(entered.wait(), 2)
-            status, body = await asyncio.to_thread(request, listener.port, '/api/health')
+            status, body = await asyncio.to_thread(
+                request, listener.port, '/api/health', '::1' if host == '::' else '127.0.0.1')
             assert status == 503 and b'false' in body
             assert not listener.stopped
             release.set()
@@ -83,6 +88,9 @@ async def test_handoff_keeps_answering_until_real_asgi_lifespan_is_ready(host):
                 status, body = await asyncio.to_thread(
                     request, listener.port, '/api/health', bound.server_address[0])
                 assert status == 200 and b'"ok":true' in body
+            if host == '::':
+                with pytest.raises(OSError):
+                    await asyncio.to_thread(socket.create_connection, ('127.0.0.1', listener.port), 2)
         finally:
             release.set()
             await startup

@@ -7,6 +7,7 @@ with this small responder, not on its serving thread.
 """
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import asyncio
+import errno
 import socket
 import sys
 import threading
@@ -16,6 +17,9 @@ class _BootstrapServer(HTTPServer):
     request_queue_size = 2048  # match uvicorn during reconnect bursts
 
     def server_bind(self):
+        # Match asyncio.create_server: an IPv6 bind must never also expose IPv4.
+        if self.address_family == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         if sys.platform == 'win32':
             # SO_REUSEADDR on Windows can bind over another live listener.
             self.allow_reuse_address = False
@@ -91,10 +95,21 @@ class BootstrapListener:
                 # Hostnames may resolve to both loopbacks. Retain every socket,
                 # like uvicorn, instead of silently narrowing localhost to IPv4.
                 bound = (address[0], port, *address[2:])
-                server = Server(bound, _Handler)
+                try:
+                    server = Server(bound, _Handler)
+                except OSError as exc:
+                    # A resolved family may be disabled on this host. Like
+                    # asyncio, retain the other addresses, but never hide a
+                    # conflict or permission failure. HTTPServer closes the
+                    # failed socket before propagating its bind error.
+                    if exc.errno != errno.EADDRNOTAVAIL:
+                        raise
+                    continue
                 self.servers.append(server)
                 if not port:
                     port = server.server_address[1]
+            if not self.servers:
+                raise OSError(errno.EADDRNOTAVAIL, f'No available address for {host}')
         except OSError as exc:
             for server in self.servers:
                 server.server_close()

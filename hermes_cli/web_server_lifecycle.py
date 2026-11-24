@@ -496,6 +496,7 @@ def _report_port_in_use(host: str, port: int) -> None:
         "'hermes serve' / 'hermes dashboard' backend or the Hermes gateway. "
         "Stop the other process, or pass --port <other> "
         "(--port 0 picks a free ephemeral port).",
+        file=sys.stderr,
         flush=True,
     )
 

@@ -58,9 +58,8 @@ def test_dribbling_client_cannot_hold_health_or_handoff(monkeypatch):
                 assert not sender.is_alive()
 
 
-def test_windows_exclusive_bind_never_enables_reuseaddr(monkeypatch):
-    monkeypatch.setattr(bootstrap.sys, 'platform', 'win32')
-    monkeypatch.setattr(socket, 'SO_EXCLUSIVEADDRUSE', 123456, raising=False)
+@pytest.mark.platforms('windows')
+def test_windows_exclusive_bind_never_enables_reuseaddr():
     seen = []
 
     class FakeSocket:
@@ -77,7 +76,7 @@ def test_windows_exclusive_bind_never_enables_reuseaddr(monkeypatch):
     server.socket = FakeSocket()
     server.server_address = ('127.0.0.1', 1234)
     server.server_bind()
-    assert seen == [(123456, 1), ('bind', ('127.0.0.1', 1234))]
+    assert seen == [(socket.SO_EXCLUSIVEADDRUSE, 1), ('bind', ('127.0.0.1', 1234))]
 
 
 @pytest.mark.parametrize('error', [OSError(10048, 'address in use'), OSError(98, 'address in use')])
@@ -112,6 +111,18 @@ def test_localhost_retains_every_resolved_loopback():
     assert all(sock.fileno() == -1 for sock in sockets)
 
 
+def test_port_conflict_hint_stays_on_stderr(monkeypatch, capsys):
+    from hermes_cli import web_server_lifecycle as lifecycle
+    sentinels = []
+    monkeypatch.setattr(lifecycle, '_write_machine_sentinel_line', sentinels.append)
+    lifecycle._report_port_in_use('127.0.0.1', 9876)
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert 'Port 9876 on 127.0.0.1 is already in use' in output.err
+    assert len(sentinels) == 1
+
+
+@pytest.mark.platforms('linux', 'macos', 'windows')
 def test_second_listener_cannot_share_live_port():
     from hermes_cli.web_server_lifecycle import PORT_IN_USE_EXIT_CODE
     with bootstrap.BootstrapListener('127.0.0.1', 0) as first:
