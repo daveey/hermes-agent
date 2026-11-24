@@ -232,7 +232,15 @@ def connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
 
 def _canonical(path: Any) -> str:
     try:
-        return os.path.realpath(os.fspath(path))
+        raw = os.fspath(path)
+        if isinstance(raw, bytes):
+            raw = os.fsdecode(raw)
+        from hermes_state_lockguard_fdscan import held_realpath
+
+        held = held_realpath(raw)
+        if held is not None:
+            return held
+        return os.path.realpath(raw)
     except (OSError, TypeError, ValueError):
         return str(path)
 
@@ -240,26 +248,42 @@ def _canonical(path: Any) -> str:
 def stranded_sidecars(db_path: Any) -> list[str]:
     """Deleted ``-wal``/``-shm`` generations of *db_path* that THIS process still holds open: its
     connections read a dead WAL index and need every handle to the board closed and reopened.
-    Linux only (``/proc``); ``[]`` elsewhere or when unreadable."""
+    Linux only (``/proc``); ``[]`` elsewhere or when unreadable.
+
+    The walk runs while the caller holds the board lifecycle lock. ``os.readlink`` would release
+    the GIL on every descriptor and stall that lock for seconds under a busy interpreter, so the
+    native sweep keeps the GIL (``proc_fd_targets``). The ``os.readlink`` loop remains only where
+    that sweep is unavailable.
+    """
     base = _canonical(db_path)
     watched = {base + "-wal", base + "-shm"}
+    from hermes_cli.sqlite_safe_read import lock_safe_fds
+    from hermes_state_lockguard_fdscan import proc_fd_targets
+
+    skip = lock_safe_fds()
+    targets = proc_fd_targets()
+    if targets is None:
+        return _stranded_via_os_readlink(watched, skip)
+    deleted = " (deleted)"
+    return [target for fd, target in targets.items()
+            if fd not in skip and target.endswith(deleted) and target[:-len(deleted)] in watched]
+
+
+def _stranded_via_os_readlink(watched: set[str], skip: frozenset[int] | set[int]) -> list[str]:
     out: list[str] = []
     try:
         names = os.listdir("/proc/self/fd")
     except OSError:
         return out
-    # Lock-safe pread fds (quarantine copies, header probes) are not connections: skip them.
-    from hermes_cli.sqlite_safe_read import lock_safe_fds
-
-    skip = lock_safe_fds()
+    deleted = " (deleted)"
     for name in names:
-        if name.isdigit() and int(name) in skip:
+        if not name.isdigit() or int(name) in skip:
             continue
         try:
             target = os.readlink(f"/proc/self/fd/{name}")
         except OSError:
             continue
-        if target.endswith(" (deleted)") and target[: -len(" (deleted)")] in watched:
+        if target.endswith(deleted) and target[:-len(deleted)] in watched:
             out.append(target)
     return out
 

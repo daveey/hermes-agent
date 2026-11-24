@@ -80,7 +80,25 @@ def _build_native() -> Optional[tuple[Callable[[int], Optional[Identity]], Calla
         return None
     finally:
         os.close(probe)
+    _bind_readlink(libc, ctypes)
     return native, read_status
+
+
+def _bind_readlink(libc, ctypes) -> None:
+    """Publish ``readlink`` and ``realpath`` only after ``_build_native`` has proved this libc."""
+    global _readlink, _realpath
+    readlink = libc.readlink
+    readlink.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+    readlink.restype = ctypes.c_ssize_t
+    _readlink = readlink
+    realpath = libc.realpath
+    realpath.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    realpath.restype = ctypes.c_char_p
+    _realpath = realpath
+
+
+_readlink = None  # GIL-held libc.readlink; None when the native sweep is off
+_realpath = None  # GIL-held libc.realpath; None when the native sweep is off
 
 
 _built = _build_native()
@@ -100,6 +118,76 @@ def identity(fd: int) -> Optional[Identity]:
     if _native is not None:
         return _native(fd)
     return _os_identity(fd)
+
+
+def held_realpath(path: str) -> Optional[str]:
+    """``os.path.realpath`` without releasing the GIL. ``None`` if the native sweep is off.
+
+    ``os.path.realpath`` lstats each component and drops the GIL on every one. Under the board
+    lifecycle lock that re-acquire waits out every busy thread's switch interval, so a cold
+    resolve held the lock for seconds (``t_01a1ce5c1d7bfe42`` cached the hit; the miss remained).
+    ``libc.realpath`` via ``PyDLL`` keeps the GIL for the syscall: busy threads wait on us.
+    A missing final component is kept, matching ``os.path.realpath``.
+    """
+    fn = _realpath
+    if fn is None or not isinstance(path, str) or not path:
+        return None
+    import ctypes
+
+    buf = ctypes.create_string_buffer(4096)
+
+    def once(candidate: str) -> Optional[str]:
+        if not candidate:
+            return None
+        got = fn(os.fsencode(candidate), buf)
+        if not got:
+            return None
+        return os.fsdecode(got)
+
+    direct = once(path)
+    if direct is not None:
+        return direct
+    parent = path
+    missing: list[str] = []
+    while True:
+        parent, tail = os.path.split(parent)
+        if not tail:
+            break
+        missing.append(tail)
+        resolved = once(parent if parent else ".")
+        if resolved is not None:
+            for part in reversed(missing):
+                resolved = os.path.join(resolved, part)
+            return resolved
+        if not parent or parent == os.sep:
+            break
+    return None
+
+
+def proc_fd_targets() -> Optional[dict[int, str]]:
+    """``fd -> readlink(/proc/self/fd/N)`` without releasing the GIL per descriptor.
+
+    ``os.readlink`` drops the GIL. On a busy interpreter each re-acquire waits a switch
+    interval, so a few hundred descriptors held a board lifecycle lock for seconds
+    (``stranded_sidecars`` runs inside ``recover``). ``None`` means the caller must use
+    ``os.readlink`` (native sweep off). A private buffer: callers do not hold ``_LOCK``.
+    """
+    readlink = _readlink
+    if readlink is None:
+        return None
+    size = _fd_table_size()
+    if size is None or size <= 0 or size > MAX_NATIVE_SWEEP:
+        return None  # caller uses os.readlink; this table is outside the native sweep
+    import ctypes
+
+    buf = ctypes.create_string_buffer(4096)
+    out: dict[int, str] = {}
+    for fd in range(size):
+        n = readlink(f"/proc/self/fd/{fd}".encode(), buf, len(buf) - 1)
+        if n <= 0 or n >= len(buf) - 1:
+            continue  # closed, gone, or truncated: not a sidecar path we can trust
+        out[fd] = buf.raw[:n].decode("utf-8", "surrogateescape")
+    return out
 
 
 def native_enabled() -> bool:

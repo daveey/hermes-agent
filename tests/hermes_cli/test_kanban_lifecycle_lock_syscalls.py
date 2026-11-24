@@ -37,22 +37,20 @@ class _Clock:
 def test_board_path_resolves_once_per_ttl_and_again_after(monkeypatch, tmp_path):
     clock = _Clock()
     calls = []
-    real = os.path.realpath
+    real = gen._resolve_now
     monkeypatch.setattr(gen, "_clock", clock)
-    monkeypatch.setattr(gen.os.path, "realpath", lambda v: calls.append(v) or real(v))
+    monkeypatch.setattr(gen, "_resolve_now", lambda v: calls.append(v) or real(v))
     db = str(tmp_path / "kanban.db")
 
-    # realpath recurses on each path component (Python 3.14); count only resolutions of the board path itself.
     first = gen._path(db)
-    once = len(calls)
-    assert once >= 1
+    assert calls == [db]
     for _ in range(50):
         assert gen._path(db) == first
-    assert len(calls) == once                   # reused: no syscall at all
+    assert calls == [db]                        # reused: no resolve at all
 
     clock.t += gen._RESOLVE_TTL_S + 0.1
     assert gen._path(db) == first
-    assert len(calls) == 2 * once               # resolved again after the TTL
+    assert calls == [db, db]                    # resolved again after the TTL
 
 
 def test_retargeted_symlink_is_seen_after_the_ttl(monkeypatch, tmp_path):

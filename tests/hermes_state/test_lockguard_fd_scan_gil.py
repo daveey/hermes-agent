@@ -114,3 +114,59 @@ def test_own_fds_scan_stays_fast_while_another_thread_is_cpu_bound(tmp_path):
             os.close(fd)
     # Per-fd hand-off: ~600 x 5 ms = seconds. GIL-held sweep: a few switch intervals at most.
     assert worst < 0.1, f"scan took {worst:.3f}s with one busy thread"
+
+
+def test_stranded_sidecar_scan_stays_inside_the_reader_timeout(tmp_path):
+    """``os.readlink`` and ``os.path.realpath`` release the GIL. Under a busy interpreter each
+    re-acquire waits a switch interval, so ``stranded_sidecars`` (called from ``recover`` while
+    the board lifecycle lock is held) stretched a sub-millisecond walk into seconds and every
+    reader raised ``BoardLifecycleBusy``. The call must finish inside the 0.5s reader timeout.
+    """
+    if not sys.platform.startswith("linux"):
+        pytest.skip("procfs sidecar scan")
+    from hermes_cli import kanban_lockguard
+
+    wal = tmp_path / "board.db-wal"
+    held = os.open(wal, os.O_RDWR | os.O_CREAT, 0o600)
+    os.unlink(wal)  # still open: readlink reports " (deleted)"
+    filler = [os.open(os.devnull, os.O_RDONLY) for _ in range(400)]
+    stop = threading.Event()
+
+    def spin():
+        while not stop.is_set():
+            sum(range(80))
+
+    spinners = [threading.Thread(target=spin, daemon=True) for _ in range(24)]
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(0.005)
+    for spinner in spinners:
+        spinner.start()
+    try:
+        started = time.perf_counter()
+        # Scan on this thread: it already holds the GIL, so the measurement is the walk,
+        # not how long a fresh thread waits to be scheduled behind the spinners.
+        found = kanban_lockguard.stranded_sidecars(tmp_path / "board.db")
+        elapsed = time.perf_counter() - started
+    finally:
+        stop.set()
+        sys.setswitchinterval(old)
+        for spinner in spinners:
+            spinner.join(2)
+        os.close(held)
+        for fd in filler:
+            os.close(fd)
+    assert elapsed < 0.5, f"stranded scan took {elapsed:.3f}s; reader timeout is 0.5s"
+    assert any(str(wal) in item for item in found)
+
+
+def test_held_realpath_matches_os_path_realpath(tmp_path, monkeypatch):
+    from hermes_state_lockguard_fdscan import held_realpath
+
+    if held_realpath("/tmp") is None:
+        pytest.skip("native realpath off")
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path)
+    missing = tmp_path / "no-such-board.db"
+    monkeypatch.chdir(tmp_path)
+    for path in (str(tmp_path), str(missing), str(link / "no-such-board.db"), "kanban.db"):
+        assert held_realpath(path) == os.path.realpath(path)

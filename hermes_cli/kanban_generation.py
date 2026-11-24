@@ -144,35 +144,51 @@ def _path(database) -> str | None:
     return _resolved(value)
 
 
-# Board paths are resolved on every cached read, under the board lock in ``recover``. ``realpath`` makes one
-# GIL-releasing syscall per path component; with a hundred busy serve threads each one waits out the switch
-# interval, which was a top board-lock holder on the hub after the fd-scan fix (t_01a1ce5c1d7bfe42).
-# An absolute path's resolution is reused for ``_RESOLVE_TTL_S``: a symlink retargeted under a live board is seen
-# within that window (board paths are not retargeted in practice). Relative paths depend on the cwd: never cached.
-# Plain dict get/set/clear are atomic under the GIL; a racing clear only costs one extra ``realpath``.
+# Board paths are resolved on every cached read, under the board lock in ``recover``. ``os.path.realpath``
+# makes one GIL-releasing syscall per path component; with a hundred busy serve threads each one waits out
+# the switch interval, which was a top board-lock holder on the hub after the fd-scan fix (t_01a1ce5c1d7bfe42).
+# An absolute path's resolution is reused for ``_RESOLVE_TTL_S``. A miss uses a GIL-held libc realpath so the
+# lock is not held across that walk; a symlink retargeted under a live board is seen within the TTL (board
+# paths are not retargeted in practice). Relative paths depend on the cwd: never cached.
+# Plain dict get/set/clear are atomic under the GIL; a racing clear only costs one extra resolve.
 _RESOLVE_TTL_S = 30.0
 _CACHE_MAX = 256
 _clock = time.monotonic
 _resolved_paths: dict[str, tuple[str, float]] = {}
 
 
+def _resolve_now(value: str) -> str:
+    """Resolve ``value`` without releasing the GIL when the native sweep is on.
+
+    The cache in ``_resolved`` skips this on a hit. A miss still runs under the board lifecycle
+    lock, so it must not call ``os.path.realpath`` (one releasing syscall per component).
+    """
+    from hermes_state_lockguard_fdscan import held_realpath
+
+    held = held_realpath(value)
+    if held is not None:
+        return held
+    return os.path.realpath(value)
+
+
 def _resolved(value: str) -> str:
     if not os.path.isabs(value):
-        return os.path.realpath(value)
+        return _resolve_now(value)
     now = _clock()
     hit = _resolved_paths.get(value)
     if hit is not None and now - hit[1] < _RESOLVE_TTL_S:
         return hit[0]
-    real = os.path.realpath(value)
+    real = _resolve_now(value)
     if len(_resolved_paths) >= _CACHE_MAX:
         _resolved_paths.clear()
     _resolved_paths[value] = (real, now)
     return real
 
 
-# A clean ``stranded_sidecars`` scan reads every ``/proc/self/fd`` link under the board lock (~7 s for 600 fds behind
-# 4 busy threads). A handle is stranded only when the board's ``-shm`` or ``-wal`` is replaced or deleted, which
-# changes that file's ``(st_dev, st_ino)`` (a held inode cannot be reused); so a clean verdict is reused while both
+# A clean ``stranded_sidecars`` scan used to read every ``/proc/self/fd`` link with ``os.readlink`` under the
+# board lock (~7 s for 600 fds behind 4 busy threads). The miss path is now a GIL-held sweep. A handle is
+# stranded only when the board's ``-shm`` or ``-wal`` is replaced or deleted, which changes that file's
+# ``(st_dev, st_ino)`` (a held inode cannot be reused); so a clean verdict is still reused while both
 # identities are unchanged, for at most ``_CLEAN_SCAN_TTL_S``. A positive verdict is never reused.
 _CLEAN_SCAN_TTL_S = 5.0
 _clean_scans: dict[str, tuple[object, float]] = {}
