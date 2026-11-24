@@ -145,6 +145,18 @@ describe('production main/preload primary reconnect routing', () => {
     expect(h.pool).not.toHaveBeenCalled()
   })
 
+  it('does not mark a named request served by the primary as inherited', async () => {
+    const h = harness()
+    const connection = await h.api.getConnection('served')
+    expect(connection.baseUrl).toBe(h.primary.baseUrl)
+    expect(connection.profile).toBe('served')
+    expect(connection.sharedPrimary).toBe(true)
+    expect(connection.inheritsPrimary).toBe(false)
+    expect(h.start).toHaveBeenCalledWith('served', false)
+    expect(h.pool).not.toHaveBeenCalled()
+    expect(h.registry).not.toHaveBeenCalled()
+  })
+
   it('keeps explicit named pools and profile-less foreground registry routing unchanged', async () => {
     for (const opts of [undefined, { inheritsPrimary: false }, { inheritsPrimary: 'true' }]) {
       const h = harness()
