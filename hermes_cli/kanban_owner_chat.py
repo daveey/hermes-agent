@@ -43,6 +43,7 @@ BACKFILL_BATCH = 100
 _ENSURED: dict[tuple[str, str], tuple[str, float]] = {}
 _LOCK = threading.Lock()
 _NEXT_BACKFILL: dict[str, float] = {}
+_UNLINKABLE: set[str] = set()
 
 
 def enabled() -> bool:
@@ -304,31 +305,42 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
     the write lock. A card left on a deleted or archived owner chat is re-validated first (``ensure(force=True)``
     restores an archived chat; a deleted one rotates). On a synced board its dead link stays: creating-chat links
     are never released on their own gateway (``kanban_chat_links._local_links``), and the live link beside it
-    owns the card. On a board without links the dead subscription is dropped."""
+    owns the card; subscriptions to the dead chat are dropped. A producer whose owner chat cannot be made is
+    skipped for the rest of the pass (``failed``); a card that stays ownerless after linking is not retried by
+    this process, so it cannot hold a batch slot forever."""
     from hermes_cli import kanban_db as kb
     links = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone())
     db, live = _liveness()
+    failed: set[str] = set()
     try:
         found, linked = ownerless(conn, live), []
         if apply:
             forced: set[str] = set()
-            for task_id, producer in found[:limit]:
+            for task_id, producer in [c for c in found if c[0] not in _UNLINKABLE][:limit]:
                 dead = _needs_owner(conn, task_id, links, live)
-                if dead is None:
+                if dead is None or producer in failed:
                     continue
                 force = bool(dead) and producer not in forced
-                sid = ensure(producer, force=force)  # state.db work outside the kanban write lock
+                try:
+                    sid = ensure(producer, force=force)  # state.db work outside the kanban write lock
+                except Exception:  # health: allow BLE001 -- one producer's state.db trouble must not stop the rest
+                    log.warning("kanban owner chat for %s unavailable; its cards wait for the next pass", producer,
+                                exc_info=True)
+                    failed.add(producer)
+                    continue
                 if force:
                     forced.add(producer)
                 with kb.write_txn(conn):
                     if _relink(conn, task_id, producer, sid, links, live):
                         linked.append(task_id)
+                    elif _needs_owner(conn, task_id, links, live) is not None:
+                        _UNLINKABLE.add(task_id)
     finally:
         db.close()
     by_producer: dict[str, int] = {}
     for _, producer in found:
         by_producer[producer] = by_producer.get(producer, 0) + 1
-    return {"ownerless": len(found), "linked": len(linked), "by_producer": by_producer}
+    return {"ownerless": len(found), "linked": len(linked), "by_producer": by_producer, "failed": sorted(failed)}
 
 
 def _relink(conn, task_id: str, producer: str, sid: str, links: bool, live) -> bool:
@@ -337,10 +349,10 @@ def _relink(conn, task_id: str, producer: str, sid: str, links: bool, live) -> b
     dead = _needs_owner(conn, task_id, links, live)
     if dead is None:
         return False
-    for ref in dead if not links else ():
-        if ref != sid:
-            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=? AND platform='tui' AND chat_id=?",
-                         (task_id, ref))
+    for ref in dead:
+        if ref != sid:  # a notice to a deleted/archived owner chat is dropped: stop binding the card to it
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=? AND (chat_id=? OR chat_id LIKE ?)",
+                         (task_id, ref, "%/" + ref))
     return link(conn, task_id, producer, sid) or sid in dead
 
 
@@ -352,8 +364,9 @@ def maybe_backfill(conn, *, now: float) -> Optional[dict]:
     path = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), "")
     if not enabled() or now < _NEXT_BACKFILL.get(path, float("-inf")):
         return None
+    _NEXT_BACKFILL[path] = now + BACKFILL_CATCHUP_S  # set first: a pass that raises waits, never reruns every tick
     result = backfill(conn, apply=True, limit=BACKFILL_BATCH)
-    full = result["ownerless"] > BACKFILL_BATCH
+    full = result["ownerless"] > BACKFILL_BATCH or bool(result["failed"])
     _NEXT_BACKFILL[path] = now + (BACKFILL_CATCHUP_S if full else BACKFILL_EVERY_S)
     if result["linked"]:
         log.info("kanban owner chats: linked %d ownerless cards %s", result["linked"], result["by_producer"])

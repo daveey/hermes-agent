@@ -172,7 +172,7 @@ def test_backfill_links_ownerless_open_cards_once(kanban_home, monkeypatch):
             conn.execute("UPDATE tasks SET status='done' WHERE id=?", (finished,))
         monkeypatch.setattr(owner, "enabled", lambda: True)
         dry = owner.backfill(conn, apply=False)
-        assert dry == {"ownerless": 1, "linked": 0, "by_producer": {"worker-claim-watch": 1}}
+        assert dry == {"ownerless": 1, "linked": 0, "by_producer": {"worker-claim-watch": 1}, "failed": []}
         assert _links(conn, old) == []
         applied = owner.backfill(conn, apply=True)
         assert applied["linked"] == 1
@@ -344,7 +344,7 @@ def test_backfill_leaves_a_card_whose_chat_released_it(synced, monkeypatch):
         synced.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,"
                        "released,created_at) VALUES ('u1',?,'hub',NULL,'20261124_120000_gone','created',1,0)", (tid,))
     monkeypatch.setattr(owner, "enabled", lambda: True)
-    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}}
+    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}, "failed": []}
 
 
 def test_owner_chats_cli_lists_then_links(kanban_home, monkeypatch, capsys):
@@ -455,7 +455,7 @@ def test_backfill_restores_an_archived_owner_chat_even_while_it_is_cached(synced
         assert not db.get_session(sid)["archived"]
     finally:
         db.close()
-    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}}
+    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}, "failed": []}
     assert sum(e.kind == owner.EVENT for e in kb.list_events(synced, tid)) == 1
 
 
@@ -493,3 +493,41 @@ def test_dispatcher_maintenance_hook_runs_the_backfill(kanban_home, monkeypatch,
         monkeypatch.setattr(owner, "enabled", lambda: True)
         maintenance._own_ownerless_cards(conn)
         assert _links(conn, tid)[0]["chat_session"] == owner.session_id("oom-detector")
+
+
+def test_one_failing_producer_neither_stops_the_pass_nor_reruns_every_tick(kanban_home, monkeypatch, owner_backfill):
+    monkeypatch.setattr(owner, "_NEXT_BACKFILL", {})
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    with kbc.connect_closing() as conn:
+        bad = kb.create_task(conn, title="bad", assignee="default", created_by="broken-producer")
+        good = kb.create_task(conn, title="good", assignee="default", created_by="self-heal")
+        monkeypatch.setattr(owner, "enabled", lambda: True)
+        real, calls = owner.ensure, []
+
+        def ensure(producer, *, force=False):
+            calls.append(producer)
+            if producer == "broken-producer":
+                raise OSError("database is locked")
+            return real(producer, force=force)
+        monkeypatch.setattr(owner, "ensure", ensure)
+        result = owner.maybe_backfill(conn, now=0.0)
+        assert result["failed"] == ["broken-producer"] and result["linked"] == 1
+        assert _links(conn, good) and not _links(conn, bad)
+        assert owner.maybe_backfill(conn, now=1.0) is None  # not every tick
+        assert owner.maybe_backfill(conn, now=owner.BACKFILL_CATCHUP_S)["failed"] == ["broken-producer"]
+        assert calls.count("broken-producer") == 2
+
+
+def test_a_card_that_stays_ownerless_after_linking_does_not_hold_a_batch_slot(kanban_home, monkeypatch):
+    monkeypatch.setattr(owner, "_UNLINKABLE", set())
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    with kbc.connect_closing() as conn:
+        stuck = kb.create_task(conn, title="stuck", assignee="default", created_by="self-heal")
+        other = kb.create_task(conn, title="other", assignee="default", created_by="self-heal")
+        monkeypatch.setattr(owner, "enabled", lambda: True)
+        real = owner.link
+        monkeypatch.setattr(owner, "link", lambda c, t, p, s: False if t == stuck else real(c, t, p, s))
+        assert owner.backfill(conn, apply=True, limit=1)["linked"] == 0  # the oldest card cannot be owned
+        assert stuck in owner._UNLINKABLE
+        assert owner.backfill(conn, apply=True, limit=1)["linked"] == 1  # the next pass moves on
+        assert _links(conn, other)
