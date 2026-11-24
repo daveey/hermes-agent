@@ -259,7 +259,8 @@ def _sidecar_path(board: str) -> Path:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    side = sqlite3.connect(str(path), timeout=30, isolation_level=None)
+    # Dedicated business-review operations journal, never a live Kanban board.
+    side = sqlite3.connect(str(path), timeout=30, isolation_level=None)  # noqa: kanban-lockguard
     side.row_factory = sqlite3.Row
     return side
 
