@@ -35,7 +35,7 @@ def _constant(_value: str):
     raise Refused('nonfinite_number')
 
 
-def strict_object(raw: object) -> dict:
+def strict_object(raw: object, *, max_bytes: int = MAX_BYTES) -> dict:
     """Bounded UTF-8 JSON object; reject duplicates, nonfinite values and surrogates."""
     if not isinstance(raw, str):
         raise Refused('json_required')
@@ -43,7 +43,7 @@ def strict_object(raw: object) -> dict:
         size = len(raw.encode('utf-8'))
     except UnicodeError as exc:
         raise Refused('invalid_unicode') from exc
-    _require(size <= MAX_BYTES, 'json_size')
+    _require(size <= max_bytes, 'json_size')
     try:
         value = json.loads(raw, object_pairs_hook=_pairs, parse_constant=_constant)
     except Refused:
@@ -120,11 +120,20 @@ def validate_current(raw: str, exact_source: str, *, gateway: str, board: str, h
     """
     row = decode_source(exact_source)
     fields = strict_object(row['fields'])
-    data = strict_object(raw)
+    # A source string is JSON-escaped again and two full parent snapshots are returned.
+    # Keep a finite response budget separate from the unchanged 128 KiB source cap.
+    data = strict_object(raw, max_bytes=2 * 1024 * 1024)
     _require(set(data) == {'version', 'gateway', 'receipt', 'current'} and type(data['version']) is int
              and data['version'] == 1 and data['gateway'] == gateway, 'proof_identity')
     receipt, current = data['receipt'], data['current']
     _require(isinstance(receipt, dict) and isinstance(current, dict), 'proof_objects')
+    _require(set(receipt) == {'version', 'gateway', 'source_json', 'reason', 'disposition',
+             'canonical_acceptance', 'historical_identity_certified', 'execution_authority',
+             'reported_rejection_only', 'snapshot_only', 'observed_at_ms', 'observed_head', 'parent', 'absence'},
+             'receipt_keys')
+    _require(set(current) == {'observed_at_ms', 'observed_head', 'parent', 'absence', 'no_lease',
+             'no_running_run', 'no_retained_op_receipt', 'op_history_certified', 'retained_receipt_floor1',
+             'execution_authority'}, 'current_keys')
     _require(type(receipt.get('version')) is int and receipt['version'] == 1
              and receipt.get('gateway') == gateway and receipt.get('source_json') == exact_source
              and receipt.get('disposition') == 'retained_unreplayed'

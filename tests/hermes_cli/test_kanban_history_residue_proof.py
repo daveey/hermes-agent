@@ -26,6 +26,24 @@ def proof():
     return raw, {'version': 1, 'gateway': 'home', 'receipt': receipt, 'current': current}
 
 
+@pytest.mark.parametrize('section,key,value', [('current', 'op_unknown', True),
+    ('current', 'canonical_acceptance', True), ('current', 'historical_identity_certified', True),
+    ('receipt', 'op_unknown', True)])
+def test_rejects_unexpected_nested_contract_keys(section, key, value):
+    raw, data = proof()
+    data[section][key] = value
+    with pytest.raises(source.Refused):
+        source.validate_current(json.dumps(data), raw, gateway='home', board='default', head=100)
+
+
+def test_large_legal_response_has_its_own_bound_not_source_cap():
+    raw, data = proof()
+    data['receipt']['parent']['body'] = 'x' * 65536
+    data['current']['parent']['body'] = 'x' * 65536
+    assert len(json.dumps(data).encode()) > source.MAX_BYTES
+    assert source.validate_current(json.dumps(data), raw, gateway='home', board='default', head=100) == data['current']
+
+
 def test_separates_historical_receipt_from_current_safe_parent_and_cache_uncertainty():
     raw, data = proof()
     data['current']['parent']['version'] = 8
