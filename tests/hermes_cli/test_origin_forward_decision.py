@@ -46,10 +46,24 @@ def test_forward_envelope_frozen_before_queue_and_survives_lease_end(forwarding)
     assert first["args"]["origin"]["gateway"] == "macbook"
     assert "from" not in first  # courier authenticates the actual MacBook, never copied worker identity
     assert first["args"]["create"] == forwarding[0]["args"]["create"]
+    assert 'creator' not in first['args']  # foreign-home route keeps chat ownership
     assert decide(forwarding, now_ms=lambda: 99999) == first
     assert forwarding[2] == [("default", "task-1")]
     with sqlite3.connect(forwarding[1]["path"]) as db:
         assert db.execute("SELECT count(*) FROM decisions").fetchone()[0] == 1
+
+
+def test_native_same_home_creator_is_frozen(forwarding):
+    request = copy.deepcopy(forwarding[0])
+    request['args']['destination']['gateway'] = 'macbook'
+    creator = request['args']['creator'] = {**request['args']['creator'], 'gateway': 'macbook'}
+    binding = {'binding_id': 'native-' + creator['task_id'], 'version': 1, 'publication_version': 1,
+               'owner': creator, 'origin': request['args']['origin'],
+               'task_record_key': 'default/default/' + creator['task_id']}
+    kwargs = {'native_lookup': lambda origin, owner: binding}
+    first = decide(forwarding, request, **kwargs)
+    assert first['args']['creator'] == creator
+    assert decide(forwarding, request, now_ms=lambda: 99999, **kwargs) == first
 
 
 @pytest.mark.parametrize("field", ["create", "destination", "run_uid", "creator"])

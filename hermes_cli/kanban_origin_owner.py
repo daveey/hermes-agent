@@ -15,7 +15,8 @@ from pathlib import Path
 from hermes_cli.kanban_origin_adapter import _gateway
 
 
-def _dispatch_owner_tool(name, args, intent, selfwork_context=None, selfwork_exception=None):
+def _dispatch_owner_tool(name, args, intent, selfwork_context=None, selfwork_exception=None,
+                         origin_creator_task_id=None):
     """The validated courier selects Kanban explicitly, independent of chat defaults.
 
     Keep registry availability checks (including delegated-child fences) and the
@@ -30,6 +31,8 @@ def _dispatch_owner_tool(name, args, intent, selfwork_context=None, selfwork_exc
         private = {'selfwork_intent': {**intent, **selfwork_context}} if selfwork_context else {}
         if selfwork_exception is not None:  # its own keyword: never part of either intent or the intake journal
             private['selfwork_exception'] = selfwork_exception
+        if origin_creator_task_id is not None:
+            private['origin_creator_task_id'] = origin_creator_task_id
         return _dispatch_result(registry.dispatch(name, args, origin_intent=intent, **private))
 
 
@@ -80,7 +83,7 @@ def receive(request: dict, *, selfwork_context=None, selfwork_exception=None) ->
                           'owner': intent['owner'], 'origin': origin, 'task_record_key': key})
         return _dispatch_owner_tool('kanban_origin_adopt', {'task_id': task_id, 'board': board}, intent)
     create = request['args'].get('create')
-    if (set(request['args']) != {'origin', 'create'} or not isinstance(create, dict)
+    if (set(request['args']) not in ({'origin', 'create'}, {'origin', 'create', 'creator'}) or not isinstance(create, dict)
             or not isinstance(create.get('session_id'), str)
             or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}', create['session_id'])
             or ('board' in create and create['board'] != board)):
@@ -88,6 +91,18 @@ def receive(request: dict, *, selfwork_context=None, selfwork_exception=None) ->
     from hermes_cli.kanban_creation_contract import validate_received
     validate_received({key: value for key, value in create.items() if key != 'board'})
     args = {**create, 'board': board}
+    if 'creator' in request['args']:
+        creator = request['args']['creator']
+        validate_binding({'binding_id': 'validation', 'version': 1, 'publication_version': 1,
+                          'owner': creator, 'origin': origin,
+                          'task_record_key': '/'.join(str(creator.get(k, ''))
+                                                     for k in ('profile', 'board', 'task_id'))
+                          if isinstance(creator, dict) else ''})
+        if not all(creator[k] == intent['owner'][k] for k in ('gateway', 'profile', 'board')):
+            raise ValueError('origin_creator_unproven')
+        intent['creator'] = creator
+        return _dispatch_owner_tool('kanban_create', args, intent, selfwork_context, selfwork_exception,
+                                    origin_creator_task_id=creator['task_id'])
     return _dispatch_owner_tool('kanban_create', args, intent, selfwork_context, selfwork_exception)
 
 
@@ -106,7 +121,8 @@ def _dispatch_result(raw_result):
         # Dispatch catches exceptions itself. An untyped error may follow a
         # committed write: keep the exact request retryable, never infer absence.
         return {'status': 'pending', 'code': 'origin_dispatch_pending', 'handoff_complete': False}
-    if result.get('code') in {'origin_creation_conflict', 'origin_already_bound', 'origin_idempotency_conflict'}:
+    if result.get('code') in {'origin_creation_conflict', 'origin_already_bound', 'origin_idempotency_conflict',
+                              'origin_creator_unproven'}:
         # Replaying an immutable conflicting envelope cannot repair it. Reject
         # this request only; the original intent and its receipt remain intact.
         return {**result, 'status': 'rejected'}

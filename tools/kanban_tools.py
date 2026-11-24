@@ -1661,7 +1661,7 @@ def _handle_create(args: dict, **kw) -> str:
                 # session's current board.
                 board=args.get("board"),
                 project_source_task_id=project_source_task_id, triage=triage,
-                creator_task_id=self_tid,
+                creator_task_id=(kw.get("origin_creator_task_id") if origin_intent is not None else self_tid),
                 idempotency_key=args.get("idempotency_key"),
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
                 requires=_effective_requires(marker_placement, args),

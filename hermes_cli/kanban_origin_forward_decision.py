@@ -97,7 +97,7 @@ def prepare(request: dict, *, path: Path, ledger: Path, gateway: str, profile: s
                           "task_record_key": "/".join(str(creator.get(k, ""))
                                                      for k in ("profile", "board", "task_id"))})
         lease = lease_lookup(creator["board"], creator["task_id"])
-        authorize(ledger=ledger, origin=args["origin"], creator=creator, gateway=gateway,
+        binding = authorize(ledger=ledger, origin=args["origin"], creator=creator, gateway=gateway,
                   profile=profile, sender=request["from"], run_uid=args["run_uid"],
                   lease=lease, now_ms=now_ms(), session_exists=session_exists, native_lookup=native_lookup)
         destination = args["destination"]
@@ -109,6 +109,11 @@ def prepare(request: dict, *, path: Path, ledger: Path, gateway: str, profile: s
                     "to_gw": destination["gateway"], "coll": "tasks", "action": "create",
                     "key": f"{destination['profile']}/{destination['board']}",
                     "args": {"origin": args["origin"], "create": args["create"]}}
+        # Only a native same-home creator can be independently attested by the
+        # receiving owner. Other routes retain authenticated chat ownership.
+        if (binding["binding_id"] == "native-" + creator["task_id"] and creator["gateway"] == gateway and
+                all(creator[k] == destination[k] for k in ("gateway", "profile", "board"))):
+            envelope["args"]["creator"] = creator
         # Concurrent admissions may have raced the network read. Recheck while
         # holding write custody, and return only after durable commit.
         with db:

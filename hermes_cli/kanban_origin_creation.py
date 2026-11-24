@@ -124,7 +124,8 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
     from hermes_cli.kanban_origin_ledger import validate_binding
 
     try:
-        if not isinstance(intent, dict) or set(intent) != {"request_id", "owner", "origin"}:
+        if (not isinstance(intent, dict) or
+                set(intent) not in ({"request_id", "owner", "origin"}, {"request_id", "owner", "origin", "creator"})):
             raise ValueError
         if not isinstance(intent["request_id"], str) or not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", intent["request_id"]):
             raise ValueError
@@ -189,6 +190,15 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
             if held:
                 raise OriginError("origin_idempotency_conflict",
                                   f"idempotency_key {key!r} already names card {held['id']} on this board")
+        if "creator" in intent:
+            from hermes_cli.kanban_origin_native import _primary_scope, _receipt
+            creator = intent["creator"]
+            expected_creator = {**intent["owner"], "task_id": options.get("creator_task_id")}
+            primary = tuple(intent["owner"][k] for k in ("gateway", "profile", "board"))
+            binding = _receipt(conn, options.get("creator_task_id"))
+            if (creator != expected_creator or _primary_scope(conn) != primary or binding is None
+                    or binding["owner"] != creator or binding["origin"] != intent["origin"]):
+                raise OriginError("origin_creator_unproven", "creator lacks an owner-local native attestation")
         task_id = kb.create_task(conn, **options, placement_checked=True,  # courier retains owner placement
                                  settle_owner_chat=False)  # its origin chat is linked below, then required
         marker = {"binding_id": "binding-" + secrets.token_hex(16), "version": 1,
