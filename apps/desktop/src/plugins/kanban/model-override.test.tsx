@@ -16,6 +16,9 @@ describe('model-neutral Kanban requirements', () => {
     expect(Array.from(selector.querySelectorAll('option')).every(option => !option.value || option.value.startsWith('class:'))).toBe(true)
     fireEvent.change(selector, { target: { value: 'class:deep' } })
     expect(onChange).toHaveBeenLastCalledWith({ effort: '', model: 'class:deep', provider: 'auto' })
+    fireEvent.change(selector, { target: { value: 'class:carbon' } })
+    expect(onChange).toHaveBeenLastCalledWith({ effort: '', model: 'class:carbon', provider: 'auto' })
+    expect(overrideCreateFields({ effort: '', model: 'class:carbon', provider: 'auto' })).toEqual({ model_override: 'class:carbon', provider_override: 'auto' })
   })
 
   it('does not display or resubmit a historical concrete pin', () => {

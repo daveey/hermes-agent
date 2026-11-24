@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 FLAGS = ("pin_mandatory", "model_pin_mandatory", "require_model")
 REFUSED_VALUES = (True, 1, 2, "true", "false", "no", "0", "", [], {}, 0.0, 1.0)
 ACCEPTED_VALUES = (None, False, 0)
-EXACT_CLASSES = ("class:fast", "class:standard", "class:deep")
+EXACT_CLASSES = ("class:fast", "class:standard", "class:deep", "class:carbon")
 
 OTHER_BOARD = "unconventional-collab"
 B1_TITLE = ("Stage B1: run the frozen X/T tuning + confirmation matrix and external-anchor rescoring "

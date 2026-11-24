@@ -5,7 +5,7 @@ title: Model class routing
 # Model class routing
 
 Class routing is an opt-in, profile-local allocator. Set a workload's model to
-`class:deep`, `class:standard`, or `class:fast`, with provider `auto`. Hermes
+`class:deep`, `class:standard`, `class:fast`, or explicitly `class:carbon`, with provider `auto`. Hermes
 resolves the marker before constructing a provider request. Classes are operator
 assignments, not model-name guesses; failure never downgrades to another class.
 
@@ -20,6 +20,7 @@ assignments, not model-name guesses; failure never downgrades to another class.
 | `model_routing.routes.deep` | `[]` | Exact routes eligible for deep reasoning workloads. |
 | `model_routing.routes.standard` | `[]` | Exact routes eligible for standard workloads. |
 | `model_routing.routes.fast` | `[]` | Exact routes eligible for fast workloads. |
+| `model_routing.routes.carbon` | `[]` | Explicit-only routes, including Gemini `gemini-4-carbon`; never automatic capacity. |
 
 Each route requires `provider`, `model`, `billing`, `weight`, and `capabilities`.
 Identifiers are exact. `weight` is an integer from 1 to 100 and must be identical
@@ -59,6 +60,17 @@ credentials in this registry or copy rotating refresh tokens between hosts.
 An empty eligible class fails closed rather than using a paid fallback.
 
 ## Sessions, pins, and recovery
+
+`class:carbon` is explicit spending authorization for its verified metered or
+credit-funded routes, even with `allow_metered: false` and
+`enforce_subscription_only: true`. It still requires funding, eligibility,
+capabilities and a usable credential. Carbon tuples (and `gemini-4-carbon`)
+are excluded from every other class, even if duplicated in its registry.
+Kanban never uses carbon as a default, strong/retry/review tier, ratio allocation,
+or reroute target. An explicit card or review request may name `class:carbon`;
+delegation inherits it only from a parent that requested carbon. No automatic
+fallback crosses into carbon. Concrete paid pins remain rejected under managed
+subscription enforcement; request the class instead.
 
 Allocation is transactionally stored in `model-routing.sqlite3` under the active
 profile home. A healthy session/job remains sticky across turns, tools, restarts,

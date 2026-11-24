@@ -1,7 +1,7 @@
 """Validate physical class attempts without allocating or changing cached context."""
 import json
 
-from agent.model_routing import ModelRoutingError, _capable, validate_policy
+from agent.model_routing import ModelRoutingError, _capable, eligible_routes, validate_policy
 
 
 _IDENTITY_FIELDS = frozenset({
@@ -162,11 +162,11 @@ def validate_class_request(agent, request, *, streaming):
     validate_policy(policy)
     requirements = _requirements(agent, request, streaming)
     routes = policy.get("routes", {}).get(metadata["requested_class"], [])
-    allowed = [route for route in routes
+    candidates = eligible_routes(policy, metadata["requested_class"])
+    allowed = [route for route in candidates
                if route["provider"] == agent.provider and route["model"] == agent.model
                and route.get("eligible") and route.get("funding_verified")
                and route["billing"] == metadata["billing_group"]
-               and (route["billing"] == "subscription" or policy.get("allow_metered", False))
                and _capable(route, requirements)]
     if not policy.get("enabled") or not allowed:
         detail = ""
@@ -183,7 +183,7 @@ def validate_class_request(agent, request, *, streaming):
         recoverable = policy.get("enabled") and any(
             route.get("eligible") and route.get("funding_verified")
             and route["billing"] == metadata["billing_group"]
-            and (route["billing"] == "subscription" or policy.get("allow_metered", False))
+            and route in candidates
             and _capable(route, context_free)
             and agent._model_routing_context_floor <= route["capabilities"].get("context_tokens", 0)
             and output_reservation(agent, request) < route["capabilities"].get("context_tokens", 0)

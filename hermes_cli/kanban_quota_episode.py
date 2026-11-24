@@ -191,6 +191,8 @@ def _strong_fallback(task, base, walls, cfg, now):
     from hermes_cli.kanban_class_walls import class_wall_routes
     config = load_tier_config() if cfg is None else cfg
     strong = str(config.get('strong_model') or '')
+    if strong == 'class:carbon':
+        return None
     if strong.startswith('class:'):
         routes, _known = class_wall_routes(task, strong, now=now, extra_walls=walls)
         return (routes[0]['model'], routes[0]['provider']) if routes else None
@@ -269,9 +271,11 @@ def alternate_route(conn, task, walls, base, now):
         model = block.get('default') if isinstance(block, dict) else block
     # A concrete default must belong to a known class; never guess its strength.
     level = str(model or '').removeprefix('class:')
+    if level == 'carbon':
+        return None
     if not str(model or '').startswith('class:'):
         levels = [key for key, routes in policy.get('routes', {}).items()
-                  if any(r['model'] == model for r in routes)]
+                  if key != 'carbon' and any(r['model'] == model for r in routes)]
         if len(levels) != 1:
             return None
         level = levels[0]

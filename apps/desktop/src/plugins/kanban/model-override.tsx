@@ -10,7 +10,7 @@ export interface TaskModelOverride {
 }
 
 export const EMPTY_OVERRIDE: TaskModelOverride = { effort: '', model: '', provider: '' }
-const CLASSES = ['class:fast', 'class:standard', 'class:deep'] as const
+const CLASSES = ['class:fast', 'class:standard', 'class:deep', 'class:carbon'] as const
 
 export const isInherited = (value: TaskModelOverride): boolean =>
   !value.model.trim() && !value.provider.trim() && !value.effort.trim()

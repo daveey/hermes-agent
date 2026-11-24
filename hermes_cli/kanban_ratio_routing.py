@@ -247,7 +247,7 @@ def fresh_v2(now: float) -> Optional[dict]:
 def _pool_routes(task: Any, default_model: str) -> list[tuple[str, list[str]]]:
     """``[(pool, [eligible models])]`` in registry order, from the class level of ``default_model``: the level a
     ``class:<level>`` selector names, else the one level that lists the concrete model."""
-    from agent.model_routing import CLASSES, ModelRoutingError, eligible_routes, is_class_selector, validate_policy
+    from agent.model_routing import AUTOMATIC_CLASSES, ModelRoutingError, eligible_routes, is_class_selector, validate_policy
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
     from hermes_cli.kanban_model_assignment import _assignee_config
@@ -262,10 +262,10 @@ def _pool_routes(task: Any, default_model: str) -> list[tuple[str, list[str]]]:
     if not policy.get("enabled"):
         return []
     if is_class_selector(default_model):
-        levels = [level for level in [default_model.removeprefix("class:")] if level in CLASSES]
+        levels = [level for level in [default_model.removeprefix("class:")] if level in AUTOMATIC_CLASSES]
     else:
         levels = [level for level, routes in (policy.get("routes") or {}).items()
-                  if any(r.get("model") == default_model for r in routes)]
+                  if level in AUTOMATIC_CLASSES and any(r.get("model") == default_model for r in routes)]
     if len(levels) != 1:
         return []
     providers = config.get("providers") or {}

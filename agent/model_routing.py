@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from agent.model_routing_state import RoutingState
 
-CLASSES = frozenset({"deep", "standard", "fast"})
+AUTOMATIC_CLASSES = frozenset({"deep", "standard", "fast"})
+CLASSES = AUTOMATIC_CLASSES | {"carbon"}
 BILLING = frozenset({"subscription", "credit-funded", "metered"})
 SUBSCRIPTION_PROVIDERS = frozenset({"anthropic", "openai-codex", "xai-oauth"})
 
@@ -27,7 +28,7 @@ def is_class_selector(model):
 
 def exact_class_selector(model):
     """Policy membership only; callers own normalization, never this predicate."""
-    return isinstance(model, str) and model in ('class:fast', 'class:standard', 'class:deep')
+    return isinstance(model, str) and model in {f"class:{level}" for level in CLASSES}
 
 
 def _validate_route(route):
@@ -70,7 +71,7 @@ def validate_policy(policy):
         raise ModelRoutingError("Unsupported model_routing policy_version")
     routes = policy.get("routes", {})
     if not isinstance(routes, dict) or set(routes) - CLASSES:
-        raise ModelRoutingError("Registry must contain only deep/standard/fast route lists")
+        raise ModelRoutingError("Registry must contain only deep/standard/fast/carbon route lists")
     for level, entries in routes.items():
         if not isinstance(entries, list):
             raise ModelRoutingError(f"{level} routes must be a list")
@@ -103,11 +104,14 @@ def _capable(route, requirements):
 
 def eligible_routes(policy, level, requirements=None, excluded=(), eligible=None):
     """Shared billing/capability filter for allocation and non-allocating probes."""
+    explicit = {(r["provider"], r["model"]) for r in policy.get("routes", {}).get("carbon", [])}
     return [r for r in policy.get("routes", {}).get(level, [])
             if r.get("eligible") is True and r.get("funding_verified") is True
+            and (level == "carbon" or (r["model"] != "gemini-4-carbon"
+                 and (r["provider"], r["model"]) not in explicit))
             and (r["provider"], r["model"]) not in excluded
             and _capable(r, requirements or {})
-            and (r["billing"] == "subscription" or
+            and (level == "carbon" or r["billing"] == "subscription" or
                  (policy.get("allow_metered", False) and not policy.get("enforce_subscription_only", False)))
             and (eligible is None or eligible(r))]
 

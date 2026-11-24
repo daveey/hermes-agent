@@ -16,7 +16,7 @@ and review boundaries, not replacements for create, DB or selfwork admission:
 
 - `validate_explicit_selector(model=None, provider=None, *, mandatory=False)` first
   uses the canonical `validate_selector`, then requires any normalized nonempty
-  model to be exactly `class:fast`, `class:standard` or `class:deep`. It returns
+  model to be exactly `class:fast`, `class:standard`, `class:deep` or explicit-only `class:carbon`. It returns
   `(model, 'auto')` for an accepted class and `(None, None)` for an empty selector.
   A concrete provider, a provider without a model, an unknown class, invalid types,
   or a truthy mandatory argument raises `ValueError` with the canonical

@@ -130,13 +130,14 @@ def resolve_managed_runtime(model, provider, *, config, session_id=None, require
 
 def verify_selected_route(model, provider, metadata, config):
     """Validate a resolved tuple in its recorded class, not every registry class."""
-    if not metadata or metadata.get("billing_group") != "subscription":
+    if not metadata or (metadata.get("billing_group") != "subscription"
+                        and metadata.get("requested_class") != "carbon"):
         raise ModelRoutingError("Managed request lacks verified subscription provenance; recreate runtime")
     if (metadata.get("selected_model"), metadata.get("selected_provider")) != (model, provider):
         raise ModelRoutingError("Managed request changed selected route identity")
     routes = eligible_routes(config["model_routing"], metadata.get("requested_class"))
     if not any(route["model"] == model and route["provider"] == provider
-               and route["billing"] == "subscription" for route in routes):
+               and route["billing"] == metadata["billing_group"] for route in routes):
         raise ModelRoutingError("Managed request route is no longer eligible in its recorded class")
 
 

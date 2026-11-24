@@ -1434,7 +1434,7 @@ def dispatch(dry_run: bool = Query(False), max_n: int = Query(8, alias="max"), b
 @router.get("/model-options")
 def model_options():
     """Class-only choices in the existing dropdown shape; empty selection clears."""
-    classes = ('class:fast', 'class:standard', 'class:deep')
+    classes = ('class:fast', 'class:standard', 'class:deep', 'class:carbon')
     return {"providers": [{"slug": "auto", "label": "Auto (routing class)", "models": list(classes)}]}
 
 

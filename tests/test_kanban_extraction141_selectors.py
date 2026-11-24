@@ -8,7 +8,7 @@ from agent import model_routing as routing
 from agent import kanban_delegation_policy as delegation
 from hermes_cli import kanban_model_neutral as neutral
 
-CLASSES = ('class:fast', 'class:standard', 'class:deep')
+CLASSES = ('class:fast', 'class:standard', 'class:deep', 'class:carbon')
 INVALID = ('class:', 'class:bogus', 'class: deep', 'Class:deep', ' class:deep', 'class:deep ', '', None, 0, [], {})
 
 

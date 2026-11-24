@@ -93,9 +93,11 @@ def resolve_model_tier(
     cfg = load_tier_config() if cfg is None else cfg
     from agent.model_routing import is_class_selector
     default_model = _str(cfg.get("default_model"))
-    if not is_class_selector(default_model):
+    if not is_class_selector(default_model) or default_model == "class:carbon":
         default_model = "class:standard"
     from hermes_cli.kanban_review_model import is_review_run
+    if _str(getattr(task, "model_override", None)) == "class:carbon":
+        return "class:carbon", "auto", "class"
     if is_review_run(conn, task, lane):
         from hermes_cli.kanban_review_model import resolve_review_model
         review = resolve_review_model(conn, task, cfg)
@@ -114,7 +116,7 @@ def resolve_model_tier(
     from agent.model_routing import is_class_selector
     strong_model = _str(cfg.get("strong_model"))
     strong: tuple[Optional[str], Optional[str]]
-    if strong_model and is_class_selector(strong_model):
+    if strong_model and is_class_selector(strong_model) and strong_model != "class:carbon":
         # An explicit strong tier names its model, so review/retry work no longer follows whatever the
         # profile's default happens to be (a profile switch once moved 558 strong runs to a GPT).
         strong = (strong_model, "auto")
@@ -366,6 +368,8 @@ def _resolve_dispatch_tier(conn, task, *, lane, cfg=None):
 
 def _route_from_base(conn, task, base, *, lane, cfg):
     """:func:`resolve_dispatch_tier` after the tier and ratio choice: the episode, wall and pace moves of *base*."""
+    if base[0] == "class:carbon":
+        return base
     from hermes_cli.kanban_quota_episode import active, decision
     _, route = decision(conn, task, lane=lane, cfg=cfg, base=base)
     if base[2] == 'pinned':

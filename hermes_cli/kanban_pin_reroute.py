@@ -189,7 +189,8 @@ def peer_route(task: Any, model: str, walled: dict) -> Optional[tuple[str, str]]
     if not policy.get("enabled"):
         return None
     # The pin's strength is its class; a model in no class (or in two) has no peer we can prove equal.
-    levels = [key for key, routes in policy.get("routes", {}).items() if any(r["model"] == model for r in routes)]
+    levels = [key for key, routes in policy.get("routes", {}).items()
+              if key != "carbon" and any(r["model"] == model for r in routes)]
     if len(levels) != 1:
         return None
     providers = config.get("providers") or {}

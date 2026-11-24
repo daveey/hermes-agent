@@ -1083,7 +1083,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "is blocked for review. Ignored unless goal_mode is "
                 "true. Defaults to the goal-engine default (20)."
         )),
-        "model": _prop("string", "Optional class:<tier> selector (for example class:deep). Concrete model IDs are rejected; omit for dynamic routing."),
+        "model": _prop("string", "Optional class:<tier> selector (class:fast/standard/deep, or explicit-only class:carbon). Concrete model IDs are rejected; omit for dynamic routing."),
         "provider": _prop("string", "Only auto with a class selector is accepted. Concrete providers are rejected."),
         "pin_mandatory": _prop("boolean", "Deprecated compatibility field: only false is accepted. Mandatory Kanban model pins are forbidden."),
     },
