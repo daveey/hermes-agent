@@ -88,8 +88,13 @@ def _receipt(value) -> LaunchReceipt:
     return LaunchReceipt(Incarnation(**identity), **{key: item for key, item in value.items() if key != 'identity'})
 
 
-def read_participants_strict(runtime: Path) -> tuple[LaunchReceipt, ...]:
-    """Absent, unsafe or malformed enrollment is uncertainty, never an empty host."""
+def read_participants_strict(runtime: Path, *, allow_foreign_namespace: bool = False) -> tuple[LaunchReceipt, ...]:
+    """Absent, unsafe or malformed enrollment is uncertainty, never an empty host.
+
+    Same-boot receipts from another PID namespace (shared-home containers) refuse the
+    CENSUS, whose cut they leave incomplete. Launch enrollment passes
+    ``allow_foreign_namespace`` so ordinary startup keeps working; it retains them verbatim.
+    """
     path = runtime / 'participants.json'
     try:
         info = path.lstat()
@@ -103,7 +108,8 @@ def read_participants_strict(runtime: Path) -> tuple[LaunchReceipt, ...]:
         receipts = tuple(_receipt(value) for value in values)
         adapter = LinuxProcessCensus()
         boot, namespace = adapter.boot_id(), adapter.namespace_id()
-        if any(row.identity.boot_id == boot and row.namespace != namespace for row in receipts):
+        if not allow_foreign_namespace and any(
+                row.identity.boot_id == boot and row.namespace != namespace for row in receipts):
             raise CensusUnavailable('foreign pid namespace')
         if len({receipt.identity for receipt in receipts}) != len(receipts):
             raise CensusUnavailable('duplicate participant incarnation')
@@ -181,19 +187,23 @@ def enroll_launch(runtime: Path, role: str, *, installation: Path, timeout: floa
         except FileNotFoundError:
             receipts = ()  # first enrollment, NEVER used as host absence evidence
         else:
-            receipts = read_participants_strict(runtime)
+            receipts = read_participants_strict(runtime, allow_foreign_namespace=True)
         boot = adapter.boot_id()
         record = adapter.read_process(os.getpid(), boot)
         receipt = LaunchReceipt(record.identity, str(installation), launcher_generation(installation),
                                 role, observation_digest(record), adapter.namespace_id())
+        namespace = adapter.namespace_id()
+        # Foreign-namespace rows cannot be probed from here: keep them (never proof of absence);
+        # the census refuses them, so the cut stays INCOMPLETE until their namespace retires them.
         kept = [row for row in receipts if row.identity.boot_id == boot
-                and row.identity != record.identity and not incarnation_exited(adapter, row.identity)]
+                and row.identity != record.identity
+                and (row.namespace != namespace or not incarnation_exited(adapter, row.identity))]
         if len(kept) >= _MAX_PARTICIPANTS:
             raise CensusUnavailable('participant count budget')
         if adapter.read_process(os.getpid(), boot) != record or adapter.boot_id() != boot:
             raise CensusUnavailable('enrolling process changed')
         _write_participants(runtime, (*kept, receipt))
-        if receipt not in read_participants_strict(runtime):
+        if receipt not in read_participants_strict(runtime, allow_foreign_namespace=True):
             raise CensusUnavailable('participant publication lost')
         return receipt
 
@@ -321,11 +331,13 @@ def classify_process(record, participants: tuple[LaunchReceipt, ...], generation
         # No broker/custody hook exists yet, even an in-memory guarded bit is not authority.
         return Classification(record.identity, 'legacy',
                               f'enrollment:{receipt.generation}:{receipt.role}')
-    if not _record_touches(record, installation, home):
-        return Classification(record.identity, 'unrelated', f'exe:{record.exe}')
     module = _module_token(record.argv)
     if module in _KNOWN_MODULES:
+        # Explicit Hermes launcher: a separate install sharing the default home, or an
+        # editable/.pth import, leaves no path evidence, so it is never positively unrelated.
         return Classification(record.identity, 'legacy', f'launcher:{module}')
+    if not _record_touches(record, installation, home):
+        return Classification(record.identity, 'unrelated', f'exe:{record.exe}')
     return Classification(record.identity, 'unknown', 'no exact guarded launch receipt')
 
 # Each collector must enumerate its exact configured scope (including disabled or

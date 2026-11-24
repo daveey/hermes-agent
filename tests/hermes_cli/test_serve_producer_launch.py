@@ -127,13 +127,29 @@ def test_forged_readiness_and_malformed_fields_refused(tmp_path, field, value):
         admission.read_participants_strict(runtime)
 
 
-def test_foreign_namespace_refused_before_retirement(tmp_path):
+def test_foreign_namespace_survives_enrollment_but_refuses_census(tmp_path):
     runtime = tmp_path / 'runtime'
-    receipt = admission.enroll_launch(runtime, 'serve', installation=Path(__file__).parents[2])
-    foreign = replace(receipt, namespace='pid:[1]')
+    root = Path(__file__).parents[2]
+    receipt = admission.enroll_launch(runtime, 'serve', installation=root)
+    foreign = replace(receipt, identity=replace(receipt.identity, pid=receipt.identity.pid + 1_000_000),
+                      namespace='pid:[1]')
     (runtime / 'participants.json').write_text(json.dumps([asdict(foreign)]))
-    with pytest.raises(CensusUnavailable, match='namespace'):
-        admission.enroll_launch(runtime, 'serve', installation=Path(__file__).parents[2])
+    fresh = admission.enroll_launch(runtime, 'serve', installation=root)  # ordinary startup keeps working
+    with pytest.raises(CensusUnavailable, match='namespace'):  # but never proves an empty/safe host
+        admission.read_participants_strict(runtime)
+    rows = admission.read_participants_strict(runtime, allow_foreign_namespace=True)
+    assert foreign in rows and fresh in rows
+    again = admission.enroll_launch(runtime, 'serve', installation=root)  # replacement namespace row kept
+    assert foreign in admission.read_participants_strict(runtime, allow_foreign_namespace=True) and again.namespace != 'pid:[1]'
+
+
+def test_explicit_hermes_module_is_never_positive_unrelated():
+    from hermes_cli.serve_producer_census import Incarnation, ProcessObservation
+    record = ProcessObservation(Incarnation('boot', 123, 456), '/opt/other-venv/bin/python', '/tmp',
+                                ('/opt/other-venv/bin/python', '-m', 'hermes_cli.main', 'serve'), ())
+    verdict = admission.classify_process(record, (), 'generation',
+                                         installation='/opt/current-hermes', home='/home/test/.hermes')
+    assert verdict.kind == 'legacy'
 
 
 def test_new_boot_prunes_old_receipts_but_stale_pending_cannot_brick_reused_pid(tmp_path):
