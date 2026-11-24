@@ -1392,6 +1392,10 @@ def _apply_one(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: App
                          (ch.version, ch.uid))
         result.skipped_echo += 1
         return
+    from hermes_cli.kanban_stop_sync import frozen_change
+    if frozen_change(conn, ch):
+        result.skipped += 1
+        return
     handler = _APPLY_HANDLERS[(ch.table == "tasks", ch.op)]
     if handler(conn, ch, own, result):
         result.applied += 1

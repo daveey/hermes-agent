@@ -139,8 +139,11 @@ def read(conn, *, board: str, task_id: str) -> dict:
     snap = snapshot(conn, task_id)
     row, payload = _stored(conn, task_id)
     if row is not None:
+        from hermes_cli.kanban_wake_check import get_state
         return {'ok': True, 'mode': 'readback', 'receipt': payload['receipt'], 'event_uid': row['uid'],
-                'status': snap['status'], 'execution_restricted': True}
+                'status': snap['status'], 'execution_restricted': True,
+                'clock_wake_eligible': snap['status'] == 'scheduled',
+                'wake_check_registered': get_state(conn, task_id) is not None}
     _eligible(conn, state, snap)
     return {'ok': True, 'mode': 'snapshot', 'board': board, 'gateway': state['gateway_id'], 'task_id': task_id,
             'expected_digest': digest(snap), 'snapshot': snap, 'writes': 0}
@@ -186,6 +189,10 @@ def apply(conn, *, board: str, task_id: str, expected_digest: str, owner, capabi
                 'request': {'request_uid': uid, 'expected_digest': expected_digest, 'frozen': frozen, 'owner': who},
                 'receipt': receipt})
             conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (task_id,))
+            # The clock selector only considers scheduled cards. Remove its probe now too,
+            # without deleting the historical parking event or changing any dependency.
+            from hermes_cli.kanban_wake_check import set_check
+            set_check(conn, task_id, None, None)
             from hermes_cli.kanban_stop_guards import install
             install(conn)
             event_uid = conn.execute('SELECT uid FROM task_events WHERE task_id=? AND kind=?', (task_id, KIND)).fetchone()[0]

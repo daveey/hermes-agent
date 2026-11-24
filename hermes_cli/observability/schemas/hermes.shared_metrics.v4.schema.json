@@ -4679,6 +4679,7 @@
                 "kanban_resume_contained",
                 "kanban_retain",
                 "kanban_show",
+                "kanban_stop_ended",
                 "kanban_unblock",
                 "kanban_unlink",
                 "manage_catalog",

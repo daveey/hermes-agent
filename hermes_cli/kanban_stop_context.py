@@ -37,8 +37,9 @@ def _session_source(session_id: str):
 
 
 def _routing_context() -> bool:
+    from agent.delegation_context import is_delegated_child_context
     from gateway.session_context import get_session_env
-    return any(os.environ.get(k) or get_session_env(k, '') for k in _ROUTING)
+    return is_delegated_child_context() or any(os.environ.get(k) or get_session_env(k, '') for k in _ROUTING)
 
 
 class OwnerToken:

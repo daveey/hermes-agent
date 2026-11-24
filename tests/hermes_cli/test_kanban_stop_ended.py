@@ -124,6 +124,23 @@ def test_owner_stops_private_shadow_card_publishes_through_outbox_and_keeps_depe
     assert guards.installed(shadow)
 
 
+def test_stop_removes_probe_and_clock_backstop_immediately(shadow):
+    from hermes_cli import kanban_wake_check as wake
+    source, target, child = ended_card(shadow)
+    with kb.write_txn(shadow):
+        kb._append_event(shadow, target, 'scheduled', {'wake_at': int(time.time()) + 300, 'resume_status': 'ready'})
+        wake.set_check(shadow, target, 'false', 120)
+    before = state(shadow, target, source, child)
+    with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE) as token:
+        stop.apply(shadow, owner=token, **args(shadow, target))
+    assert wake.get_state(shadow, target) is None
+    from hermes_cli.kanban_continuation import _wake_parks
+    assert target not in _wake_parks(shadow, int(time.time()) + 600)[0]
+    assert state(shadow, target, source, child)['links'] == before['links']
+    readback = stop.read(shadow, board=BOARD, task_id=target)
+    assert readback['clock_wake_eligible'] is False and readback['wake_check_registered'] is False
+
+
 def test_stopped_card_cannot_be_claimed_reopened_relinked_or_replaced(shadow):
     source, target, child = ended_card(shadow)
     with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE) as token:
@@ -134,6 +151,9 @@ def test_stopped_card_cannot_be_claimed_reopened_relinked_or_replaced(shadow):
     assert not kb.claim_task(shadow, target, claimer='default')
     writes = [
         "UPDATE tasks SET status='ready' WHERE id=:t",
+        "UPDATE tasks SET id='renamed' WHERE id=:t",
+        "INSERT OR REPLACE INTO task_runs (id,task_id,profile,status,started_at) "
+        "SELECT id,:s,'default','running',0 FROM task_runs WHERE task_id=:t",
         "UPDATE tasks SET status='done' WHERE id=:t",
         "UPDATE tasks SET status='archived' WHERE id=:t",
         "UPDATE tasks SET claim_lock='x' WHERE id=:t",
@@ -269,11 +289,25 @@ def test_cancellation_waits_for_inflight_commit_never_inverse(shadow):
             stop.apply(shadow, owner=token, **a)
 
 
-def test_existing_primary_off_retain_gate_is_unchanged():
-    import inspect
+def test_existing_primary_off_retain_gate_is_unchanged(shadow, monkeypatch):
     from hermes_cli import kanban_retain
-    src = inspect.getsource(kanban_retain.retain)
-    assert "raise ValueError('retain requires owning primary or genuinely local board')" in src
+    monkeypatch.setattr(kanban_retain.actors, 'bound_actor', lambda _conn: object())
+    with pytest.raises(ValueError, match='retain requires owning primary or genuinely local board'):
+        kanban_retain.retain(shadow, board=BOARD, summary='stop', reason='scope_stopped',
+                             next_step='owner review', release_condition='none', evidence=['ended'])
+
+
+def test_token_cannot_cross_live_contexts_or_delegate(shadow):
+    from agent.delegation_context import delegated_child_context
+    _source, target, _child = ended_card(shadow)
+    a = args(shadow, target)
+    with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE) as first:
+        with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE):
+            with pytest.raises(stop.StopRefused, match='owner_required'):
+                stop.apply(shadow, owner=first, **a)
+        with delegated_child_context('child'):
+            with pytest.raises(stop.StopRefused, match='owner_required'):
+                stop.apply(shadow, owner=first, **a)
 
 
 def _tool():

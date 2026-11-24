@@ -18,8 +18,13 @@ _STOPPED = f"SELECT task_id FROM task_events WHERE kind='{KIND}'"
 
 def _uid_only(table: str, columns: set[str]) -> str:
     # The NULL -> uid bootstrap, or an exact no-op rewrite (a sync echo of this gateway's own row).
-    same = ' AND '.join(f'NEW.{c} IS OLD.{c}' for c in sorted(columns - {'uid'}))
-    return f'(({same}) AND (NEW.uid IS OLD.uid OR (OLD.uid IS NULL AND NEW.uid IS NOT NULL)))'
+    # Transport acknowledgements may monotonically advance a run's server version,
+    # never its outcome, ownership, timestamps or any other lifecycle evidence.
+    metadata = {'sync_version'} if table == 'task_runs' else set()
+    same = ' AND '.join(f'NEW.{c} IS OLD.{c}' for c in sorted(columns - {'uid'} - metadata))
+    version = (' AND COALESCE(NEW.sync_version,0)>=COALESCE(OLD.sync_version,0)'
+               if 'sync_version' in columns and metadata else '')
+    return f'(({same}) AND (NEW.uid IS OLD.uid OR (OLD.uid IS NULL AND NEW.uid IS NOT NULL)){version})'
 
 
 def _columns(conn, table):
@@ -31,7 +36,7 @@ def ddl(conn) -> dict[str, tuple[str, str]]:
     pinned = ["NEW.status IS NOT 'triage'", 'NEW.current_run_id IS NOT NULL', 'NEW.claim_lock IS NOT NULL',
               'NEW.claim_expires IS NOT NULL']
     pinned += [f'NEW.{c} IS NOT NULL' for c in ('worker_pid', 'worker_started_at') if c in task_cols]
-    pinned += [f'NEW.{c} IS NOT OLD.{c}' for c in ('title', 'body', 'assignee', 'created_on', 'tenant') if c in task_cols]
+    pinned += [f'NEW.{c} IS NOT OLD.{c}' for c in ('id', 'title', 'body', 'assignee', 'created_on', 'tenant') if c in task_cols]
     runs_uid = _uid_only('task_runs', run_cols) if 'uid' in run_cols else '0'
     events_uid = _uid_only('task_events', event_cols) if 'uid' in event_cols else '0'
     links = f'OLD.parent_id IN ({_STOPPED}) OR OLD.child_id IN ({_STOPPED})'
@@ -47,6 +52,7 @@ def ddl(conn) -> dict[str, tuple[str, str]]:
         # INSERT OR REPLACE fires INSERT (not DELETE) triggers with recursive_triggers OFF.
         'task_replace': ('BEFORE INSERT ON tasks', f'NEW.id IN ({_STOPPED})'),
         'run_insert': ('BEFORE INSERT ON task_runs', f'NEW.task_id IN ({_STOPPED})'),
+        'run_replace': ('BEFORE INSERT ON task_runs', evidence_replace.replace('task_events o', 'task_runs o')),
         'run_update': ('BEFORE UPDATE ON task_runs', f'OLD.task_id IN ({_STOPPED}) AND NOT {runs_uid}'),
         'run_delete': ('BEFORE DELETE ON task_runs', f'OLD.task_id IN ({_STOPPED})'),
         'event_update': ('BEFORE UPDATE ON task_events', f'OLD.task_id IN ({_STOPPED}) AND NOT {events_uid}'),
