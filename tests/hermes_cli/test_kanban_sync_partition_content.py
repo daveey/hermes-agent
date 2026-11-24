@@ -7,6 +7,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_sync_client as ksc
 from hermes_cli import kanban_sync_partition_content as content
 from hermes_cli import kanban_sync_partition_repair as repair
+from hermes_cli.kanban_sync_pending import REPLICA_GUARD
 from hermes_cli.kanban_sync_repair_revision import ensure_revision
 from tests.hermes_cli import test_kanban_sync_repair_window as window
 
@@ -74,8 +75,11 @@ def _warm(pair):
 @pytest.mark.parametrize("side", ["live", "replica"])
 @pytest.mark.parametrize("change", ["task", "link", "chat", "outbox", "tombstone", "omission", "trigger"])
 def test_relevant_mutations_rearm_partition(pair, side, change):
-    _warm(pair)
     conn = getattr(pair, side)
+    if side == "replica" and change == "outbox":  # only a file from before the guard holds replica ops
+        with kbc.write_txn(conn):
+            conn.execute(f"DROP TRIGGER {REPLICA_GUARD}")
+    _warm(pair)
     statements = {
         "task": "UPDATE tasks SET title='changed' WHERE id=?",
         "link": "DELETE FROM task_links WHERE parent_id=?",
@@ -92,7 +96,12 @@ def test_relevant_mutations_rearm_partition(pair, side, change):
         "trigger": "DROP TRIGGER kanban_repair_tasks_update",
     }
     with kbc.write_txn(conn):
+        pulled = side == "replica" and change == "tombstone"  # a replica tombstone is a pulled one
+        if pulled:
+            conn.execute("UPDATE kanban_sync_state SET applying = 1")
         conn.execute(statements[change], () if change == "trigger" else (pair.parent,))
+        if pulled:
+            conn.execute("UPDATE kanban_sync_state SET applying = 0")
     assert not pair.prepare().skip
 
 

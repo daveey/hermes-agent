@@ -48,7 +48,8 @@ from hermes_cli import kanban_sync_outbox_age as outbox_age  # oldest pending op
 from hermes_cli.kanban_sync_backlog import BUSY_RETRY_S, PULL_PAGE_BUDGET, Pulled
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli import kanban_sync_cpu as sync_cpu
-from hermes_cli.kanban_sync_pending import pending_task_fields, without_pending
+from hermes_cli.kanban_sync_pending import (discard_replica_writes, guard_replica, pending_task_fields,
+                                           without_pending)
 from hermes_cli import kanban_sync_refusal as refusal  # one board's ContainmentRefused ends only its round
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
@@ -849,6 +850,7 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
     total = pages = 0
     from hermes_cli.kanban_sync_apply_budget import apply_page, service_pushes
     changed: dict[str, str] = {}  # status changes applied, for the parks that name those cards
+    discard_replica_writes(conn, hub, board)  # a replica's outbox is never sent: its ops would mask the feed
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
     while True:
         if max_pages is not None and pages >= max_pages:
@@ -937,6 +939,7 @@ def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
         conn = _connect(path)
         cleanup.callback(conn.close)
         ensure_identity(conn, slug, gateway)
+        guard_replica(conn)  # only the pull writes a replica (kanban_sync_pending.guard_replica)
         from hermes_cli import kanban_sync_quarantine as quarantine
         quarantine.restore(conn, quarantine.load_rebuild(path), path)
         cleanup.pop_all()

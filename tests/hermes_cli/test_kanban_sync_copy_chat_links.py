@@ -72,8 +72,10 @@ def test_repair_preserves_scope_edits_deletions_and_audits(live, svc, kanban_hom
             conn = live if side == "live" else replica
             table, row_uid = ("tasks", "t_foreign") if target == "task" else ("task_chat_links", uid)
             with write_txn(conn):
+                conn.execute("UPDATE kanban_sync_state SET applying = 1")  # a replica tombstone is a pulled one
                 conn.execute("INSERT INTO kanban_sync_tombstones (table_name,row_uid,deleted_at) VALUES (?,?,1)",
                              (table,row_uid))
+                conn.execute("UPDATE kanban_sync_state SET applying = 0")
         elif barrier == "existing":
             with write_txn(live):
                 live.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_session,kind,released,created_at) "

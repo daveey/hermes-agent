@@ -707,7 +707,11 @@ def test_missing_child_repair_honors_existing_state(live, svc, kanban_home, tabl
                               "rejected" if guard == "rejected" else "pending"))
             elif guard.endswith("tombstone"):
                 target = live if guard == "local_tombstone" else shadow
+                if target is shadow:  # a replica tombstone is a pulled one: written under applying
+                    shadow.execute("UPDATE kanban_sync_state SET applying = 1")
                 target.execute("INSERT INTO kanban_sync_tombstones VALUES (?, ?, 1)", (table, uid))
+                if target is shadow:
+                    shadow.execute("UPDATE kanban_sync_state SET applying = 0")
             elif guard in ("version_ahead", "parent_version"):
                 live.execute("UPDATE tasks SET sync_version = sync_version + 1 WHERE id = ?", (subject,))
             elif guard == "replica_ahead":
