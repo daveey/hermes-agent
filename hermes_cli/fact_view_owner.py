@@ -16,12 +16,14 @@ from hermes_cli.fact_process import store as process_store
 
 
 class ViewOwner:
-    def __init__(self, scope, capture, render, views, *, paths=(), bindings=(), consumer='board'):
+    def __init__(self, scope, capture, render, views, *, paths=(), bindings=(), consumer='board', input_options=None):
+        """``input_options``: the native input source's bounds (``BoardInputSource`` refresh/validity/gap/limit)."""
         self.scope, self.consumer = scope, consumer
         self.store = process_store()
         engine = ReducerEngine(self.store, scope)
         from hermes_cli.fact_contract import SourceId
-        self.source = BoardInputSource(engine, SourceId(scope, 'board.input', 'native'), capture, paths=paths)
+        self.source = BoardInputSource(engine, SourceId(scope, 'board.input', 'native'), capture, paths=paths,
+                                       **(input_options or {}))
         self.owner = self.transport = self.handle = None
         self.lifecycle = IncrementalLifecycle({(scope, consumer)})
         # Views depend only on each binding's SourceState (an invalidation clock), never its rows, so the

@@ -16,11 +16,12 @@ board capture is 0.7-0.8 s alone but 4-8 s cold and longer under the backend's G
 budget failed every one there (failed even when it finished: ``_build`` re-checks the time); a board capture
 now has ``max_capture_seconds`` (30 s), below the 60 s validity, so a slow capture still lands as fresh evidence.
 
-Every ``ViewOwner`` uses this source, so the project tree's views (``fact_tree_startup``) are paced and limited the
-same way. A capture queued behind a wedged shared worker reports no failure: its evidence goes stale when its 60 s
-validity expires (``fact_expiry``) instead of within the owner's 10 s budget. The next refresh is timed from the
-last evidence's observation, not its commit: one selector whose captures finish within 30 s keeps its validity;
-in a round of several views, earlier views' evidence is older by the later captures' durations.
+Every ``ViewOwner`` uses this source, so the project tree's views (``fact_tree_startup``) are paced the same way;
+the tree passes its own bounds (300 s validity, 60 s capture limit: its four-selector cycle outgrew 60 s). A capture
+queued behind a wedged shared worker reports no failure: its evidence goes stale when its validity (60 s for a
+board, 300 s for the tree) expires (``fact_expiry``) instead of within the owner's 10 s budget. The next refresh is
+timed from the last evidence's observation, not its commit: one selector whose captures finish within 30 s keeps its
+validity; in a round of several views, earlier views' evidence is older by the later captures' durations.
 """
 from collections import deque
 from contextvars import copy_context

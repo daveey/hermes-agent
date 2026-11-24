@@ -252,9 +252,9 @@ def test_the_gap_runs_from_the_capture_start_not_its_queueing(clock):
 
 
 def test_every_view_owner_paces_its_views():
-    """The project tree's views run on the same source as the board's."""
+    """Every ViewOwner's input source is paced (the tree passes its own validity and limit, fact_tree_startup)."""
     from hermes_cli.fact_view_owner import ViewOwner
-    owner = ViewOwner(Scope('installation', 'default', 'tree'), lambda *a: None, lambda *a: None, ('tree',))
+    owner = ViewOwner(Scope('installation', 'default', 'board'), lambda *a: None, lambda *a: None, ('board',))
     assert owner.source._gap == 5 and owner.source._capture_seconds == 30
 
 

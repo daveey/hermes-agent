@@ -31,6 +31,18 @@ class TreeBinding:
             return Unavailable('tree_owner_unavailable')
 
 
+# The tree's captured input stays servable this long (BoardInputSource valid_seconds; the board keeps 60 s).
+# Hub 2026-11-24, board facts on: each tree capture walks all twelve profiles, and its four selectors (native and
+# profiles surfaces x preview limits) queue on the one shared capture worker with the board views, so a full cycle
+# took longer than 60 s in the loaded dashboard backend. The inputs expired before their recapture (ages 64-178 s,
+# validity_expired) and GET /api/profiles/projects/tree answered 503 dependency_unavailable ~15-24 times a minute,
+# while every per-profile sessions.content clock was fresh. Refresh is still every 30 s; this bounds how stale a
+# served tree, and a project_sessions drill-in on the same owner, can get while a slow recapture cycles, and a
+# single capture may take up to TREE_CAPTURE_SECONDS. A failed capture still marks its input stale at once.
+TREE_INPUT_VALID_SECONDS = 300
+TREE_CAPTURE_SECONDS = 60
+
+
 class TreeRuntime:
     def __init__(self, *, targets=None):
         from hermes_cli.config import get_hermes_home
@@ -51,7 +63,8 @@ class TreeRuntime:
                     for name, home in self.targets if (home / 'state.db').exists()]
         paths = [path for _name, home in self.targets for path in (home, home / 'state.db', home / 'projects.db')]
         self.owner = ViewOwner(self.scope, partial(fact_tree_inputs.capture, self.targets, self.source_id),
-            fact_tree_inputs.project, ('tree', 'project_sessions'), paths=paths, bindings=bindings, consumer='projects')
+            fact_tree_inputs.project, ('tree', 'project_sessions'), paths=paths, bindings=bindings, consumer='projects',
+            input_options={'valid_seconds': TREE_INPUT_VALID_SECONDS, 'max_capture_seconds': TREE_CAPTURE_SECONDS})
 
     def start(self):
         self.handle = self.owner.start()
