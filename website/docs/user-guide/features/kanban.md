@@ -757,8 +757,8 @@ standing owner chat: one pinned chat per producer, titled
 `Kanban owner: <producer>`. It is created on first use and seeded with a note
 on what it decides. The producer is the card's `created_by` for system
 monitors and watchers, the cron job for cards created from a cron run,
-`selfwork:<repository>/<area>` for a card the self-work intake admits (one per
-policy slot), and `terminal` for a human's `hermes kanban create`. A scope or budget stop on the
+`selfwork:<repository>` for a card the self-work intake admits (one per
+repository), and `terminal` for a human's `hermes kanban create`. A scope or budget stop on the
 card then routes to that chat, which can release, re-scope or archive it,
 instead of waiting for an operator. An agent with no chat of its own is still
 refused (`scope_authority_missing`). If the owner chat cannot be made, a

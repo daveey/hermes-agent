@@ -96,7 +96,7 @@ def declared_producer(tool_task_id: Optional[str] = None, *, allow_env: bool = T
 def tool_create_options(tool_task_id: Optional[str], selfwork_intent) -> dict:
     """``create_task`` owner options for the ``kanban_create`` tool. A receiver-set self-work intake create needs
     no requester chat authority (#4252); it is not settled here because the intake home's ``admit`` settles it
-    with its policy slot's producer (:func:`selfwork_producer`) inside its own create transaction. Any other
+    with its repository's producer (:func:`selfwork_producer`) inside its own create transaction. Any other
     chat-less caller is owned by its runner's producer: the cron job running this tool call, or (only outside an
     agent turn: a script calling the tool directly) ``HERMES_KANBAN_PRODUCER``."""
     return {"settle_owner_chat": selfwork_intent is None,
@@ -104,9 +104,10 @@ def tool_create_options(tool_task_id: Optional[str], selfwork_intent) -> dict:
 
 
 def selfwork_producer(value: dict) -> str:
-    """The producer of a self-work intake card: its policy slot's repository and area, so every intake card of
-    one slot (created now or backfilled later) shares one standing owner chat."""
-    return f"selfwork:{value['repository']}/{value['area']}"
+    """The producer of a self-work intake card: its repository only (``selfwork:<repository>``, at most one
+    standing owner chat per Hermes repository), for cards created now and backfilled later alike. Not the area:
+    it is requester-chosen, so an invented or mistyped area would mint a new pinned sidebar chat."""
+    return f"selfwork:{value['repository']}"
 
 
 def intake_producer(conn, task_id: str) -> Optional[str]:
@@ -116,7 +117,7 @@ def intake_producer(conn, task_id: str) -> Optional[str]:
     try:
         value = policy.declared(conn, task_id)
     except (policy.SelfWorkError, ValueError, TypeError):
-        return None  # a malformed record names no slot: the card keeps its created_by producer
+        return None  # a malformed record names no repository: the card keeps its created_by producer
     return selfwork_producer(value) if value else None
 
 

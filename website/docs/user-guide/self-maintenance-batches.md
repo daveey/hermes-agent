@@ -46,11 +46,13 @@ creating a local card. The courier must support the `selfwork-create` and
 At the home, one transaction either creates a card or appends the new title and
 body as a comment to an open card with the same repository, tenant, area and UTC
 day. A different day or area creates a new owner card. The requester needs no
-chat of its own: each card the intake creates is owned by its slot's standing
-owner chat, `Kanban owner: selfwork:<repository>/<area>` (one per repository
-and area, shared by every day's card and by older cards the owner-chat backfill
-links), so a stop on it routes to that chat and its worker can file child cards
-such as a review. Done and archived cards are not
+chat of its own: each card the intake creates is owned by its repository's
+standing owner chat, `Kanban owner: selfwork:<repository>` (at most one per
+repository, shared by every area and day), so a stop on it routes to that chat
+and its worker can file child cards such as a review. The owner-chat backfill
+links older ownerless intake cards to the same chat. Cards it had already linked
+to a `gw:<sender>` owner chat before this keyed by repository stay with that
+chat until they close. Done and archived cards are not
 reused. Batching does not modify existing dependencies, placement, or acceptance
 text, and does not bypass review, required CI, or landing checks.
 

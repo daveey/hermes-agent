@@ -113,7 +113,7 @@ def admit(conn, *, request_id, authority, local_gateway, options, now, create_gu
             from hermes_cli.kanban_db_creation import run_insert_guard
             run_insert_guard(conn, create_guard)
             with _creation_scope(conn, value):
-                # [daveey] Owned by the slot's standing owner chat, settled in this create transaction. No
+                # [daveey] Owned by its repository's standing owner chat, settled in this create transaction. No
                 # requester chat authority is needed (#4252): not strict, so a state.db failure leaves it ownerless.
                 from hermes_cli.kanban_owner_chat import selfwork_producer
                 task_id = kb.create_task(conn, **{**options, 'settle_owner_chat': True,
