@@ -819,24 +819,23 @@ def _replica_paths() -> list[Path]:
 
 
 def _projection_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
-    """Links/annotation key: ignores task_events inserts those caches do not read. An older or busy file is
-    answered by that one open; the fallback here is only a probe-lock miss, which did not open the file."""
+    """Links/annotation key. A probe-lock miss or a missing file falls back to the notify key."""
     key = _revision.projection_content_key(path, tables, lambda p: cached_ro(p, busy_budget=0))
     if key is not None:
         return key
     return _board_content_key(path, tables)
 
 
-def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
-    """Count inputs include sync shadows; the origin-ledger projection never reads them."""
+def _activity_fingerprint(*, include_shadows: bool = True, projection: bool = False) -> tuple:
+    """Counts use the notify key: that read also selects park, lifecycle and containment events."""
     pinned = getattr(_revalidate.inputs_pin, "fingerprints", None)
-    if pinned is not None and pinned[int(include_shadows)] is not None:
+    if not projection and pinned is not None and pinned[int(include_shadows)] is not None:
         return pinned[int(include_shadows)]
     hub = _hub_db_path()
     signature = [_hub_content_signature(hub)] if hub is not None else []
-    # [daveey] Each board's content revision (``kanban_activity_revision``), not its stat: bookkeeping writes
-    # (sync stamps, dispatch stamps, a replica's pull stamp) rewrite the files ~61x/min with no task change.
-    signature.extend((str(db), _projection_content_key(db)) for db in _board_db_paths())
+    # Bookkeeping rewrites the files ~61x/min with no task change; the counter ignores those columns.
+    key_of = _projection_content_key if projection else _board_content_key
+    signature.extend((str(db), key_of(db)) for db in _board_db_paths())
     if include_shadows:
         signature.extend(_shadow_fingerprint())
         signature.extend(_origin_ledger_fingerprint())
@@ -845,7 +844,7 @@ def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
 
 def _shadow_fingerprint() -> tuple:
     """What ``_activity_fingerprint()`` appends to the local one: each sync shadow's content key."""
-    return tuple((str(db), _projection_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
+    return tuple((str(db), _board_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
 
 
 def _board_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
@@ -945,7 +944,7 @@ _LINKS_MAX_AGE_S = 15.0
 
 def _links_fingerprint() -> tuple:
     """Every store the remote inventory reads except state.db (alias tips), which the TTL bounds instead."""
-    return (*_activity_fingerprint(include_shadows=False), *_origin_ledger_fingerprint())
+    return (*_activity_fingerprint(include_shadows=False, projection=True), *_origin_ledger_fingerprint())
 
 
 def _origin_ledger_fingerprint() -> tuple:

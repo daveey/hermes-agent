@@ -84,25 +84,13 @@ def test_inline_poll_reads_each_board_revision_once(clock, spies, tmp_path, monk
     paths = [tmp_path / "kanban.db", tmp_path / "kanban" / "boards" / "second" / "kanban.db"]
     conns = [helpers._board(p, [(f"t{i}", "running", "s1")]) for i, p in enumerate(paths)]
     reads = Counter()
-    real, real_projection = ksa._board_content_key, ksa._projection_content_key
-    nested = []
+    real = ksa._board_content_key
 
     def counted(path, *args):
-        if not nested:  # the projection probe's lock-miss fallback is the same read, not a second one
-            reads[path] += 1
+        reads[path] += 1
         return real(path, *args)
 
-    def counted_projection(path, *args):
-        # The fingerprint reads through the projection probe, which answers an older board itself.
-        reads[path] += 1
-        nested.append(path)
-        try:
-            return real_projection(path, *args)
-        finally:
-            nested.pop()
-
     monkeypatch.setattr(ksa, "_board_content_key", counted)
-    monkeypatch.setattr(ksa, "_projection_content_key", counted_projection)
     try:
         assert ksa._board_db_paths() == paths
         assert all(real(path)[0] == "revision" for path in paths)

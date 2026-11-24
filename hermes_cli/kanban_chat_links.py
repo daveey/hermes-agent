@@ -602,6 +602,16 @@ def _stale_after_s() -> float:
     return max(HUB_STALE_AFTER_S, 3 * period)
 
 
+def shadow_link_key(path: Path, content: tuple | None = None) -> tuple:
+    """The one key both link-row memo callers pass. A stat key is kept, so a busy file never hits."""
+    from hermes_cli.kanban_activity_revision import SHADOW_TABLES, is_revision
+    from hermes_cli.kanban_session_activity import _projection_content_key
+
+    if content is not None and not is_revision(content):
+        return content
+    return _projection_content_key(path, SHADOW_TABLES)
+
+
 def _read_replica(path: Path, gateway: str,
                   profile: str) -> tuple[list[dict[str, Any]], Optional[float], dict[str, dict]]:
     """Every unreleased link of this gateway+profile's chats in one replica, with its card row (or none when the
@@ -615,11 +625,10 @@ def _read_replica(path: Path, gateway: str,
     release is unverified, whose owner-written ``shepherd`` sibling was released because the card closed. It hid 19
     such hub cards from chat 20261026_170127_f07c32 that the ledger lists as ``unknown`` (David-MBP links_diff,
     2026-11-13). Each link now carries its own answer, as ``replica_cards`` says: only a released link drops it."""
-    from hermes_cli.kanban_activity_revision import SHADOW_TABLES
-    from hermes_cli.kanban_session_activity import _board_content_key, cached_ro  # lazy: that module imports this one
+    from hermes_cli.kanban_session_activity import cached_ro  # lazy: that module imports this one
     # [daveey] The link rows only change with the replica's tasks/task_chat_links content; a pull that only moves
     # ``pulled_at`` (every few seconds) re-reads the stamp, not the ~10k links. Rows are read-only to callers.
-    content = _board_content_key(path, SHADOW_TABLES)
+    content = shadow_link_key(path)
     with cached_ro(path) as conn:
         conn.row_factory = sqlite3.Row
         rows = replica_link_rows(conn, path, gateway, profile, content)

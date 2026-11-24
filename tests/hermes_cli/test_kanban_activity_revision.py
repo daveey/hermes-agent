@@ -19,6 +19,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_session_activity as ksa
 from hermes_cli import kanban_suspend_ledger as ledger
+from hermes_cli.kanban_counts_scopes import CountSnapshot
 from tests.hermes_cli import kanban_sync_support as support
 
 ME, OTHER = "macbook", "hub"
@@ -113,9 +114,9 @@ def test_projection_kinds_match_the_unseen_reader():
 
 
 def test_an_unread_event_wakes_notify_but_not_the_links_or_annotation_key(board):
-    """A comment or claim event still moves the notify counter, and does not move the links or annotation key.
-    An unseen kind and a task-status write move both. This is the notification-loss guard: dropping the
-    notify bump would hide the event from the gate.
+    """A comment still moves the notify counter and the counts key (the counts read selects every event kind),
+    and does not move the links key. An unseen kind and a task-status write move both. Dropping the notify
+    bump would hide the event from the gate.
     """
     tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
     path = ksa._board_db_paths()[0]
@@ -131,20 +132,24 @@ def test_an_unread_event_wakes_notify_but_not_the_links_or_annotation_key(board)
         board.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'commented', 1)", (tid,))
     assert notify_key() != before_notify  # notification-loss: the gate key must move
     assert ksa._board_content_key(path) != before_notify
-    assert ksa._activity_fingerprint() == before_fp
+    assert ksa._activity_fingerprint() != before_fp  # counts readers select this kind
     assert ksa._links_fingerprint() == before_links
 
+    before_links = ksa._links_fingerprint()
     before_fp = ksa._activity_fingerprint()
     with kbc.write_txn(board):
         board.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'claimed', 2)", (tid,))
-    assert ksa._activity_fingerprint() == before_fp
+    assert ksa._activity_fingerprint() != before_fp
+    assert ksa._links_fingerprint() == before_links
     assert notify_key() != before_notify
 
     before_fp = ksa._activity_fingerprint()
+    before_links = ksa._links_fingerprint()
     before_notify = notify_key()
     with kbc.write_txn(board):
         board.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'completed', 3)", (tid,))
     assert ksa._activity_fingerprint() != before_fp
+    assert ksa._links_fingerprint() != before_links
     assert notify_key() != before_notify
 
     before_fp = ksa._activity_fingerprint()
@@ -319,3 +324,53 @@ def test_an_unchanged_schema_checks_trigger_coverage_once(board, monkeypatch):
     board.execute("DROP TRIGGER kanban_activity_rev_tasks_update")
     board.commit()
     assert ksa._board_content_key(path)[0] == "stat" and len(scans) == 2
+
+
+def test_event_only_park_or_wake_moves_the_counts_key_not_the_links_key(board):
+    """A park or wake event committed after its task row (a feed page boundary) is an event the counts
+    read selects and the links projection does not. The counts cache must not keep the pre-event execution.
+    """
+    import time
+
+    tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
+    path = ksa._board_db_paths()[0]
+    now = int(time.time())
+    with kbc.write_txn(board):
+        board.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (tid,))
+    payload = {"reason": "waiting for CI", "wake_at": now + 3600, "clock_only": True,
+               "awaiting": {"kind": "ci", "ref": "run 1", "why": "CI"}}
+    before = ksa._all_counts(include_snapshot=True)
+    fp0 = ksa._activity_fingerprint()
+    links0 = ksa._links_fingerprint()
+    reads0, _ = ksa._read_board(path, parked=True, stalled=True)
+    with kbc.write_txn(board):
+        kb._append_event(board, tid, "scheduled", payload)
+    assert ksa._activity_fingerprint() != fp0
+    assert ksa._links_fingerprint() == links0
+    reads1, _ = ksa._read_board(path, parked=True, stalled=True)
+    assert reads0["execution"] != reads1["execution"]
+    after = ksa._all_counts(include_snapshot=True)
+    assert isinstance(before, CountSnapshot) and isinstance(after, CountSnapshot)
+    assert after.execution is not before.execution
+    assert reads1["execution"][tid]["state"] == "waiting"
+
+
+def test_event_only_condition_met_moves_the_counts_key(board):
+    import time
+
+    tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
+    path = ksa._board_db_paths()[0]
+    now = int(time.time())
+    with kbc.write_txn(board):
+        board.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (tid,))
+        kb._append_event(board, tid, "scheduled", {"reason": "r", "wake_at": now + 3600, "clock_only": True})
+    before = ksa._all_counts(include_snapshot=True)
+    fp0 = ksa._activity_fingerprint()
+    with kbc.write_txn(board):
+        kb._append_event(board, tid, "condition_met", {"reason": "probe passed"})
+    assert ksa._activity_fingerprint() != fp0
+    reads1, _ = ksa._read_board(path, parked=True, stalled=True)
+    after = ksa._all_counts(include_snapshot=True)
+    assert isinstance(before, CountSnapshot) and isinstance(after, CountSnapshot)
+    assert after.execution is not before.execution
+    assert reads1["execution"][tid]["state"] == "unknown"

@@ -8,7 +8,7 @@ def test_slow_annotation_uses_one_projection(monkeypatch):
     clock = [100.0]
     calls = []
     monkeypatch.setattr(activity.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(activity, "_activity_fingerprint", lambda: ())
+    monkeypatch.setattr(activity, "_activity_fingerprint", lambda **_kw: ())
     monkeypatch.setattr(activity, "_origin_scope", lambda: ("owner", "default"))
     monkeypatch.setattr(activity, "_extra_waiting", dict)
     monkeypatch.setattr(activity, "attention_task_counts", dict)

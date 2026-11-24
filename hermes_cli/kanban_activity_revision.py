@@ -78,8 +78,8 @@ BOOKKEEPING_COLUMNS: dict[str, frozenset[str]] = {
 # no longer re-reads every board's counts, the links projection and the attention pass (t_01a1cee98aaa8db1). Every
 # other kind, and any update or delete of an event row, still bumps.
 UNREAD_EVENT_KINDS = ("heartbeat",)
-# Kinds a cached activity reader selects from task_events (session-activity UNSEEN_KINDS). An insert of any
-# other kind still bumps ``revision`` (notify reads it) but not ``projection_revision``.
+# Kinds the links and annotation projection caches select (session-activity UNSEEN_KINDS). An insert of any
+# other kind still bumps ``revision`` (notify and the counts cache read it) but not ``projection_revision``.
 PROJECTION_EVENT_KINDS = ("blocked", "completed", "crashed", "gave_up", "status", "timed_out")
 _BUMP = f"UPDATE {REVISION_TABLE} SET revision = revision + 1 WHERE id = 1;"
 _BUMP_PROJECTION = (f"UPDATE {REVISION_TABLE} SET projection_revision = projection_revision + 1 WHERE id = 1;")
@@ -278,6 +278,7 @@ def file_stat(path: Path) -> tuple:
 # (t_01a19d0bcab45558). Any trigger or table change bumps ``schema_version`` (and a replaced file has a new inode),
 # so a matching version proves the same coverage; one statement reads both, in one snapshot.
 _COVERED: dict[tuple, int] = {}
+_PROJECTION_COVERED: dict[tuple, int] = {}
 _COVERED_LOCK = threading.Lock()
 _COVERED_MAX = 256
 
@@ -303,6 +304,33 @@ def _covered_read(conn: sqlite3.Connection, path: Path, db: tuple | None, tables
                     _COVERED.clear()
                 _COVERED[memo_key] = revision[1]
     return revision
+
+
+def _projection_covered_read(conn: sqlite3.Connection, path: Path, db: tuple | None,
+                             tables: tuple[str, ...]) -> tuple | None:
+    """``read_projection_key``, skipping the schema scan once ``schema_version`` still matches."""
+    memo_key = (str(path), db[0], db[1], tables) if db is not None else None
+    with _COVERED_LOCK:
+        version = _PROJECTION_COVERED.get(memo_key) if memo_key is not None else None
+    if version is not None:
+        try:
+            row = conn.execute(
+                f"SELECT projection_revision, (SELECT schema_version FROM pragma_schema_version) "
+                f"FROM {REVISION_TABLE} WHERE id = 1").fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row is not None and int(row[1]) == version:
+            return (int(row[0]), int(row[1]))
+    found = read_projection_key(conn, tables)
+    if memo_key is not None:
+        with _COVERED_LOCK:
+            if found is None:
+                _PROJECTION_COVERED.pop(memo_key, None)
+            else:
+                if len(_PROJECTION_COVERED) >= _COVERED_MAX:
+                    _PROJECTION_COVERED.clear()
+                _PROJECTION_COVERED[memo_key] = found[1]
+    return found
 
 
 # Zero-budget SQLite probes must not race each other's reader lifecycle opens.
@@ -388,9 +416,9 @@ def read_projection_key(conn: sqlite3.Connection, tables: Iterable[str]) -> tupl
 
 
 def projection_content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple | None:
-    """Links/annotation key from one open, or None only when the probe lock was not acquired.
+    """Links/annotation key from one open, or None when the probe lock was not acquired or the file is missing.
 
-    None is the only case the caller retries via ``content_key``. A file with no projection
+    None is the case the caller retries via ``content_key``. A file with no projection
     counter is answered as the notify key on this same connection. A busy or unreadable file
     returns an unequal stat key. Opening again would spend a second busy budget on a board
     that is already locked.
@@ -406,7 +434,7 @@ def projection_content_key(path: Path, tables: Iterable[str], open_ro: Callable)
             return None
         try:
             with open_ro(path) as conn:
-                row = read_projection_key(conn, tables)
+                row = _projection_covered_read(conn, path, db, tables)
                 if row is not None:
                     return ("projection", db[0], db[1], *row)
                 # Same open as ``_content_key``: an older file must not hide a write, and must

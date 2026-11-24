@@ -262,7 +262,8 @@ def shadows_part(entries: list[tuple[str, Any]], profile: str, now: float | None
         with cached_ro(Path(path), busy_budget=0) as conn:
             conn.row_factory = sqlite3.Row
             try:
-                rows = links.replica_link_rows(conn, Path(path), gateway, profile, content)
+                rows = links.replica_link_rows(conn, Path(path), gateway, profile,
+                                               links.shadow_link_key(Path(path), content))
                 try:
                     row = conn.execute("SELECT pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
                     pulled = float(row[0]) if row and row[0] is not None else None

@@ -310,3 +310,30 @@ def test_patched_rows_equal_a_full_read(world, seed):
         narrow.reset()
         assert key(world) == incremental, f"step {step} op {op}"
     assert own.stats["board_patches"] > 0
+
+
+def test_shadow_link_memo_shares_one_key(world, monkeypatch):
+    """``shadows_part`` and ``_read_replica`` share one slot. Different keys re-read an unchanged shadow."""
+    from pathlib import Path
+
+    from hermes_cli import kanban_chat_links as links
+
+    shadow = Path(world["shadow"])
+    monkeypatch.setattr(ksa, "_replica_paths", lambda: [shadow])
+    links._reset_for_tests()
+    reads = []
+    real = links._read_replica_links
+
+    def counted(conn, gateway, profile):
+        reads.append(1)
+        return real(conn, gateway, profile)
+
+    monkeypatch.setattr(links, "_read_replica_links", counted)
+    for _ in range(3):
+        own.shadows_part([(str(shadow), dict(ksa._shadow_fingerprint())[str(shadow)])], PROFILE)
+        links._read_replica(shadow, ME, PROFILE)
+    assert len(reads) == 1
+    world["sconn"].execute("INSERT INTO task_events (task_id, kind) VALUES ('r1', 'commented')")
+    own.shadows_part([(str(shadow), dict(ksa._shadow_fingerprint())[str(shadow)])], PROFILE)
+    links._read_replica(shadow, ME, PROFILE)
+    assert len(reads) == 1

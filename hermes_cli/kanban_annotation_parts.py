@@ -108,14 +108,15 @@ def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
     from hermes_cli import kanban_session_activity as ksa
 
     wall = time.time()
-    local = ksa._activity_fingerprint(include_shadows=False)
+    counts_local = ksa._activity_fingerprint(include_shadows=False)
+    links_local = ksa._activity_fingerprint(include_shadows=False, projection=True)
     shadows = ksa._shadow_fingerprint()
-    if not ksa._revalidate.revalidatable(local + shadows, wall):
+    if not ksa._revalidate.revalidatable(counts_local + shadows, wall):
         return None
     ledger = ksa._origin_ledger_fingerprint()
     plain = _plain_key(scope)
-    return {COUNTS: (local, shadows, ledger, plain), LINKS: (local, ledger),
-            ATTENTION: (local, _done_key(scope, wall))}
+    return {COUNTS: (counts_local, shadows, ledger, plain), LINKS: (links_local, ledger),
+            ATTENTION: (links_local, _done_key(scope, wall))}
 
 
 def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[frozenset, dict[str, object] | None]:
