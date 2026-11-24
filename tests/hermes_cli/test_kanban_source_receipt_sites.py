@@ -341,6 +341,7 @@ INVOLUNTARY = {  # no receipt: custody becomes ``retained`` (fail closed)
 }
 # Sites the scan cannot prove off-``running`` from SQL text alone, each checked by hand.
 NOT_FROM_RUNNING = {
+    "hermes_cli/kanban_stop_ended.py::apply": "owner stop requires non-running, unclaimed target with an ended run and no open runs under the writer transaction",
     "hermes_cli/kanban_protect_stopped.py::protect": "stop-only adoption requires an ended-run, unclaimed triage/archived target (no current run) under the writer transaction",
     "hermes_cli/kanban_review_admission.py::record_refusal": "only ready/review lanes; writer transaction requires matching unclaimed row",
     "hermes_cli/kanban_containment_lifecycle.py::resume_local": "requires unclaimed triage under the writer transaction",

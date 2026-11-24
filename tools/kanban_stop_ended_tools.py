@@ -16,8 +16,8 @@ _PROPERTIES = {
                  'items': {'type': 'string', 'minLength': 1, 'maxLength': 512}},
     'escalate_at': {'type': 'integer', 'description': 'Fixed future Unix deadline, at most 14 days out; never renewed.'}}
 SCHEMA = _schema('kanban_stop_ended',
-    'Owning interactive chat only: stop an ENDED card on a local-executing shadow board, leaving it incomplete, '
-    'nonexecuting and in triage with dependencies unsatisfied. Without expected_digest returns a read-only '
+    'Owning chat: stop an ended shadow-board card without completing it. Leaves it nonexecuting in triage, '
+    'with dependencies unsatisfied. Without expected_digest returns a read-only '
     'snapshot/readback. Receipt is LOCAL-SHADOW-ONLY (canonical_protected false); published to the hub only '
     'through the ordinary outbox once the Board advertises admin_stop_ingress. Never a release or completion.',
     _PROPERTIES, ['task_id'])
