@@ -42,7 +42,7 @@ def plan(args, *, cfg, gateway, machine_ok):
         return None
     if args.get('board') not in (None, '', 'default'):
         return args, {'where': 'refuse', 'pin': 'hub', 'why': 'worker creation home supports only the default board'}
-    if ((args.get('workspace_kind') or 'scratch') != 'scratch'
+    if (args.get('workspace_kind') not in (None, 'scratch')
             or args.get('workspace_path') or args.get('project_id') or args.get('project')):
         return args, {'where': 'refuse', 'pin': 'hub',
                       'why': 'publish host-local source before forwarding to the canonical creation home'}
@@ -53,7 +53,7 @@ def plan(args, *, cfg, gateway, machine_ok):
         if not machine_ok or not machine_ok(execution):
             return args, {'where': 'refuse', 'pin': execution, 'why': 'execution pin is not an enrolled pickup machine'}
         labels = placement.route_labels(execution)
-    if not labels:
+    if labels is None:
         # Determine execution independently: a real creator-local artifact or
         # operator/this-host requirement remains pinned, but never owns storage.
         from hermes_cli import kanban_home_marker_placement as markers
@@ -95,10 +95,12 @@ def transport_options(args, *, hub_cli):
         raise ValueError('canonical_home_transport_unavailable: update the courier client before forwarding')
     if args.get('pin_mandatory'):
         raise ValueError('canonical_home_transport_unavailable: mandatory model pin cannot be forwarded')
-    keys = ('runs_on', 'parents', 'tenant', 'max_retries', 'initial_status', 'human_request')
+    keys = ('runs_on', 'parents', 'tenant', 'max_retries', 'initial_status', 'human_request',
+            'requires', 'skills', 'priority')
     # Preserve explicit retry overrides and empty label/dependency lists. The
     # core owner entrypoint validates typed values; never stringify safety fields.
-    return {key: args[key] for key in keys if args.get(key) is not None}
+    carried = placement.carried_options(args)
+    return {key: carried.get(key, args[key]) for key in keys if args.get(key) is not None}
 
 
 def result(args, fields, *, tid, status, target):

@@ -24,6 +24,8 @@ def pool_labels(monkeypatch):
 
 @pytest.mark.parametrize('options,expected', [
     ({}, ['pool:worker']),
+    ({'runs_on': []}, []),
+    ({'runs_on': [], 'placement': 'macbook'}, []),
     ({'skills': ['session-status-panel', 'inspecting-hermes-desktop-dom'],
       'body': 'Inspect the Desktop DOM'}, ['pool:worker', 'capability:tailnet-exec']),
     ({'runs_on': ['pool:worker', 'capability:core-ship']},
