@@ -140,16 +140,18 @@ def skip_wake(conn: sqlite3.Connection, task_id: str, wake_kind: str, **extra: A
 _UNBLOCKABLE = ("blocked", "scheduled", "triage")
 
 
-def unblock_held(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_held(conn: sqlite3.Connection, task_id: str, *, event_extra=None) -> bool:
     """``kanban_db.unblock_task``, first inside its write txn: True (refuse) when the row reads blocked/scheduled/
     triage but the card is held terminal. ``unblocked`` is an explicit reopen (``REOPEN_KINDS``, and on the Board),
     so an automated caller acting on a stale copy (shared-blocker clear/probe, quota release, ``resolved_check``)
     would otherwise reopen a done card. Spend stops also require a recorded promote/archive decision.
     A card that is not unblockable anyway leaves no note."""
     from hermes_cli.kanban_spend_decision import pending as spend_pending
+    from hermes_cli.kanban_selfwork_exception import missing_local_adapter
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return row is not None and row[0] in _UNBLOCKABLE and (
-        skip_wake(conn, task_id, "unblocked") or spend_pending(conn, task_id))
+        skip_wake(conn, task_id, "unblocked") or spend_pending(conn, task_id)
+        or missing_local_adapter(conn, task_id, event_extra))
 
 
 def stale_hold(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:

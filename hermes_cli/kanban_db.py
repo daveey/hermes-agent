@@ -3245,7 +3245,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: ReasonComme
     now = int(time.time())
     # ``held`` is decided in the write txn, before ``precondition`` and the comment savepoint (its rollback drops notes).
     with write_txn(conn):
-        held = unblock_held(conn, task_id)
+        held = unblock_held(conn, task_id, event_extra=event_extra)
         with reason_comment(conn, task_id, None if held else comment) as noted:
             if held or precondition is not None and precondition(conn):
                 return False

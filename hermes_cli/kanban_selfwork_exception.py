@@ -199,7 +199,8 @@ def _grant(conn, offer_uid: str) -> Optional[dict]:
                 and all(isinstance(v, str) for v in request.values())
                 and ca._valid_receipt(conn, TARGET.owner_task, request, ca.digest(request), "unblocked", receipt)):
             return grant
-    return None
+    from hermes_cli.kanban_selfwork_local import recorded
+    return recorded(conn, offer_uid)
 
 
 def granting(conn, task: str, ask, *, now: Optional[int] = None) -> Optional[dict]:
@@ -224,6 +225,16 @@ def granting(conn, task: str, ask, *, now: Optional[int] = None) -> Optional[dic
     if _spent(conn, stamp["offer_uid"]) or _grant(conn, stamp["offer_uid"]) is not None:
         raise AnswerRefused("selfwork_exception_offer_used")
     return stamp
+
+
+def missing_local_adapter(conn, task, extra) -> bool:
+    """Old local plugins must not silently consume a stamped ask without issuance."""
+    if task != TARGET.owner_task or not isinstance(extra, dict) or 'user_steps_projection' not in extra:
+        return False
+    row = conn.execute('SELECT human_request FROM tasks WHERE id=?', (task,)).fetchone()
+    ask = json.loads(row[0] or 'null') if row else None
+    return (isinstance(ask, dict) and STAMP in ask
+            and (not isinstance(extra.get(GRANT), dict) or extra[GRANT].get('local_version') != 1))
 
 
 def same_offer(conn, fresh, current, stamp) -> bool:
@@ -255,6 +266,9 @@ def check(conn, exception, *, request_id: str, now: int) -> dict:
         raise Refused("exception grant expired")
     if _spent(conn, grant["offer_uid"]):
         raise Refused("exception grant already used")
+    if grant.get('local_version') is not None:
+        from hermes_cli.kanban_selfwork_local import validate
+        validate(conn, grant, now=now)
     return grant
 
 
@@ -359,7 +373,14 @@ def reconsider(conn, records) -> dict:
     grant = _live_grant(conn)
     if grant is None:
         raise Refused("no verified Desktop grant for this request")
-    result, _ = _receive(original(records), grant)
+    envelope = original(records)
+    if grant.get('local_version') is not None:
+        from hermes_cli.kanban_selfwork_local_source import custody
+        # Retain source evidence custody through the intake transaction commit.
+        with custody(grant['operationId'], delivered=True):
+            result, _ = _receive(envelope, grant)
+    else:
+        result, _ = _receive(envelope, grant)
     return result
 
 
@@ -371,7 +392,16 @@ def status(conn) -> dict:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='self_work_intake' AND type='table'").fetchone():
         row = conn.execute("SELECT receipt_json FROM self_work_intake WHERE request_id=?",
                            (TARGET.request_id,)).fetchone()
+    authority = None
+    if grant is not None and grant.get('local_version') is not None:
+        from hermes_cli.kanban_selfwork_local import validate
+        try:
+            validate(conn, grant, now=int(time.time()))
+            authority = {'usable': True, 'reason': None}
+        except (Refused, OSError) as exc:
+            authority = {'usable': False, 'reason': str(exc)}
     return {"request_id": TARGET.request_id, "owner_task": TARGET.owner_task,
+            "local_authority": authority,
             "offer": offers[0] if offers else None,
             "grant": grant and {"offer_uid": grant["offer_uid"], "operationId": grant["operationId"]},
             "spent": [e["payload"] for e in _own(conn, SPENT)],
@@ -384,13 +414,18 @@ def main(argv=None) -> int:
     from hermes_cli.kanban_card_answer_transport import Records
     from hermes_cli.kanban_db_connect import connect_closing
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) != 1 or argv[0] not in ("offer", "reconsider", "status"):
+    recovering = len(argv) == 2 and argv[0] == 'recover-local'
+    if not recovering and (len(argv) != 1 or argv[0] not in ("offer", "reconsider", "status")):
         print(json.dumps({"ok": False, "error": "usage"}))
         return 64
     try:
         with connect_closing(_board_db("default")) as conn:
-            result = (status(conn) if argv[0] == "status" else
-                      offer(conn, Records()) if argv[0] == "offer" else reconsider(conn, Records()))
+            if recovering:
+                from hermes_cli.kanban_selfwork_local import recover
+                result = recover(conn, Records(), argv[1])
+            else:
+                result = (status(conn) if argv[0] == "status" else
+                          offer(conn, Records()) if argv[0] == "offer" else reconsider(conn, Records()))
         out, code = {"ok": True, "result": result}, 0
     except (AnswerRefused, policy.SelfWorkError) as exc:
         out, code = {"ok": False, "refused": str(exc) or "refused"}, 2
@@ -401,4 +436,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # The receiver imports the canonical Capability; do not instantiate __main__'s
+    # distinct type when this file is executed with python -m.
+    from hermes_cli.kanban_selfwork_exception import main as canonical_main
+    raise SystemExit(canonical_main())

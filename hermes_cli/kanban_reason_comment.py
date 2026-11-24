@@ -31,7 +31,15 @@ class RecordedDecisionComment:
     before_insert: Optional[Callable[[sqlite3.Connection], None]] = None
 
 
-Comment = Optional[tuple[str, str] | RecordedDecisionComment]  # legacy (author, body) remains valid
+@dataclass(frozen=True)
+class FencedReasonComment:
+    """Internal pre-insert fence with an ordinary comment, not remote decision provenance."""
+    author: str
+    body: str
+    before_insert: Callable[[sqlite3.Connection], None]
+
+
+Comment = Optional[tuple[str, str] | RecordedDecisionComment | FencedReasonComment]
 
 
 class _ReasonComment:
@@ -56,9 +64,10 @@ def reason_comment(conn: sqlite3.Connection, task_id: str, comment: Comment) -> 
 
     state = _ReasonComment()
     decision = comment if isinstance(comment, RecordedDecisionComment) else None
-    if decision is not None and decision.before_insert is not None:
-        decision.before_insert(conn)  # lock held; no tentative duplicate comment yet
-    if isinstance(comment, RecordedDecisionComment):
+    fenced = comment if isinstance(comment, (RecordedDecisionComment, FencedReasonComment)) else None
+    if fenced is not None and fenced.before_insert is not None:
+        fenced.before_insert(conn)  # lock held; no tentative duplicate comment yet
+    if fenced is not None:
         author, body = comment.author, comment.body
     else:
         author, body = comment or ("", "")
