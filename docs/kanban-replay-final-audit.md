@@ -79,10 +79,30 @@ in the diagnostic producer test file.
    only. Ordinary strict OSError/HubError paths interrupt observation and rethrow;
    `SyncWork.finished` caps delay at 60s but does not stop attempts. Prove the
    general public path, restart persistence, offline exclusion and exact custody.
-3. **Aggregate fault/storage proof.** Existing callback rollback/page-damage tests
-   are not a proof of actual SQLITE_FULL at freeze/exposure/settlement/ACK metadata
-   boundaries or hard process death at those boundaries. Add bounded real fault
-   controls; never replace a runtime write hook/authorizer or reentrancy change.
+3. **Aggregate fault/storage proof (local boundaries now exercised).** Three new
+   test scenarios run in both DELETE and WAL journal modes with real SQLite
+   `max_page_count` exhaustion and assert `SQLITE_FULL`, not
+   an injected exception or host disk exhaustion: journal issue, authenticated
+   exposure append, and retained-verdict/ACK-tuple storage after actual source
+   deletion. Reopen verifies exact old custody; after lifting the connection-local
+   page cap, the same issue/exposure/settlement can complete. The settlement test
+   explicitly verifies the source deletion ran and rolled back with the failed
+   metadata write. These are journal/exposure API proofs against minimal storage,
+   not full sender/Board integration.
+
+   Four independent-process SIGKILL tests exercise the actual public sender and
+   production HTTP transport at capability, accepted session, accepted operation
+   before reply, and accepted ACK before reply. Reopening preserves the exact
+   journal/source/exposure image. The fixture receiver sees each original operation
+   once across recovery; the remaining independent lifecycle event then settles.
+   Four additional process-death controls cover uncommitted issue, source DELETE
+   inside the settlement callback, completed-but-uncommitted settlement, and
+   committed settlement. Pending bytes, source custody and the ACK identity tuple
+   are all-old or all-new on reopen. These do not simulate power loss/fsync failure
+   or prove deployed Board atomicity. No production hook, sqlite authorizer or
+   reentrancy change was added. Baseline production passes these controls; no
+   production RED is claimed. Three targeted premature-commit/exposure-omission
+   mutants fail at their intended assertions, with original source restored.
 4. **State and model/throughput evidence.** Add many-settlement/reopen and seeded
    reference-model sender interleavings, separating constant stream state from
    intentional business/diagnostic obligations. Measure backlog/lease-sensitive
