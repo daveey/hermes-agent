@@ -1459,8 +1459,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         view = {**args, "assignee": assignee, "skills": skills, "parents": parents,
                 "project_id": project_id, "tenant": _ca.effective_tenant(args, None)}
         from hermes_cli import kanban_worker_node as _wn
-        # runs_on only works on a board that syncs as primary; the machine check is kp._machine_picks_up.
-        from hermes_cli import kanban_sync_runstate as _runstate  # down: a machine pin takes the gateway route
+        from hermes_cli import kanban_sync_runstate as _runstate  # primary sync + pickup required; down uses gateway routing
         machine_ok = ((lambda m: _wn.sync.board_mode(conn) == "primary" and kp._machine_picks_up(m)
                        and not _runstate.down()) if conn is not None else None)
         from hermes_cli.kanban_creation_home import prepare as creation_home, result as home_result

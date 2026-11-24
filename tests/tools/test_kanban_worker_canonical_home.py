@@ -14,7 +14,11 @@ gws = nodes.gws
 
 
 @pytest.fixture(autouse=True)
-def pool_labels(monkeypatch):
+def pool_labels(monkeypatch, gws):
+    from tests.tools.test_kanban_create_overlap import register_chat
+    for gateway in gws:
+        register_chat(gateway.home, 'canonical-home-owner')
+    monkeypatch.setenv('HERMES_SESSION_ID', 'canonical-home-owner')
     machines = {key: dict(value) for key, value in nodes.MACHINES.items()}
     machines[nodes.WORKER]['labels'] = ['linux', 'pool:worker', 'capability:core-ship',
                                          'capability:tailnet-exec']
