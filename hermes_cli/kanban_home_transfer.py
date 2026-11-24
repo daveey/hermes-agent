@@ -20,6 +20,28 @@ def _install(conn: sqlite3.Connection) -> None:
     conn.execute(f"""CREATE TABLE IF NOT EXISTS {_TABLE} (
         task_id TEXT PRIMARY KEY, source TEXT NOT NULL, destination TEXT NOT NULL,
         nonce TEXT NOT NULL, expected_version INTEGER NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS kanban_home_finalized1 (
+        task_id TEXT PRIMARY KEY, nonce TEXT NOT NULL, receipt TEXT NOT NULL,
+        CHECK(json_valid(receipt) AND json_extract(receipt,'$.task') IS task_id
+            AND json_extract(receipt,'$.nonce') IS nonce
+            AND json_extract(receipt,'$.phase') IS 'materialized'
+            AND json_type(receipt,'$.rows') IS 'array'))""")
+    for action in ("UPDATE", "DELETE"):
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_finalized1_{action.lower()}
+            BEFORE {action} ON kanban_home_finalized1
+            BEGIN SELECT RAISE(ABORT, 'home finalization immutable'); END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS home_finalized1_insert
+        BEFORE INSERT ON kanban_home_finalized1
+        WHEN EXISTS(SELECT 1 FROM kanban_home_finalized1 WHERE task_id=NEW.task_id)
+        BEGIN SELECT RAISE(ABORT, 'home finalization immutable'); END""")
+    conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_finalized1_scope
+        BEFORE INSERT ON kanban_home_finalized1
+        WHEN NOT EXISTS(SELECT 1 FROM {_TABLE} p WHERE p.task_id=NEW.task_id AND p.nonce=NEW.nonce
+            AND p.source IS json_extract(NEW.receipt,'$.source')
+            AND p.destination IS json_extract(NEW.receipt,'$.destination')
+            AND p.expected_version IS json_extract(NEW.receipt,'$.expected_version')
+            AND json_type(NEW.receipt,'$.expected_version') IS 'integer')
+        BEGIN SELECT RAISE(ABORT, 'home finalization scope mismatch'); END""")
     # Include local-only task custody (wake/ask probes, subscriptions, private
     # restriction records), not just the rows sent by sync. Discover task_id
     # tables from this board's real schema, retaining guards across sync detach.
@@ -27,7 +49,7 @@ def _install(conn: sqlite3.Connection) -> None:
     for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
         quoted = '"' + table.replace('"', '""') + '"'
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({quoted})")}
-        if "task_id" in columns and table != _TABLE:
+        if "task_id" in columns and table not in (_TABLE, "kanban_home_finalized1"):
             related[table] = columns
     for table in ("tasks", "task_links", *sorted(related)):
         quoted = '"' + table.replace('"', '""') + '"'
@@ -72,7 +94,9 @@ def _install(conn: sqlite3.Connection) -> None:
             cond = " OR ".join(tests)
             trigger = '"home_prepared1_' + table.replace('"', '""') + '_' + action.lower() + '"'
             conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger}
-                BEFORE {action} ON {quoted} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE {cond})
+                BEFORE {action} ON {quoted} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE ({cond})
+                    AND NOT EXISTS(SELECT 1 FROM kanban_home_finalized1 f
+                                   WHERE f.task_id={_TABLE}.task_id AND f.nonce={_TABLE}.nonce))
                 BEGIN SELECT RAISE(ABORT, 'home transfer prepared'); END""")
     for action in ("UPDATE", "DELETE"):
         conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_prepared1_marker_{action.lower()}
@@ -133,3 +157,10 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
         raise
     conn.execute("RELEASE home_prepare")
     return {"phase": "prepared_local", **record}
+
+
+def finalize_source(conn: sqlite3.Connection, record: dict) -> dict:
+    """Stop local ownership after the authenticated destination materialization ACK."""
+    from hermes_cli.kanban_home_source_stop import finalize_source as finish
+
+    return finish(conn, record)
