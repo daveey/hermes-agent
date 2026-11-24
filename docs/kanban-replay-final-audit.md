@@ -1,5 +1,22 @@
 # Sender final audit: remaining gates (not approval)
 
+## Malformed strict endpoint envelopes (review 6038956723)
+
+HTTP 200 with a non-object capability (`[]`) or a serving envelope missing a
+dict `slot` (`{}`, `{slot: []}`) previously escaped as AttributeError/KeyError
+and aborted `sync_all_once` before a later healthy board. Capability and slot
+payloads are now typed into ValueError at the envelope boundary, which the
+strict sender turns into ReplayFault. Inspect, session, post-send inspect and
+ACK all use the same slot helper. Exact pre-send journal custody is unchanged;
+a malformed ACK after a successful send still isolates the board without
+uncaught indexing errors.
+
+Nine HTTP/dispatch cases plus a helper unit test cover those shapes, a valid
+two-board control, and ACK `{}`. Four source mutants are killed: capability
+passthrough, inspect/session raw `['slot']` indexing, and a `.get` slot helper
+that skips the typed refusal. Restored hashes precede the post-control run.
+This is not live Board proof, activation, or D completion.
+
 ## Exact-successor ACK and strict HTTP410 corrections
 
 Review6038016773 at28589d8cedf059118b23e6cfac21f882d4b2e030 reproduced

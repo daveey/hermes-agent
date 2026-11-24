@@ -13,6 +13,23 @@ _TRANSPORT = frozenset({'consumed', 'sequence', 'payload_sha256', 'h', 'dup',
                         'row', 'source_predecessor'})
 
 
+def capability_envelope(payload):
+    """Refuse a non-object capability as a board-local stream fault."""
+    if not isinstance(payload, dict):
+        raise ValueError('replay capability unavailable')
+    return payload
+
+
+def slot_envelope(payload):
+    """Refuse a missing or non-object serving slot as a board-local stream fault."""
+    if not isinstance(payload, dict):
+        raise ValueError('replay serving envelope malformed')
+    slot = payload.get('slot')
+    if not isinstance(slot, dict):
+        raise ValueError('replay serving envelope malformed')
+    return slot
+
+
 def consumed_slot(reply, wire, previous, local):
     """Return a validated final snapshot, or require inspect without settlement.
 

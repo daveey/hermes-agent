@@ -106,7 +106,8 @@ def replay_session(hub, board):
     root = f'/v2/boards/{quote(board, safe="")}/replay/'
     transport = Hub(hub.ident, timeout=hub.timeout, deadline=hub.deadline)
     try:
-        capability = transport._call('GET', root + 'capability')
+        from hermes_cli.kanban_replay_reply import capability_envelope
+        capability = capability_envelope(transport._call('GET', root + 'capability'))
         observed_capability = dict(capability)
 
         def send_ops(conn, ops, replay):

@@ -114,16 +114,17 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
     local = journal.snapshot(conn)
     if isinstance(hub, client._HTTP_HUB) and send_ops is None:
         raise ValueError('strict HTTP transport requires pinned session')
-    cap = recovery.call(hub, 'GET', root + 'capability') if capability is None else capability
+    from hermes_cli.kanban_replay_reply import capability_envelope, slot_envelope
+    cap = capability_envelope(recovery.call(hub, 'GET', root + 'capability') if capability is None else capability)
     if (cap.get('processed_prefix') is not True or
             cap.get('board_incarnation') != local['board_incarnation'] or
             cap.get('gateway_principal') != local['gateway_principal']):
         raise ValueError('replay capability unavailable')
-    remote = recovery.call(hub, 'GET', root + 'inspect')['slot']
+    remote = slot_envelope(recovery.call(hub, 'GET', root + 'inspect'))
     reconcile(local, remote)  # inspect before authenticated full-state session CAS
     identity = dict(board_incarnation=local['board_incarnation'], journal_id=local['journal_id'])
     expected = dict(remote, session=str(int(remote['session']) + 1))
-    remote = recovery.call(hub, 'POST', root + 'session', dict(identity, expected=remote))['slot']
+    remote = slot_envelope(recovery.call(hub, 'POST', root + 'session', dict(identity, expected=remote)))
     if remote != expected:
         raise ValueError('session readback mismatch')
     reconcile(local, remote)
@@ -416,14 +417,14 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             # Inspect immediately, but leave recording/ACK to the next serialized
             # turn. A lost mutation reply never authorizes a blind resend.
             try:
-                reconcile(journal.snapshot(conn), recovery.call(hub, 'GET', root + 'inspect')['slot'])
+                reconcile(journal.snapshot(conn), slot_envelope(recovery.call(hub, 'GET', root + 'inspect')))
             except (OSError, client.HubError, client.Resync):
                 pass  # Offline inspection preserves the original transport error/custody.
             raise
         out.sent += 1
         from hermes_cli.kanban_replay_reply import consumed_slot
         remote = (consumed_slot(reply, wire, remote, journal.snapshot(conn)) or
-                  recovery.call(hub, 'GET', root + 'inspect')['slot'])
+                  slot_envelope(recovery.call(hub, 'GET', root + 'inspect')))
         membership = refresh_capacity()
         current_row = refresh_current_row()
         with settlement():
@@ -446,9 +447,10 @@ def _ack_settled(conn, hub, root, identity, remote):
     # authenticated prefix must never be moved back to our settled predecessor.
     if int(remote['a']) < int(settled['settled']):
         expected = dict(remote, a=settled['settled'])
-        remote = recovery.call(hub, 'POST', root + 'ack', dict(identity, session=remote['session'],
+        from hermes_cli.kanban_replay_reply import slot_envelope
+        remote = slot_envelope(recovery.call(hub, 'POST', root + 'ack', dict(identity, session=remote['session'],
             generation=settled['generation'], ack=dict(sequence=settled['settled'],
-                op_id=settled['last_op_id'], payload_sha256=settled['last_payload_sha256'])))['slot']
+                op_id=settled['last_op_id'], payload_sha256=settled['last_payload_sha256']))))
         from hermes_cli.kanban_replay_reply import same_slot
         if not same_slot(expected, remote):
             raise ValueError('ack readback mismatch')
