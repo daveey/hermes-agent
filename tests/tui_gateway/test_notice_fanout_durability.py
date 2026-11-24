@@ -16,7 +16,6 @@ db = helpers.db
 
 def test_chat_hosted_elsewhere_does_not_hold_the_board_cursor(db, monkeypatch, caplog):
     foreign = "20261123_100853_foreign"
-    monkeypatch.setattr(helpers.server, "_readopt_wake_profiles", lambda: [None])
 
     @contextlib.contextmanager
     def profile_db(session, **kwargs):
@@ -73,11 +72,14 @@ def test_unknown_hosting_keeps_cursor(db, monkeypatch):
     assert state.get_cursor(ident) > before
 
 
-def test_chat_hosted_here_reports_absent_only_when_every_store_opened(db, tmp_path, monkeypatch):
+def test_chat_hosted_here_reports_absent_only_when_every_store_opened(db, monkeypatch):
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
     from hermes_state import SessionDB
-    with contextlib.closing(SessionDB(tmp_path / "second.db")) as second:
+    second_path = Path(get_hermes_home()) / "profiles" / "second" / "state.db"
+    second_path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.closing(SessionDB(second_path)) as second:
         second.create_session("second-chat", "desktop")
-        monkeypatch.setattr(helpers.server, "_readopt_wake_profiles", lambda: [None, "second"])
         broken = []
 
         @contextlib.contextmanager
@@ -101,6 +103,74 @@ def test_chat_hosted_here_reports_absent_only_when_every_store_opened(db, tmp_pa
         assert state.get_cursor(str(kb.kanban_db_path().resolve())) == before
         broken.clear()
         assert [(r["task_id"], r["skipped"]) for r in nf.card_change_pass()] == [(tid, "not_hosted_here")]
+
+
+@pytest.mark.parametrize("with_file", [False, True])
+def test_nonprofile_file_does_not_make_hosting_unknown(db, monkeypatch, with_file):
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+
+    @contextlib.contextmanager
+    def profile_db(session, **kwargs):
+        yield db
+
+    monkeypatch.setattr(helpers.server, "_profile_db", profile_db)
+    root = Path(get_hermes_home()) / "profiles"
+    if with_file:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "README").write_text("not a profile")
+    else:
+        assert not root.exists()
+    nf.card_change_pass()
+    ident = str(kb.kanban_db_path().resolve())
+    before = state.get_cursor(ident)
+    tid = helpers._card(done=False, chat="absent-chat")
+    assert helpers.ku.chat_hosted_here("absent-chat") is False
+    assert [(r["task_id"], r["skipped"]) for r in nf.card_change_pass()] == [(tid, "not_hosted_here")]
+    assert state.get_cursor(ident) > before
+
+
+@pytest.mark.parametrize("boundary", ["enumeration", "metadata"])
+def test_unreadable_profile_roster_retains_cursor(db, monkeypatch, boundary):
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+
+    @contextlib.contextmanager
+    def profile_db(session, **kwargs):
+        yield db
+
+    monkeypatch.setattr(helpers.server, "_profile_db", profile_db)
+    root = Path(get_hermes_home()) / "profiles"
+    named = root / "temporarily-unreadable"
+    named.mkdir(parents=True, exist_ok=True)
+    nf.card_change_pass()
+    ident = str(kb.kanban_db_path().resolve())
+    before = state.get_cursor(ident)
+    tid = helpers._card(done=False, chat="chat-in-unreadable-profile")
+    original_iterdir, original_stat = Path.iterdir, Path.stat
+
+    def unreadable_iterdir(path):
+        if path == root:
+            raise PermissionError("profile directory temporarily unavailable")
+        return original_iterdir(path)
+
+    def unreadable_stat(path, *args, **kwargs):
+        if path == named / "state.db":
+            raise PermissionError("profile metadata temporarily unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "iterdir" if boundary == "enumeration" else "stat",
+                  unreadable_iterdir if boundary == "enumeration" else unreadable_stat)
+        result = nf.card_change_pass()
+        state.forget_memory_for_tests()
+        assert state.get_cursor(ident) == before
+        assert result.incomplete
+        assert not any(r.get("skipped") == "not_hosted_here" for r in result)
+        assert helpers.ku.chat_hosted_here("chat-in-unreadable-profile") is None
+        assert helpers.ku.chat_hosted_here(helpers.CHAT) is True
+    assert [(r["task_id"], r["skipped"]) for r in nf.card_change_pass()] == [(tid, "not_hosted_here")]
+    assert state.get_cursor(ident) > before
 
 
 def test_stale_metadata_cas_loss_keeps_durable_cursor(db, monkeypatch):

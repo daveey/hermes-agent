@@ -196,8 +196,10 @@ def live_session_ids() -> set[str]:
 def chat_hosted_here(chat_id: str) -> Optional[bool]:
     """Prove local presence or absence; an unreadable profile leaves absence unknown."""
     from tui_gateway import server
-    unavailable = False
-    for profile in server._readopt_wake_profiles():
+    from tui_gateway.kanban_chat_hosting import profile_roster
+    profiles, complete = profile_roster()
+    unavailable = not complete
+    for profile in profiles:
         try:
             with server._profile_db({"profile": profile} if profile else None) as db:
                 if db is None:
