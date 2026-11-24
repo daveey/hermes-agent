@@ -243,3 +243,31 @@ Historical malformed-reply, storage, model and migration evidence above is not
 independent approval. Exact-head consumer/mutation receipts, required CI, a fresh
 independent review and canonical landing are still separate gates. No activation,
 deployment, runtime hook, authorizer or reentrancy change is authorized here.
+
+## Second independent-review corrections (dormant only)
+
+Review6034945422 at e2bdda34c072cc8141044427f16b71177800ba0c found two
+additional introduced defects, fixed in this same PR:
+
+- Successful primary deletes can settle from separately authenticated current
+  deleted evidence bound to Board/table/UID and a nonnegative integer head, with
+  explicit row=null. They no longer require an impossible live image. Unknown,
+  never, malformed or unbound evidence still holds exact custody. Absence is not
+  projected as a synthetic image or used to erase newer local work. Existing live
+  evidence continues through ordinary primary projection. Real unlink/outbox tests
+  cover applied/merged, accepted reply loss, SQLite reopen, one settlement/ACK,
+  no resend, nine evidence refusals and explicit same-identity repair.
+- Reachable elapsed sampling retires after each successful settlement even when
+  that predecessor never needed a durable fault. Twenty successful operations
+  taking300 seconds cannot pause operation21 on its first instantaneous fault.
+  Controlled0/35/300-second successor failures assert exact successor identity,
+  own elapsed budget, pause threshold and durable reopen readback.
+
+Both defects were reproduced before correction; initial incorrect fixture table
+and column assumptions were setup failures, not product RED. Three negative
+controls remove deleted settlement, UID binding and episode reset respectively;
+all fail in their intended regression cases and restore production bytes.
+Focused primary/delete/clock files passed38 tests before final integration.
+The first broad invocation rejected an unsupported runner flag before discovery;
+it is not a passing or completed broad gate. Final integrated counts, exact head,
+required CI and renewed independent review are recorded in the PR/card receipt.
