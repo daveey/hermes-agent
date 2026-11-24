@@ -1928,6 +1928,16 @@ def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = Fals
 
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
+    # A bounded poll can return while its refresh still owns cached SQLite readers.
+    # Drain that owner before resetting state or closing its connections.
+    _annotate_refresh_lock.acquire()
+    try:
+        _reset_cache_locked_for_tests(keep_remote)
+    finally:
+        _annotate_refresh_lock.release()
+
+
+def _reset_cache_locked_for_tests(keep_remote: bool) -> None:
     global _cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
     global _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
     _remote_read_memo = None
