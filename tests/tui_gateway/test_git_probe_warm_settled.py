@@ -53,7 +53,7 @@ def test_second_warm_of_the_same_cwds_spawns_no_pool_and_no_git(probes, tmp_path
 
 
 def test_only_the_new_cwd_is_probed(probes, tmp_path):
-    calls, repos, pools = probes
+    calls, _repos, pools = probes
     old, new = tmp_path / "old", tmp_path / "new"
     old.mkdir()
     new.mkdir()
@@ -66,7 +66,7 @@ def test_only_the_new_cwd_is_probed(probes, tmp_path):
 
 
 def test_negative_is_reprobed_when_the_dir_changes_or_the_ttl_ends(probes, tmp_path, monkeypatch):
-    calls, repos, pools = probes
+    calls, repos, _pools = probes
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir()
     b.mkdir()
@@ -86,7 +86,7 @@ def test_negative_is_reprobed_when_the_dir_changes_or_the_ttl_ends(probes, tmp_p
 
 
 def test_repo_with_unresolved_common_root_is_still_warmed(probes, tmp_path):
-    calls, repos, pools = probes
+    calls, repos, _pools = probes
     repo = tmp_path / "repo"
     repo.mkdir()
     repos[str(repo)] = str(repo)

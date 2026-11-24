@@ -632,9 +632,9 @@ def _gc_snapshot() -> Optional[dict[str, Any]]:
     """Collection counts and stop-the-world time (``gateway.gc_budget``), None when unavailable."""
     try:
         from gateway.gc_budget import snapshot as gc_snapshot
-        return gc_snapshot()
-    except Exception:
+    except ImportError:  # a trimmed install without the gateway package
         return None
+    return gc_snapshot()
 
 
 def _residual(threads: list[dict[str, Any]], process_cpu: float, accounted_total: float,

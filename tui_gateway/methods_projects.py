@@ -182,7 +182,6 @@ def _non_workspace_policy() -> tuple[frozenset, tuple]:
         profiles_stamp = os.stat(profiles).st_mtime_ns  # moves when a profile is added, removed or relinked
     except OSError:
         profiles_stamp = None
-    # no-tmp: ok — classify OS temp roots, not scratch-file creation.
     key = (str(get_hermes_home()), str(default_home), os.path.expanduser("~"), tempfile.gettempdir(),
            os.getenv("TMPDIR", ""), profiles_stamp)
     memo = _non_workspace_memo
@@ -191,7 +190,9 @@ def _non_workspace_policy() -> tuple[frozenset, tuple]:
         return memo[2], memo[3]
     # Resolve sibling profile homes too: a profile can be symlinked outside the base home.
     profile_homes = tuple(str(p) for p in profiles.glob("*"))
-    roots = (key[0], key[1], *profile_homes, key[3], "/tmp", "/private/tmp", "/var/folders", key[4])
+    roots = (key[0], key[1], *profile_homes, key[3],
+             # no-tmp: ok — classify OS temp roots, not scratch-file creation.
+             "/tmp", "/private/tmp", "/var/folders", key[4])
     dirs = frozenset(_non_workspace_dirs())
     prefixes = tuple(sorted({_canonical_workspace_path(p) for p in roots if p}))
     _non_workspace_memo = (key, now + _NON_WORKSPACE_TTL_S, dirs, prefixes)

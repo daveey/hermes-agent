@@ -58,8 +58,7 @@ def _on_gc(phase: str, info: dict) -> None:
     row[0] += 1
     row[1] += cpu
     row[2] += wall
-    if wall > row[3]:
-        row[3] = wall
+    row[3] = max(row[3], wall)
     row[4] += info.get("collected", 0)
 
 
