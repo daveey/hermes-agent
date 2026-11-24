@@ -915,12 +915,12 @@ DEFAULT_CONFIG = {
             "first_lines": 2,
             "last_lines": 2,
         },
-        # Gateway: natural mid-turn assistant status messages. Desktop: keep mid-turn narration
-        # between tool calls instead of collapsing to the final message.
+        # Gateway interim status messages; Desktop keeps mid-turn narration between tool calls.
         "interim_assistant_messages": True,
         # Warnings stay visible unless opted out; task results, manual commands and logs are unaffected.
         "suppress_warning_notifications": False,
         "loaded_notification_f": False,  # incident containment: legacy until shared source cost is corrected
+        "gateway_notification_f": True,  # native host notifications; live OFF preserves legacy custody
         # Codex Responses commentary channel: true delivers completed commentary as mid-turn interim
         # updates; false routes it to reasoning (visible only with show_reasoning).
         "show_commentary": True,

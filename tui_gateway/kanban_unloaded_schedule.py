@@ -26,7 +26,7 @@ class UnloadedSchedule:
         # never permission to resume scans using the launch profile instead.
         native = self.gate.native_action
         ready = native is not None and native.owner.ready
-        if not due and not (changed and (self.gate.actions or ready or not self.gate.was_bound)):
+        if not due and not (changed and (self.gate.actions or ready or self.gate.legacy)):
             return
         report = PassReport()
         try:

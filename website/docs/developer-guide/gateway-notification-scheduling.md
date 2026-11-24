@@ -12,6 +12,19 @@ process, start a second delivery executor, reset a notification cursor or releas
 an in-flight delivery. Pending action deadlines/refusal floors survive rollback.
 This narrowly scoped emergency switch is not a secrets setting.
 
+For no-restart control, the registered `display.gateway_notification_f` key defaults
+to true and is ANDed with that environment switch. Its one native config lease is
+separate from data invalidations: an unrelated config write does not wake collectors.
+`hermes config set display.gateway_notification_f false` on the running profile
+withdraws data watches and restores legacy cadence on the next executor iteration.
+The config lease remains while executors are registered, so setting true rearms
+the sources and catches up from the same durable state. Only the shared owner reads
+config, on a native control hint, failed-read retry or the existing 30s census.
+Unsupported native platforms and managed/nonlocal config updates use that census.
+Unknown policy fails to legacy with a one-second shared retry, not native admission.
+No environment mutation RPC or serve signal is used. A service drop-in is only a
+future-start override; daemon-reload does not alter the current process environment.
+
 ## Sources and readiness
 
 The shared owner captures the canonical board inventory and profile-store paths,

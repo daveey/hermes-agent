@@ -30,7 +30,8 @@ class BoundActions:
 
     @property
     def legacy(self):
-        return not self.was_bound or (self.native and not self.facts_bound and self.native_action is None)
+        return not self.was_bound or (self.native and not self.facts_bound and
+                                      (self.native_action is None or not self.native_action.owner.policy.enabled))
 
     def _native_due(self, now, legacy_due):
         from tui_gateway.notification_gateway_sources import enabled
@@ -47,6 +48,8 @@ class BoundActions:
         self.was_bound = True
         if self.retry_floor and now < self.retry_at:
             return False
+        if not self.native_action.owner.policy.enabled:
+            return legacy_due or now >= self.retry_at
         return self.native_action.due(legacy_due=legacy_due) or now >= self.retry_at
 
     def due(self, now: float, *, legacy_due: bool) -> bool:

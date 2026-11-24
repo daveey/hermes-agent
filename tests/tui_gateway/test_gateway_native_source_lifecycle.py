@@ -133,10 +133,10 @@ def test_unsupported_watch_uses_census_not_one_second_retries(owner, monkeypatch
     owner.add(lambda: None)
     owner.step(0, reconcile=True)
     owner.step(1, reconcile=False)
-    assert attempts == [1]
+    assert attempts == [1, 1]  # one config control and one data watch, neither retried at 1s
     assert not owner.ready
     owner.step(30, reconcile=True)
-    assert attempts == [1, 1]
+    assert attempts == [1, 1, 1, 1]  # both retry on the same unchanged census
 
 
 def test_roster_census_arms_successor_before_closing_predecessor(owner, monkeypatch, tmp_path):
