@@ -6,6 +6,10 @@ session: ~100 ms of CPU per read on a 22k-session store, and a sidebar poll miss
 once a second because some session row changes that often. ``ranked_rows`` returns the same rows
 while running that probe only on a small candidate set that provably contains the page:
 
+* On current schemas, the timestamp-leading candidate index reads only messages at or above T.
+  This needs no full-store maxima rebuild and is exact even after message rewrites/deletions.
+  Its opt-in partial predicate keeps the new index out of unrelated readers' query plans.
+* Legacy schemas without that index use the per-store maxima cache below.
 * A per-store cache keeps each session's in-window ``MAX(messages.timestamp)``, built once with
   the same probe. Every read folds in the sessions of messages past the watermark, inside the
   read's own snapshot (``messages.id`` is AUTOINCREMENT, so a new message always lands past it).
@@ -236,8 +240,10 @@ def clear() -> None:
 
 def _candidates(conn, store, where_clauses, params, need) -> Optional[str]:
     """The JSON array of session ids that contain the page (module doc), or None to read unrestricted."""
-    if not store.refresh(conn):
-        return None
+    # The timestamp-leading index avoids a full message-max rebuild in every fresh
+    # capture child. Legacy schemas keep the existing watermark path below.
+    indexed = conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' "
+                           "AND name='idx_messages_recency_candidates'").fetchone() is not None
     # Among rows with an in-window last_activity_at the index key IS last_activity_at. CASE keeps the
     # admission filter (JSON markers) off every row that has none.
     in_window = f"s.last_activity_at {_SQL_IN_WINDOW}"
@@ -249,6 +255,18 @@ def _candidates(conn, store, where_clauses, params, need) -> Optional[str]:
     if row is None:
         return None
     threshold = row[0]
+    if indexed:
+        # Any message max >= T has at least one message in [T, EPOCH_MAX].
+        # Query that covering index range directly, including ancestors in the
+        # same snapshot; no retained maxima or AUTOINCREMENT assumption needed.
+        high_json = conn.execute(
+            "SELECT json_group_array(DISTINCT session_id) FROM messages "
+            "INDEXED BY idx_messages_recency_candidates "
+            "WHERE (timestamp+0 IS NULL OR timestamp+0 IS NOT NULL) "
+            "AND timestamp BETWEEN ? AND ?", (threshold, EPOCH_MAX)).fetchone()[0]
+        return conn.execute(_CANDIDATES_SQL, (threshold, threshold, high_json)).fetchone()[0]
+    if not store.refresh(conn):
+        return None
     high = [sid for sid, value in store.msg_max.items() if value >= threshold]
     if len(high) > 2 * need + 64:
         # Cached maxima a delete lowered stay high until probed again: re-probe them once.

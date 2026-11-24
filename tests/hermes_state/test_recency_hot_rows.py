@@ -159,6 +159,7 @@ def test_cold_and_lowered_reads_step_through_the_page_not_the_store(db, monkeypa
 def test_reprobe_of_legitimately_high_sessions_steps_through_none(db, monkeypatch):
     """Sessions outside the page's filter can hold most fresh messages: the re-probe finds them still high
     and must not bring them back to Python one row each."""
+    _write(db, 'DROP INDEX idx_messages_recency_candidates')  # legacy watermark/re-probe path
     _seed(db, 100)
     _seed(db, 600, source="cron", prefix="c")
     _write(db, "UPDATE messages SET timestamp = timestamp + 100000 WHERE session_id LIKE 'c%'")
