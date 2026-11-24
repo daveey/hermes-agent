@@ -49,8 +49,8 @@ def _landing_placement(conn, args, origin, origin_intent, marker, runs_on, *, ti
             and str(args.get("placement") or "auto").strip().lower() == "auto"
             and ((marker or {}).get("hub_admission") or {}).get("admit") is False
             and ((marker or {}).get("runs_on") or (marker or {}).get("placement_policy"))):
-        # Empty courier labels are not a hub pin: persist admission's pool route.
-        # Else retain [] and its normal sync/lease validation on non-hub intakes.
+        # Replay an older immutable admission-denied envelope's pool route.
+        # Fresh explicit [] courier landings no longer produce this marker.
         runs_on = None
     if runs_on is None and (marker or {}).get("runs_on"):
         runs_on = list(marker["runs_on"])

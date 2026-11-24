@@ -771,8 +771,8 @@ def test_courier_create_denied_by_hub_admission_joins_the_pool_queue(hub, judge,
 
 
 @pytest.mark.parametrize("queued", [True, False])
-def test_selfwork_auto_empty_labels_denial_persists_pool_route(hub, judge, monkeypatch, queued):
-    """swf-7c606: intake owns storage; runs_on=[] must not become a hub pin."""
+def test_selfwork_auto_empty_labels_preserve_any_machine_contract(hub, judge, monkeypatch, queued):
+    """Storage intake is not hub execution; explicit [] survives capacity changes."""
     from tools import kanban_tools as kt
     monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1"]}})
     machines = [{**m, "labels": [*m["labels"], "capability:hub-write", "capability:hub-read"]}
@@ -788,16 +788,12 @@ def test_selfwork_auto_empty_labels_denial_persists_pool_route(hub, judge, monke
     assert out.get("created") is True, out
     tid = out["task_id"]
     task = kb.get_task(hub.conn, tid)
-    assert {"terminal", "git", "hub:read"} <= set(task.requires)
-    if queued:
-        assert POOL in _runs_on(hub.conn, tid)
-        assert task.placement_policy is None
-    else:
-        assert _runs_on(hub.conn, tid) is None
-        assert task.placement_policy == "worker-first-v1"
+    assert task.requires == ["terminal", "git", "hub:read"]
+    assert _runs_on(hub.conn, tid) == []
+    assert task.placement_policy is None
     again = json.loads(kt._handle_create(dict(args), origin_intent=intent))
     assert again.get("task_id") == tid, again
-    assert len(judge.calls) == 1
+    assert judge.calls == []
 
 
 def test_courier_create_keeps_worker_first_only_without_a_live_queue_label(hub, judge, monkeypatch):

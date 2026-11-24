@@ -88,6 +88,11 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None
     prior = _prior_landing(conn, request_id)
     if prior is not None:
         return prior or None
+    if runs_on == [] and str(args.get("placement") or "auto").strip().lower() == "auto":
+        # [] is a caller-selected any-machine lease, not hub-only execution.
+        # Storage home alone must not add hub:write or narrow its eligible set.
+        # An immutable earlier landing above still replays its original route.
+        return None
     # validate_creation's own fences: a worker-first card cannot carry a host workspace, board or project.
     pinned = (bool(runs_on) or str(args.get("placement") or "auto").strip().lower() != "auto"
               or (args.get("workspace_kind") or "scratch") != "scratch"

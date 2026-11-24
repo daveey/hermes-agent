@@ -64,7 +64,11 @@ def plan(args, *, cfg, gateway, machine_ok):
                 return args, {'where': 'refuse', 'pin': gateway, 'why': 'local execution need has no enrolled pickup machine'}
             labels = placement.route_labels(gateway)
         else:
-            portable = {k: v for k, v in args.items() if k not in ('placement', 'runs_on')}
+            # These fields are carried by canonical-home-v1, but not the legacy
+            # courier. Exclude only from execution-route classification, keeping
+            # them in the forwarded view and its normal receiving validation.
+            portable = {k: v for k, v in args.items() if k not in (
+                'placement', 'runs_on', 'max_retries', 'initial_status', 'human_request')}
             queued = workers.queue_decision(portable, cfg, gateway, 'auto', machine_ok)
             if not queued or not queued.get('runs_on'):
                 return args, {'where': 'refuse', 'pin': 'hub',
