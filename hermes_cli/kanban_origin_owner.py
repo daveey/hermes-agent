@@ -15,7 +15,7 @@ from pathlib import Path
 from hermes_cli.kanban_origin_adapter import _gateway
 
 
-def _dispatch_owner_tool(name, args, intent, selfwork_context=None):
+def _dispatch_owner_tool(name, args, intent, selfwork_context=None, selfwork_exception=None):
     """The validated courier selects Kanban explicitly, independent of chat defaults.
 
     Keep registry availability checks (including delegated-child fences) and the
@@ -28,10 +28,12 @@ def _dispatch_owner_tool(name, args, intent, selfwork_context=None):
         if not registry.get_definitions({name}, quiet=True):
             return {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
         private = {'selfwork_intent': {**intent, **selfwork_context}} if selfwork_context else {}
+        if selfwork_exception is not None:  # its own keyword: never part of either intent or the intake journal
+            private['selfwork_exception'] = selfwork_exception
         return _dispatch_result(registry.dispatch(name, args, origin_intent=intent, **private))
 
 
-def receive(request: dict, *, selfwork_context=None) -> dict:
+def receive(request: dict, *, selfwork_context=None, selfwork_exception=None) -> dict:
     from hermes_cli.profiles import get_active_profile_name
     from tools import kanban_tools  # built-in self-registration
 
@@ -86,7 +88,7 @@ def receive(request: dict, *, selfwork_context=None) -> dict:
     from hermes_cli.kanban_creation_contract import validate_received
     validate_received({key: value for key, value in create.items() if key != 'board'})
     args = {**create, 'board': board}
-    return _dispatch_owner_tool('kanban_create', args, intent, selfwork_context)
+    return _dispatch_owner_tool('kanban_create', args, intent, selfwork_context, selfwork_exception)
 
 
 def _dispatch_result(raw_result):

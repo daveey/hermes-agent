@@ -183,6 +183,17 @@ def _release(conn, request, fingerprint, receipt, note, provenance, fence, ask):
     return _record_release(conn, request, fingerprint, receipt, note, provenance)
 
 
+def _default_unblock(conn, request, fingerprint, receipt, note, origin, fence, ask):
+    """``(exception, released)`` for a default Unblock. On the home's own admission-exception offer
+    (``kanban_selfwork_exception``) the first is its stamp: the caller's plain unblock then records the grant on
+    its event, releases nothing and renews no spend. Otherwise the second is :func:`_release`'s receipt or None."""
+    from hermes_cli import kanban_selfwork_exception as sx
+    exception = sx.granting(conn, request["task"], ask)
+    if exception is not None:
+        return exception, None
+    return None, _release(conn, request, fingerprint, receipt, note, {**request, "originGateway": origin}, fence, ask)
+
+
 def _owner(conn, task, gateway, *, require_primary=False):
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task,)).fetchone()
     if row is None or ('created_on' in row.keys() and row['created_on'] not in (None, '', gateway)):
@@ -277,11 +288,13 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
         if _receipt(c, request, fingerprint):
             return "already_recorded"
         fresh = snapshot(c, request["task"])
-        return None if fresh == current else "stale_ask"
+        return None if sx.same_offer(c, fresh, current, exception) else "stale_ask"
 
+    from hermes_cli import kanban_selfwork_exception as sx
+    exception = None
     if not archive and not informational and not current["ask"].get("choices") and request["choice"] == "unblock":
-        released = _release(conn, request, fingerprint, receipt, note, {**request, "originGateway": origin},
-                            lambda c: fence(c, releasing=True), current["ask"])
+        exception, released = _default_unblock(conn, request, fingerprint, receipt, note, origin,
+                                               lambda c: fence(c, releasing=True), current["ask"])
         if released is not None:
             return released
 
@@ -307,9 +320,9 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
                            writer_kind='agent', recorded_decision=provenance)
             kb._append_event(conn, request['task'], 'card_answer_recorded', {FIELD: receipt})
         return _receipt(conn, request, fingerprint)
+    extra = {FIELD: receipt, **sx.grant_fields(exception, request, fingerprint, origin)}
     try:
-        transition(conn, request["task"], precondition=fence, comment=comment,
-                   event_extra={FIELD: receipt})
+        transition(conn, request["task"], precondition=fence, comment=comment, event_extra=extra)
     except _AlreadyRecorded as done:
         return done.receipt
     recorded = _receipt(conn, request, fingerprint)

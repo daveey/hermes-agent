@@ -32,8 +32,11 @@ def frozen():
     return value
 
 
-def choose(conn, value, *, now, tenant=None, report=True):
-    """Share selection between preflight and admission; caller holds write lock."""
+def choose(conn, value, *, now, tenant=None, report=True, excepted=False):
+    """Share selection between preflight and admission; caller holds write lock.
+
+    ``excepted``: admission already spent a single-use exception for this exact request in this transaction
+    (``kanban_selfwork_exception.spend``). An open owner is still reused; only the no-owner refusal is replaced."""
     if value['kind'] != 'guard' or not frozen():
         return batch.choose(conn, value, now=now, tenant=tenant)
     row = conn.execute(
@@ -46,6 +49,8 @@ def choose(conn, value, *, now, tenant=None, report=True):
     if report or row is None:
         log.info('guard creation frozen: repository=%s area=%s owner=%s',
                  value['repository'], value['area'], row['id'] if row else 'none')
+    if row is None and excepted:
+        return batch.Decision('create')
     if row is None:
         raise GuardFrozen('kanban.self_work.freeze_guards is on: no open guard owner in this area; '
                                    'add evidence to existing work instead of creating a guard')

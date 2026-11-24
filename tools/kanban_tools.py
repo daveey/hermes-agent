@@ -1588,7 +1588,7 @@ def _handle_create(args: dict, **kw) -> str:
         args = _effective_board_args(args, courier_intent)
         from hermes_cli.kanban_selfwork_owner import replay, snapshot
         request_args = snapshot(args)
-        replayed = replay(conn, args, courier_intent, origin_intent=origin_intent)
+        replayed = replay(conn, args, courier_intent, origin_intent=origin_intent, exception=kw.get("selfwork_exception"))
         if replayed is not None:
             return replayed
         _check(*create_ask_check(conn, args, str(assignee)))  # ask line, then its filing probe [daveey]
@@ -1693,7 +1693,7 @@ def _handle_create(args: dict, **kw) -> str:
                 from hermes_cli.kanban_selfwork_owner import create
                 return create(conn, creation_options, after_create=after_create,
                               marker_placement=marker_placement, place_origin=place_origin, request=request_args,
-                              intent=courier_intent)
+                              intent=courier_intent, exception=kw.get("selfwork_exception"))
             new_tid = kb.create_task(conn, **creation_options)
         except kanban_overlap.OverlapRefused as exc:  # landed under the write lock after the first check
             return exc.settle()

@@ -90,9 +90,19 @@ def snapshot(args):
     return json.loads(json.dumps(args)) if args.get('self_work') is not None else None
 
 
-def replay(conn, args, intent, *, origin_intent=None):
+def _sender(exception):
+    """The authenticated original envelope's sender on the exception path, else None (ordinary attribution)."""
+    if exception is None:
+        return None
+    from hermes_cli import kanban_selfwork_exception as sx
+    return sx.require(exception).sender
+
+
+def replay(conn, args, intent, *, origin_intent=None, exception=None):
     """Revalidate authority even for a replay; never rerun create preflight."""
     if args.get('self_work') is None:
+        if exception is not None:
+            raise policy.SelfWorkError('self-work exception requires a declared self-work request')
         return None
     authority = validate_home(conn, intent, args.get('board'))
     request = {'args': args, 'intent': intent}
@@ -102,12 +112,13 @@ def replay(conn, args, intent, *, origin_intent=None):
         options = {key: args[key] for key in ('title', 'body', 'self_work', 'tenant', 'board') if key in args}
         options.update(origin_intent=origin_intent or (intent if 'origin' in intent else None),
                        creator_task_id=creator_task(conn, intent),
-                       created_by=intent.get('sender') or _persisted_identity(),
+                       created_by=_sender(exception) or intent.get('sender') or _persisted_identity(),
                        parents=_coerce_str_list(args.get('parents') or [], 'parents', 'task ids'))
         from hermes_cli import kanban_selfwork_guards as guards
         try:
             receipt = intake.append_existing(conn, request_id=intent['request_id'], authority=authority,
-                                             options=options, request=request, now=int(time.time()))
+                                             options=options, request=request, now=int(time.time()),
+                                             exception=exception)
         except guards.GuardFrozen as exc:
             return guards.refusal(exc)
     return _render(conn, receipt, intent) if receipt is not None else None
@@ -131,7 +142,7 @@ def _render(conn, receipt, intent, marker_placement=None, place_origin=None):
                        **kt._fields(task, kt._ca.CREATED_FIELDS), **extra})
 
 
-def create(conn, options, *, after_create, marker_placement, place_origin, request, intent=None):
+def create(conn, options, *, after_create, marker_placement, place_origin, request, intent=None, exception=None):
     """Called by the existing tool path after normalization/preflight, before INSERT.
 
     Only DB-local effects execute under intake's transaction. Courier origins
@@ -142,6 +153,8 @@ def create(conn, options, *, after_create, marker_placement, place_origin, reque
     authority = validate_home(conn, intent, options.get('board'))
     options = dict(options)
     options['creator_task_id'] = creator_task(conn, intent)
+    if exception is not None:  # the original envelope's sender, never whoever asked for the reconsideration
+        options['created_by'] = _sender(exception)
     guard = options.pop('insert_guard', None)
     # Gateway forwarding would split one area across admission journals. Board
     # execution labels remain valid, but legacy deferred forwarding cannot.
@@ -152,7 +165,7 @@ def create(conn, options, *, after_create, marker_placement, place_origin, reque
         receipt = intake.admit(conn, request_id=intent['request_id'], authority=authority,
                                local_gateway=authority, options=options, now=int(time.time()),
                                create_guard=guard, on_created=after_create,
-                               request={'args': request, 'intent': intent})
+                               request={'args': request, 'intent': intent}, exception=exception)
     except guards.GuardFrozen as exc:
         return guards.refusal(exc)
     return _render(conn, receipt, intent, marker_placement, place_origin)

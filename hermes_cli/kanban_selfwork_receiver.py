@@ -16,7 +16,9 @@ from hermes_cli import kanban_selfwork_owner as owner
 _ID = re.compile(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}')
 
 
-def receive(request: dict) -> dict:
+def receive(request: dict, *, exception=None) -> dict:
+    """``exception`` is the home's private single-use capability (``kanban_selfwork_exception.reconsider``): a
+    typed object in a keyword, never an envelope field. No CLI or tool entry of this module can supply it."""
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools  # built-in registration
     from tools.kanban_toolset_context import scoped_kanban_toolset_selection
@@ -45,14 +47,19 @@ def receive(request: dict) -> dict:
             or not isinstance(create, dict) or create.get('self_work') is None
             or set(body) not in ({'create'}, {'create', 'origin'}, {'create', 'origin', 'creator'})
             or ('board' in create and create['board'] != board)
-            or any(k in create for k in ('origin_intent', 'selfwork_intent', 'origin_session', 'creator_task_id'))):
+            or any(k in create for k in ('origin_intent', 'selfwork_intent', 'origin_session', 'creator_task_id',
+                                          'selfwork_exception'))):
         raise ValueError('self_work_request_invalid')
+    if exception is not None:  # the exact authenticated original, hashed before the action is normalised below
+        from hermes_cli import kanban_selfwork_exception as sx
+        sx.bind(exception, request)
     if 'origin' in body:
         from hermes_cli.kanban_origin_owner import receive as receive_origin
         origin_body = {k: v for k, v in body.items() if k != 'creator'}
         context = {'creator': body['creator'], 'sender': sender} if 'creator' in body else None
-        return receive_origin({**request, 'action': 'create', 'args': origin_body}, selfwork_context=context)
-    if create.get('session_id') is not None:
+        return receive_origin({**request, 'action': 'create', 'args': origin_body}, selfwork_context=context,
+                              selfwork_exception=exception)
+    if exception is not None or create.get('session_id') is not None:
         raise ValueError('self_work_request_invalid')
     intent = {'request_id': request['id'], 'sender': sender,
               'owner': {'gateway': gateway, 'profile': profile, 'board': board}}

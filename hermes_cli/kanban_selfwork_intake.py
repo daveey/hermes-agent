@@ -71,7 +71,7 @@ def _adopt(conn, intent, task_id, board):
 
 
 def admit(conn, *, request_id, authority, local_gateway, options, now, create_guard=None,
-          on_created=None, request=None):
+          on_created=None, request=None, exception=None):
     _authority(conn, authority, local_gateway)
     if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9._:-]{8,128}', request_id):
         raise policy.SelfWorkError('self-work requires a stable request identity')
@@ -94,7 +94,10 @@ def admit(conn, *, request_id, authority, local_gateway, options, now, create_gu
         from hermes_cli.kanban_lanes import lane_tenant
         tenant = lane_tenant(conn, tuple(options.get('parents', ())), options.get('initial_status', 'running'),
                              options.get('triage', False), options.get('tenant'), options)
-        decision = guards.choose(conn, value, now=now, tenant=tenant)
+        if exception is not None:  # the one seam that spends it; a rollback below un-spends it
+            from hermes_cli import kanban_selfwork_exception as sx
+            sx.spend(conn, exception, request_id=request_id, tenant=tenant, now=now)
+        decision = guards.choose(conn, value, now=now, tenant=tenant, excepted=exception is not None)
         if decision.disposition == 'append':
             receipt = batch.append(conn, decision, value, request_id=request_id,
                                    title=options['title'], body=options.get('body'),
@@ -137,9 +140,18 @@ def _origin_receipt(conn, options, task_id):
     raise policy.SelfWorkError('self-work origin adoption has no durable receipt')
 
 
-def append_existing(conn, *, request_id, authority, options, request, now):
-    """Try append before creation preflight; a miss performs no writes."""
+def append_existing(conn, *, request_id, authority, options, request, now, exception=None):
+    """Try append before creation preflight; a miss performs no writes.
+
+    With the home's exception capability this is a read-only check: an early append here would spend the
+    exception outside :func:`admit` and skip the create path's validation, so reuse and create both go on to it."""
     _authority(conn, authority, authority)
+    if exception is not None:
+        from hermes_cli import kanban_selfwork_exception as sx
+        prior = replay(conn, request_id, request)
+        if prior is None:
+            sx.check(conn, exception, request_id=request_id, now=now)
+        return prior
     value = policy.contract(options.get('self_work'))
     with kb.write_txn(conn, allow_nested=True):
         prior = replay(conn, request_id, request)

@@ -38,6 +38,17 @@ class Records:
         self._opener = urllib.request.build_opener(_NoRedirect())
 
     def read(self, request_id: str) -> dict:
+        try:
+            body = json.loads(self.raw(request_id))
+        except (ValueError, UnicodeError):
+            raise AnswerRefused('courier_record_invalid') from None
+        record = body.get('request') if isinstance(body, dict) else None
+        if not isinstance(record, dict) or record.get('id') != request_id:
+            raise AnswerRefused('courier_record_invalid')
+        return record
+
+    def raw(self, request_id: str) -> bytes:
+        """The response bytes, for a caller that must parse them strictly (duplicate keys, non-finite numbers)."""
         if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,199}', request_id):
             raise AnswerRefused('courier_request_id_invalid')
         request = urllib.request.Request(self.url + '/v2/sync/requests/' + urllib.parse.quote(request_id, safe=''),
@@ -54,11 +65,4 @@ class Records:
             raise OSError('courier_record_unavailable') from None
         if len(raw) > 1024 * 1024:
             raise AnswerRefused('courier_record_invalid')
-        try:
-            body = json.loads(raw)
-        except (ValueError, UnicodeError):
-            raise AnswerRefused('courier_record_invalid') from None
-        record = body.get('request') if isinstance(body, dict) else None
-        if not isinstance(record, dict) or record.get('id') != request_id:
-            raise AnswerRefused('courier_record_invalid')
-        return record
+        return raw
