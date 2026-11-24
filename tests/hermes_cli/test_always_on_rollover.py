@@ -276,6 +276,85 @@ def make_roller(home, host, *, head="c" * 40, boot_timeout_s=5.0):
     return roller
 
 
+@pytest.mark.parametrize("dangling", [False, True])
+def test_roll_defers_admission_hold_then_launches_after_clear(home, capsys, dangling):
+    host = FakeHost(running={9148}, commits={9148: "a" * 40})
+    ro.write_active(9148)
+    before = ro.active_path().read_bytes()
+    roller = make_roller(home, host)
+    hold = roller.marker.parent / "core-update" / "holds" / "hermes-sync"
+    hold.parent.mkdir(parents=True)
+    if dangling:
+        hold.symlink_to(home / "absent")
+    else:
+        hold.touch()
+    for _ in range(3):  # a permanent hold returns immediately, without consuming boot time
+        assert roller.roll("held", marker_waited=True) is False
+        assert ro.active_path().read_bytes() == before
+        assert host.running == {9148}
+        health = roller.health(9148)
+        assert health and health["ok"] is True
+    assert roller.clock() == 0
+    assert host.calls == []  # held admission must defer even before port discovery
+    assert not any(c[0] in ("start", "stop", "reset-failed") for c in host.calls)
+    assert "update admission hold" in capsys.readouterr().err
+    from hermes_cli import admission_fence, serve_update_wait
+
+    boot_logs = []
+    start = host._start
+
+    def boot(port):
+        assert serve_update_wait.wait_for_update_clear(
+            update_probe=lambda: False,
+            hold_probe=lambda: admission_fence.is_held(hold.parent.parent),
+            log=boot_logs.append, sleep=roller.sleep, now=roller.clock) == "clear"
+        return start(port)
+
+    host._start = boot
+    hold.unlink()
+    assert roller.roll("clear") is True
+    assert boot_logs == []  # real serve gate saw no hold and emitted no waiting line
+    assert ("start", "--no-block", ro.backend_unit(9149)) in host.calls
+    assert "update admission hold" not in capsys.readouterr().err
+    assert 9148 in host.running
+
+
+def test_roll_rechecks_admission_after_port_discovery(home, monkeypatch):
+    host = FakeHost(running={9148})
+    ro.write_active(9148)
+    before = ro.active_path().read_bytes()
+    roller = make_roller(home, host)
+    pick = roller.pick_port
+
+    def pick_then_hold(*args):
+        result = pick(*args)
+        hold = roller.marker.parent / "core-update" / "holds" / "hermes-sync"
+        hold.parent.mkdir(parents=True)
+        hold.touch()
+        return result
+
+    monkeypatch.setattr(roller, "pick_port", pick_then_hold)
+    assert roller.roll("new hold") is False
+    assert ro.active_path().read_bytes() == before
+    assert host.running == {9148}
+    assert not any(c[0] in ("start", "reset-failed", "stop") for c in host.calls)
+
+
+def test_roll_unreadable_admission_fails_closed(home, monkeypatch, capsys):
+    roller = make_roller(home, FakeHost())
+    real_lstat = Path.lstat
+
+    def unreadable(path):
+        if path.name == "hermes-sync":
+            raise PermissionError("denied")
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", unreadable)
+    assert roller.roll("unreadable") is False
+    assert "cannot read update admission hold" in capsys.readouterr().err
+    assert ro.read_active() is None
+
+
 def test_roll_warms_the_successor_before_switching_and_never_stops_the_old_backend(home):
     host = FakeHost(running={9148}, commits={9148: "a" * 40})
     ro.write_active(9148)

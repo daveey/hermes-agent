@@ -630,9 +630,29 @@ class Roller:
                 return port, False
         return None, False
 
+    def admission_deferred(self, reason: str) -> bool:
+        """Keep launch outside the update hold; supervision retries with its normal backoff.
+
+        marker lives in the installation root (not the active backend's profile home).
+        Stay stdlib-only like the standalone roller; match admission_fence.is_held's lstat.
+        The serve-side fence remains authoritative for a hold arriving after this check.
+        """
+        hold = self.marker.parent / "core-update" / "holds" / "hermes-sync"
+        try:
+            hold.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            log(f"roll ({reason}) deferred: cannot read update admission hold {hold}: {exc}; keeping current backend")
+            return True
+        log(f"roll ({reason}) deferred: update admission hold {hold} is set; keeping current backend")
+        return True
+
     def roll(self, reason: str, *, marker_waited: bool = False) -> bool:
         """*marker_waited*: the caller already waited out the update marker (Roller.start), so a stale marker
         does not hold the roll for a second UPDATE_WAIT_S."""
+        if self.admission_deferred(reason):
+            return False
         if not marker_waited and not aod.wait_for_update_clear(self.marker, sleep=self.sleep, now=self.clock):
             log("update marker still present; rolling anyway")
         record = read_active(self.home)
@@ -641,6 +661,10 @@ class Roller:
         port, adopted = self.pick_port(active_port, head, record["warming"] if record else ())
         if port is None:
             log(f"roll ({reason}) skipped: every backend port {self.ports} is busy; retiring backends hold them")
+            return False
+        # Port discovery and marker waits may outlive the first admission observation.
+        # Do not publish warming state (or consume the unit boot budget) under a new hold.
+        if self.admission_deferred(reason):
             return False
         log(f"roll ({reason}): {'adopting' if adopted else 'starting'} backend :{port}"
             f" (active :{active_port or '-'}, HEAD {(head or '?')[:10]})")
