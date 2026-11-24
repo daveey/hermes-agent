@@ -165,6 +165,35 @@ def test_policy_failure_quiet_retry_and_unsupported_census(monkeypatch, tmp_path
         policy.close()
 
 
+def test_policy_watch_loss_revokes_native_until_quiet_retry(monkeypatch, tmp_path):
+    from hermes_cli import config, fact_source_watch
+    from tui_gateway.notification_gateway_policy import Policy
+    from tests.tui_gateway.test_gateway_native_source_lifecycle import Watch
+
+    monkeypatch.setattr(config, 'get_config_path', lambda: tmp_path / 'config.yaml')
+    monkeypatch.setattr(config, 'load_config_readonly', dict)
+    monkeypatch.setattr(fact_source_watch, 'NativeSourceWatch', Watch)
+    policy = Policy(threading.Event())
+    try:
+        policy.step(0, reconcile=True)
+        assert policy.enabled
+
+        def unavailable():
+            raise OSError('native control lease lost')
+
+        monkeypatch.setattr(policy.watch, 'check', unavailable)
+        policy.changed()
+        assert policy.step(1, reconcile=False)
+        assert not policy.enabled
+        assert policy.retry_at == 2
+        monkeypatch.setattr(policy.watch, 'check', lambda: None)
+        assert not policy.step(1.5, reconcile=False)
+        assert policy.step(2, reconcile=False)
+        assert policy.enabled
+    finally:
+        policy.close()
+
+
 def test_failed_config_envelope_cannot_authorize_native_work(monkeypatch, tmp_path):
     from hermes_cli import config, fact_source_watch
     from tui_gateway.notification_gateway_policy import Policy
