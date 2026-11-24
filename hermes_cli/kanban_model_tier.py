@@ -96,8 +96,6 @@ def resolve_model_tier(
     if not is_class_selector(default_model) or default_model == "class:carbon":
         default_model = "class:standard"
     from hermes_cli.kanban_review_model import is_review_run
-    if _str(getattr(task, "model_override", None)) == "class:carbon":
-        return "class:carbon", "auto", "class"
     if is_review_run(conn, task, lane):
         from hermes_cli.kanban_review_model import resolve_review_model
         review = resolve_review_model(conn, task, cfg)

@@ -5,6 +5,9 @@ import pytest
 
 from hermes_cli import kanban_model_tier as tier
 from tests.agent.test_carbon_routing import carbon_config
+from tests.hermes_cli import test_kanban_strong_tier as helpers
+
+board = helpers.board
 
 
 def task(model=None):
@@ -25,6 +28,8 @@ def test_carbon_cannot_be_configured_as_implicit_tier(monkeypatch, case):
 
 @pytest.mark.parametrize("lane", ["ready", "review"])
 def test_explicit_card_carbon_survives_tiering(monkeypatch, lane):
+    from hermes_cli import kanban_review_model as review
+    monkeypatch.setattr(review, "_override", lambda *a: None)
     assert tier.resolve_model_tier(None, task("class:carbon"), lane=lane, cfg={}) == (
         "class:carbon", "auto", "class")
     from hermes_cli import kanban_quota_episode as episode
@@ -65,6 +70,30 @@ def test_no_strong_fallback_or_episode_alternate_to_carbon(monkeypatch):
     monkeypatch.setattr(assignment, "_assignee_config", lambda *a: carbon_config())
     assert episode.alternate_route(None, task(), {"gemini": 100}, ("class:carbon", "auto", "class"), 0) is None
     assert episode.alternate_route(None, task(), {"gemini": 100}, ("gemini-4-carbon", "gemini", "default"), 0) is None
+
+
+@pytest.mark.parametrize("handoff", ["class:deep", "class:carbon", None])
+def test_carbon_card_review_handoff_precedence(board, monkeypatch, handoff):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_model_assignment as assignment
+
+    config = carbon_config()
+    deep = config["model_routing"]["routes"]["deep"][1]
+    deep["capabilities"]["streaming"] = True
+    config["model_routing"]["routes"]["deep"] = [deep]
+    monkeypatch.setattr(assignment, "_assignee_config", lambda *a: config)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="carbon review fixture", assignee="default",
+                             model_override="class:carbon", provider_override="auto")
+        assert kb.claim_task(conn, tid)
+        assert kb.request_review(conn, tid, metadata={"review_model": handoff} if handoff else {})
+        assert kb.claim_review_task(conn, tid)
+        result = tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane="review", cfg={})
+        if handoff == "class:deep":
+            assert result == (deep["model"], "openai-codex", "review_override")
+        else:
+            assert result == ("class:carbon", "auto", "review_override" if handoff else "class")
 
 
 def test_dashboard_exposes_explicit_carbon():

@@ -413,6 +413,10 @@ def resolve_review_model(conn, task, cfg):
     from hermes_cli import kanban_provider_walls as pw
     # Separate execution is enforced by verdict custody, not model identity.
     override = _override(conn, task)
+    # A card's explicit paid class survives review only when no newer handoff
+    # supersedes it. Ordinary review candidates must never select carbon.
+    if not override and str(getattr(task, "model_override", None) or "").strip() == "class:carbon":
+        return "class:carbon", "auto", "class"
     assignee = getattr(task, "assignee", None)
     refusal = registry_refusal(override[0], override[1], assignee) if override else None
     class_override = bool(override and is_class_selector(override[0]))
