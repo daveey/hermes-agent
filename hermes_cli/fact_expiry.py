@@ -2,7 +2,8 @@
 import heapq
 import threading
 import time
-from dataclasses import replace
+
+from hermes_cli.fact_contract import evolve
 
 
 class ExpiryIndex:
@@ -34,7 +35,7 @@ class ExpiryIndex:
             self.current.pop(key, None)
             fact = store._facts.get(key)
             if fact is not None and fact.rev == rev:
-                prepared.append((replace(fact, health="stale", error_code="validity_expired", valid_until=None),
+                prepared.append((evolve(fact, health="stale", error_code="validity_expired", valid_until=None),
                                  store._sizes[key]))
         if prepared:
             store._publish(prepared, ())

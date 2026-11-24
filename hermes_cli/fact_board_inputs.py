@@ -14,7 +14,7 @@ import threading
 import time
 
 from hermes_cli.fact_capture import CaptureBudgetExceeded
-from hermes_cli.fact_contract import Fact, FactKey, freeze
+from hermes_cli.fact_contract import Fact, FactKey, evolve, freeze
 from hermes_cli.fact_store import view_key
 from hermes_cli.fact_source_watch import NativeSourceWatch
 from hermes_cli.fact_capture_queue import submit
@@ -152,7 +152,7 @@ class BoardInputSource:
 
     def _fail(self, key):
         old = self.engine.store.snapshot(self.engine.scope).get(key)
-        fact = (replace(old, health='stale', error_code='board_capture_failed') if old is not None
+        fact = (evolve(old, health='stale', error_code='board_capture_failed') if old is not None
                 else Fact(key, {}, error_code='board_capture_failed'))
         self.engine.publish([fact], now=time.time())
 

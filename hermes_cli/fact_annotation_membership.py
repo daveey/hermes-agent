@@ -6,7 +6,7 @@ unavailable, never a fresh empty inventory. Other annotation families are NOT
 covered by these two sources.
 """
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ import sqlite3
 import time
 
 from hermes_cli.fact_capture import CaptureBudgetExceeded
-from hermes_cli.fact_contract import Fact, FactKey
+from hermes_cli.fact_contract import Fact, FactKey, evolve
 from hermes_cli.fact_source_watch import NativeSourceWatch
 
 
@@ -120,6 +120,6 @@ class AnnotationMembershipSource:
 
     def failure(self):
         old = self.engine.store.snapshot(self.engine.scope).get(self.key)
-        fact = (replace(old, health='stale', error_code='annotation_capture_failed') if old is not None
+        fact = (evolve(old, health='stale', error_code='annotation_capture_failed') if old is not None
                 and old.health != 'unknown' else Fact(self.key, {}, error_code='annotation_capture_failed'))
         self.engine.publish([fact], now=time.time())

@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from graphlib import TopologicalSorter
 
-from hermes_cli.fact_contract import Fact, FactKey, Scope
+from hermes_cli.fact_contract import Fact, FactKey, Scope, evolve
 from hermes_cli.fact_store import FactStore, Snapshot
 
 
 def _changed(old: Fact | None, new: Fact | None) -> bool:
-    return old != (replace(new, rev=old.rev if old else 0) if new else None)
+    return old != (evolve(new, rev=old.rev if old else 0) if new else None)
 
 
 class StagedSnapshot:
@@ -137,7 +137,7 @@ class ReducerEngine:
             raise ValueError("source scope mismatch")
         if any(key.kind in self._specs for key in staged):
             raise ValueError("source cannot publish a derived key")
-        staged = {key: replace(fact, rev=base.rev + 1) if fact else None
+        staged = {key: evolve(fact, rev=base.rev + 1) if fact else None
                   for key, fact in staged.items() if _changed(base.get(key), fact)}
         dirty = self._closure(set(staged) | self._pending)
         snapshot = StagedSnapshot(base, staged)
@@ -146,7 +146,7 @@ class ReducerEngine:
             fact, edges[key] = self._reduce(key, snapshot, now)
             old = base.get(key)
             if _changed(old, fact):
-                staged[key] = replace(fact, rev=base.rev + 1) if fact else None
+                staged[key] = evolve(fact, rev=base.rev + 1) if fact else None
             # Unchanged outputs remain visible through the base snapshot. Do
             # not send them through FactStore's wire validation/encoding again;
             # still install newly discovered edges after successful publication.

@@ -15,18 +15,34 @@ _TYPES: dict[str, Any] = {cls.__name__: cls for cls in (
 )}
 
 
+_CHUNK = 65536
+
+
 def pack(value):
+    return _pack(value, None)
+
+
+def _pack(value, bytes_sizes):
+    """Transport form of *value*. With a *bytes_sizes* list, bytes pack as an empty chunk list and the length
+    their chunks would have added to the encoding is appended to *bytes_sizes* (sizing without base64)."""
     if is_dataclass(value) and _TYPES.get(type(value).__name__) is type(value):
-        return ["record", type(value).__name__, [pack(getattr(value, f.name)) for f in fields(value)]]
+        return ["record", type(value).__name__,
+                [_pack(getattr(value, f.name), bytes_sizes) for f in fields(value)]]
     if isinstance(value, Mapping):
-        return ["map", [[pack(k), pack(v)] for k, v in value.items()]]
+        return ["map", [[_pack(k, bytes_sizes), _pack(v, bytes_sizes)] for k, v in value.items()]]
     if isinstance(value, bytes):
-        return ["bytes", [base64.b64encode(value[i:i + 65536]).decode("ascii")
-                          for i in range(0, len(value), 65536)]]
+        if bytes_sizes is not None:
+            # Each chunk encodes as a quoted base64 string ("..." = 4 per 3 bytes, rounded up), comma-separated.
+            whole, tail = divmod(len(value), _CHUNK)
+            chunks = [4 * -(-_CHUNK // 3)] * whole + ([4 * -(-tail // 3)] if tail else [])
+            bytes_sizes.append(sum(chunks) + 2 * len(chunks) + max(len(chunks) - 1, 0))
+            return ["bytes", []]
+        return ["bytes", [base64.b64encode(value[i:i + _CHUNK]).decode("ascii")
+                          for i in range(0, len(value), _CHUNK)]]
     if isinstance(value, (tuple, list)):
-        return ["tuple", [pack(v) for v in value]]
+        return ["tuple", [_pack(v, bytes_sizes) for v in value]]
     if isinstance(value, (set, frozenset)):
-        return ["set", [pack(v) for v in value]]
+        return ["set", [_pack(v, bytes_sizes) for v in value]]
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     raise TypeError(type(value).__name__)
@@ -57,9 +73,18 @@ def decode(data: bytes | bytearray) -> Any:
     return unpack(json.loads(data))
 
 
+_SIZER = json.JSONEncoder(ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+
+
 def encoded_size(value):
-    return sum(len(part) for part in json.JSONEncoder(
-        ensure_ascii=True, separators=(",", ":"), allow_nan=False).iterencode(pack(value)))
+    """len(encode(value)), without building the encoding's bytes or any base64. [daveey]
+
+    JSONEncoder.iterencode() always runs json's pure-Python encoder; sizing every changed fact that way was ~25%
+    of the hub's fact-change-feed thread (2026-11-23). This uses the C one-shot encoder instead (ASCII-only, so
+    characters == bytes), and counts bytes payloads arithmetically so a large bytes view adds no transient copy.
+    """
+    bytes_sizes = []
+    return len(_SIZER.encode(_pack(value, bytes_sizes))) + sum(bytes_sizes)
 
 
 def encode_into(value, stream, limit):

@@ -8,7 +8,7 @@ import threading
 import logging
 import time
 
-from hermes_cli.fact_contract import Delta, Fact, FactKey, Position, Ready, Pending, Unavailable
+from hermes_cli.fact_contract import Delta, Fact, FactKey, Position, Ready, Pending, Unavailable, evolve
 from hermes_cli.fact_ipc import connect, receive, send
 from hermes_cli.fact_demand import DemandChannel
 from hermes_cli.fact_map import FactMap
@@ -29,7 +29,7 @@ class _Snapshot(Snapshot):
 
     def get(self, key):
         fact = super().get(key)
-        return fact if self.online or fact is None else replace(fact, health="stale", error_code="owner_disconnected")
+        return fact if self.online or fact is None else evolve(fact, health="stale", error_code="owner_disconnected")
 
 
 class ReplicaV1:
@@ -67,7 +67,7 @@ class ReplicaV1:
     def _health(self, delta):
         if self._handle._online:
             return delta
-        return replace(delta, upserts=tuple(replace(f, health="stale", error_code="owner_disconnected")
+        return replace(delta, upserts=tuple(evolve(f, health="stale", error_code="owner_disconnected")
                                             for f in delta.upserts))
 
 

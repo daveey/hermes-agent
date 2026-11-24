@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -72,8 +72,35 @@ class Fact:
     error_code: str | None = None
 
     def __post_init__(self) -> None:
+        # Freeze only: evolve() skips this for fields it copies, so any check added here must be added there too.
         object.__setattr__(self, "value", freeze(self.value))
         object.__setattr__(self, "source_vector", freeze(tuple(self.source_vector)))
+
+
+_FACT_FIELDS = tuple(item.name for item in fields(Fact))
+
+
+def evolve(fact: Fact, **changes: Any) -> Fact:
+    """``dataclasses.replace`` for a Fact that does not re-freeze what the Fact already holds. [daveey]
+
+    A Fact froze its value and source_vector when it was built, so a copy that only changes rev, health,
+    error_code or timing can share them. replace() runs __post_init__ again, which deep-walks the whole value
+    once per copy; on the hub (2026-11-23) those walks were ~27% of the fact-change-feed thread. A value or
+    source_vector given in *changes* is frozen as usual.
+    """
+    unknown = set(changes).difference(_FACT_FIELDS)
+    if unknown:
+        raise TypeError(f"unknown Fact field: {sorted(unknown)[0]}")
+    if type(fact) is not Fact:
+        raise TypeError("evolve requires a Fact")
+    copy = object.__new__(Fact)
+    for name in _FACT_FIELDS:
+        object.__setattr__(copy, name, changes[name] if name in changes else getattr(fact, name))
+    if "value" in changes:
+        object.__setattr__(copy, "value", freeze(changes["value"]))
+    if "source_vector" in changes:
+        object.__setattr__(copy, "source_vector", freeze(tuple(changes["source_vector"])))
+    return copy
 
 
 @dataclass(frozen=True)

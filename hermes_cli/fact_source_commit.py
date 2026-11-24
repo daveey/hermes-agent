@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
-from hermes_cli.fact_contract import Fact, FactKey, freeze
+from hermes_cli.fact_contract import Fact, FactKey, evolve
 
 
 class SourcePublisher:
@@ -41,14 +41,14 @@ class SourcePublisher:
         return FactKey(self.source.scope, self.kind, token)
 
     def _fact(self, key, value, snapshot, capture, vector):
-        value = freeze(value)
+        # Built first so the row is frozen once, not once to compare and again to store. [daveey]
+        fact = Fact(key, value, source_vector=vector, observed_at=capture.observed_at, health='fresh')
         old = snapshot.get(key)
         # Unchanged rows retain provenance/observation, avoiding false dirty
         # dependencies on FULL or a cursor-only wake. Recovery changes health.
-        if old is not None and old.value == value:
-            return replace(old, health='fresh', error_code=None)
-        return Fact(key, value, source_vector=vector,
-                    observed_at=capture.observed_at, health='fresh')
+        if old is not None and old.value == fact.value:
+            return evolve(old, health='fresh', error_code=None)
+        return fact
 
     def commit(self, capture):
         if capture.before != self.cursor:
@@ -85,7 +85,7 @@ class SourcePublisher:
                 old = snapshot.get(self.key(identity))
                 if old is None:
                     raise ValueError('source membership lost')
-                facts.append(replace(old, health='fresh', error_code=None))
+                facts.append(evolve(old, health='fresh', error_code=None))
         if membership_changed or previous_membership is None or previous_membership.health != 'fresh':
             facts.append(self._fact(self.membership_key, membership_value, snapshot, capture, vector))
         facts.append(self._fact(self.state_key, {'source_kind': self.source.kind,
@@ -104,7 +104,7 @@ class SourcePublisher:
         facts = []
         for key in keys:
             old = snapshot.get(key)
-            facts.append(replace(old, health='stale' if self.cursor is not None else 'unknown',
+            facts.append(evolve(old, health='stale' if self.cursor is not None else 'unknown',
                                  error_code='source_unavailable') if old else
                          Fact(key, None, health='unknown', error_code='source_unavailable'))
         self.engine.publish(facts, now=time.time())

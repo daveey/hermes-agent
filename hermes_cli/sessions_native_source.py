@@ -6,14 +6,14 @@ annotations/time/roster have a disclosed 30s reconciliation bound. One fair queu
 retains trailing hints; a failed selector cannot starve unrelated selectors.
 """
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import json
 import logging
 import threading
 import time
 
 from hermes_cli.fact_capture import CaptureBudgetExceeded
-from hermes_cli.fact_contract import Fact
+from hermes_cli.fact_contract import Fact, evolve
 from hermes_cli.fact_source_watch import NativeSourceWatch
 from hermes_cli.fact_store import view_key
 
@@ -178,7 +178,7 @@ class SessionsSource:
                 logger.warning('sessions capture unavailable reason=%s elapsed_seconds=%.3f encoded_bytes=%s',
                                reason or 'reader_error', time.monotonic() - started, encoded_bytes)
             old = self.store.snapshot(self.source.scope).get(key)
-            fact = (replace(old, health='stale', error_code='sessions_capture_failed') if old is not None
+            fact = (evolve(old, health='stale', error_code='sessions_capture_failed') if old is not None
                     else Fact(key, {}, error_code='sessions_capture_failed'))
             with self._lock:
                 if key in self._selectors:
@@ -218,7 +218,7 @@ class SessionsSource:
             keys = tuple(self._selectors)
             for key in keys:
                 self._dirty.setdefault(key, None)
-        stale = [replace(fact, health='stale', error_code='sessions_source_failed')
+        stale = [evolve(fact, health='stale', error_code='sessions_source_failed')
                  for key in keys if (fact := snapshot.get(key)) is not None]
         self.store.publish(stale)
 

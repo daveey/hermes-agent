@@ -7,11 +7,12 @@ import math
 import threading
 import uuid
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import logging
 from collections.abc import Iterable, Mapping
 
-from hermes_cli.fact_contract import Delta, Fact, FactKey, Pending, Position, Ready, Scope, Unavailable
+from hermes_cli.fact_contract import (Delta, Fact, FactKey, Pending, Position, Ready, Scope, Unavailable,
+                                      evolve)
 from hermes_cli.fact_map import FactMap
 from hermes_cli.fact_expiry import ExpiryIndex
 from hermes_cli.fact_wire import encode, encoded_size
@@ -47,7 +48,7 @@ class Snapshot:
 
 def _same_content(old: Fact | None, fact: Fact) -> bool:
     """*fact* equals the stored *old* apart from ``rev``: publishing it changes nothing."""
-    return old is not None and replace(fact, rev=old.rev) == old
+    return old is not None and evolve(fact, rev=old.rev) == old
 
 
 class FactStore:
@@ -152,11 +153,11 @@ class FactStore:
                 touched.add(key)
             for fact, size in prepared:
                 old = staged.get(fact.key)
-                normalized = replace(fact, rev=old.rev if old else 0)
+                normalized = evolve(fact, rev=old.rev if old else 0)
                 if old != normalized:
                     if size is None:
                         return None
-                    staged = staged.put(fact.key, replace(fact, rev=self._rev + 1))
+                    staged = staged.put(fact.key, evolve(fact, rev=self._rev + 1))
                     sizes = sizes.put(fact.key, size)
                 touched.add(fact.key)
             changed = frozenset(key for key in touched if self._facts.get(key) != staged.get(key))

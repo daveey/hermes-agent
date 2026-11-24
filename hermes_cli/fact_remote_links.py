@@ -16,7 +16,7 @@ import threading
 import time
 
 from hermes_cli.fact_capture import CaptureBudget, CaptureBudgetExceeded
-from hermes_cli.fact_contract import Fact, FactKey, freeze
+from hermes_cli.fact_contract import Fact, FactKey, evolve, freeze
 
 _current = ContextVar('remote_links_facts', default=None)
 
@@ -198,7 +198,7 @@ class RemoteLinksSource:
 
     def failure(self, error_code='links_capture_failed'):
         old = self.engine.store.snapshot(self.engine.scope).get(self.key)
-        fact = (replace(old, health='stale', error_code=error_code) if old is not None
+        fact = (evolve(old, health='stale', error_code=error_code) if old is not None
                 and old.health != 'unknown' else Fact(self.key, {}, error_code=error_code))
         self.engine.publish([fact], now=time.time())
         from hermes_cli.fact_links_health import changed
