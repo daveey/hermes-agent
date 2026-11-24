@@ -83,8 +83,8 @@ class MethodLanes:
                 # A cancel runs this callback on the cancelling thread. ``shutdown(cancel_futures=True)``
                 # cancels while holding the executor's own lock, and ``submit`` takes that lock: handing
                 # the slot over inline would deadlock the shutdown. Hand over from a thread of its own.
-                threading.Thread(target=self._finished, args=(method,), name="tui-rpc-lane-handoff",
-                                 daemon=True).start()
+                threading.Thread(  # health: allow HX012 -- hand-off only: each call runs in the context it captured at dispatch
+                    target=self._finished, args=(method,), name="tui-rpc-lane-handoff", daemon=True).start()
             else:
                 self._finished(method)
 
