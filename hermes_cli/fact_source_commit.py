@@ -21,12 +21,13 @@ class SourcePublisher:
     owns the engine and must not register duplicate source identities. Source key
     prefixes prevent local and shadow rows with identical ids colliding.
     """
-    def __init__(self, engine, source, kind):
+    def __init__(self, engine, source, kind, *, clock_only=False):
         if source.scope != engine.scope:
             raise ValueError('source scope mismatch')
         if kind in ('SourceState', 'SourceMembership') or kind in engine._specs:
             raise ValueError('source kind reserved or derived')
         self.engine, self.source, self.kind = engine, source, kind
+        self.clock_only = clock_only  # publish SourceState only (see ContentBinding.clock_only)
         self.cursor = None
         self._members = set()
         self._failed = False
@@ -55,6 +56,13 @@ class SourcePublisher:
             raise ValueError('source cursor mismatch')
         if capture.after is None:
             raise ValueError('source cursor coverage missing')
+        if self.clock_only:
+            cursor = asdict(capture.after)
+            snapshot = self.engine.store.snapshot(self.source.scope)
+            revision = self.engine.publish([self._state(cursor, snapshot, capture, ((self.source, cursor),))],
+                                           now=time.time())
+            self.cursor, self._failed = capture.after, False
+            return revision
         records = {}
         ids = set(capture.ids)
         for row in capture.records:
@@ -88,19 +96,23 @@ class SourcePublisher:
                 facts.append(evolve(old, health='fresh', error_code=None))
         if membership_changed or previous_membership is None or previous_membership.health != 'fresh':
             facts.append(self._fact(self.membership_key, membership_value, snapshot, capture, vector))
-        facts.append(self._fact(self.state_key, {'source_kind': self.source.kind,
-                     'origin_id': self.source.origin_id, 'cursor_state': cursor,
-                     'revision_token': json.dumps(cursor, sort_keys=True, separators=(',', ':'))},
-                     snapshot, capture, vector))
+        facts.append(self._state(cursor, snapshot, capture, vector))
         revision = self.engine.publish(facts, deleted_keys=(self.key(i) for i in removed),
                                        now=time.time())
         self.cursor, self._members, self._failed = capture.after, members, False
         return revision
 
+    def _state(self, cursor, snapshot, capture, vector):
+        return self._fact(self.state_key, {'source_kind': self.source.kind,
+                          'origin_id': self.source.origin_id, 'cursor_state': cursor,
+                          'revision_token': json.dumps(cursor, sort_keys=True, separators=(',', ':'))},
+                          snapshot, capture, vector)
+
     def failure(self):
         """Sanitized last-good health; never publish exception text or deletions."""
         snapshot = self.engine.store.snapshot(self.source.scope)
-        keys = [self.key(i) for i in self._members] + [self.membership_key, self.state_key]
+        keys = ([self.state_key] if self.clock_only else
+                [self.key(i) for i in self._members] + [self.membership_key, self.state_key])
         facts = []
         for key in keys:
             old = snapshot.get(key)

@@ -18,9 +18,27 @@ from hermes_cli.fact_task_source import TaskContentSource
 
 @dataclass(frozen=True)
 class ContentBinding:
+    """*clock_only*: publish only the source's SourceState (its cursor), never rows or membership. [daveey]
+
+    For consumers that use a content source as an invalidation clock. On the hub (2026-11-23) the board and
+    project-tree owners bound the main kanban.db (16,884 tasks, ~66 MiB as facts) and state.db (27,727 sessions,
+    ~78 MiB) only for their SourceState, but every row was published into the shared 48 MiB process store: each
+    publication failed fact_budget_exceeded and the feed rebuilt both sources every 5 s (~70% of a core).
+    """
     source: object
     path: object
     hydrate: object = None
+    clock_only: bool = False
+
+
+def _ids_only(conn, ids):
+    """Clock-only hydration: the cursor alone is published, so rows carry nothing but their id.
+    Same input contract as the scalar row hydrators (capture transaction, <= 500 string ids)."""
+    if not conn.in_transaction:
+        raise ValueError('content hydration requires capture transaction')
+    if len(ids) > 500 or any(type(identity) is not str for identity in ids):
+        raise ValueError('invalid hydration id batch')
+    return ({'id': identity} for identity in ids)
 
 
 class ContentStartupError(RuntimeError):
@@ -54,8 +72,11 @@ class ContentOwner:
                 adapter_type, kind, rows = SessionContentSource, 'SessionContentInput', session_rows
             else:
                 raise ValueError('unsupported content source kind')
-            adapter = adapter_type(source, binding.path, rows if binding.hydrate is None else binding.hydrate)
-            publisher = SourcePublisher(engines[source.scope], source, kind)
+            if binding.clock_only and binding.hydrate is not None:
+                raise ValueError('clock-only binding takes no hydrate')
+            hydrate = _ids_only if binding.clock_only else rows if binding.hydrate is None else binding.hydrate
+            adapter = adapter_type(source, binding.path, hydrate)
+            publisher = SourcePublisher(engines[source.scope], source, kind, clock_only=binding.clock_only)
             self._publishers[adapter] = publisher
             self._by_source[source] = publisher
         for adapter in operational:

@@ -4,6 +4,8 @@ Trusted startup supplies source paths, identities and detached capture/render
 functions. Demands only enqueue; no request discovery, source access or reducer
 execution occurs here. This is an in-process transport, not a dedicated host.
 """
+from dataclasses import replace
+
 from hermes_cli.fact_board_inputs import BoardInputSource
 from hermes_cli.fact_capture import CaptureBudget
 from hermes_cli.fact_content_owner import ContentOwner
@@ -22,7 +24,9 @@ class ViewOwner:
         self.source = BoardInputSource(engine, SourceId(scope, 'board.input', 'native'), capture, paths=paths)
         self.owner = self.transport = self.handle = None
         self.lifecycle = IncrementalLifecycle({(scope, consumer)})
-        self._bindings = tuple(bindings)
+        # Views depend only on each binding's SourceState (an invalidation clock), never its rows, so the
+        # bindings are clock-only: whole kanban.db/state.db row sets overflowed the shared store. [daveey]
+        self._bindings = tuple(replace(binding, clock_only=True) for binding in bindings)
         self._states = []
 
         def projection(view):
