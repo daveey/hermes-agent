@@ -32,21 +32,36 @@ async def test_default_lifespan_child_capture_serves_real_list_and_sidebar(tmp_p
     diagnostics = tmp_path / 'capture-stderr'
     from hermes_cli import sessions_capture_process as process
     original_spawn = process.spawn_owned
+    spawned = []
 
     def diagnostic_spawn(*args, **kwargs):
         with diagnostics.open('ab') as output:
             kwargs['stderr'] = output
-            return original_spawn(*args, **kwargs)
+            child = original_spawn(*args, **kwargs)
+            spawned.append(child.pid)
+            return child
 
     monkeypatch.setattr(process, 'spawn_owned', diagnostic_spawn)
     app = FastAPI()
     app.add_middleware(SessionsMiddleware)
     app.include_router(profiles.sessions_router)
     # No injected capture, parent-only roster, clock or annotation doubles.
+    cold_started = time.monotonic()
     async with lifespan(app):
         runtime = app.state.sessions_facts
-        assert await asyncio.to_thread(wait_until, lambda: runtime.ready, timeout=10)
+        assert await asyncio.to_thread(wait_until, lambda: runtime.ready, timeout=5)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            # The actual HTTP list50/min1 AND sidebar must already be published
+            # by the same first cold child, before a second cooldown/capture.
+            for endpoint in ('/api/profiles/sessions?limit=50&min_messages=1',
+                             '/api/profiles/sessions/sidebar'):
+                cold = await client.get(endpoint)
+                assert cold.status_code == 200, (cold.text, diagnostics.read_text())
+                payload = cold.json()
+                rows = payload['recents']['sessions'] if endpoint.endswith('sidebar') else payload['sessions']
+                assert any(row['id'] == 'parent' for row in rows)
+            assert time.monotonic() - cold_started < 5
+            assert len(spawned) == 1
             for endpoint in ('/api/profiles/sessions', '/api/profiles/sessions/sidebar'):
                 response = None
 

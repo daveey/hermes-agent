@@ -58,9 +58,34 @@ class CaptureProcess:
         self._closed = False
 
     def __call__(self, name, selector):
+        return self._request({'name': name, 'selector': selector})
+
+    def capture_many(self, views):
+        started = time.monotonic()
+        if not 1 <= len(views) <= 4:
+            raise CaptureUnavailable('request_views')
+        result = json.loads(self._request({'views': views}))
+        results = result.get('results')
+        if not isinstance(results, list) or len(results) != len(views):
+            raise CaptureUnavailable('invalid_body')
+        bodies = []
+        for item in results:
+            if not isinstance(item, dict):
+                raise CaptureUnavailable('invalid_body')
+            if set(item) == {'body'} and isinstance(item['body'], dict):
+                bodies.append(json.dumps(item['body'], separators=(',', ':'), allow_nan=False).encode())
+            elif item == {'unavailable': 'reader_error'}:
+                bodies.append(CaptureUnavailable('reader_error'))
+            else:
+                raise CaptureUnavailable('invalid_body')
+        if time.monotonic() - started > self.seconds:
+            raise CaptureUnavailable('timeout')
+        return bodies
+
+    def _request(self, value):
         started = time.monotonic()
         deadline = started + self.seconds
-        request = json.dumps({'name': name, 'selector': selector}, allow_nan=False).encode('utf-8')
+        request = json.dumps(value, allow_nan=False).encode('utf-8')
         if len(request) > MAX_REQUEST:
             raise CaptureUnavailable('request_bytes')
         # Resolve installation-bound Python/dependencies, not ambient python/PYTHONPATH.

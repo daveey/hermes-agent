@@ -7,6 +7,7 @@ retains trailing hints; a failed selector cannot starve unrelated selectors.
 """
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+import json
 import logging
 import threading
 import time
@@ -24,14 +25,16 @@ class SessionViewCapture:
     after: int
     next_deadline: float
     fact: object = None
+    facts: tuple = ()
 
 
 class SessionsSource:
     """Bounded per-endpoint inventories with read-touch LRU and fair dirty order."""
     def __init__(self, store, source, paths, capture, *, max_views=32,
-                 max_bytes=12 * 1024 * 1024, refresh_seconds=30, reconcile=None):
+                 max_bytes=12 * 1024 * 1024, refresh_seconds=30, reconcile=None, capture_many=None):
         self.store, self.source = store, source
         self.paths, self.reader = tuple(paths), capture
+        self.reader_many = capture_many
         self.max_views, self.max_bytes = max_views, max_bytes
         self.refresh_seconds, self.reconcile = refresh_seconds, reconcile
         self._lock = threading.Lock()
@@ -115,17 +118,44 @@ class SessionsSource:
                 for key in self._selectors:
                     self._dirty.setdefault(key, None)
                 self._refresh = started + self.refresh_seconds
-            key = next((key for key in self._dirty
-                        if started >= max(self._next_capture, self._retry.get(key, 0))), None)
-            if key is None:
+            keys = [key for key in self._dirty
+                    if started >= max(self._next_capture, self._retry.get(key, 0))]
+            keys = keys[:4 if self.reader_many is not None else 1]
+            if self.reader_many is not None:
+                from hermes_cli.sessions_capture_process import MAX_REQUEST
+                while len(keys) > 1 and len(json.dumps(
+                        {'views': [self._selectors[key] for key in keys]}, allow_nan=False).encode()) > MAX_REQUEST:
+                    keys.pop()  # Keep long stamp selectors fair; never overload a shared frame.
+            if not keys:
                 return SessionViewCapture(self._serial, self._deadline())
-            self._dirty.pop(key)
-            name, selector = self._selectors[key]
+            views = [self._selectors[key] for key in keys]
+            for key in keys:
+                self._dirty.pop(key)
+        try:
+            bodies = (self.reader_many(views) if self.reader_many is not None else
+                      [self.reader(*views[0])])
+            if len(bodies) != len(keys):
+                raise ValueError('invalid batch result count')
+            if sum(len(body) for body in bodies if isinstance(body, bytes)) > min(budget.max_bytes, self.max_bytes):
+                from hermes_cli.sessions_capture_process import CaptureUnavailable
+                raise CaptureUnavailable('bytes')
+        except Exception as error:  # health: allow BLE001 -- transport fault invalidates each selected view
+            bodies = [error] * len(keys)
+        facts = tuple(self._fact(key, body, started, budget) for key, body in zip(keys, bodies))
+        with self._lock:
+            # <=50% duty charges the WHOLE batch, including spawn and serialization.
+            ended = time.monotonic()
+            self._next_capture = ended + max(.2, ended - started)
+            due = self._deadline()
+        return SessionViewCapture(self._serial, due, facts[0], facts)
+
+    def _fact(self, key, body, started, budget):
         observed = time.time()
         self._serial += 1
         reason, encoded_bytes = 'reader_error', None
         try:
-            body = self.reader(name, selector)
+            if isinstance(body, Exception):
+                raise body
             encoded_bytes = len(body) if isinstance(body, bytes) else None
             reason = ('invalid_type' if encoded_bytes is None else
                       'bytes' if encoded_bytes > min(budget.max_bytes, self.max_bytes) else
@@ -158,22 +188,19 @@ class SessionsSource:
             with self._lock:
                 self._retry.pop(key, None)
                 self._failed.discard(key)
-        with self._lock:
-            # <=50% capture duty under sustained hints, at most five passes/sec.
-            self._next_capture = time.monotonic() + max(.2, time.monotonic() - started)
-            due = self._deadline()
-        return SessionViewCapture(self._serial, due, fact)
+        return fact
 
     def commit(self, capture):
         with self._lock:
             deleted = set(self._retired)
             self._retired.clear()
-            fact = capture.fact
-            if fact is not None and fact.key not in self._selectors:
-                fact = None  # Evicted during capture.
+            facts = capture.facts or ((capture.fact,) if capture.fact is not None else ())
             for key in deleted:
                 self._sizes.pop(key, None)
-            if fact is not None:
+            retained = []
+            for fact in facts:
+                if fact.key not in self._selectors:
+                    continue  # Evicted during capture or earlier in this batch.
                 size = len(fact.value.get('encoded', b''))
                 while sum(self._sizes.values()) - self._sizes.get(fact.key, 0) + size > self.max_bytes:
                     victim = next(key for key in self._selectors if key != fact.key and key in self._sizes)
@@ -181,7 +208,8 @@ class SessionsSource:
                     self._sizes.pop(victim)
                     deleted.add(victim)
                 self._sizes[fact.key] = size
-            self.store.publish([fact] if fact is not None else (), deleted_keys=deleted)
+                retained.append(fact)
+            self.store.publish([fact for fact in retained if fact.key in self._selectors], deleted_keys=deleted)
 
     def failure(self):
         # Watch/publication failure (not one selector failure) invalidates all.

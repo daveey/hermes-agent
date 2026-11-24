@@ -36,7 +36,8 @@ class SessionsRuntime:
         self.feed = self.local = self.handle = self.binding = None
         paths = [home / filename for _, home in targets for filename in ('state.db', 'config.yaml')]
         self.source = SessionsSource(self.store, SourceId(self.scope, 'sessions.display', 'canonical'),
-                                     paths, self.capture, reconcile=self.reconcile)
+                                     paths, self.capture, reconcile=self.reconcile,
+                                     capture_many=self.capture_many if hasattr(self.capture_reader, 'capture_many') else None)
         self.generation = 0
         self.ready = False
         self._stopping = False
@@ -63,8 +64,19 @@ class SessionsRuntime:
         self.names = frozenset(name for name, _ in targets)
 
     def capture(self, name, selector):
-        import json
         body = self.capture_reader(name, selector)
+        self._observe(body)
+        return body
+
+    def capture_many(self, views):
+        bodies = self.capture_reader.capture_many(views)
+        for body in bodies:
+            if isinstance(body, bytes):
+                self._observe(body)
+        return bodies
+
+    def _observe(self, body):
+        import json
         result = json.loads(body)
         groups = [result.get('sessions', ())]
         groups.extend(result.get(key, {}).get('sessions', ()) for key in ('recents', 'cron', 'messaging'))
@@ -72,7 +84,6 @@ class SessionsRuntime:
             for row in rows:
                 if row.get('is_active'):
                     self.source.refresh_at(row.get('last_active', row.get('started_at', 0)) + 300)
-        return body
 
     def wait_projection(self, name, selector, timeout):
         """Wait on owner memory only; capture remains on the feed thread."""
@@ -95,16 +106,21 @@ class SessionsRuntime:
                                budget=CaptureBudget(max_bytes=4 * 1024 * 1024, max_seconds=5),
                                stores={self.scope: self.store})
         try:
+            from hermes_cli.sessions_fact_routes import selector_for
+            selector = selector_for(inspect.signature(self.profiles.get_profiles_sessions), (), {})
+            # Seed before registration so the first feed turn shares one child.
+            self.demand(self.scope, 'sessions', selector)
+            if hasattr(self.capture_reader, 'capture_many'):
+                self.demand(self.scope, 'sessions', {**selector, 'limit': 50, 'min_messages': 1})
+                sidebar = selector_for(inspect.signature(self.profiles.get_profiles_sessions_sidebar), (), {})
+                self.demand(self.scope, 'sessions_sidebar', sidebar)
             self.feed.register(self.source)
             self.local = InProcessFacts(self.store, [self.scope], demand=self.demand)
             self.handle = self.local.acquire(self.scope, lifecycle=self.lifecycle)
             binding_handle = SimpleNamespace(v1=self.handle.v1, demand=self.handle.demand,
                                              touch=self.source.touch, wait_projection=self.wait_projection)
             self.binding = self.profiles.bind_sessions_facts(binding_handle, self.scope)
-            from hermes_cli.sessions_fact_routes import selector_for
             from hermes_cli.fact_contract import Ready
-            selector = selector_for(inspect.signature(self.profiles.get_profiles_sessions), (), {})
-            self.demand(self.scope, 'sessions', selector)
             with self.store._condition:
                 # Readiness gates this surface, not the server socket. An over-
                 # budget cold capture remains unavailable and retries normally.

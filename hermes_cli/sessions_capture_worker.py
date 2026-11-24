@@ -31,19 +31,41 @@ def main():
     if len(request) != size or incoming.read(1):
         return 2
     value = json.loads(request)
-    if (not isinstance(value, dict) or set(value) != {'name', 'selector'}
-            or value['name'] not in ('sessions', 'sessions_sidebar', 'sessions_stamps')
-            or not isinstance(value['selector'], dict)):
-        return 2
     # Libraries/plugins may print. Never permit such output to enter IPC framing.
     with redirect_stdout(sys.stderr):
-        body = capture(value['name'], value['selector'])
+        if isinstance(value, dict) and set(value) == {'views'}:
+            body = capture_many(value['views'])
+        elif (isinstance(value, dict) and set(value) == {'name', 'selector'}
+              and valid_view([value['name'], value['selector']])):
+            body = capture(value['name'], value['selector'])
+        else:
+            return 2
     if len(body) > MAX_RESPONSE:
         return 3
     outgoing.write(struct.pack('!I', len(body)))
     outgoing.write(body)
     outgoing.flush()
     return 0
+
+
+def valid_view(view):
+    return (isinstance(view, (list, tuple)) and len(view) == 2
+            and view[0] in ('sessions', 'sessions_sidebar', 'sessions_stamps')
+            and isinstance(view[1], dict))
+
+
+def capture_many(views):
+    if not isinstance(views, list) or not 1 <= len(views) <= 4 or not all(map(valid_view, views)):
+        raise ValueError('invalid views')
+    from hermes_cli.kanban_session_activity import one_annotation_snapshot
+    results = []
+    with one_annotation_snapshot():
+        for name, selector in views:
+            try:
+                results.append({'body': json.loads(capture(name, selector))})
+            except Exception:  # health: allow BLE001 -- one failed selector must not hide successful peers
+                results.append({'unavailable': 'reader_error'})
+    return json.dumps({'results': results}, separators=(',', ':'), allow_nan=False).encode()
 
 
 if __name__ == '__main__':

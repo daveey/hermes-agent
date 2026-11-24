@@ -202,6 +202,15 @@ def test_cold_twelve_profile_capture_under_parent_gil_contention(tmp_path, monke
                 assert result['total'] >= 24000
             elif name == 'sessions_sidebar':
                 assert result['recents']['sessions']
+        started = time.monotonic()
+        batch = capture.capture_many([
+            (name, selector_for(inspect.signature(reader), (), params))
+            for name, reader, params in selectors])
+        assert time.monotonic() - started < 5
+        assert all(isinstance(body, bytes) for body in batch)
+        assert len(json.loads(batch[0])['sessions']) == 100
+        assert json.loads(batch[1])['recents']['sessions']
+        print(f'cold-parent-spinner all-three: {time.monotonic() - started:.3f}s')
     finally:
         stop.set()
         spinner.join(3)
