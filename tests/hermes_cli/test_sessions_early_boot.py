@@ -81,6 +81,19 @@ def test_rollback_does_not_touch_runtime(boot, monkeypatch, mode):
     assert not calls
 
 
+def test_ignored_signal_keeps_owner_adoptable(boot):
+    calls, runtime = boot
+    original = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        with early.early_sessions(headless=True, isolated=False) as owner:
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            assert 'close' not in calls
+            assert owner.adopt() is runtime
+        assert calls.count('close') == 1
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+
 def test_failed_drain_retains_owner():
     calls = []
     def close():

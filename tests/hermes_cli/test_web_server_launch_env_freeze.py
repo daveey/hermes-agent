@@ -5,6 +5,9 @@ only source for launch keys with no ``.env`` to rebuild them from (systemd ``Env
 ``op run``, Compose). Taken at the TOP of ``start_server`` it missed everything the rest of boot
 injected or rotated, for the process lifetime.
 """
+import asyncio
+from contextlib import nullcontext
+from types import SimpleNamespace
 import os
 
 import pytest
@@ -44,3 +47,32 @@ def test_boot_time_credential_injection_is_inside_the_frozen_launch_env(tmp_path
     assert secret_scope.is_multiplex_active()
     assert launch_profile_policy.capture_launch_env().get(LATE_KEY) == "injected-during-boot", (
         "the launch env was frozen before boot finished injecting credentials")
+
+
+@pytest.mark.parametrize('failure', ['ready', 'loop'])
+def test_exception_after_bind_drains_before_runner_teardown(monkeypatch, failure):
+    calls = []
+    async def startup():
+        server.started = True
+    async def loop():
+        calls.append('loop')
+        raise RuntimeError('loop failure')
+    async def shutdown():
+        calls.append('shutdown')
+    server = SimpleNamespace(started=False, should_exit=False, capture_signals=nullcontext,
+                             startup=startup, main_loop=loop, shutdown=shutdown)
+    config = SimpleNamespace(loaded=True, lifespan_class=lambda config: object())
+    def ready(*args, **kwargs):
+        calls.append('ready')
+        if failure == 'ready':
+            raise RuntimeError('ready failure')
+    monkeypatch.setattr(web_server, '_configure_auth_gate', lambda *a, **kw: None)
+    monkeypatch.setattr(web_server, '_build_uvicorn_server', lambda *a, **kw: (config, server))
+    monkeypatch.setattr(web_server, '_port_bind_conflict', lambda *a, **kw: False)
+    monkeypatch.setattr(launch_profile_policy, 'activate_multi_profile_hosting_eagerly', lambda: None)
+    monkeypatch.setattr(web_server, '_on_server_started', ready)
+    monkeypatch.setattr(web_server, '_run_serve', lambda serve, *a: asyncio.run(serve()))
+    with pytest.raises(RuntimeError, match=failure + ' failure'):
+        web_server.start_server(open_browser=False, headless=False)
+    assert calls[-1] == 'shutdown'
+    assert calls.count('shutdown') == 1

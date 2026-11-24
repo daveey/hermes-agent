@@ -1818,25 +1818,27 @@ def _start_server_runtime(
             await server.startup()
             if server.should_exit:
                 return
-            app.state.http_listener_ready.set()
-
-            _on_server_started(
-                server,
-                host=host,
-                port=port,
-                headless=headless,
-                isolated=isolated,
-                open_browser=open_browser,
-                initial_profile=initial_profile,
-                start_mcp_discovery_after_bind=start_mcp_discovery_after_bind,
-                ssh_lock_path=ssh_lock_path,
-            )
-            if headless:
-                from hermes_cli.observability.shared_metrics_startup import record_process_ready
-                record_process_ready("serve_boot", background=True)
-
-            await server.main_loop()
-            if server.started:
-                await server.shutdown()
+            try:
+                app.state.http_listener_ready.set()
+                _on_server_started(
+                    server,
+                    host=host,
+                    port=port,
+                    headless=headless,
+                    isolated=isolated,
+                    open_browser=open_browser,
+                    initial_profile=initial_profile,
+                    start_mcp_discovery_after_bind=start_mcp_discovery_after_bind,
+                    ssh_lock_path=ssh_lock_path,
+                )
+                if headless:
+                    from hermes_cli.observability.shared_metrics_startup import record_process_ready
+                    record_process_ready("serve_boot", background=True)
+                await server.main_loop()
+            finally:
+                # Drain the app before asyncio.run cancels its background warmup
+                # on an exceptional loop/ready callback exit.
+                if server.started:
+                    await server.shutdown()
 
     _run_serve(_serve, config, host, port)

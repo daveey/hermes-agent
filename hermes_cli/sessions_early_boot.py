@@ -47,8 +47,10 @@ def early_sessions(*, headless, isolated):
     previous = {}
 
     def stop(signum, frame):
-        owner.close()
         handler = previous[signum]
+        if handler == signal.SIG_IGN:
+            return
+        owner.close()
         if callable(handler):
             handler(signum, frame)
         elif handler != signal.SIG_IGN:

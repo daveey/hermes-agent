@@ -17,6 +17,8 @@ class BootServicesMiddleware:
             ready = getattr(scope['app'].state, 'boot_services_ready', None)
             if ready is not None and not ready.is_set():
                 if scope['type'] == 'websocket':
+                    await receive()  # consume websocket.connect before a retryable close
+                    await send({'type': 'websocket.accept'})
                     await send({'type': 'websocket.close', 'code': 1013})
                     return
                 if scope['method'] != 'GET' or scope['path'] not in _DISPLAY_PATHS:

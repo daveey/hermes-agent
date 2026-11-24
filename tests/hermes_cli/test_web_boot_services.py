@@ -163,8 +163,10 @@ async def test_ws_refused_during_warmup():
         pytest.fail('uninitialized websocket handler called')
     async def send(message):
         sent.append(message)
-    await BootServicesMiddleware(forbidden)({'type': 'websocket', 'app': app}, forbidden, send)
-    assert sent == [{'type': 'websocket.close', 'code': 1013}]
+    async def receive():
+        return {'type': 'websocket.connect'}
+    await BootServicesMiddleware(forbidden)({'type': 'websocket', 'app': app}, receive, send)
+    assert sent == [{'type': 'websocket.accept'}, {'type': 'websocket.close', 'code': 1013}]
 
 
 @pytest.mark.asyncio
