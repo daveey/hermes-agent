@@ -198,7 +198,7 @@ export function useComposerSubmit({
           ...(attachments ? { attachments } : {}),
           composerScope: submittedScope,
           ...assignment,
-          ...(displayKind ? { displayKind } : onRejected ? { unsent: 'elsewhere' as const } : {})
+          ...(displayKind ? { displayKind } : onRejected ? {} : { unsent: 'restored' as const })
         })
       )
     )

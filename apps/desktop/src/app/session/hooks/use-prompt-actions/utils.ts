@@ -841,11 +841,12 @@ export interface SubmitTextOptions {
    *  still receives the text as a normal user turn. */
   displayKind?: 'hidden'
   /** Where the words are when this send is refused before it leaves, which
-   *  picks the notice. Default: the composer restores them into the draft.
-   *  `kept`: they never left the composer (a busy Enter the server queue would
-   *  have taken). `elsewhere`: the caller re-homes them (an external request
-   *  goes to the queue), so the notice names no place. */
-  unsent?: 'elsewhere' | 'kept'
+   *  picks the notice. Default: nowhere this code knows of (a voice turn, the
+   *  quick-entry window, the pet, an external request its caller re-queues),
+   *  so the notice names no place. `restored`: the composer puts them back
+   *  into the draft when submit returns false. `kept`: they never left the
+   *  composer (a busy Enter the server queue would have taken). */
+  unsent?: 'kept' | 'restored'
   /** Per-turn client surface the gateway turns into a model-bound note. The
    *  HUD sets `hud` from its own store; a GPT-Live delegation passes
    *  `voice-live` (spoken transcript in, speakable prose out). */

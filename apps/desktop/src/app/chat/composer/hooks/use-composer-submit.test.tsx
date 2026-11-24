@@ -286,11 +286,9 @@ describe('useComposerSubmit external request routing', () => {
         expect(requestComposerSubmit('continue', { target: 'main' })).toBe(true)
       })
 
-      // `unsent: 'elsewhere'`: a refused request goes to the queue, so the notice must not say "back in the composer".
-      expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
-        'continue',
-        expect.objectContaining({ attachments: [], unsent: 'elsewhere' })
-      )
+      // No `unsent`: a refused request goes to the queue, so the notice must not say "back in the composer".
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith('continue', expect.objectContaining({ attachments: [] }))
+      expect((onSubmit.mock.calls[0] as unknown[])[1]).not.toHaveProperty('unsent')
       expect(clearDraft).not.toHaveBeenCalled()
       expect(loadIntoComposer).not.toHaveBeenCalled()
       expect(stashAt).not.toHaveBeenCalled()
@@ -348,8 +346,7 @@ describe('useComposerSubmit external request routing', () => {
       expect(visibleMain.onSubmit).toHaveBeenCalledWith('ship this branch', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'session-a',
-        unsent: 'elsewhere'
+        composerScope: 'session-a'
       })
     )
     expect(visibleMain.onSubmit).toHaveBeenCalledTimes(1)
@@ -368,8 +365,7 @@ describe('useComposerSubmit external request routing', () => {
       expect(tile.onSubmit).toHaveBeenCalledWith('ship project B', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'tile-session',
-        unsent: 'elsewhere'
+        composerScope: 'tile-session'
       })
     )
     expect(main.onSubmit).not.toHaveBeenCalled()
@@ -385,8 +381,7 @@ describe('useComposerSubmit external request routing', () => {
       expect(second.onSubmit).toHaveBeenCalledWith('ship exactly one session', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'session-second',
-        unsent: 'elsewhere'
+        composerScope: 'session-second'
       })
     )
     expect(first.onSubmit).not.toHaveBeenCalled()
@@ -406,8 +401,7 @@ describe('useComposerSubmit external request routing', () => {
       expect(visibleB.onSubmit).toHaveBeenCalledWith('ship session B', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'session-b',
-        unsent: 'elsewhere'
+        composerScope: 'session-b'
       })
     )
     expect(hiddenA.onSubmit).not.toHaveBeenCalled()
@@ -554,7 +548,8 @@ describe('useComposerSubmit busy-turn routing', () => {
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith('/compress preserve context', {
         submission_id: expect.any(String),
-        composerScope: 'stored-session'
+        composerScope: 'stored-session',
+        unsent: 'restored'
       })
     )
     expect(clearDraft).toHaveBeenCalledTimes(1)
@@ -608,7 +603,8 @@ describe('useComposerSubmit busy-turn routing', () => {
       expect(onSubmit).toHaveBeenCalledWith('ordinary question', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'stored-session'
+        composerScope: 'stored-session',
+        unsent: 'restored'
       })
     )
     expect(onSteer).not.toHaveBeenCalled()
@@ -643,7 +639,8 @@ describe('useComposerSubmit busy-turn routing', () => {
       expect(onSubmit).toHaveBeenCalledWith('look at @terminal:`zsh:23-58`', {
         submission_id: expect.any(String),
         attachments: [],
-        composerScope: 'stored-session'
+        composerScope: 'stored-session',
+        unsent: 'restored'
       })
     )
     expect(onSteer).not.toHaveBeenCalled()
@@ -1052,7 +1049,8 @@ describe('useComposerSubmit with a blocking prompt parked on the session', () =>
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith('/status', {
         submission_id: expect.any(String),
-        composerScope: 'stored-session'
+        composerScope: 'stored-session',
+        unsent: 'restored'
       })
     )
     expect(queueCurrentDraft).not.toHaveBeenCalled()

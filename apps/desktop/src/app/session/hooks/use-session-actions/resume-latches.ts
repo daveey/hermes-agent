@@ -26,6 +26,9 @@ export function clearResumeLatches(storedSessionId: string): void {
 // resumeSession swallows its failure: it repaints what it can, toasts and
 // resolves. A caller that needed the runtime (a send into an unbound chat)
 // reads the error here instead of finding out from a second resume.
+// Bounded: an entry nobody reads (a chat that is never resumed or sent into again) must not
+// keep its error object for the life of the window.
+const MAX_RESUME_FAILURES = 64
 const resumeFailureByStoredSessionId = new Map<string, { error: unknown }>()
 
 /** The error the latest resume attempt of this session ended on, once. */
@@ -72,7 +75,16 @@ export function notifyResumeFailed(
   storedSessionId: string,
   options: ResumeAttemptOptions | undefined
 ): void {
+  resumeFailureByStoredSessionId.delete(storedSessionId)
   resumeFailureByStoredSessionId.set(storedSessionId, { error })
+
+  for (const oldest of resumeFailureByStoredSessionId.keys()) {
+    if (resumeFailureByStoredSessionId.size <= MAX_RESUME_FAILURES) {
+      break
+    }
+
+    resumeFailureByStoredSessionId.delete(oldest)
+  }
 
   if (!options?.reattach) {
     notifyError(error, fallback, { id: resumeFailedToastId(storedSessionId) })

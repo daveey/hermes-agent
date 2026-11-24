@@ -50,7 +50,7 @@ interface UnsentSend {
   /** `sessionDriftReason()`: the user moved to another chat. */
   drift: null | string
   optimisticId: string
-  options: undefined | { displayKind?: 'hidden'; fromQueue?: boolean; unsent?: 'elsewhere' | 'kept' }
+  options: undefined | { displayKind?: 'hidden'; fromQueue?: boolean; unsent?: 'kept' | 'restored' }
   /** This identity was sent before and its outcome never came back. */
   uncertain: boolean
 }
@@ -65,18 +65,21 @@ function unsentNotice({ copy, options, uncertain }: UnsentSend): string {
   const kept = options?.unsent === 'kept'
   const what = uncertain ? copy.promptSendUnconfirmed : kept ? copy.promptNotQueued : copy.promptNotSent
 
-  if (options?.unsent === 'elsewhere') {
-    return what
+  // Only a caller that says so gets a place named: a voice turn, the quick-entry
+  // window or the pet restore nothing, and an external request is re-queued.
+  if (kept) {
+    return `${what} ${copy.promptStillInComposer}`
   }
 
-  return `${what} ${kept ? copy.promptStillInComposer : copy.promptBackInComposer}`
+  return options?.unsent === 'restored' ? `${what} ${copy.promptBackInComposer}` : what
 }
 
 /**
  * The chat has no live runtime and rebinding one failed (a starved hub times
  * `session.resume` out after 30s), so this attempt never left. The composer
- * restores the words into the draft when submit returns `false`; without a
- * notice the user sees nothing and takes the message for delivered.
+ * restores the words into the draft when submit returns `false` (other callers
+ * restore nothing); without a notice the user sees nothing and takes the
+ * message for delivered.
  *
  * Call before the abort drops the bubble. A deliberate session switch (`drift`)
  * stays silent, and so does a drain of an entry that stays in its queue

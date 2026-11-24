@@ -98,6 +98,8 @@ const RESUMED = {
 
 const copy = en.desktop
 const NOT_SENT_BACK_IN_COMPOSER = `${copy.promptNotSent} ${copy.promptBackInComposer}`
+// What use-composer-submit passes for a draft it restores when submit returns false.
+const COMPOSER_SEND = { submission_id: SUBMISSION_ID, unsent: 'restored' } as const
 const resumeTimeout = () => new Error('request timed out after 30s: session.resume')
 
 function deferred<T>() {
@@ -172,8 +174,9 @@ const noticesFromSend = () => errorNotices().filter(notice => notice.id !== resu
  *  `routed`: the route resume is the real `resumeSession` (as wired in the app); its
  *  `session.resume` RPC is the one that times out.
  *  `direct`: the route resume returned without publishing a runtime and without a failure, so
- *  submit's own `session.resume` RPC is the one that times out. */
-async function sendIntoUnboundChat(path: 'direct' | 'routed') {
+ *  submit's own `session.resume` RPC is the one that times out.
+ *  `routed-throws`: a route resume that rejects outright (no RPC of its own in this test). */
+async function sendIntoUnboundChat(path: 'direct' | 'routed' | 'routed-throws') {
   const resumeRpc = deferred<never>()
   const submits: Record<string, unknown>[] = []
   const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
@@ -209,7 +212,7 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed') {
       onReady={handle => (prompt = handle)}
       refreshSessions={async () => undefined}
       requestGateway={requestGateway}
-      resumeStoredSession={async id => void (await routeResume?.(id, true))}
+      resumeStoredSession={async id => void (await (path === 'routed-throws' ? resumeRpc.promise : routeResume?.(id, true)))}
       selectedStoredSessionIdRef={selectedStoredSessionIdRef}
       storedSessionId={STORED_SESSION_ID}
     />
@@ -218,10 +221,13 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed') {
   let sent!: Promise<boolean>
   await act(async () => {
     // The composer names every send; `false` is its signal to restore the draft under this id.
-    sent = prompt!.submitTextRaw(TEXT, { submission_id: SUBMISSION_ID })
+    sent = prompt!.submitTextRaw(TEXT, COMPOSER_SEND)
   })
-  await waitFor(() => expect(resumeCalls(path === 'routed' ? routeGateway : requestGateway)).toBe(1))
-  expect(messageIds()).toContain(BUBBLE_ID)
+  await waitFor(() => expect(messageIds()).toContain(BUBBLE_ID))
+
+  if (path !== 'routed-throws') {
+    await waitFor(() => expect(resumeCalls(path === 'routed' ? routeGateway : requestGateway)).toBe(1))
+  }
 
   return {
     failResume: () =>
@@ -234,7 +240,7 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed') {
     retry: () => {
       hubAnswers = true
 
-      return prompt!.submitText(TEXT, { submission_id: SUBMISSION_ID })
+      return prompt!.submitText(TEXT, COMPOSER_SEND)
     },
     selectedStoredSessionIdRef,
     submits
@@ -243,9 +249,11 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed') {
 
 /** Another surface's resume of the same chat (use-route-resume's retry), started while the typed
  *  message is on screen, so its start-of-resume snapshot holds the bubble. `session.resume` is
- *  single-flight per chat: `joins` shares the RPC already in flight and fails with it; otherwise
- *  it asks for an authoritative snapshot, which queues its own RPC behind that one. */
-async function startConcurrentChatResume(joins: boolean) {
+ *  single-flight per chat:
+ *  `joins` shares the RPC already in flight and fails with it;
+ *  `queued` asks for an authoritative snapshot, which sends its own RPC once that one settled;
+ *  `first` finds no RPC in flight and sends its own at once. */
+async function startConcurrentChatResume(flight: 'first' | 'joins' | 'queued') {
   const ownRpc = deferred<typeof RESUMED>()
 
   const requestGateway = vi.fn((method: string) =>
@@ -256,17 +264,17 @@ async function startConcurrentChatResume(joins: boolean) {
 
   let settled!: Promise<unknown>
   await act(async () => {
-    settled = resume(STORED_SESSION_ID, true, undefined, joins ? undefined : { authoritativeSnapshot: true })
+    settled = resume(STORED_SESSION_ID, true, undefined, flight === 'queued' ? { authoritativeSnapshot: true } : undefined)
   })
 
   const settle = (answer: () => void) => async () => {
-    if (!joins) {
+    if (flight !== 'joins') {
       await waitFor(() => expect(resumeCalls(requestGateway)).toBe(1))
     }
 
     await act(async () => {
       // A joined resume never sent an RPC of its own: it already failed with the shared one.
-      if (!joins) {
+      if (flight !== 'joins') {
         answer()
       }
 
@@ -349,7 +357,7 @@ describe('a send whose session.resume times out', () => {
     '%s resume: says the message was not sent, and a failed-resume repaint does not show it as a bubble',
     async path => {
       const send = await sendIntoUnboundChat(path)
-      const chat = await startConcurrentChatResume(path === 'direct')
+      const chat = await startConcurrentChatResume(path === 'direct' ? 'joins' : 'queued')
       clearNotifications()
 
       // `false` is what makes the composer put the words back into the draft under SUBMISSION_ID.
@@ -379,7 +387,7 @@ describe('a send whose session.resume times out', () => {
 
   it('a resume that succeeds after the send was rejected does not show it as a bubble either', async () => {
     const send = await sendIntoUnboundChat('routed')
-    const chat = await startConcurrentChatResume(false)
+    const chat = await startConcurrentChatResume('queued')
 
     expect(await send.failResume()).toBe(false)
     expect(messageIds()).not.toContain(BUBBLE_ID)
@@ -387,6 +395,31 @@ describe('a send whose session.resume times out', () => {
     await chat.succeedAndRepaint()
 
     expect(JSON.stringify($messages.get())).toContain('earlier answer')
+    expect(messageIds()).not.toContain(BUBBLE_ID)
+    expect(JSON.stringify($messages.get())).not.toContain(TEXT)
+  })
+
+  it('the transcript painted while a later resume is still pending does not show it as a bubble', async () => {
+    const send = await sendIntoUnboundChat('routed-throws')
+    // This resume's REST transcript arrives only after the send was rejected, and its own
+    // `session.resume` never answers in this test.
+    const restTranscript = deferred<{ messages: typeof STORED_MESSAGES; session_id: string }>()
+    vi.mocked(getLatestSessionMessages).mockReturnValue(restTranscript.promise as never)
+    await startConcurrentChatResume('first')
+    clearNotifications()
+
+    expect(await send.failResume()).toBe(false)
+    expect(errorNotices().map(notice => notice.title)).toEqual([NOT_SENT_BACK_IN_COMPOSER])
+    expect(messageIds()).not.toContain(BUBBLE_ID)
+
+    await act(async () => {
+      restTranscript.resolve({
+        messages: [...STORED_MESSAGES, { content: 'answer only the transcript has', role: 'assistant', timestamp: 3 }],
+        session_id: STORED_SESSION_ID
+      })
+    })
+
+    await waitFor(() => expect(JSON.stringify($messages.get())).toContain('answer only the transcript has'))
     expect(messageIds()).not.toContain(BUBBLE_ID)
     expect(JSON.stringify($messages.get())).not.toContain(TEXT)
   })
@@ -412,9 +445,13 @@ describe('the notice says where the words are', () => {
   const queued = { fromQueue: true, sessionId: null, storedSessionId: STORED_SESSION_ID } as const
 
   it.each<[string, SubmitTextOptions, string[]]>([
-    ['a composer send is back in the draft', {}, [NOT_SENT_BACK_IN_COMPOSER]],
-    // use-composer-submit: a rejected external request goes to the queue, not into the draft.
-    ['an external request names no place', { unsent: 'elsewhere' }, [copy.promptNotSent]],
+    ['a composer send is back in the draft', { unsent: 'restored' }, [NOT_SENT_BACK_IN_COMPOSER]],
+    // Callers that restore nothing: the pet overlay and the voice conversation pass no options,
+    // the quick-entry window only `onAccepted`, and an external request is re-queued by its caller.
+    ['a send nobody restores names no place', {}, [copy.promptNotSent]],
+    // use-composer-voice: both clear the draft and restore nothing.
+    ['a voice turn names no place', { voiceTurn: true }, [copy.promptNotSent]],
+    ['a live delegation names no place', { surface: 'voice-live', voiceContext: 'user: hi' }, [copy.promptNotSent]],
     // use-composer-queue queueCurrentDraft: the draft was never cleared.
     [
       'a busy Enter the server queue did not take is still in the composer',
@@ -452,13 +489,13 @@ describe('the notice says where the words are', () => {
       />
     )
 
-    expect(await prompt!.submitText(TEXT, { submission_id: SUBMISSION_ID })).toBe(false)
+    expect(await prompt!.submitText(TEXT, COMPOSER_SEND)).toBe(false)
     activeSessionIdRef.current = null
     runtimeIdByStoredSessionIdRef.current.clear()
     clearNotifications()
     const resumesBefore = resumeCalls(requestGateway)
 
-    expect(await prompt!.submitText(TEXT, { submission_id: SUBMISSION_ID })).toBe(false)
+    expect(await prompt!.submitText(TEXT, COMPOSER_SEND)).toBe(false)
 
     expect(resumeCalls(requestGateway)).toBe(resumesBefore + 1)
     expect(errorNotices().map(notice => notice.title)).toEqual([
