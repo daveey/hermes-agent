@@ -12,6 +12,7 @@ import re
 
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_retain_transport as retain
+from hermes_cli import kanban_home_command as home
 
 KIND = 'actionability_record'
 
@@ -33,6 +34,7 @@ def ensure_schema(conn) -> None:
     columns = {r[1] for r in conn.execute('PRAGMA table_info(kanban_actionability_commands)')}
     if 'eligibility_checked_at' not in columns:
         conn.execute('ALTER TABLE kanban_actionability_commands ADD COLUMN eligibility_checked_at INTEGER')
+    home.install(conn, 'kanban_actionability_commands')
 
 
 def envelope(task_id: str, payload: dict, phase: str = 'contract') -> dict:
@@ -74,12 +76,13 @@ def reserve(conn, task_id: str, payload: dict, *, phase: str = 'contract') -> di
         if old['request_json'] != frozen:
             raise ValueError('actionability request changed after first committed bytes')
         return old
+    epoch = home.capture(conn, wire)
     conn.execute('INSERT INTO kanban_actionability_commands '
-                 '(op_id,task_id,contract_key,phase,request_json,request_sha256,delivery_state) '
-                 "VALUES (?,?,?,?,?,?,'pending')", (wire['client_op_id'], task_id, wire['payload']['contract_key'],
-                                                     phase, frozen, digest(frozen)))
-    conn.execute('INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at) '
-                 f"VALUES (?,'tasks',?,?,?,'',{sync._NOW_MS_SQL})", (wire['client_op_id'], task_id, KIND, frozen))
+                 '(op_id,task_id,contract_key,phase,request_json,request_sha256,delivery_state,home_generations) '
+                 "VALUES (?,?,?,?,?,?,'pending',?)", (wire['client_op_id'], task_id, wire['payload']['contract_key'],
+                                                     phase, frozen, digest(frozen), epoch))
+    conn.execute('INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at,home_generations) '
+                 f"VALUES (?,'tasks',?,?,?,'',{sync._NOW_MS_SQL},?)", (wire['client_op_id'], task_id, KIND, frozen, epoch))
     return command(conn, wire['client_op_id'])
 
 
@@ -100,7 +103,7 @@ def outbound(conn, row: dict) -> dict:
             or owned['request_sha256'] != digest(owned['request_json'])
             or owned['task_id'] != wire['task'] or envelope(wire['task'], wire['payload'], wire['phase']) != wire):
         raise ValueError('actionability outbox lost immutable custody')
-    return wire
+    return home.outbound(owned, wire)
 
 
 def capability(hub, board: str) -> dict:

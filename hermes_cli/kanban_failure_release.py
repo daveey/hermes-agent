@@ -100,6 +100,8 @@ def _ensure_commands(conn: sqlite3.Connection) -> None:
                  "delivery_state", "canonical_receipt_json", "rejected_release_op_id"):
         if name not in existing:
             conn.execute(f"ALTER TABLE kanban_failure_commands ADD COLUMN {name} TEXT")
+    from hermes_cli.kanban_home_command import install
+    install(conn, 'kanban_failure_commands')
 
 
 def mark_sent(conn: sqlite3.Connection, run_uid: str, task_id: str) -> None:
@@ -127,6 +129,10 @@ def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
     if not conn.in_transaction:
         raise ValueError("failure release requires a write transaction")
     _ensure_commands(conn)
+    if observer_held(conn, run_id):
+        return True  # Existing custody is replay, not a new current-epoch intent.
+    from hermes_cli.kanban_home_command import capture
+    epoch = capture(conn, {'op': 'release', 'task': task_id})
     op_id = sync.uuid7()
     inserted = conn.execute("INSERT OR IGNORE INTO kanban_failure_commands (run_uid,task_id,op_id,operation_kind) "
                             "VALUES (?, ?, ?, 'release')",
@@ -143,7 +149,7 @@ def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
         # Same millisecond clock as captured rows: a release may reference a
         # systemic fix card created earlier in this transaction.
         conn.execute("INSERT INTO kanban_sync_outbox "
-                     "(op_id,table_name,row_uid,op,fields,hlc,created_at) "
-                     f"VALUES (?, 'tasks', ?, 'release', ?, '', {sync._NOW_MS_SQL})",
-                     (op_id, task_id, json.dumps(fields)))
+                     "(op_id,table_name,row_uid,op,fields,hlc,created_at,home_generations) "
+                     f"VALUES (?, 'tasks', ?, 'release', ?, '', {sync._NOW_MS_SQL},?)",
+                     (op_id, task_id, json.dumps(fields), epoch))
     return True

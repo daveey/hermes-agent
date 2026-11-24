@@ -12,6 +12,7 @@ import urllib.parse
 from hermes_cli import kanban_actionability_transport as wireutil
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_protect_stopped as kernel
+from hermes_cli import kanban_home_command as home_intent
 
 KIND = 'protect_stopped'
 
@@ -36,6 +37,7 @@ def ensure_schema(conn):
                  'delivery_state TEXT NOT NULL,canonical_receipt_json TEXT)')
     conn.execute('CREATE TABLE IF NOT EXISTS kanban_protect_scan (board TEXT PRIMARY KEY,last_id INTEGER NOT NULL)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_protect_pending ON kanban_protect_commands(board,request_uid)')
+    home_intent.install(conn, 'kanban_protect_commands')
 
 
 def command(conn, request_uid):
@@ -77,10 +79,11 @@ def reserve(conn, board, payload, request_event_uid):
         if old['request_json']!=frozen or old['board']!=board or old['home']!=home:
             raise ValueError('protect frozen command conflict; recover original custody')
         return old
+    epoch = home_intent.capture(conn, wire)
     conn.execute('INSERT INTO kanban_protect_commands '
-                 '(request_uid,board,task_id,home,request_event_uid,request_json,request_sha256,delivery_state) '
-                 "VALUES (?,?,?,?,?,?,?,'pending')",(payload['request_uid'],board,wire['task'],home,
-                  request_event_uid,frozen,wireutil.digest(frozen)))
+                 '(request_uid,board,task_id,home,request_event_uid,request_json,request_sha256,delivery_state,home_generations) '
+                 "VALUES (?,?,?,?,?,?,?,'pending',?)",(payload['request_uid'],board,wire['task'],home,
+                  request_event_uid,frozen,wireutil.digest(frozen),epoch))
     return command(conn,payload['request_uid'])
 
 
@@ -111,7 +114,7 @@ def confirm(conn, hub, board, request_uid):
     # Protect has its own frozen transport, not the replay sender's ACK state.
     # Still refuse enrollment loss before this independent command can leave.
     journal.bound_custody(conn)
-    reply=hub.ops(board,[wire])
+    reply=hub.ops(board,[home_intent.outbound(old,wire)])
     results=reply.get('results',[]) if isinstance(reply,dict) else []
     if (isinstance(results,list) and len(results)==1 and isinstance(results[0],dict)
             and results[0].get('client_op_id')==wire['client_op_id'] and results[0].get('status')=='rejected'

@@ -13,6 +13,7 @@ import time
 
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_failure_release as release
+from hermes_cli import kanban_home_command as home
 
 
 def canonical(value: dict) -> str:
@@ -57,7 +58,7 @@ def outbound(conn: sqlite3.Connection, row: dict) -> dict:
             or owned["task_id"] != row["row_uid"] or owned["request_json"] != canonical(wire)
             or owned["request_sha256"] != hashlib.sha256(owned["request_json"].encode("utf-8")).hexdigest()):
         raise ValueError("retain outbox lost its exact immutable command custody")
-    return wire
+    return home.outbound(owned, wire)
 
 
 def _replayable(owned: dict) -> None:
@@ -135,7 +136,7 @@ def confirm(conn: sqlite3.Connection, hub, board: str, run_uid: str) -> dict:
     capability(hub, board)
     from hermes_cli.kanban_replay_controls import confirmed_transport
     strict = confirmed_transport(conn, owned)
-    results = [] if strict else hub.ops(board, [wire]).get("results", [])
+    results = [] if strict else hub.ops(board, [home.outbound(owned, wire)]).get("results", [])
     if (len(results) == 1 and results[0].get("client_op_id") == owned["request_uid"]
             and results[0].get("status") == "rejected"):
         from hermes_cli import kanban_db as kb
@@ -239,11 +240,12 @@ def reserve(conn: sqlite3.Connection, task_id: str, run_uid: str, payload: dict,
         return old
     request_uid, event_uid = sync.uuid7(), sync.uuid7()
     wire = canonical(_envelope(task_id, run_uid, payload, expected_episode, request_uid, event_uid))
+    epoch = home.capture(conn, json.loads(wire))
     digest = hashlib.sha256(wire.encode("utf-8")).hexdigest()
     conn.execute("INSERT INTO kanban_failure_commands "
-                 "(run_uid,task_id,op_id,operation_kind,request_uid,event_uid,request_json,request_sha256,delivery_state) "
-                 "VALUES (?,?,?,'retain',?,?,?,?,'pending')",
-                 (run_uid, task_id, request_uid, request_uid, event_uid, wire, digest))
-    conn.execute("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at) "
-                 f"VALUES (?,'tasks',?,'retain',?,'',{sync._NOW_MS_SQL})", (request_uid, task_id, wire))
+                 "(run_uid,task_id,op_id,operation_kind,request_uid,event_uid,request_json,request_sha256,delivery_state,home_generations) "
+                 "VALUES (?,?,?,'retain',?,?,?,?,'pending',?)",
+                 (run_uid, task_id, request_uid, request_uid, event_uid, wire, digest, epoch))
+    conn.execute("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at,home_generations) "
+                 f"VALUES (?,'tasks',?,'retain',?,'',{sync._NOW_MS_SQL},?)", (request_uid, task_id, wire, epoch))
     return command(conn, run_uid)
