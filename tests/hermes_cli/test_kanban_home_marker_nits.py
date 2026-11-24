@@ -11,6 +11,10 @@ import pytest
 from hermes_cli import kanban_home_marker_placement as khm
 from tests.hermes_cli import test_kanban_pool_queue as helpers
 
+# Reuse the execution-policy seam as well as its gateway fixtures: these
+# assertions intentionally inspect the execution-layer local INSERT/marker.
+# Canonical hub ownership is covered by the unpatched composition suite.
+execution_policy_layer = helpers.execution_policy_layer
 svc = helpers.svc
 w2 = helpers.w2
 on_w2 = helpers.on_w2
