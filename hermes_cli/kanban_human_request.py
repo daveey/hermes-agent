@@ -42,6 +42,9 @@ def validate_human_request(value: Any, *, kind: str | None = None) -> dict | Non
         raise ValueError("human_request interaction must be approval, reply, user_terminal, physical or external")
     if kind in NONHUMAN_KINDS:
         raise ValueError("human_request cannot accompany dependency, transient or time waits")
+    # Only the named fields are kept. In particular a caller-supplied ``release_target`` (the release offer the
+    # stranded-park brief stamps on its own ask, kanban_release.offer) never survives validation: every agent,
+    # tool and CLI ingress passes through here, so no supplied request can make an Unblock click a release.
     request = {field: value[field].strip() for field in FIELDS}
     if value.get("choices") is not None:
         request["choices"] = _validate_choices(value["choices"])

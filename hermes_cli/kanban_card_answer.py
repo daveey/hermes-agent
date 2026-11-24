@@ -151,23 +151,28 @@ def _record_release(conn, request, fingerprint, receipt, note, provenance):
     return _receipt(conn, request, fingerprint)
 
 
-def _release(conn, request, fingerprint, receipt, note, provenance, fence):
-    """A default Unblock on a card a spend or scope stop holds (or on the decision card filed for one) is the
-    user's authenticated Desktop operation: release the stopped card as that human act (``kanban_release``).
-    None when the card is not held that way; the caller then applies the plain unblock. A refused release
-    (provider safety, containment) leaves the ask in place and records the reason once per operation.
+def _release(conn, request, fingerprint, receipt, note, provenance, fence, ask):
+    """A default Unblock on an ask that offered a release is the user's authenticated Desktop operation: release
+    the stopped card as that human act (``kanban_release``).
 
-    The courier delivers the answer to the card's home (``_owner``), so the bound card is local here; a decision
-    card whose stopped card lives on another board is refused by ``release`` (``no_such_task``) like any other."""
+    The offer is the ``release_target`` stamp the stranded-park brief writes on its own ask and no supplied
+    request can carry (``kanban_release.offered``): it must name the card still held and its still-pending stop,
+    and on a decision card the stop that card was filed for. Anything else returns None and the caller applies
+    the plain unblock: an agent-written ask, an ask filed before the stamp existed, a stale decision card, a
+    card no stop holds, and a decision card whose stopped card lives on another board (it is not held here).
+    A refused release (provider safety, containment) leaves the ask in place and records the reason once per
+    operation. ``fence`` is asked here and again inside the transaction that records the release decision."""
     from hermes_cli import kanban_release
     task, operation = request["task"], request["operationId"]
-    if kanban_release.held(conn, task) is None:
+    if kanban_release.offered(conn, task, ask) is None:
         return None
     error = fence(conn)
     if error:
         raise AnswerRefused(error)
     out = kanban_release.release(conn, task, writer=kanban_release.human_writer("desktop-operation:" + operation),
-                                 author="user-steps", note=kanban_release.desktop_note(operation))
+                                 author="user-steps", note=kanban_release.desktop_note(operation), precondition=fence)
+    if out["outcome"] == "refused" and out["refusal"] == "ask_changed":
+        raise AnswerRefused("stale_ask")
     if out["outcome"] == "refused":
         reason = (f"Desktop Unblock did not release {out['target']} ({out['refusal']}): {out['message']}"
                   f"\nOperation: {operation}")
@@ -276,7 +281,7 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
 
     if not archive and not informational and not current["ask"].get("choices") and request["choice"] == "unblock":
         released = _release(conn, request, fingerprint, receipt, note, {**request, "originGateway": origin},
-                            lambda c: fence(c, releasing=True))
+                            lambda c: fence(c, releasing=True), current["ask"])
         if released is not None:
             return released
 

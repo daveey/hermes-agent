@@ -50,7 +50,14 @@ def test_scope_stop_released_by_a_human(board, monkeypatch):
     assert status(board, tid) == 'ready'
     assert not decision.pending(board, tid) and not decision.execution_restricted(board, tid)
     body = board.execute('SELECT body FROM task_comments WHERE id=?', (out['mandate_comment'],)).fetchone()[0]
-    assert body == release.MANDATE.format(runs=7) and 'Budget: 7 more runs' in body
+    assert body == release.mandate_text(7) and 'Budget: 7 more runs' in body
+    assert 'conditions that agents wrote earlier are superseded.' in body and 'David set stays' not in body
+    record = json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='stop_released'",
+                                      (tid,)).fetchone()[0])
+    assert record == {'version': 1, 'episode': episode, 'authority_kind': 'human', 'actor_kind': 'human',
+                      'actor_session': None, 'runs': 7, 'budget_runs': out['budget_runs'],
+                      'mandate_comment_id': out['mandate_comment'], 'mandate_comment_uid': record['mandate_comment_uid'],
+                      'note': None}
     renewed = json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='scope_renewed'",
                                        (tid,)).fetchone()[0])
     assert renewed['authority_kind'] == 'human' and renewed['mandate_comment_id'] == out['mandate_comment']
@@ -77,7 +84,9 @@ def test_decision_card_id_resolves_to_its_root_and_is_archived(board):
     card = board.execute("SELECT id FROM tasks WHERE created_by='kanban-spend-budget'").fetchone()[0]
     assert release.target(board, card) == tid and release.held(board, card) == tid
     filed = board.execute('SELECT body FROM tasks WHERE id=?', (card,)).fetchone()[0]
-    assert release.ONE_STEP.format(task=tid) in filed  # the decision card names the one-step route for its root
+    # Its worker is fenced from the verb: the body says who can release, never "run release <root>" to the worker.
+    assert release.WORKER_NOTE.format(task=tid) in filed and f'hermes kanban release {tid}' not in filed
+    assert f"`hermes kanban promote {tid} --reason" in filed and 'or archive it' in filed
     out = run(board, card)
     assert out['outcome'] == 'released' and out['task_id'] == card and out['target'] == tid
     assert status(board, tid) == 'ready'
@@ -234,6 +243,9 @@ def test_brief_on_a_decision_card_says_unblock_releases_the_stopped_card(board):
     request = brief.request(board, card, None, 3 * 3600, 'events: spend_budget_triaged runs=15')
     assert (f'Unblock = release it to finish with 10 more runs under a goal-level scope '
             f'(`hermes kanban release {tid}`); safety holds still apply') in request['action']
+    episode = scope.renewal.key(decision.pending_episode(board, tid))
+    assert request['release_target'] == {'task': tid, 'episode': episode}  # the offer the click checks
+    assert release.offered(board, card['id'], request) == tid
     assert 'A) Unblock: Release the stopped work to finish its acceptance: 10 more runs' in request['scope']
     assert 'Recommend: A - release it to finish' in request['scope']
     # A decision card whose stopped card is no longer held keeps the plain "return to an agent" brief.
@@ -251,6 +263,7 @@ def test_brief_on_a_safety_restricted_card_keeps_the_cautious_line(board, monkey
     row = dict(board.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
     request = brief.request(board, row, None, 3 * 3600, 'events: decision_hold_restricted')
     assert 'Unblock = no release: a provider safety hold stays' in request['action']
+    assert 'release_target' not in request and release.offer(board, tid) is None
     assert 'Recommend: B - avoid authorizing more work without a bounded proposal.' in request['scope']
     assert 'release it to finish' not in request['action'] + request['scope']
 
@@ -302,3 +315,242 @@ def test_a_delegate_chat_releases_an_ordinary_spend_stop_and_a_revoked_grant_is_
     out = as_triage(board, second)
     assert out['outcome'] == 'refused' and out['refusal'] == 'not_scope_authority'
     assert written(board, second) == before and status(board, second) == 'triage'
+
+
+# ---- review round: validate first, read before acting, reruns, the durable record, the release offer ----
+
+OWNER = {'HERMES_SESSION_ID': scope.CHAT}
+
+
+def as_owner(board, tid, **kw):
+    return release.release(board, tid, writer=scope.AGENT, env=OWNER, ancestry=[OWNER], **kw)
+
+
+def mandates(board, tid):
+    return board.execute("SELECT COUNT(*) FROM task_comments WHERE task_id=? AND body LIKE ?",
+                         (tid, release.MARK + '%')).fetchone()[0]
+
+
+def records(board, tid):
+    return board.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='stop_released'",
+                         (tid,)).fetchone()[0]
+
+
+def test_invalid_runs_is_refused_with_nothing_written(board):
+    tid = spend_stopped(board)
+    before = written(board, tid)
+    for bad in (0, -3, True, '5'):
+        assert run(board, tid, runs=bad)['refusal'] == 'invalid_runs'
+    assert written(board, tid) == before
+
+
+def test_fenced_shell_cannot_run_release(board, monkeypatch, capsys):
+    from hermes_cli import kanban
+    tid = spend_stopped(board)
+    assert 'release' in kanban._DELEGATED_CHILD_DENIED_ACTIONS
+    monkeypatch.setattr('agent.delegation_context.kanban_path_is_fenced', lambda path: True)
+    before = written(board, tid)
+    assert argv(tid) != 0
+    assert 'cannot mutate Kanban tasks' in capsys.readouterr().err
+    assert written(board, tid) == before and status(board, tid) == 'triage'
+
+
+def test_scope_restriction_outside_triage_is_not_stopped(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+    before = written(board, tid)
+    assert run(board, tid)['refusal'] == 'not_stopped' and written(board, tid) == before
+
+
+def test_scheduled_card_with_an_open_parent_and_a_missing_parent_are_refused_up_front(board):
+    tid, gone = spend_stopped(board), spend_stopped(board)
+    parent = kb.create_task(board, title='parent', assignee='default')
+    kb.link_tasks(board, parent, tid)
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+        board.execute("INSERT INTO task_links (parent_id, child_id) VALUES ('t_gone', ?)", (gone,))
+    before = written(board, tid), written(board, gone)
+    assert run(board, tid)['refusal'] == 'scheduled_open_parent'
+    assert run(board, gone)['refusal'] == 'parent_unresolved'
+    assert (written(board, tid), written(board, gone)) == before
+
+
+def test_agent_authority_must_have_read_a_human_comment_written_after_the_stop(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Hold this until Friday.', writer_kind='human')
+    before = written(board, tid)
+    out = as_owner(board, tid)
+    assert out['refusal'] == 'budget_decision_unread' and out['unread'] == [said]
+    assert f'comment {said}' in out['message'] and f'--seen {said}' in out['message']
+    assert written(board, tid) == before and status(board, tid) == 'triage'
+    assert as_owner(board, tid, seen=said)['outcome'] == 'released'
+
+
+def test_agent_authority_must_have_read_a_budget_decision_and_a_human_proceeds(board, monkeypatch):
+    agent_card, human_card = spend_stopped(board), spend_stopped(board)
+    for tid in (agent_card, human_card):
+        scope.link(board, tid)
+        budget.set_override(board, tid, runs=3, by='david', reason='three more, then stop')
+    before = written(board, agent_card)
+    out = as_owner(board, agent_card)
+    assert out['refusal'] == 'budget_decision_unread' and out['unread'] and written(board, agent_card) == before
+    assert f"--seen {max(out['unread'])}" in out['message']
+    assert as_owner(board, agent_card, seen=max(out['unread']))['outcome'] == 'released'
+    assert run(board, human_card)['outcome'] == 'released'  # a human caller is not asked to prove a read
+
+
+def test_an_exempt_card_stays_exempt(board):
+    tid = spend_stopped(board)
+    budget.set_override(board, tid, runs=0, cache_read_tokens=0, by='david', reason='standing card')
+    out = run(board, tid, runs=4)
+    assert out['outcome'] == 'released' and out['budget_runs'] == 0
+    assert budget.card_limits(board, tid, budget.limits()) == budget.Limits(0, 0)
+    assert json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='spend_budget_set' "
+                                    "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0])['by'] == 'david'
+
+
+def test_agent_mandate_supersedes_only_what_agents_wrote(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    out = as_owner(board, tid)
+    body = board.execute('SELECT body FROM task_comments WHERE id=?', (out['mandate_comment'],)).fetchone()[0]
+    assert body == release.mandate_text(release.DEFAULT_RUNS, agent=True)
+    assert 'written by agents earlier are superseded; a limit David set stays in force.' in body
+    record = json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='stop_released'",
+                                      (tid,)).fetchone()[0])
+    assert record['authority_kind'] == 'chat' and record['actor_session'] == scope.CHAT
+
+
+def test_rerun_after_board_unavailable_reuses_the_mandate_comment(board, monkeypatch):
+    from hermes_cli import kanban_scope_renewal_cli as renewal_cli
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    real = renewal_cli.renew
+
+    def down(*a, **kw):
+        raise scope.RenewalRefused('board_unavailable', 'the Board could not be reached')
+    monkeypatch.setattr(renewal_cli, 'renew', down)
+    out = run(board, tid, note='on his word')
+    assert out['refusal'] == 'board_unavailable' and 'a rerun reuses it' in out['message']
+    assert mandates(board, tid) == 1 and records(board, tid) == 0 and status(board, tid) == 'triage'
+    monkeypatch.setattr(renewal_cli, 'renew', real)
+    again = run(board, tid, note='on his word')
+    assert again['outcome'] == 'released' and again['mandate_reused'] is True
+    assert again['mandate_comment'] == out['mandate_comment'] and mandates(board, tid) == 1
+    # A different caller or a different text is not "the same mandate": nothing of someone else's is adopted.
+    other = spend_stopped(board)
+    kb.add_comment(board, other, 'default', release.mandate_text(release.DEFAULT_RUNS), writer_kind='agent',
+                   writer_session='someone-else')
+    assert run(board, other)['mandate_reused'] is False and mandates(board, other) == 2
+
+
+def test_promote_refused_records_nothing_and_a_rerun_finishes(board, monkeypatch):
+    tid = spend_stopped(board)
+    real = kb.promote_task
+    monkeypatch.setattr(kb, 'promote_task', lambda *a, **kw: (False, 'promotion is down'))
+    out = run(board, tid)
+    assert out['refusal'] == 'promote_refused' and 'promotion is down' in out['message']
+    assert status(board, tid) == 'triage' and decision.pending(board, tid) and records(board, tid) == 0
+    monkeypatch.setattr(kb, 'promote_task', real)
+    again = run(board, tid)
+    assert again['outcome'] == 'released' and again['mandate_reused'] and mandates(board, tid) == 1
+    assert records(board, tid) == 1 and status(board, tid) == 'ready'
+
+
+def test_dependency_wait_refused_is_finished_by_a_rerun(board, monkeypatch):
+    tid = spend_stopped(board)
+    parent = kb.create_task(board, title='parent', assignee='default')
+    kb.link_tasks(board, parent, tid)
+    real = kb.block_task
+    monkeypatch.setattr(kb, 'block_task', lambda *a, **kw: False)
+    out = run(board, tid)
+    assert out['refusal'] == 'dependency_wait_refused' and 'rerun to finish' in out['message']
+    assert status(board, tid) == 'triage' and not decision.pending(board, tid) and records(board, tid) == 1
+    monkeypatch.setattr(kb, 'block_task', real)
+    again = run(board, tid)
+    assert again['outcome'] == 'waiting_on_parents' and again['resumed'] and status(board, tid) == 'todo'
+    assert mandates(board, tid) == 1 and records(board, tid) == 1
+    assert run(board, tid)['outcome'] == 'already_released'
+    # The same partial state with the parent finished meanwhile is finished by a promotion.
+    late = spend_stopped(board)
+    kb.link_tasks(board, parent, late)
+    monkeypatch.setattr(kb, 'block_task', lambda *a, **kw: False)
+    assert run(board, late)['refusal'] == 'dependency_wait_refused'
+    monkeypatch.setattr(kb, 'block_task', real)
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+    done = run(board, late)
+    assert done['outcome'] == 'released' and done['resumed'] and status(board, late) == 'ready'
+
+
+def test_already_released_cannot_be_faked_by_a_comment(board):
+    tid = spend_stopped(board)
+    kb.add_comment(board, tid, 'default', release.mandate_text(10), writer_kind='agent', writer_session='x')
+    assert kb.promote_task(board, tid, actor='someone', reason='plain promote')[0]
+    out = run(board, tid)
+    assert out['outcome'] == 'refused' and out['refusal'] == 'not_held'
+    assert release.released_by(board, tid, 'anything') is None
+
+
+def test_a_precondition_is_asked_before_writing_and_inside_the_deciding_transaction(board):
+    tid = spend_stopped(board)
+    before = written(board, tid)
+    assert run(board, tid, precondition=lambda c: 'changed ask')['refusal'] == 'ask_changed'
+    assert written(board, tid) == before
+    calls = []
+
+    def late(c):
+        calls.append(c.in_transaction)
+        return 'changed ask' if len(calls) > 1 else None
+    out = run(board, tid, precondition=late)
+    assert out['refusal'] == 'ask_changed' and calls == [False, True]
+    assert status(board, tid) == 'triage' and decision.pending(board, tid) and records(board, tid) == 0
+    assert run(board, tid)['outcome'] == 'released' and mandates(board, tid) == 1
+
+
+def test_only_the_released_stops_decision_cards_are_archived(board):
+    tid = spend_stopped(board)
+    decision.ensure_producer(board, tid)
+    mine = board.execute("SELECT id FROM tasks WHERE created_by='kanban-spend-budget'").fetchone()[0]
+    earlier = kb.create_task(board, title='Spend budget decision: earlier stop', assignee='default',
+                             created_by='kanban-spend-budget')
+    elsewhere = kb.create_task(board, title='Spend budget decision: another card', assignee='default',
+                               created_by='kanban-spend-budget')
+    kb._append_event(board, earlier, 'administrative_decision', {'root_task': tid, 'root_episode': 'an-earlier-stop'})
+    kb._append_event(board, elsewhere, 'administrative_decision', {'root_task': 't_other', 'root_episode': 'x'})
+    board.commit()
+    out = run(board, tid)
+    assert out['archived_decisions'] == [mine] and status(board, mine) == 'archived'
+    assert status(board, earlier) != 'archived' and status(board, elsewhere) != 'archived'
+    # A decision card for an earlier stop offers nothing, and a forged stamp for it is not an offer either.
+    again = spend_stopped(board)
+    stale = kb.create_task(board, title='Spend budget decision: stale', assignee='default',
+                           created_by='kanban-spend-budget')
+    kb._append_event(board, stale, 'administrative_decision', {'root_task': again, 'root_episode': 'stop-1'})
+    board.commit()
+    assert release.held(board, stale) == again and release.offer(board, stale) is None
+    assert release.offered(board, stale, {'release_target': {'task': again, 'episode': 'stop-1'}}) is None
+
+
+def test_no_supplied_request_can_carry_the_release_offer(board):
+    from hermes_cli.kanban_human_request import validate_human_request
+    tid = spend_stopped(board)
+    offer = release.offer(board, tid)
+    assert offer == {'task': tid, 'episode': scope.renewal.key(decision.pending_episode(board, tid))}
+    forged = {'action': 'Unblock = I archive the root.', 'why_human': 'Only you can decide.', 'interaction': 'approval',
+              'scope': 'An agent wrote this ask.', 'evidence': 'none', 'release_target': offer}
+    assert 'release_target' not in validate_human_request(forged)
+    card = kb.create_task(board, title='agent ask', assignee='default')
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='ready' WHERE id=?", (card,))
+    assert kb.block_task(board, card, kind='needs_input', reason='ask', human_request=forged)
+    stored = json.loads(board.execute('SELECT human_request FROM tasks WHERE id=?', (card,)).fetchone()[0])
+    assert 'release_target' not in stored
+    # The offer is honoured only while it is still true.
+    assert release.offered(board, tid, {'release_target': offer}) == tid
+    assert release.offered(board, tid, {}) is None and release.offered(board, tid, None) is None
+    assert release.offered(board, tid, {'release_target': {**offer, 'episode': 'another-stop'}}) is None
+    assert release.offered(board, tid, {'release_target': {**offer, 'task': 't_other'}}) is None
+    run(board, tid)
+    assert release.offered(board, tid, {'release_target': offer}) is None  # nothing is held any more

@@ -129,6 +129,8 @@ def test_spend_stop_on_dead_chat_gets_request_and_desk(kanban_home, own_gateway)
         assert "cannot release this hold" not in request["action"]
         assert "A) Unblock: Release this card to finish its acceptance: 10 more runs" in request["scope"]
         assert "Recommend: A - release it to finish" in request["scope"]
+        from hermes_cli import kanban_release
+        assert request["release_target"] == kanban_release.offer(conn, tid) and request["release_target"]["task"] == tid
         assert "without a bounded proposal" not in request["scope"]
         assert request["why_human"].startswith("Tried:") and "Only you can:" in request["why_human"]
         assert "spend_budget_triaged" in request["evidence"] and "runs=" in request["evidence"]
@@ -681,7 +683,9 @@ def test_remote_unblock_refused_by_safety_leaves_the_ask_and_records_the_reason(
     with kbc.connect_closing() as conn:
         tid = _spend_stopped_on_dead_chat(conn, kanban_home)
         assert _sweep(conn, now=_later(3), cfg={}) == [tid]
-        kb._append_event(conn, tid, "decision_hold_restricted", {"cause": "safety_refusal"})
+        stop = decision.pending_episode(conn, tid)  # a refusal that arrived after the ask offered the release
+        kb._append_event(conn, tid, "decision_hold_restricted",
+                         {"cause": "safety_refusal", "episode": stop.get("uid") or str(stop["id"])})
         conn.commit()
         for _ in range(2):  # a redelivery says it once
             with pytest.raises(ca.AnswerRefused, match="release_refused: safety_restricted"):
@@ -740,3 +744,101 @@ def test_invalid_human_request_is_not_left_to_the_stale_sweep(kanban_home, own_g
         assert _sweep(conn, now=_later(1), cfg={}) == []
         assert _sweep(conn, now=_later(3), cfg={}) == [tid]
         assert card_is_open_human_ask(*_row(conn, tid))
+
+
+# --- the Unblock click releases only an ask that offered it (kanban_release.offered) ------------------------------
+
+def _restamp(conn, tid, change):
+    """Rewrite the swept ask as ``change`` leaves it; the lifecycle (and so the generation's events) is untouched."""
+    ask = json.loads(_row(conn, tid)[2])
+    change(ask)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET human_request=? WHERE id=?", (json.dumps(ask), tid))
+
+
+def _no_release(conn, tid):
+    return not conn.execute("SELECT 1 FROM task_comments WHERE task_id=? AND body LIKE 'Released to finish%'",
+                            (tid,)).fetchone() and decision.pending(conn, tid)
+
+
+@pytest.mark.parametrize("ask", ["agent_authored", "old_text", "other_stop"])
+def test_remote_unblock_without_a_true_release_offer_is_a_plain_unblock(kanban_home, own_gateway, ask):
+    """An ask an agent wrote, one filed before the stamp existed, and a stamp naming another stop: none offered
+    this release, so the click is today's unblock (refused on a pending spend decision) and releases nothing."""
+    from hermes_cli import kanban_card_answer as ca
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+
+        def change(request):
+            if ask == "agent_authored":
+                request.pop("release_target")
+                request["action"] = "Unblock = I archive the root card."
+            elif ask == "old_text":
+                request.pop("release_target")
+                request["action"] = ("Decide how to handle: Bounded work. Unblock = ask the owner to record a "
+                                     "bounded decision; the button cannot release this hold")
+            else:
+                request["release_target"]["episode"] = "an-earlier-stop"
+        _restamp(conn, tid, change)
+        with pytest.raises(ca.AnswerRefused, match="ask_changed_or_held|spend_decision_pending"):
+            _answer(conn, tid, "unblock")
+        assert _row(conn, tid)[0] == "triage" and _no_release(conn, tid)
+
+
+def test_remote_unblock_refused_by_containment_leaves_the_ask_and_records_the_reason(kanban_home, own_gateway,
+                                                                                    monkeypatch):
+    from hermes_cli import kanban_card_answer as ca
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        generation = ca.snapshot(conn, tid)["generation"]
+        monkeypatch.setattr("hermes_cli.kanban_containment_guard.pending", lambda c, task, **kw: task == tid)
+        with pytest.raises(ca.AnswerRefused, match="release_refused: containment_hold"):
+            _retry(conn, tid, generation)
+        assert _row(conn, tid)[0] == "triage" and _row(conn, tid)[2] and _no_release(conn, tid)
+        notes = [r[0] for r in conn.execute(
+            "SELECT body FROM task_comments WHERE task_id=? AND author='user-steps'", (tid,))]
+        assert len(notes) == 1 and "containment_hold" in notes[0]
+
+
+def _decision_card_with_ask(conn):
+    """A plain budget stop no chat owns, its decision card, and the brief's ask filed on that card."""
+    from hermes_cli import kanban_stranded_brief as brief
+    from hermes_cli.kanban_ask_resolved import store_request
+    root = kb.create_task(conn, title="Ownerless work", assignee="default")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (root,))
+        kb._append_event(conn, root, decision.EVENT, {"reason": "Spend budget: 15 runs"})
+    decision.ensure_producer(conn, root)
+    card = conn.execute("SELECT id FROM tasks WHERE created_by='kanban-spend-budget' ORDER BY rowid DESC").fetchone()[0]
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='blocked', block_kind='needs_input' WHERE id=?", (card,))
+        row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (card,)).fetchone())
+        store_request(conn, card, brief.request(conn, row, None, 3 * HOUR, "events: spend_budget_triaged runs=15"))
+    return root, card
+
+
+def test_remote_unblock_on_a_decision_card_releases_its_stopped_card(kanban_home, own_gateway, monkeypatch):
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    monkeypatch.setattr(reviewer, "queue", lambda *a, **kw: False)
+    with kbc.connect_closing() as conn:
+        root, card = _decision_card_with_ask(conn)
+        assert json.loads(_row(conn, card)[2])["release_target"]["task"] == root
+        receipt = _answer(conn, card, "unblock")
+        assert receipt["task"] == card and kb.get_task(conn, root).status == "ready"
+        assert kb.get_task(conn, card).status == "archived" and not decision.pending(conn, root)
+
+
+def test_remote_unblock_on_a_stale_decision_card_does_not_release_a_later_stop(kanban_home, own_gateway, monkeypatch):
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    monkeypatch.setattr(reviewer, "queue", lambda *a, **kw: False)
+    with kbc.connect_closing() as conn:
+        root, card = _decision_card_with_ask(conn)
+        with kb.write_txn(conn):  # the card stopped again: the ask on the first stop's decision card is stale
+            kb._append_event(conn, root, "promoted_manual", {"actor": "someone", "reason": "one more"})
+            kb._append_event(conn, root, decision.EVENT, {"reason": "Spend budget: again"})
+        assert decision.pending(conn, root)
+        _answer(conn, card, "unblock")  # today's plain unblock of the decision card itself
+        assert kb.get_task(conn, card).status != "blocked"
+        assert kb.get_task(conn, root).status == "triage" and _no_release(conn, root)

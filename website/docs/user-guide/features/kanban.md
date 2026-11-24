@@ -751,21 +751,34 @@ there but undecided after 30 minutes gets the same single review. Scope and
 safety stops are never reviewed; `kanban.spend_review: false` turns the
 reviewer off.
 
-`hermes kanban release <id> [--ids <id>...] [--runs N] [--note TEXT]` is the one-step release of a
-spend or scope stop. Per card it writes one goal-level mandate comment (finish the card's
+`hermes kanban release <id> [--ids <id>...] [--runs N] [--note TEXT] [--seen ID]` is the one-step release
+of a spend or scope stop. Per card it writes one goal-level mandate comment (finish the card's
 acceptance; stop only on a provider safety refusal, a step that needs David physically, the same
 error three times, or the run budget), renews the scope when the stop is a scope stop, sets the
 card's budget to the runs already counted plus `N` (default `kanban.release_runs`, 10) with no
-cache-read limit, promotes it, and archives the open decision cards filed for that stop. A decision
-card's id releases the card it was filed for. A card with an open parent is not promoted: its
-decision is recorded and it waits in `todo` as a dependency wait. The caller must be whoever
-`renew-scope` accepts (a human operator, the owning chat, the creator task); a run of the stopped
-card is refused. A provider safety restriction (`safety_restricted`) and a containment hold
-(`containment_hold`) are refused, a card no stop holds is `not_held`, and a rerun is
-`already_released`; a refusal writes nothing. Only a card whose home is this board is released.
-The Desktop Unblock button on such a card's ask, or on its decision card's ask, makes the same release
-(locally through the user-steps mirror, remotely through `kanban_card_answer` on the card's home), recorded as
-a human act with the note `Desktop Unblock, operation <id>`; an ask with its own choices keeps the plain unblock.
+cache-read limit, promotes it, and archives the open decision cards filed for that stop. An exempt
+card stays exempt. A decision card's id releases the card it was filed for. A card with an open
+parent is not promoted: its decision is recorded and it waits in `todo` as a dependency wait.
+
+The caller is a human operator, the card's owning chat or a delegate chat (`hermes kanban delegate
+grant`); a run of the stopped card is refused and worker shells are fenced from the verb. Everything
+that can refuse is checked before anything is written: a provider safety restriction
+(`safety_restricted`), a containment hold (`containment_hold`), a card no stop holds (`not_held`), a
+parent not on this board (`parent_unresolved`), a scheduled card with an open parent
+(`scheduled_open_parent`). An agent caller is also refused `budget_decision_unread`, with the comment
+id, when a human commented or a budget decision was recorded after the stop and it has not passed
+`--seen <id>`; a human caller proceeds. An agent's mandate supersedes only limits agents wrote.
+
+Each release records a `stop_released` event (authority, runs, mandate comment); a rerun after it is
+`already_released`. A rerun after a failure past the mandate comment reuses that comment and
+finishes. Only a card whose home is this board is released.
+
+The Desktop Unblock button makes the same release, recorded as a human act with the note
+`Desktop Unblock, operation <id>`, only on an ask that offered it: the stranded-park ask for a held
+card (or for the decision card of its pending stop) carries a `release_target` stamp that no agent,
+tool or CLI request can supply. An agent-written ask, an ask with its own choices, an ask filed
+before the stamp existed and a decision card for an earlier stop keep the plain unblock. Local
+clicks go through the user-steps mirror, remote ones through `kanban_card_answer` on the card's home.
 
 An over-budget card that **published** an OPEN PR on
 `softmax-universe/daveey-hermes` targeting `main` is spared from a new spend
@@ -1603,7 +1616,7 @@ hermes kanban renew-scope <id> --episode <stop uid> --mandate-comment <comment i
 hermes kanban delegate grant --session <session id|'*'> [--gateway G] [--profile P] [--hours H] --reason <text>
 hermes kanban delegate revoke --session <session id|'*'> [--gateway G] [--profile P] --reason <text>
 hermes kanban delegate list [--json]                   # human operator: let a chat renew cards it does not own
-hermes kanban release <id> [--ids <id>...] [--runs N] [--note TEXT] [--json]
+hermes kanban release <id> [--ids <id>...] [--runs N] [--note TEXT] [--seen ID] [--json]
                                                        # one step: mandate comment + renew-scope + spend-budget
                                                        # (spent + N runs) + promote; open parents wait in todo
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time

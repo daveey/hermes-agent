@@ -54,9 +54,12 @@ def request(conn, row, entry, age, evidence):
     restricted = execution_restricted(conn, tid)
     # The stopped card an Unblock releases (kanban_release): this card, or the one this decision card was filed for.
     from hermes_cli import kanban_release
-    stopped, runs = kanban_release.held(conn, tid), kanban_release.default_runs()
+    waiting, runs = kanban_release.held(conn, tid), kanban_release.default_runs()
     from hermes_cli.kanban_refusal_receipt import restricted as safety_restricted
-    unsafe = bool(stopped) and safety_restricted(conn, stopped)
+    unsafe = bool(waiting) and safety_restricted(conn, waiting)
+    # The offer is stamped on the ask below; the click releases only an ask that carries it (kanban_release.offered).
+    offer = None if unsafe else kanban_release.offer(conn, tid)
+    stopped = waiting if unsafe else (offer or {}).get('task')
     if stopped:
         resume = ('No release: a provider safety hold stays on the work; the click only records that refusal.'
                   if unsafe else
@@ -94,7 +97,7 @@ def request(conn, row, entry, age, evidence):
                "scope renewal and safety gates still apply" if held or restricted else
                "Unblock = return this decision to an agent (not permission to run the source work)" if administrative else
                "Unblock = it goes back to work as it is")
-    return validate_human_request({
+    request = validate_human_request({
         'action': f"Decide how to handle: {summary}. {release}; archive = {drop}",
         'why_human': (f"Tried: checking for an active owner and a usable request after {age // 3600}h stopped. "
                       "Only you can: choose whether to dismiss this work or give its owner new direction."),
@@ -103,3 +106,6 @@ def request(conn, row, entry, age, evidence):
                   f"Recommend: {recommendation}\nIf you do nothing, the work stays stopped with no further spend."),
         'evidence': evidence,
     }, kind=row.get('block_kind'))
+    if offer:  # after validation, which drops the field from any supplied request: only this producer sets it
+        request[kanban_release.STAMP] = offer
+    return request

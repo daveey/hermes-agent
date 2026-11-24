@@ -695,10 +695,14 @@ _SPECS = [
         _arg("--runs", type=int, default=None,
              help="More runs the card gets (default: kanban.release_runs, 10), on top of the runs already counted"),
         _arg("--note", default=None, help="Text appended to the mandate comment as its own paragraph"),
+        _arg("--seen", dest="seen_comment_id", type=int,
+             help="Newest comment id read (one card). An agent caller needs it when a human commented or a budget "
+                  "decision was recorded after the stop"),
         _json_flag(),
     ], help="Release spend- or scope-stopped cards to finish in one step: a goal-level mandate comment, the scope "
             "renewal, a spend budget of spent + N runs and the promotion (a card with an open parent waits in "
-            "todo). Same authority as renew-scope; safety and containment holds are refused"),
+            "todo). For a human operator, the card's owning chat or a delegate chat; worker shells are fenced. "
+            "Safety and containment holds are refused"),
     _cmd("spend-budget", [
         _TASK_ID,
         _arg("--seen", dest="seen_comment_id", type=int, help="Newest decision comment read; refuse replacing an unread spend-stop budget decision."),

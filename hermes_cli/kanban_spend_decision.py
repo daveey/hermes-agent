@@ -245,9 +245,10 @@ def unblock_refusal(conn, task_id: str) -> str | None:
             + _one_step(task_id))
 
 
-def _one_step(task_id) -> str:
-    from hermes_cli.kanban_release import ONE_STEP
-    return ONE_STEP.format(task=task_id or '<task>')
+def _one_step(task_id, *, for_worker=False) -> str:
+    """``for_worker``: text for a decision card's own worker, which is fenced from the verb."""
+    from hermes_cli.kanban_release import ONE_STEP, WORKER_NOTE
+    return (WORKER_NOTE if for_worker else ONE_STEP).format(task=task_id or '<task>')
 
 
 def notice(payload: dict) -> str:
@@ -268,7 +269,7 @@ def notice(payload: dict) -> str:
     return (str(payload.get("reason") or "Spend budget reached") + ". Held in triage until a recorded decision: "
             "split or re-scope the work, then manually promote it, or archive it. "
             "Do not requeue unchanged; the stale-triage sweep cannot release this hold. "
-            + _one_step(payload.get('task_id')) + '.')
+            + _one_step(payload.get('task_id'), for_worker=bool(payload.get('for_worker'))) + '.')
 
 
 def producer(conn, task_id: str, note: str) -> dict:
@@ -400,7 +401,7 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
     # wait explains it. Only an ordinary budget stop reaches the decision card below.
     if safety or stopped or (stop and _json.loads(stop['payload'] or '{}').get('cause')):
         return {'kind': 'unavailable'}
-    guidance = notice({'reason': note, 'task_id': task_id})
+    guidance = notice({'reason': note, 'task_id': task_id, 'for_worker': True})
     action = (f"\n\nRecord the decision on {task_id}; use `hermes kanban promote {task_id} --reason '<what changed>'` "
               'only after re-scoping or justifying further spend, or archive it. Do not run the original work here.')
     sup = kb.create_task(
