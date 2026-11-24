@@ -430,7 +430,12 @@ def _process_tree_snapshot(pid: int, *, hard_kill: bool):
                             if status != psutil.STATUS_STOPPED:
                                 process.suspend()
                                 stopped.append(process)
-                            while process.status() != psutil.STATUS_STOPPED:
+                            # A target that exits after the first read is a zombie until
+                            # reaped, never STOPPED; it cannot fork, so it is as safe as
+                            # stopped. Waiting for STOPPED burned the whole stop budget.
+                            while (status := process.status()) != psutil.STATUS_STOPPED:
+                                if status in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                                    break
                                 if time.monotonic() >= stop_deadline:
                                     raise TimeoutError("process did not stop before snapshot deadline")
                                 time.sleep(0.001)
