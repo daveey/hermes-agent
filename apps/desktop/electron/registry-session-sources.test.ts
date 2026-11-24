@@ -63,4 +63,64 @@ describe('registry session sources with the SSH primary reused', () => {
 
     expect(scopes.sort()).toEqual(['box/box-default-1', 'box/box-gamma-1', 'lan/lan-eps-1'])
   })
+
+  it('reuses the primary aggregate for the reused SSH primary instead of re-reading that backend', async () => {
+    const deps = {
+      connections: [
+        { id: 'box', kind: 'ssh' },
+        { id: 'lan', kind: 'remote' }
+      ],
+      pool: [['conn:lan::default', { connectionPromise: Promise.resolve(lan) }]] as Array<
+        [string, { connectionPromise: Promise<unknown> }]
+      >,
+      scopePrefix: (id: string) => `conn:${id}::`,
+      reusedPrimary: async (id: string) => (id === 'box' ? primary : null),
+      installId: async (id: string) => `install-${id}`,
+      sharedProfiles: sharedSshProfiles
+    }
+
+    const sources = await collectRegistrySessionSources(deps, false)
+    expect(sources.find(source => source.connectionId === 'box')?.reusesPrimary).toBe(true)
+    expect(sources.find(source => source.connectionId === 'lan')?.reusesPrimary).toBeUndefined()
+
+    const read = async (base: unknown) => {
+      const hosts: string[] = []
+
+      const counting = async (descriptor: unknown, path: string) => {
+        hosts.push((descriptor as { baseUrl: string }).baseUrl)
+
+        return JSON.parse(JSON.stringify(await getJson(descriptor, path)))
+      }
+
+      const merged: unknown[] = []
+      const totals: Record<string, number> = {}
+      await mergeRegistrySessionRows(sources, new URLSearchParams('limit=500'), counting, merged, totals, { base })
+
+      return { hosts, merged, totals }
+    }
+
+    const fetched = await read(null)
+    // Without the reuse the same backend is scanned again (five 100-row pages
+    // per 500-row refresh against a real history; one here, as it runs short).
+    expect(fetched.hosts.filter(host => host === primary.baseUrl).length).toBeGreaterThan(0)
+
+    const primaryRows: Array<Record<string, unknown>> = [
+      { id: 'box-default-1', profile: 'default', last_active: 3 },
+      { id: 'box-gamma-1', profile: 'gamma', last_active: 2 }
+    ]
+    const first = { sessions: primaryRows, total: 2, profile_totals: { default: 1, gamma: 1 } }
+    const reused = await read(first)
+
+    expect(reused.hosts).not.toContain(primary.baseUrl)
+    expect(reused.hosts).toContain(lan.baseUrl)
+    expect(reused.merged).toEqual(fetched.merged)
+    expect(reused.totals).toEqual(fetched.totals)
+    // The primary read is shared with the base list: tagging must not mutate it.
+    expect(primaryRows.every(row => !('connection_id' in row))).toBe(true)
+
+    // A degraded primary read (scan errors) is never reused as authoritative.
+    const degraded = await read({ ...first, errors: [{ profile: 'gamma', error: 'locked' }] })
+    expect(degraded.hosts).toContain(primary.baseUrl)
+    expect(degraded.merged).toEqual(fetched.merged)
+  })
 })

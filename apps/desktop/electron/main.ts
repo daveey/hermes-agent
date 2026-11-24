@@ -15550,8 +15550,8 @@ async function mergeRemoteProfileSessions(
 
   if (registrySources.length) {
     const getRegistryJson = (descriptor, path) => getJsonForBackend(descriptor, path, { timeoutMs: 10_000 })
-    // RT-42: count each backend (install_id) once; remote-override profiles are another backend.
-    const identity = { primaryBackendId: await primaryBackendInstallId(), unknownPrimaryProfiles: remoteProfiles }
+    // RT-42: count each backend (install_id) once; `base` serves the reused SSH primary without a re-read.
+    const identity = { primaryBackendId: await primaryBackendInstallId(), unknownPrimaryProfiles: remoteProfiles, base }
     total += await mergeRegistrySessionRows(registrySources, remoteParams, getRegistryJson, merged, profileTotals, identity)
   }
 

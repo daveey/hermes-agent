@@ -453,6 +453,18 @@ export interface RegistrySessionSource {
   /** The connection's gateway install_id, when known. Sources sharing one are the same backend
    *  and count their session totals once; a source without one is never summed with another. */
   backendId?: string
+  /** True when `backends[0]` is the window's running primary descriptor reused
+   *  for this SSH connection (no pooled backend of its own): the primary
+   *  aggregate already read this exact backend, so a merge can reuse it. */
+  reusesPrimary?: boolean
+}
+
+/** The primary aggregate a unified merge already read: rows plus the first
+ *  page (for `total`/`profile_totals`). Only offered when that read had no
+ *  scan errors, so a degraded primary read is never reused as authoritative. */
+export interface PrimaryAggregateRead {
+  rows: unknown[]
+  first: unknown
 }
 
 type PinnedRegistrySessionSource = Pick<RegistrySessionSource, 'connectionId'> &
@@ -639,7 +651,8 @@ export async function fetchRegistrySessionRows(
   sources: RegistrySessionSource[],
   searchParams: URLSearchParams,
   getJson: GetJsonForDescriptor,
-  reportedTotals?: Map<string, number>
+  reportedTotals?: Map<string, number>,
+  primaryAggregate: PrimaryAggregateRead | null = null
 ): Promise<unknown[]> {
   const rows: unknown[] = []
 
@@ -725,6 +738,22 @@ export async function fetchRegistrySessionRows(
       const shared = source.backends[0]
 
       if (!shared) {
+        return
+      }
+
+      // The SSH primary reused as this registry source is the backend the
+      // primary aggregate just read with the same window and filters: reuse
+      // that read instead of re-scanning every profile on the remote again
+      // (five paged /api/profiles/sessions calls per refresh). Rows are copied
+      // because tagging stamps connection_id/profile in place.
+      if (source.reusesPrimary && primaryAggregate) {
+        recordTotals(primaryAggregate.first, source.connectionId, null)
+        tag(
+          primaryAggregate.rows.map(row => (row && typeof row === 'object' ? { ...(row as object) } : row)),
+          source.connectionId,
+          null
+        )
+
         return
       }
 
@@ -933,10 +962,19 @@ export async function mergeRegistrySessionRows(
   getJson: GetJsonForDescriptor,
   merged: unknown[],
   profileTotals: Record<string, number>,
-  identity: Omit<RegistryBackendIdentity, 'backendIds'> = {}
+  identity: Omit<RegistryBackendIdentity, 'backendIds'> & {
+    /** The primary aggregate response this merge already read. A clean one
+     *  (no scan errors) stands in for a `reusesPrimary` source's own read. */
+    base?: unknown
+  } = {}
 ): Promise<number> {
+  const primaryAggregate: PrimaryAggregateRead | null =
+    identity.base && typeof identity.base === 'object' && !errorsOf(identity.base)?.length
+      ? { rows: rowsOf(identity.base), first: identity.base }
+      : null
+
   const reportedTotals = new Map<string, number>()
-  const registryRows = await fetchRegistrySessionRows(sources, searchParams, getJson, reportedTotals)
+  const registryRows = await fetchRegistrySessionRows(sources, searchParams, getJson, reportedTotals, primaryAggregate)
   const before = merged.length
   spliceRegistrySessionRows(merged, registryRows, profileTotals)
 

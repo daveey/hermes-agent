@@ -51,12 +51,14 @@ export async function collectRegistrySessionSources(
     const pooled = pool.filter(([key, entry]) => key.startsWith(prefix) && entry.connectionPromise)
     const perProfile = connection.kind === 'ssh' || (includeLocal && connection.kind === 'local')
     const backends: SessionBackend[] = []
+    let reusesPrimary = false
 
     if (connection.kind === 'ssh' && !pooled.some(([key]) => (key.slice(prefix.length) || 'default') === 'default')) {
       const primary = await deps.reusedPrimary(connection.id)
 
       if (primary) {
         backends.push({ descriptor: primary, profileLabel: 'default' })
+        reusesPrimary = true
       }
     }
 
@@ -84,7 +86,14 @@ export async function collectRegistrySessionSources(
     if (backends.length) {
       const backendId = await deps.installId(connection.id, backends[0].descriptor)
       const sharedProfiles = connection.kind === 'ssh' ? deps.sharedProfiles(connection.id, backends) : undefined
-      sources.push({ backendId, backends, connectionId: connection.id, kind: connection.kind, sharedProfiles })
+      sources.push({
+        backendId,
+        backends,
+        connectionId: connection.id,
+        kind: connection.kind,
+        sharedProfiles,
+        ...(reusesPrimary ? { reusesPrimary } : {})
+      })
     }
   }
 
