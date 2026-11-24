@@ -35,14 +35,28 @@ in the diagnostic producer test file.
 
 ## Unresolved sender requirements: D stays open
 
-1. **Normal ACK carrier / throughput.** Design section 2 (lines 251–258 of the
-   pinned spec) requires successor-piggyback ACK and standalone ACK for idle or
-   rotation/cancellation. `_push_strict` currently sends ops, performs separate
-   inspect, then standalone ACK before selecting another operation. The allocator
-   can freeze predecessor ACK, but this public steady-state path does not yet
-   establish the specified one-round-trip behavior. Implement and prove the
-   specified path before throughput benchmarking; do not call the present
-   three-request-per-operation loop compliant or infer a waiver from an old test.
+1. **Normal ACK carrier / throughput (partial progress).** The public sender now
+   leaves the predecessor ACK for the successor's frozen envelope rather than
+   sending an intermediate standalone control. Exact newly consuming ops replies
+   (explicit protocol, consumed=true, sequence, H, ID and digest) can settle without
+   a redundant inspect; all incomplete/nonconsuming/unknown/duplicate reply shapes
+   still require authoritative inspection. Idle/end-of-turn and recovery ACKs stay.
+   ACK readback requires identical slot fields and JSON-equivalent final verdicts,
+   allowing only representation differences (Board JSON.stringify versus Python),
+   never different verdict content. Nineteen new fixture cases include40 successive
+   settlements, uncertain successor/reopen, bad consuming metadata, compact JSON,
+   changed verdict refusal and exclusion of current-row reply enrichment.
+
+   This is **not yet production HTTP one-round-trip or throughput acceptance**:
+   `kanban_sync_exposure.send` still performs a pinned credential capability probe
+   for each mutation. Preserve that exposure/authentication boundary while designing
+   session-scoped reuse; never simply omit the probe. The real receiver's reply
+   shape was read from `settleReplay` at hub main f6f535ae7205cdf07239248bf48d165f712f9f11,
+   not invented from client expectations. Its current ingress reads top-level
+   `op.ack`, whereas the frozen sender stores `op.replay.ack`; this interoperability
+   mismatch remains explicitly receiver/integration-owned and unproven. Do not
+   unilaterally change frozen wire identity. Fixture request counts are not real
+   Board/latency/backlog/lease throughput evidence.
 2. **General bounded transport recovery.** Spec lines 384–393 bound automatic
    timeout/gap/ACK-required recovery to eight attempts or five reachable minutes,
    preserve custody offline, stop with one actionable recovery fault and require

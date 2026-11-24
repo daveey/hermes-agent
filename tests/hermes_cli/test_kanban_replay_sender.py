@@ -44,6 +44,10 @@ class Receiver:
         assert body['journal_id'] == self.slot['journal_id']
         op, = body['ops']
         assert op['replay']['session'] == self.slot['session']
+        if int(op['replay']['sequence']) > int(self.slot['h']) and self.slot['a'] != self.slot['h']:
+            assert op['replay'].get('ack') == dict(sequence=self.slot['h'], op_id=self.slot['last_op_id'],
+                                                  payload_sha256=self.slot['last_payload_sha256'])
+            self.slot['a'] = self.slot['h']
         self.sent.append(op)
         self.slot.update(h=op['replay']['sequence'], last_op_id=op['client_op_id'],
                          last_payload_sha256=op['replay']['payload_sha256'],

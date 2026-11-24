@@ -384,20 +384,21 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         wire['replay']['session'] = remote['session']
         if isinstance(hub, client._HTTP_HUB):
             from hermes_cli.kanban_sync_exposure import send
-            send(hub, conn, board, [wire], replay=identity)
+            reply = send(hub, conn, board, [wire], replay=identity)
         else:
-            hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
+            reply = hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
         out.sent += 1
-        remote = hub._call('GET', root + 'inspect')['slot']
+        from hermes_cli.kanban_replay_reply import consumed_slot
+        remote = (consumed_slot(reply, wire, remote, journal.snapshot(conn)) or
+                  hub._call('GET', root + 'inspect')['slot'])
         membership = refresh_capacity()
         current_row = refresh_current_row()
         with settlement():
             decision = journal.recover(conn, remote, record)
         if decision['action'] != 'record':
             break
-        # W=1: locally settling a verdict is not enough to open the next slot.
-        # Publish its ACK before selecting/issuing another intent in this push.
-        remote = _ack_settled(conn, hub, root, identity, remote)
+        # The next issued envelope freezes the durable predecessor ACK. Keep
+        # standalone ACK for idle/end-of-turn and recovery, not between sends.
     settled = journal.snapshot(conn)
     remote = _ack_settled(conn, hub, root, identity, remote)
     from hermes_cli.kanban_replay_observation import after_push
@@ -412,7 +413,8 @@ def _ack_settled(conn, hub, root, identity, remote):
         remote = hub._call('POST', root + 'ack', dict(identity, session=remote['session'],
             generation=settled['generation'], ack=dict(sequence=settled['settled'],
                 op_id=settled['last_op_id'], payload_sha256=settled['last_payload_sha256'])))['slot']
-        if remote != expected:
+        from hermes_cli.kanban_replay_reply import same_slot
+        if not same_slot(expected, remote):
             raise ValueError('ack readback mismatch')
         reconcile(settled, remote)
     return remote
