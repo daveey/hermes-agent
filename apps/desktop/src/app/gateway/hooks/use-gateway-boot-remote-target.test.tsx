@@ -63,17 +63,13 @@ afterEach(() => {
   tearDownBootHarness()
 })
 
-it('keeps send on the REST-readable remote target after a primary disconnect', async () => {
+it('keeps send on the same remote target after a primary disconnect', async () => {
   render(<BootHarness />)
   await flushAsync()
   expect(FakeWebSocket.instances[0].url).toBe(remote.wsUrl)
 
-  // History reads remain pinned to the remote REST source across a WS drop.
-  const read = vi.fn(async (connectionId: string) => (connectionId === 'hub' ? { id: target } : null))
-  expect(await read('hub')).toEqual({ id: target })
   act(() => FakeWebSocket.instances[0].drop())
   await advanceBackoff()
-  expect(await read('hub')).toEqual({ id: target })
   expect(FakeWebSocket.instances.at(-1)?.url).toBe(remote.wsUrl)
 
   const pending = requestGatewayForAgent('hub', 'default', 'session.resume', { session_id: target }).catch(

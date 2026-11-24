@@ -7356,7 +7356,7 @@ async function mintGatewayWsTicket(baseUrl: string, headers: Record<string, stri
 // calls this immediately before every gateway.connect() so each WS upgrade
 // carries a freshly-minted ticket. For local/token connections this just
 // reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile, webContentsId, opts = {}) {
+async function freshGatewayWsUrl(profile, webContentsId, opts: { inheritsPrimary?: boolean } = {}) {
   // Named pool callers mint on their own backend. Primary descriptors must
   // retain inheritance: their alias/name may also identify a local pool.
   // Descriptor lookup and ticket mint must make the same backend choice.
@@ -7364,8 +7364,9 @@ async function freshGatewayWsUrl(profile, webContentsId, opts = {}) {
   const connection = await ensure()
 
   if (connection.gatewayEndpoint) {
-    return localGatewayDial({ ensure, forget: () => forgetLocalGatewayDescriptor(profile), launchHome: HERMES_HOME,
-      prepare: (baseUrl, ticket) => localGatewayDials.prepare(baseUrl, ticket, webContentsId), profile: String(profile ?? '') })
+    const dialProfile = opts.inheritsPrimary ? connection.profile : String(profile ?? '')
+    return localGatewayDial({ ensure, forget: () => forgetLocalGatewayDescriptor(dialProfile), launchHome: HERMES_HOME,
+      prepare: (baseUrl, ticket) => localGatewayDials.prepare(baseUrl, ticket, webContentsId), profile: dialProfile })
   }
 
   if (connection.authMode === 'oauth') {
