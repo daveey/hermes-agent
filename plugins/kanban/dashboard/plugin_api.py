@@ -820,7 +820,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.metadata_only:
             with _value_error_400():
                 if not classify_request(conn, task_id, payload, actor):
-                    raise _conflict("classification requires a parked, uncontained card without a current run")
+                    raise _conflict("classification requires a parked card without a current run or a containment hold")
         # For a combined assignee+review patch, request_review must capture the
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
@@ -966,7 +966,7 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
         return entry.update(ok=False, holder=lease["holder"], error=lease["message"])
     if payload.metadata_only:
         if not classify_request(conn, tid, payload, actor):
-            entry.update(ok=False, error="classification requires a parked, uncontained card without a current run")
+            entry.update(ok=False, error="classification requires a parked card without a current run or a containment hold")
         return
     if payload.archive:
         try:

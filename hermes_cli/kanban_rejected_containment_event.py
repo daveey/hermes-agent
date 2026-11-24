@@ -114,8 +114,9 @@ def archive(conn: sqlite3.Connection, op: dict, before: dict, evidence: dict, pa
     text = json.dumps({"operation": op, "event": before["row"], "task": before["parent"],
                        "containment": before["containment_event"], "lifecycle_authority": False},
                       sort_keys=True, separators=(",", ":"), default=str)
+    proof = json.dumps({"event": evidence, "task": parent_evidence}, sort_keys=True, separators=(",", ":"),
+                       default=str)
+    digest = hashlib.sha256(f"{len(text)}:{text}{proof}".encode()).hexdigest()  # snapshot and evidence
     conn.execute("INSERT INTO kanban_rejected_containment_event_receipts VALUES (?,?,?,?)",
-                 (op["op_id"], text, hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                  json.dumps({"event": evidence, "task": parent_evidence}, sort_keys=True,
-                             separators=(",", ":"), default=str)))
+                 (op["op_id"], text, digest, proof))
     return True

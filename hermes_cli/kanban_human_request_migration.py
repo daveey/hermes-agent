@@ -33,10 +33,10 @@ def classify_parked_request(conn, task_id: str, *, human_request: dict | None,
             return False
         # A contained card's lifecycle belongs to its containment authority: the Board refuses this generic
         # write (containment_hold), which used to leave a never-applicable rejected upload behind.
-        from hermes_cli.kanban_containment_guard import pending as contained
-        if contained(conn, task_id):
-            return False
         request = validate_human_request(human_request, kind=row["block_kind"])
+        from hermes_cli.kanban_containment_guard import pending as contained
+        if contained(conn, task_id):  # also a sync quarantine or a pending containment request
+            return False
         from hermes_cli.kanban_ask_resolved import filing_fields, store_request
         store_request(conn, task_id, request)  # adds, changes or removes the resolved_check probe [daveey]
         db._append_event(conn, task_id, "blocked", {
@@ -62,7 +62,7 @@ def classify_cli_request(args, request, reason):
             lambda tid: classify_parked_request(conn, tid, human_request=request,
                                                actor=cli_actor(), reason=reason),
             lambda tid: f"Classified {tid} (metadata only; remains parked)",
-            lambda tid: f"cannot classify {tid} (requires a parked, uncontained card without a current run)")
+            lambda tid: f"cannot classify {tid} (requires a parked card without a current run or a containment hold)")
 
 
 def reclassify_cli_request(args, reason):

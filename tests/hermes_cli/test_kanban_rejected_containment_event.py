@@ -121,6 +121,10 @@ def test_normal_sync_retires_with_immutable_receipt_and_touches_nothing_else(ref
     snapshot = json.loads(receipt["snapshot_json"])
     assert receipt["op_id"] == op["op_id"] and snapshot["operation"] == op
     assert snapshot["lifecycle_authority"] is False
+    import hashlib
+    text, proof = receipt["snapshot_json"], receipt["evidence_json"]
+    assert receipt["snapshot_sha256"] == hashlib.sha256(f"{len(text)}:{text}{proof}".encode()).hexdigest()
+    assert json.loads(proof)["event"]["state"] == "never_existed"
     for sql in ("DELETE FROM kanban_rejected_containment_event_receipts",
                 "UPDATE kanban_rejected_containment_event_receipts SET snapshot_sha256='bad'",
                 "INSERT OR REPLACE INTO kanban_rejected_containment_event_receipts "
@@ -310,3 +314,10 @@ def test_producer_still_classifies_an_uncontained_parked_card(live):
         live.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
     assert classify_parked_request(live, tid, human_request=REQUEST, actor="user", reason="needs a decision") is True
     assert live.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='blocked'", (tid,)).fetchone()
+
+
+def test_producer_validates_the_request_before_the_containment_refusal(live, svc):
+    from hermes_cli.kanban_human_request_migration import classify_parked_request
+    tid, _ = _contained(live, svc)
+    with pytest.raises(ValueError, match="human_request requires"):
+        classify_parked_request(live, tid, human_request={"action": "x"}, actor="user", reason="needs a decision")
