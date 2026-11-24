@@ -2,6 +2,8 @@
 import json
 import time
 
+import pytest
+
 from gateway.session_results import admission_result, retain_result
 from hermes_state import SessionDB
 from hermes_state_mutation_retirement import RETRY_HORIZON_S
@@ -117,21 +119,36 @@ def test_an_unsettled_admission_and_a_malformed_result_are_left_alone(tmp_path):
         db.create_session('other', source='api_server')  # 'chat' still has its running turn
         settled, _ = _settle(db, epoch, 'bad-row', session='other')
         _age(db, settled, RETRY_HORIZON_S + 60)
-        for value in ('not json', '[1, 2]', '{"result": "flat"}', '{"result": {"messages": "text"}}'):
+        for value in ('not json', '[1, 2]', '{"result": "flat"}',
+                      '{"result": {"final_response": "x", "messages": "text"}}',
+                      '{"result": {"final_response": "x", "messages": []}}',
+                      '{"result": {"final_response": "x"}}'):
             db._execute_write(lambda c, value=value: c.execute('UPDATE state_meta SET value=? WHERE key=?',
                                                                (value, RESULT_PREFIX + settled)))
             assert db._execute_write(compact_settled_results) == 0, value  # terminal and aged, but not a turn result
             assert _size(db, settled) == len(value)
 
 
-def test_a_turn_that_ended_without_a_final_reply_keeps_its_messages(tmp_path):
+@pytest.mark.parametrize('reply', ['', None, 'NO_REPLY', '[SILENT]', 'NO_REPLY.', '   '])
+def test_a_turn_that_ended_without_a_final_reply_keeps_its_messages(tmp_path, reply):
     db, epoch = _db(tmp_path)
     with db:
-        silent, _ = _settle(db, epoch, 'silent', reply='')
-        _age(db, silent, RETRY_HORIZON_S + 60)
+        silent, _ = _settle(db, epoch, 'silent', reply=reply)
+        spoken, _ = _settle(db, epoch, 'spoken')
+        for admission_id in (silent, spoken):
+            _age(db, admission_id, RETRY_HORIZON_S + 60)
         stored = admission_result(db, silent)
-        assert db._execute_write(compact_settled_results) == 0
+        # Kept-whole rows do not use up the pass: the later, compactable row is still reached with limit=1.
+        assert db._execute_write(lambda c: compact_settled_results(c, limit=1)) == 1
         assert admission_result(db, silent) == stored and len(stored['result']['messages']) == 3
+        assert admission_result(db, spoken)['result']['messages'] == []
+
+
+def test_a_reply_that_only_ends_with_a_silence_marker_is_a_reply():
+    from hermes_state_result_horizon import reply_projects_empty
+    assert reply_projects_empty('the reply') is False
+    assert reply_projects_empty('Here is the answer.\nNO_REPLY') is False
+    assert reply_projects_empty(0) is True and reply_projects_empty([]) is True
 
 
 def test_a_row_inserted_already_terminal_is_stamped(tmp_path):
