@@ -12,7 +12,7 @@ from hermes_cli import kanban_home_destination as destination
 from hermes_cli.kanban_sync_client import Hub
 
 _KEYS = ("task", "source", "destination", "nonce", "expected_version")
-_PHASES = ("prepared", "committed", "materialized", "complete")
+_PHASES = ("prepared", "committed", "materialized", "complete", "aborted")
 
 
 def _identity(conn, hub: Hub, board: str, identity: dict, actor: str) -> dict:
@@ -50,6 +50,10 @@ def source_step(conn, hub: Hub, board: str, identity: dict) -> dict:
     record = _advance(hub, board, identity, "prepare")
     if record["phase"] == "prepared":
         record = _advance(hub, board, identity, "commit")
+    if record["phase"] == "aborted":
+        with dbc.write_txn(conn):
+            source.abort_source(conn, record)
+        return record
     if record["phase"] in ("materialized", "complete"):
         with dbc.write_txn(conn):
             source.finalize_source(conn, record)
@@ -65,7 +69,7 @@ def destination_step(conn, hub: Hub, board: str, identity: dict) -> dict:
     """
     identity = _identity(conn, hub, board, identity, "destination")
     record = _advance(hub, board, identity, "read")
-    if record["phase"] in ("prepared", "complete"):
+    if record["phase"] in ("prepared", "complete", "aborted"):
         # A complete response is historical custody, not a request to re-import
         # an old manifest over later legitimate execution. Native eligibility
         # releases only when the newer authenticated STOP feed arrives.
@@ -73,3 +77,17 @@ def destination_step(conn, hub: Hub, board: str, identity: dict) -> dict:
     with dbc.write_txn(conn):
         rows = destination.materialize(conn, record)
     return _advance(hub, board, identity, "materialize", rows)
+
+
+def reconcile_precommit(conn, hub: Hub, board: str, identity: dict) -> dict:
+    """Request a durable Board NONCOMMIT decision for this exact attempt.
+
+    Never infer a refusal from an exception/timeout or clear a local marker. If
+    a commit won (including a lost reply), Board refuses abort and we stay frozen.
+    If abort won, delayed packets for that tuple can never commit afterward.
+    """
+    identity = _identity(conn, hub, board, identity, "source")
+    record = _advance(hub, board, identity, "abort")
+    with dbc.write_txn(conn):
+        source.abort_source(conn, record)
+    return record

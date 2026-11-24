@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 import sqlite3
 
+from hermes_cli import kanban_home_abort as abort
+
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 _NONCE = re.compile(r"[A-Za-z0-9._:-]{16,128}\Z")
 _TABLE = "kanban_home_prepared1"
@@ -42,6 +44,7 @@ def _install(conn: sqlite3.Connection) -> None:
             AND p.expected_version IS json_extract(NEW.receipt,'$.expected_version')
             AND json_type(NEW.receipt,'$.expected_version') IS 'integer')
         BEGIN SELECT RAISE(ABORT, 'home finalization scope mismatch'); END""")
+    abort.install(conn)
     # Include local-only task custody (wake/ask probes, subscriptions, private
     # restriction records), not just the rows sent by sync. Discover task_id
     # tables from this board's real schema, retaining guards across sync detach.
@@ -49,7 +52,7 @@ def _install(conn: sqlite3.Connection) -> None:
     for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
         quoted = '"' + table.replace('"', '""') + '"'
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({quoted})")}
-        if "task_id" in columns and table not in (_TABLE, "kanban_home_finalized1"):
+        if "task_id" in columns and table not in (_TABLE, "kanban_home_finalized1", "kanban_home_aborted1"):
             related[table] = columns
     for table in ("tasks", "task_links", *sorted(related)):
         quoted = '"' + table.replace('"', '""') + '"'
@@ -96,11 +99,14 @@ def _install(conn: sqlite3.Connection) -> None:
             conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger}
                 BEFORE {action} ON {quoted} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE ({cond})
                     AND NOT EXISTS(SELECT 1 FROM kanban_home_finalized1 f
-                                   WHERE f.task_id={_TABLE}.task_id AND f.nonce={_TABLE}.nonce))
+                                   WHERE f.task_id={_TABLE}.task_id AND f.nonce={_TABLE}.nonce)
+                    AND NOT EXISTS(SELECT 1 FROM kanban_home_aborted1 a WHERE {abort.predicate()}))
                 BEGIN SELECT RAISE(ABORT, 'home transfer prepared'); END""")
     for action in ("UPDATE", "DELETE"):
+        condition = ("WHEN NOT EXISTS(SELECT 1 FROM kanban_home_aborted1 a WHERE a.task_id=OLD.task_id AND a.nonce=OLD.nonce)"
+                     if action == "DELETE" else "")
         conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_prepared1_marker_{action.lower()}
-            BEFORE {action} ON {_TABLE}
+            BEFORE {action} ON {_TABLE} {condition}
             BEGIN SELECT RAISE(ABORT, 'home transfer preparation immutable'); END""")
     conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_prepared1_marker_insert
         BEFORE INSERT ON {_TABLE} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE task_id=NEW.task_id)
@@ -130,6 +136,9 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
         _install(conn)
         old = conn.execute(f"SELECT task_id,source,destination,nonce,expected_version FROM {_TABLE} WHERE task_id=?",
                            (task_id,)).fetchone()
+        if old and tuple(old) != tuple(record.values()) and abort.aborted(conn, task_id):
+            conn.execute(f"DELETE FROM {_TABLE} WHERE task_id=?", (task_id,))
+            old = None
         if old:
             if tuple(old) != tuple(record.values()):
                 raise ValueError("home preparation identity changed")
@@ -178,6 +187,8 @@ def frozen(conn: sqlite3.Connection, task_id: str) -> bool:
     row = conn.execute(f"SELECT task_id,source,destination,nonce,expected_version FROM {_TABLE} WHERE task_id=?", (task_id,)).fetchone()
     if not row:
         return False
+    if abort.aborted(conn, task_id):
+        return False
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_home_finalized1'").fetchone():
         return True
     final = conn.execute("SELECT nonce,receipt FROM kanban_home_finalized1 WHERE task_id=?", (task_id,)).fetchone()
@@ -204,3 +215,8 @@ def finalize_source(conn: sqlite3.Connection, record: dict) -> dict:
     from hermes_cli.kanban_home_source_stop import finalize_source as finish
 
     return finish(conn, record)
+
+
+def abort_source(conn: sqlite3.Connection, record: dict) -> dict:
+    """Record only an exact authenticated Board noncommit decision."""
+    return abort.abort_source(conn, record)

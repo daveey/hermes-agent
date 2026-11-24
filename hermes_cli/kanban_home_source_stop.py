@@ -67,6 +67,9 @@ def finalize_source(conn: sqlite3.Connection, record: dict) -> dict:
     try:
         payload, fields, encoded = _receipt(conn, record)
         task, nonce = payload["task"], payload["nonce"]
+        from hermes_cli.kanban_home_abort import aborted
+        if aborted(conn, task):
+            raise ValueError("home transfer already aborted")
         old = conn.execute("SELECT nonce,receipt FROM kanban_home_finalized1 WHERE task_id=?", (task,)).fetchone()
         if old:
             if tuple(old) != (nonce, encoded):
