@@ -1,5 +1,6 @@
 """Canonical diagnostic source discovery: no replica coordinates or authority guesses."""
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -97,3 +98,19 @@ def test_source_clock_and_containment_are_exact():
     hub.data['t_root']['task']['containment_episode'] = 't_root_created'
     assert source.observe(hub, 'default', 't_root')['facts']['root_episode'] == 't_root_created'
     assert source.observe(hub, 'default', 't_root')['first_observed'] == 100
+
+
+@pytest.mark.parametrize('kind,extra,selected', [
+    ('assignment', (), 'blocked'),
+    ('needs_input', (), 't_root_created'),
+    ('assignment', (('after', 3, 'unblocked', 300),), 't_root_created'),
+])
+def test_todo_selects_live_assignment_blocked_not_historical(kind, extra, selected):
+    hub = Hub()
+    hub.data['t_root']['task']['status'] = 'todo'
+    events = hub.data['t_root']['events']
+    events.append(dict(events[0], uid='blocked', ord=2, kind='blocked', created_at=200,
+                       payload=json.dumps({'kind': kind})))
+    events.extend(dict(events[0], uid=uid, ord=ord_, kind=event_kind, created_at=created_at, payload='{}')
+                  for uid, ord_, event_kind, created_at in extra)
+    assert source.observe(hub, 'default', 't_root', include_source=True)['source_event']['uid'] == selected

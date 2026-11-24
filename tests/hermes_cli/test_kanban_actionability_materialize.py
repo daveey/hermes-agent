@@ -5,10 +5,18 @@ import json
 import pytest
 
 from hermes_cli import kanban_actionability_intents as intents
+from hermes_cli import kanban_actionability_observation as observation
 from hermes_cli import kanban_actionability_transport as transport
+from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_client as client
 from tests.hermes_cli import test_kanban_actionability_intents as journal
 from tests.hermes_cli import test_kanban_actionability_recovery as recovery
+from tests.hermes_cli import test_kanban_assignment_routing as assignment
+from tests.hermes_cli.test_kanban_actionability_observation import inventory
+
+assignment_board = assignment.board
 
 live = journal.live
 
@@ -222,3 +230,37 @@ def test_real_materializer_checks_raw_parent_completion(live, canonical_status, 
     intents.materialize(live, hub, 'default')
     assert live.execute('SELECT state FROM kanban_actionability_intents').fetchone()[0] == expected
     assert len(hub.sent) == (1 if expected == 'confirmed' else 0)
+
+
+def test_assignment_producer_reaches_canonical_materializer(assignment_board):
+    conn, home = assignment_board
+    (home / 'config.yaml').write_text(
+        (home / 'config.yaml').read_text().rstrip() + '\n  sync:\n    enabled: true\n    boards: [default]\n')
+    sync.install_or_remove(conn, str(home / 'kanban.db'))
+    client.ensure_identity(conn, 'default', 'fixture')
+    sync.set_mode(conn, 'primary')
+    tid = assignment.task_with_drift(assignment_board)
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET created_on='fixture' WHERE id=?", (tid,))
+    assert kb.block_task(conn, tid, kind='assignment', reason='Worker lacks terminal tools')
+    blocked = dict(conn.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND kind='blocked' ORDER BY id DESC", (tid,)).fetchone())
+    assert json.loads(blocked['payload'])['actionability_intent']['invalid_reason'] is None
+    hub = recovery.Hub(conn, tid)
+    for task in conn.execute('SELECT * FROM tasks'):
+        data = inventory(task['id'], task['status'])
+        data['task'] = dict(task, uid=task['id'], current_run_uid=sync.run_uid(conn, task['current_run_id']),
+                            deleted_at=None)
+        data['events'] = [dict(event, ord=event['id'], version=1, deleted_at=None)
+                          for event in conn.execute('SELECT * FROM task_events WHERE task_id=? ORDER BY id',
+                                                    (task['id'],))]
+        hub.data[task['id']] = data
+    links = [dict(row, uid=str(i), deleted_at=None)
+             for i, row in enumerate(conn.execute('SELECT * FROM task_links ORDER BY parent_id,child_id'))]
+    hub.pages = [dict(table='task_links', head=42, rows=links, next=(links[-1]['uid'] if links else ''), more=False)]
+    picked = observation.observe(hub, 'default', tid, include_source=True)['source_event']
+    intents.materialize(conn, hub, 'default')
+    saved = dict(conn.execute('SELECT * FROM kanban_actionability_intents WHERE event_uid=?',
+                              (blocked['uid'],)).fetchone())
+    assert picked['kind'] == 'blocked' and picked['uid'] == blocked['uid']
+    assert saved['state'] == 'confirmed'
