@@ -9,6 +9,8 @@ def run(conn, result, *, board, dry_run):
     if not dry_run:
         from hermes_cli.kanban_hold_notices import sweep as holds
         la.timed('dispatch.hold_notices', holds, conn)
+        from hermes_cli.kanban_scope_renewal_alarm import sweep as renewal_alarm
+        la.timed('dispatch.scope_renewal_alarm', renewal_alarm, conn)
     from hermes_cli.kanban_provider_walls import tick_upkeep
     la.timed('dispatch.tick_upkeep', tick_upkeep, conn, board=board, dry_run=dry_run)
     from hermes_cli import kanban_db_dispatch_quota as quota
