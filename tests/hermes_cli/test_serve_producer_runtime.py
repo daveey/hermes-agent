@@ -1,7 +1,9 @@
 """Dormant exec slice: request callers never execute provider code."""
 import hashlib
 import json
+import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +28,16 @@ def test_exec_projection_and_control_stay_off_the_request_thread(tmp_path):
         assert result['value'] == 'one'
         assert result['pid'] not in (relay.broker_pid, __import__('os').getpid())
         assert relay.ping(timeout=5)['child_pid'] == result['pid']
+        if __import__('sys').platform == 'linux':
+            from hermes_cli.serve_producer_admission import read_participants_strict
+            status = relay.ping()
+            assert status['enrollment_pid'] == relay.broker_pid
+            tickets = read_participants_strict(tmp_path / 'runtime')
+            assert any(row.identity.pid == relay.broker_pid and not row.guarded for row in tickets)
+            info = Path(f'/proc/{relay.broker_pid}/fdinfo/{status["custody_fd"]}').read_text()
+            assert ' FLOCK ' in info and ' WRITE ' in info
+            locked = os.stat(f'/proc/{relay.broker_pid}/fd/{status["custody_fd"]}')
+            assert locked.st_ino == (tmp_path / 'runtime/panel.lock').stat().st_ino
         assert relay.acknowledged(key)
     finally:
         relay.close(timeout=10)

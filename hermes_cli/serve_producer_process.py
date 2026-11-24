@@ -110,11 +110,15 @@ def receive_control(channel):
 
 
 def broker(channel, config):
+    from hermes_cli._startup_fast import project_root_str
+    from hermes_cli.serve_producer_enrollment import BrokerEnrollment
     from hermes_cli.serve_producer_custody import FamilyCustody
     from hermes_cli.serve_producer_protocol import ProtocolError
     from hermes_cli.serve_producer_runtime import spawn
 
-    owner = FamilyCustody.acquire(Path(config['runtime']), 'panel')
+    enrollment = (BrokerEnrollment.acquire(Path(config['runtime']), Path(project_root_str()))
+                  if sys.platform == 'linux' else None)
+    owner = enrollment.owner if enrollment else FamilyCustody.acquire(Path(config['runtime']), 'panel')
     child, data = spawn('producer', config, custody_fd=owner.fd)
     try:
         hello = data.receive()
@@ -175,7 +179,9 @@ def broker(channel, config):
                 break
             elif request.get('verb') == 'PING':
                 control.send({'verb': 'PONG', 'child_pid': hello['pid'],
-                              'child_exited': child.poll() is not None}, str(sequence))
+                              'child_exited': child.poll() is not None,
+                              'enrollment_pid': enrollment.ticket.identity.pid if enrollment else None,
+                              'custody_fd': owner.fd}, str(sequence))
             else:
                 control.send({'verb': 'REFUSED'}, str(sequence))
     except (EOFError, OSError):

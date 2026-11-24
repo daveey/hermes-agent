@@ -25,11 +25,12 @@ from hermes_cli.serve_producer_census import (
 from hermes_cli.serve_producer_custody import CustodyConflict, FamilyCustody, _acquire_runtime
 
 SUPPORTED_LAUNCHES = frozenset(('serve', 'dashboard', 'gateway', 'agent_startup',
-                                'tui_gateway', 'gateway_spawner', 'plugin_host'))
+                                'tui_gateway', 'gateway_spawner', 'plugin_host', 'producer_broker'))
 # Hash actual import boundaries, not a version string or inherited environment bit.
 LAUNCH_SOURCES = ('hermes_cli/main.py', 'gateway/run.py', 'tui_gateway/entry.py',
                   'hermes_cli/gateway_runtime_start.py', 'hermes_cli/plugin_host_child.py',
-                  'hermes_cli/serve_producer_admission.py', 'hermes_cli/serve_producer_census.py')
+                  'hermes_cli/serve_producer_admission.py', 'hermes_cli/serve_producer_census.py',
+                  'hermes_cli/serve_producer_process.py', 'hermes_cli/serve_producer_enrollment.py')
 _MAX_PARTICIPANTS = 8192
 _MAX_RECEIPTS = 8 * 1024 * 1024
 
@@ -591,10 +592,12 @@ def launcher_coverage(installation: Path) -> dict:
 
 
 def inspect_host(runtime: Path, installation: Path, *, root: Path, timeout: float = 10,
-                 legacy_candidates: tuple[Incarnation, ...] = ()) -> AdmissionCut:
+                  legacy_candidates: tuple[Incarnation, ...] = (), broker=None) -> AdmissionCut:
     """Gate-held strict cut. Enrollment remains unguarded; COMPLETE stays conservative."""
     if sys.platform != 'linux':
         raise AdmissionUnavailable('no linux census adapter')
+    from hermes_cli.serve_producer_enrollment import classify_with_broker
+
     installation = installation.resolve(strict=True)
     root = Path(root)
     generation = launcher_generation(installation)
@@ -610,7 +613,8 @@ def inspect_host(runtime: Path, installation: Path, *, root: Path, timeout: floa
             boot_id=adapter.boot_id(), generation=generation, installation=str(installation),
             census=adapter.collect,
             collectors=host_collectors(root, installation),
-            classify=lambda record: classify_process(
-                record, participants, generation, installation=str(installation)),
+            classify=lambda record: classify_with_broker(
+                record, participants, generation, installation=str(installation),
+                runtime=runtime, broker=broker, home=str(root)),
             legacy_candidates=legacy_candidates, exited=lambda identity: incarnation_exited(adapter, identity),
         )
