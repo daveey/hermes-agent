@@ -79,6 +79,8 @@ def test_current_core_pushes_placement_policy_to_the_board(live, svc):
 
 def test_tool_created_worker_first_card_keeps_placement_policy_on_the_board(kanban_home, live, svc, monkeypatch):
     """The live path: ``kanban_create`` with the default placement on a gateway with a worker pool."""
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(kanban_home))
     (kanban_home / "config.yaml").write_text(
         "kanban:\n  sync:\n    enabled: true\n  placement:\n    worker_pools:\n      hub: [worker-1]\n")
     from hermes_cli import kanban_capability_registry as reg
@@ -338,6 +340,8 @@ def test_sync_state_is_ignored_when_sync_is_off(kanban_home, pre_rename_live, sv
 @pytest.fixture
 def machine_pin_create(kanban_home, pre_rename_live, monkeypatch):
     """A primary board whose registry lists worker-1 as a machine that picks up other gateways' cards."""
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(kanban_home))
     from hermes_cli import kanban_capability_registry as reg
     from hermes_cli import kanban_worker_node as wn
     monkeypatch.setattr(reg, "self_gateway", lambda: ME)

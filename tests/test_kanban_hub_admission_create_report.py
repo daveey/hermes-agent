@@ -97,6 +97,8 @@ def test_cli_admitted_card_still_reports_local(conn, hub, monkeypatch, capsys):
 
 @pytest.fixture
 def tool_hub(kanban_home, hub, monkeypatch):
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(kanban_home))
     from hermes_cli import kanban_sync_client as ksc
     (kanban_home / "config.yaml").write_text(
         "kanban:\n  sync:\n    enabled: true\n  placement:\n    worker_pools:\n      hub: []\n"
@@ -120,6 +122,8 @@ def test_tool_result_reports_the_denied_card_in_the_pool(tool_hub):
 
 def test_tool_unsynced_board_reports_the_worker_pool(kanban_home, hub, monkeypatch):
     """A board with no Board sync has no runs_on column: the denied card is worker-first."""
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(kanban_home))
     (kanban_home / "config.yaml").write_text("kanban:\n  placement:\n    worker_pools:\n      hub: []\n")
     monkeypatch.setattr(kt, "_persisted_identity", lambda: "default")
     hub.admit_next = False

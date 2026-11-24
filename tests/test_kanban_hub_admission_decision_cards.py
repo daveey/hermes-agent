@@ -112,6 +112,8 @@ def test_hub_local_pin_refusal_names_a_working_alternative(gate, pin):
 
 @pytest.fixture
 def on_hub(kanban_home, monkeypatch, hub_judge):
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(kanban_home))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_WORKER_TASK", raising=False)
     monkeypatch.setattr(kt, "_persisted_identity", lambda: "default")
