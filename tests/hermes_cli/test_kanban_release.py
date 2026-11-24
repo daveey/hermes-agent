@@ -823,3 +823,43 @@ def test_a_card_with_no_run_limit_over_its_cache_limit_is_not_handed_back_to_be_
     assert out['outcome'] == 'released'
     assert budget.card_limits(board, tid, budget.limits()) == budget.Limits(0, 0)  # still no run limit; lifted
     assert budget.hold(board, tid) is None and status(board, tid) == 'ready'
+
+
+def test_a_persons_run_only_override_keeps_its_deference_to_the_board_limit(board):
+    """Human 3 runs / no cache value -> agent release -> stop -> agent release: the board limit still applies."""
+    tid = spend_stopped(board)
+    scope.link(board, tid)
+    budget.set_override(board, tid, runs=3, by='david', reason='three more', writer_kind='human')
+    board_limit = budget.limits().cache_read_tokens
+    assert board_limit > 0
+    shown = as_owner(board, tid)
+    assert as_owner(board, tid, seen=max(shown['unread']))['outcome'] == 'released'
+    first = newest_budget(board, tid)
+    assert first['cache_read_tokens'] is None and first['cache_read_writer_kind'] == 'human'
+    stop_again(board, tid)
+    assert as_owner(board, tid)['outcome'] == 'released'
+    second = newest_budget(board, tid)
+    assert second['cache_read_tokens'] is None and second['cache_read_writer_kind'] == 'human'
+    assert budget.card_limits(board, tid, budget.limits()).cache_read_tokens == board_limit
+
+
+def test_an_agent_release_written_before_attribution_reads_as_unknown_not_agent(board):
+    """Under the first follow-up an agent release that kept a person's limit recorded only writer_kind agent."""
+    era = {'runs': 13, 'cache_read_tokens': 5_000_000, 'by': 'default', 'writer_kind': 'agent',
+           'reason': 'hermes kanban release: 10 more runs (mandate comment 7)'}
+    assert budget.cache_attribution(era) == 'unknown'
+    assert budget.cache_attribution({**era, 'reason': 'tightening'}) == 'agent'  # an agent's own spend-budget
+    assert budget.cache_attribution({**era, 'cache_read_writer_kind': 'agent'}) == 'agent'
+    tid = spend_stopped(board)
+    scope.link(board, tid)
+    with kb.write_txn(board):
+        kb._append_event(board, tid, budget.OVERRIDE_EVENT, era)
+    stop_again(board, tid)
+    out = as_owner(board, tid)
+    assert out['outcome'] == 'released', out
+    kept = newest_budget(board, tid)
+    assert kept['cache_read_tokens'] == 5_000_000 and kept['cache_read_writer_kind'] == 'unknown'
+    # A release that lifts the limit says so: the limit is then this writer's.
+    human = spend_stopped(board)
+    run(board, human)
+    assert newest_budget(board, human)['cache_read_writer_kind'] == 'human'

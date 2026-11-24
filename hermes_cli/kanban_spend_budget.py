@@ -119,19 +119,30 @@ def card_limits(conn: sqlite3.Connection, task_id: str, lim: Limits) -> Limits:
     return Limits(lim.runs if runs is None else runs, lim.cache_read_tokens if cache is None else cache)
 
 
+RELEASE_REASON = "hermes kanban release:"  # kanban_release's reason prefix on the overrides it writes
+
+
 def cache_attribution(data: Optional[dict]) -> Optional[str]:
-    """Who set an override's cache-read limit: ``human``, ``agent``, ``unknown``, or None when the event records
-    nothing (written before attribution existed). A limit a later writer only carried over keeps its own
-    attribution (``cache_read_writer_kind``); otherwise it is the event's writer."""
+    """Who set an override's cache-read limit (a number, or None = deferring to the board's): ``human``,
+    ``agent``, ``unknown``, or None when the event records nothing (written before attribution existed). A limit
+    a later writer only carried over keeps its own attribution (``cache_read_writer_kind``); otherwise it is the
+    event's writer. One exception: an agent release written before releases recorded the field may have kept a
+    person's limit under its own ``writer_kind``, so it reads ``unknown``, never ``agent``."""
     data = data or {}
-    return data.get("cache_read_writer_kind") or data.get("writer_kind")
+    if data.get("cache_read_writer_kind"):
+        return data["cache_read_writer_kind"]
+    if data.get("writer_kind") == "agent" and str(data.get("reason") or "").startswith(RELEASE_REASON):
+        return "unknown"
+    return data.get("writer_kind")
 
 
 def carried(prior: Optional[dict], writer_kind: str = "agent") -> dict:
     """Attribution fields for an override that sets its own run limit and carries ``prior``'s cache-read limit
-    over unchanged (the spend reviewer, the operator-courier promote, an agent release that keeps a limit)."""
+    over unchanged (the spend reviewer, the operator-courier promote, an agent release that keeps a limit).
+    A prior override with no cache-read value is carried too: it defers to the board limit, and whoever chose
+    that keeps the choice."""
     out = {"writer_kind": writer_kind}
-    if _limit_value((prior or {}).get("cache_read_tokens")) is not None:
+    if override_set(prior):
         out["cache_read_writer_kind"] = cache_attribution(prior) or "unknown"
     return out
 

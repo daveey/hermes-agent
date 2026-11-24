@@ -775,7 +775,9 @@ to an agent (`spend_budget_set.writer_kind`, recorded on new events by release, 
 spend reviewer and the operator-courier promote; a limit that is only carried over keeps its own
 attribution in `cache_read_writer_kind`, so a later agent release keeps it too), and is refused
 `budget_limit_in_force` when that limit is already reached; a human lifts it, also on a card with no
-run limit.
+run limit. A person's run-only override defers to the board's cache-read limit and that deference is
+kept the same way. An agent that first restates the numbers with `spend-budget` and then releases
+has made the limit its own; that is not prevented here.
 
 Each release records a `stop_released` event (authority, runs, mandate comment); a rerun after it is
 `already_released`. A rerun after a failure past the mandate comment reuses that comment (unless newer
@@ -787,8 +789,13 @@ The Desktop Unblock button makes the same release, recorded as a human act with 
 card (or for the decision card of its pending stop) carries a `release_target` stamp that no agent,
 tool or CLI request can supply, and the sweep records the same stamp on its `stranded_park_escalated`
 event: a stamp on the synced ask column alone, without this board's own event, offers nothing. An
-open ask whose stamp has no such record here, or names an earlier stop than the pending one, is
-re-filed once by the sweep from its own brief (`refiled: true` on the event), so the button works again. An agent-written ask, an ask with its own choices, an ask filed
+ask this board filed in the current park episode whose offer is no longer honoured (filed before
+the record existed, or its stored text changed) is re-filed from the sweep's own brief, at most once
+per episode (`stranded_park_refiled`, no second desk notice). Any other ask with a dead offer, such as
+a stamp this board has no filing record for, a rehomed card, or a card that stopped again under its
+old ask, is not an open ask to the sweep: the card passes the normal escalation gates like any
+unowned stop, and nothing is written until it does. An escalation event whose origin a foreign write
+replaced is not this board's evidence and is not re-filed. An agent-written ask, an ask with its own choices, an ask filed
 before the stamp existed and a decision card for an earlier stop keep the plain unblock. Local
 clicks go through the user-steps mirror, remote ones through `kanban_card_answer` on the card's home.
 

@@ -440,7 +440,7 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
         if fresh is None:
             return False
         fresh = dict(fresh)
-        if (fresh["status"] not in PARKED or _excluded(conn, fresh, now, age=age, defer=defer)
+        if (fresh["status"] not in PARKED or _excluded(conn, _gated(conn, fresh), now, age=age, defer=defer)
                 or _escalated(conn, tid, entry)):
             return False
         if not contained:
@@ -457,10 +457,13 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
         kb._append_event(conn, tid, EVENT, {
             "episode_start": entry["created_at"] if entry else int(fresh.get("created_at") or 0),
             "reason": _reason(entry), "desk_chat": desk_chat, "request": not contained,
-            # The release offer this sweep stamped on the ask, recorded here too: the ask is a synced column any
-            # gateway can write, this event's origin is attested (kanban_release._home_filed).
-            **({"release_target": filed["release_target"]} if not contained and filed.get("release_target") else {})})
+            # The release offer this sweep stamped on the ask, and the ask's digest, recorded here too: the ask is
+            # a synced column any gateway can write, this event's origin is attested (kanban_release._home_filed).
+            **(_record(filed) if not contained else {})})
     return True
+
+
+REFILED = "stranded_park_refiled"  # kanban_release.REFILED: not the escalation kind, so no second desk notice
 
 
 def _dead_offer(conn: sqlite3.Connection, row: dict) -> bool:
@@ -472,14 +475,41 @@ def _dead_offer(conn: sqlite3.Connection, row: dict) -> bool:
     return kanban_release.dead_offer(conn, row["id"], ask)
 
 
+def _filed_here(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> bool:
+    """This board's own record that it filed an ask for the card in the current park episode: an own-origin
+    escalation event with ``request`` after the park entry. The only evidence a re-file accepts. A stamp on
+    the ask column proves nothing (any gateway can write it), and an event whose origin a foreign write
+    replaced is no longer ours: there is no local-only copy of the original to check, so that shape is not
+    re-filed."""
+    from hermes_cli import kanban_release
+    floor = entry["id"] if entry else 0
+    return any(e["id"] > floor and e["payload"].get("request") is True
+               for e in kanban_release.own_events(conn, task_id, (EVENT,)))
+
+
+def _refiled(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> bool:
+    """A re-file is already recorded for this park episode (any origin: it only ever withholds another)."""
+    return conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND id > ? LIMIT 1",
+                        (task_id, REFILED, entry["id"] if entry else 0)).fetchone() is not None
+
+
+def _record(filed: dict) -> dict:
+    """What a filing event records of the ask it stored: the release offer and the ask's identity
+    (``kanban_release._home_filed`` requires both to match before a click releases)."""
+    from hermes_cli import kanban_release
+    if not filed.get("release_target"):
+        return {}
+    return {"release_target": filed["release_target"], "ask_sha256": kanban_release.ask_digest(filed)}
+
+
 def _refile(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int) -> bool:
     """Replace an ask whose release button is dead with this sweep's own brief and record the offer.
 
-    The click releases only an ask whose stamp this board recorded for the card's pending stop
-    (``kanban_release.offered``). An ask filed before that record existed, one whose card was rehomed or whose
-    event lost its origin, and the old ask of a card that has since stopped again all show a button that can
-    only be refused. The ask is rewritten from the brief, so a stamp that arrived on stored text this board
-    never wrote gains nothing. Once: after it the stamp is current and recorded."""
+    Only where this board filed an ask for the card in this park episode (``_filed_here``) and has not re-filed
+    it yet (``_refiled``): the ask an earlier core filed without recording the offer, or one whose stored text
+    was changed afterwards. The ask is rewritten from the brief, so stored text this board never wrote gains
+    nothing, and at most once per park episode however often the column is rewritten. The record is a
+    ``stranded_park_refiled`` event, not a second escalation: the desk chat was told once."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_ask_resolved import store_request
     from hermes_cli.kanban_human_request import NONHUMAN_KINDS
@@ -487,17 +517,28 @@ def _refile(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: 
     with kb.write_txn(conn):
         fresh = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
         fresh = dict(fresh) if fresh is not None else None
-        if fresh is None or fresh["status"] not in PARKED or _leased(fresh, now) or not _dead_offer(conn, fresh):
+        if (fresh is None or fresh["status"] not in PARKED or _leased(fresh, now) or not _dead_offer(conn, fresh)
+                or not _filed_here(conn, tid, entry) or _refiled(conn, tid, entry)):
             return False
         kind = fresh.get("block_kind")
-        filed = _request(conn, fresh, entry, age, "The earlier ask's release offer had no record on this board or "
-                         "named an earlier stop", "needs_input" if kind in NONHUMAN_KINDS else kind)
+        if kind in NONHUMAN_KINDS:  # as _escalate: a human ask cannot sit under a dependency/transient/time kind
+            kind = "needs_input"
+            conn.execute("UPDATE tasks SET block_kind = ? WHERE id = ?", (kind, tid))
+        filed = _request(conn, fresh, entry, age, "The earlier ask's release offer was not recorded on this board "
+                         "or its text was changed", kind)
         store_request(conn, tid, filed)
-        kb._append_event(conn, tid, EVENT, {
+        kb._append_event(conn, tid, REFILED, {
             "episode_start": entry["created_at"] if entry else int(fresh.get("created_at") or 0),
-            "reason": _reason(entry), "desk_chat": None, "request": True, "refiled": True,
-            **({"release_target": filed["release_target"]} if filed.get("release_target") else {})})
+            "reason": _reason(entry), "request": True, **_record(filed)})
     return True
+
+
+def _gated(conn: sqlite3.Connection, row: dict) -> dict:
+    """``row`` as the escalation gates see it. An ask whose release offer is dead is no open ask: without it the
+    card would keep a button that can only be refused and the sweep would never look at it again. It gates like
+    any unowned stop (strand age, live owner, once per episode), and an escalation that passes writes the real
+    ask over it. Nothing is written otherwise, so a rewritten column cannot make this loop."""
+    return {**row, "human_request": None} if _dead_offer(conn, row) else row
 
 
 def _escalated(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> bool:
@@ -551,7 +592,8 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
             entry = park_entry(conn, tid)
             start = entry["created_at"] if entry else int(row.get("created_at") or 0)
             age = now - start
-            if _dead_offer(conn, row):  # an open ask whose release button cannot work: re-file it, once
+            if _filed_here(conn, tid, entry) and not _refiled(conn, tid, entry) and _dead_offer(conn, row):
+                # This board filed the ask in this episode and its release button cannot work: repair it, once.
                 try:
                     if _refile(conn, row, entry, now=now, age=age):
                         escalated.append(tid)
@@ -559,7 +601,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                     logger.warning("kanban: stranded-park re-file failed for %s", tid, exc_info=True)
                 continue
             if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
-                    or _excluded(conn, row, now, age=age, defer=defer_s)):
+                    or _excluded(conn, _gated(conn, row), now, age=age, defer=defer_s)):
                 continue
             try:
                 if live_owner(conn, tid, own=own, liveness=liveness):

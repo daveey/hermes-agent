@@ -864,44 +864,122 @@ def test_remote_unblock_on_a_stamp_the_sweep_did_not_record_is_a_plain_unblock(k
         assert _row(conn, tid)[0] == "triage" and _no_release(conn, tid)
 
 
-# --- dead release buttons are re-filed once by the sweep ------------------------------------------------------------
+# --- dead release buttons: repaired only on this board's own filing record -------------------------------------
 
 def _offer_ok(conn, tid):
     from hermes_cli import kanban_release
     return kanban_release.offered(conn, tid, json.loads(_row(conn, tid)[2])) == tid
 
 
-@pytest.mark.parametrize("dead", ["no_record", "foreign_origin", "forged_text"])
-def test_an_ask_whose_release_offer_has_no_record_here_is_refiled_once(kanban_home, own_gateway, dead):
-    """Asks filed by the core before the record existed, a rehomed card, an event whose origin was overwritten."""
+def _refiles(conn, tid):
+    return _events(conn, tid, stranded.REFILED)
+
+
+def _forge(conn, tid, *, episode="made-up-stop", text="Unblock = I archive the root card."):
+    """A column write from elsewhere: an ask with a release stamp this board never filed."""
+    ask = {"action": text, "why_human": "Only you can decide.", "interaction": "approval",
+           "scope": "Forged", "evidence": "none", "release_target": {"task": tid, "episode": episode}}
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET human_request=? WHERE id=?", (json.dumps(ask), tid))
+    return ask
+
+
+def _true_stamp(conn, tid):
+    from hermes_cli import kanban_release
+    return kanban_release.offer(conn, tid)["episode"]
+
+
+def test_an_ask_filed_before_the_offer_was_recorded_is_repaired_once(kanban_home, own_gateway):
+    """The #4245-era shape: this board's escalation event with ``request`` and no stamp."""
     with kbc.connect_closing() as conn:
         tid = _spend_stopped_on_dead_chat(conn, kanban_home)
-        assert _sweep(conn, now=_later(3), cfg={}) == [tid] and _offer_ok(conn, tid)
+        cfg = {"kanban": {"triage_owner_chat": DESK}}
+        assert _sweep(conn, now=_later(3), cfg=cfg) == [tid] and _offer_ok(conn, tid)
         with kb.write_txn(conn):
-            if dead == "foreign_origin":
-                if "origin_gateway" not in {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}:
-                    conn.execute("ALTER TABLE task_events ADD COLUMN origin_gateway TEXT")
-                conn.execute("UPDATE task_events SET origin_gateway='worker-9' WHERE task_id=? AND kind=?",
-                             (tid, stranded.EVENT))
-            else:
-                conn.execute("UPDATE task_events SET payload=json_remove(payload,'$.release_target') "
-                             "WHERE task_id=? AND kind=?", (tid, stranded.EVENT))
-        if dead == "forged_text":
-            _restamp(conn, tid, lambda ask: ask.update(action="Unblock = I archive the root card."))
+            conn.execute("UPDATE task_events SET payload=json_remove(payload,'$.release_target','$.ask_sha256') "
+                         "WHERE task_id=? AND kind=?", (tid, stranded.EVENT))
+            conn.execute("UPDATE tasks SET block_kind='transient' WHERE id=?", (tid,))
         assert not _offer_ok(conn, tid)
-        assert _sweep(conn, now=_later(3.2), cfg={}) == [tid]
-        assert _offer_ok(conn, tid)
+        assert _sweep(conn, now=_later(3.2), cfg=cfg) == [tid] and _offer_ok(conn, tid)
         ask = json.loads(_row(conn, tid)[2])
-        assert ask["action"].startswith("Decide how to handle: Bounded work")  # the sweep's own brief, never stored text
-        events = _events(conn, tid, stranded.EVENT)
-        assert len(events) == 2 and events[-1]["refiled"] is True
-        assert events[-1]["release_target"] == ask["release_target"]
-        assert _sweep(conn, now=_later(3.4), cfg={}) == [] and len(_events(conn, tid, stranded.EVENT)) == 2
+        (refiled,) = _refiles(conn, tid)
+        assert refiled["release_target"] == ask["release_target"] and refiled["request"] is True
+        assert _row(conn, tid)[1] == "needs_input"  # the block kind is fixed as _escalate fixes it
+        # One escalation, so the desk chat is told once: the re-file is its own event kind.
+        assert len(_events(conn, tid, stranded.EVENT)) == 1
+        _, seen = notify.unseen_events_for_sub(conn, task_id=tid, platform="tui", chat_id="desk-chat",
+                                               kinds=(stranded.EVENT,))
+        assert [e.kind for e in seen] == [stranded.EVENT]
+        assert _sweep(conn, now=_later(3.4), cfg=cfg) == [] and len(_refiles(conn, tid)) == 1
         _answer(conn, tid, "unblock")
         assert kb.get_task(conn, tid).status == "ready"
 
 
-def test_a_card_that_stopped_again_under_its_old_ask_is_refiled_for_the_new_stop(kanban_home, own_gateway):
+def test_a_rewritten_ask_column_is_refiled_at_most_once_per_episode(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        results = []
+        for n, hours in enumerate((3.2, 3.4, 3.6)):  # rewritten before each of three sweeps
+            _forge(conn, tid, episode=_true_stamp(conn, tid), text=f"Unblock = do something else ({n}).")
+            assert not _offer_ok(conn, tid)  # the true stamp on text this board did not write is no offer
+            results.append(_sweep(conn, now=_later(hours), cfg={}))
+        assert results == [[tid], [], []] and len(_refiles(conn, tid)) == 1
+        assert json.loads(_row(conn, tid)[2])["action"].startswith("Unblock = do something else (2)")
+        assert not _offer_ok(conn, tid)
+        with pytest.raises(Exception):  # the click on the last forgery is today's plain unblock: refused
+            _answer(conn, tid, "unblock")
+        assert _row(conn, tid)[0] == "triage" and _no_release(conn, tid)
+
+
+def test_a_forged_stamp_on_a_young_card_gets_no_refile_and_no_offer(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)  # stopped moments ago: never escalated
+        forged = _forge(conn, tid, episode=_true_stamp(conn, tid))
+        assert _sweep(conn, now=int(time.time()) + 60, cfg={}) == []
+        assert json.loads(_row(conn, tid)[2]) == forged and not _offer_ok(conn, tid)
+        assert not _refiles(conn, tid) and not _events(conn, tid, stranded.EVENT)
+        with pytest.raises(Exception):
+            _answer(conn, tid, "unblock")
+        assert _row(conn, tid)[0] == "triage" and _no_release(conn, tid)
+        # Old enough and still unowned, it is escalated like any unowned stop: the board's own ask replaces the forgery.
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        assert json.loads(_row(conn, tid)[2])["action"].startswith("Decide how to handle: Bounded work")
+        assert _offer_ok(conn, tid) and not _refiles(conn, tid) and len(_events(conn, tid, stranded.EVENT)) == 1
+
+
+def test_a_forged_stamp_on_a_card_whose_decision_card_is_open_gets_no_refile(kanban_home, own_gateway, monkeypatch):
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    monkeypatch.setattr(reviewer, "queue", lambda *a, **kw: False)
+    with kbc.connect_closing() as conn:
+        root = kb.create_task(conn, title="Ownerless work", assignee="default")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (root,))
+            kb._append_event(conn, root, decision.EVENT, {"reason": "Spend budget: 15 runs"})
+        decision.ensure_producer(conn, root)  # an agent route owns the decision: an open decision card
+        forged = _forge(conn, root, episode=_true_stamp(conn, root))
+        for hours in (3, 3.2):
+            assert root not in _sweep(conn, now=_later(hours), cfg={})
+        assert json.loads(_row(conn, root)[2]) == forged and not _offer_ok(conn, root)
+        assert not _refiles(conn, root) and not _events(conn, root, stranded.EVENT)
+
+
+def test_an_escalation_whose_origin_was_overwritten_is_not_this_boards_evidence(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid] and _offer_ok(conn, tid)
+        with kb.write_txn(conn):
+            if "origin_gateway" not in {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}:
+                conn.execute("ALTER TABLE task_events ADD COLUMN origin_gateway TEXT")
+            conn.execute("UPDATE task_events SET origin_gateway='worker-9' WHERE task_id=? AND kind=?",
+                         (tid, stranded.EVENT))
+        assert not _offer_ok(conn, tid)
+        assert _sweep(conn, now=_later(3.2), cfg={}) == [] and not _refiles(conn, tid) and not _offer_ok(conn, tid)
+
+
+def test_a_card_that_stopped_again_under_its_old_ask_is_escalated_for_the_new_stop(kanban_home, own_gateway):
+    """No filing record exists for the new park episode, so nothing is re-filed: the stale ask is no open ask
+    and the card passes the normal gates like any unowned stop."""
     from hermes_cli import kanban_release
     with kbc.connect_closing() as conn:
         tid = _spend_stopped_on_dead_chat(conn, kanban_home)
@@ -911,9 +989,12 @@ def test_a_card_that_stopped_again_under_its_old_ask_is_refiled_for_the_new_stop
             kb._append_event(conn, tid, "promoted_manual", {"actor": "someone", "reason": "one more"})
             kb._append_event(conn, tid, decision.EVENT, {"reason": "Spend budget: again"})
         assert decision.pending(conn, tid) and not _offer_ok(conn, tid)
+        assert _sweep(conn, now=int(time.time()) + 60, cfg={}) == []  # too young: nothing written yet
+        assert json.loads(_row(conn, tid)[2])["release_target"] == old
         assert _sweep(conn, now=_later(3.2), cfg={}) == [tid]
         new = json.loads(_row(conn, tid)[2])["release_target"]
         assert new == kanban_release.offer(conn, tid) and new["episode"] != old["episode"] and _offer_ok(conn, tid)
+        assert not _refiles(conn, tid) and len(_events(conn, tid, stranded.EVENT)) == 2
         _answer(conn, tid, "unblock")
         assert kb.get_task(conn, tid).status == "ready"
 

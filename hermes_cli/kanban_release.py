@@ -53,6 +53,7 @@ _AGENT_LIMITS = ("Narrower run counts, dollar caps and stop-on-finding condition
 _QUIET = frozenset({"commented", RELEASED, "spend_budget_set", "spend_budget_decision_ready", "scope_renewed",
                     "user_steps_answer", "card_answer_released", "stranded_park_escalated"})
 ESCALATED = "stranded_park_escalated"  # kanban_stranded_park.EVENT: the home's own record of the ask it filed
+REFILED = "stranded_park_refiled"  # the same record for an ask the sweep re-filed; no second desk notice
 MANDATE = (MARK + " Budget: {runs} more runs. {limits} Stop only on: a provider safety refusal; a step that needs "
            "David physically; the same error three times; the run budget. Findings, design changes, review "
            "CHANGES, CI waits and sandbox refusals of -c scripts are work inside the round. Safety exclusions in "
@@ -164,35 +165,52 @@ def offered(conn: sqlite3.Connection, task_id: str, ask: Any) -> Optional[str]:
     ``stranded_park_escalated`` event for this card (:func:`_home_filed`), whose origin the Board attests."""
     stamp = ask.get(STAMP) if isinstance(ask, dict) else None
     current = _pending_stop(conn, task_id)
-    if not isinstance(stamp, dict) or current is None or not _home_filed(conn, task_id, stamp):
+    if not isinstance(stamp, dict) or current is None or not _home_filed(conn, task_id, ask):
         return None
     return current["task"] if (stamp.get("task"), stamp.get("episode")) == (current["task"], current["episode"]) else None
 
 
-def _home_filed(conn: sqlite3.Connection, task_id: str, stamp: dict) -> bool:
-    """This board's own sweep filed the ask that carries ``stamp``: the card's newest ``stranded_park_escalated``
-    event records the same stamp and was written here. A synced event keeps the sending gateway the Board
-    authenticated (``origin_gateway``); a local one has none. A row another gateway pushed never qualifies."""
+def ask_digest(ask: Any) -> str:
+    """Identity of a filed ask: the sweep records it with the offer, so stored text it did not write is no offer."""
+    import hashlib
+    return hashlib.sha256(json.dumps(ask, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def own_events(conn: sqlite3.Connection, task_id: str, kinds: Sequence[str]) -> list[dict]:
+    """This board's own events of ``kinds`` on the card, newest first: ``{id, kind, payload}``. A synced event
+    keeps the sending gateway the Board authenticated (``origin_gateway``); a local one has none. An event
+    another gateway pushed, or one whose origin a foreign write replaced, is not this board's."""
     from hermes_cli.kanban_db_sync import sync_state
     from hermes_cli.kanban_origin import gateway_names
     columns = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
     origin = "origin_gateway" if "origin_gateway" in columns else "NULL"
-    row = conn.execute(f"SELECT payload, {origin} FROM task_events WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
-                       (task_id, ESCALATED)).fetchone()
-    if row is None or _payload(row[0]).get(STAMP) != stamp:
-        return False
     own = {gateway_names()[0], str((sync_state(conn) or {}).get("gateway_id") or "")}  # never the fleet list
-    return not row[1] or row[1] in own
+    marks = ",".join("?" for _ in kinds)
+    return [{"id": int(r[0]), "kind": r[1], "payload": _payload(r[2])} for r in conn.execute(
+        f"SELECT id, kind, payload, {origin} FROM task_events WHERE task_id=? AND kind IN ({marks}) ORDER BY id DESC",
+        (task_id, *kinds)) if not r[3] or r[3] in own]
+
+
+def _home_filed(conn: sqlite3.Connection, task_id: str, ask: dict) -> bool:
+    """This board's own sweep filed ``ask``: its newest own filing record for the card (an escalation or a
+    re-file) carries the ask's stamp and, when it recorded one, the ask's digest. A stamp on text the sweep did
+    not write, a row another gateway pushed and a later own filing without the offer all fail."""
+    filings = own_events(conn, task_id, (ESCALATED, REFILED))
+    if not filings or filings[0]["payload"].get(STAMP) != ask.get(STAMP):
+        return False
+    digest = filings[0]["payload"].get("ask_sha256")
+    return digest is None or digest == ask_digest(ask)  # records written before the digest existed carry none
 
 
 def dead_offer(conn: sqlite3.Connection, task_id: str, ask: Any) -> bool:
     """``ask`` carries a release stamp its button cannot honour although a release could be offered now: the
     stamp names an earlier stop, or this board has no record of filing it (an ask filed before the record
-    existed, a card rehomed after the ask, an event whose origin was overwritten). The stranded-park sweep
-    re-files such an ask from its own brief (``kanban_stranded_park``), never by blessing the stored text."""
+    existed, a card rehomed after the ask, an event whose origin was overwritten, text the sweep did not write).
+    A dead offer proves nothing about who wrote it: the stranded-park sweep decides from its own records whether
+    to re-file it or to treat the card as any unowned stop (``kanban_stranded_park``)."""
     stamp = ask.get(STAMP) if isinstance(ask, dict) else None
     current = offer(conn, task_id) if isinstance(stamp, dict) else None
-    return current is not None and (stamp != current or not _home_filed(conn, task_id, stamp))
+    return current is not None and (stamp != current or not _home_filed(conn, task_id, ask))
 
 
 def _newest_stop(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
@@ -508,9 +526,11 @@ def _mandate_and_budget(conn: sqlite3.Connection, out: dict, s) -> None:
         s.budget = runs
         try:
             who = kind if kind in ("human", "agent") else None
+            # The cache-read limit's own attribution, always: a kept one keeps what it had (a person's run-only
+            # override defers to the board limit, and that deference is kept too); a lifted one is this writer's.
+            kept = ksb.carried(s.prior).get("cache_read_writer_kind", "unknown") if s.keeps_limit else who
             ksb.set_override(conn, s.tid, runs=runs, cache_read_tokens=cache, by=s.by, reason=s.reason,
-                             seen=s.budget_seen, board=s.board, writer_kind=who,
-                             cache_read_writer_kind=ksb.carried(s.prior).get("cache_read_writer_kind") if s.keeps_limit else None)
+                             seen=s.budget_seen, board=s.board, writer_kind=who, cache_read_writer_kind=kept)
         except unread.UnreadComments as exc:  # a budget decision recorded since the check above
             raise _Refusal("budget_decision_unread", f"{exc}{s.kept}")
     out.update(spent_runs=spent, budget_runs=s.budget)
