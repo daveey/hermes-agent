@@ -363,7 +363,7 @@ def read_annotation_parts() -> tuple:
     snapshot = _parts.measured(_parts.COUNTS, lambda: _ksa._all_counts(include_snapshot=True))
     active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys = snapshot[:9]
     execution = getattr(snapshot, "execution", {})
-    extra = _parts.measured("waiting", _ksa._extra_waiting)
+    extra = _parts.measured(_parts.WAITING, lambda: _parts.waiting(_ksa._extra_waiting))
     try:
         attention = _parts.measured(_parts.ATTENTION, _ksa.attention_task_counts)
     except Exception:

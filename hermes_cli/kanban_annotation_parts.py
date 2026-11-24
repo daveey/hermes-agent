@@ -28,8 +28,8 @@ request poll is.
 
 Every part is forced when no key can vouch for the inputs: a provider clock deadline came due (wall-time verdicts
 move without any write), a board has no content revision and its file stat is not settled, a done check declared no
-watch paths, a key could not be read, or the scope has no completed holder read yet. Waiting sources are not gated
-here: they are called on every refresh and own their input memo.
+watch paths, a key could not be read, or the scope has no completed holder read yet. Waiting sources are gated
+as a group by their exact declared inputs, with detached holder-only output; ordinary request reads are unchanged.
 """
 
 from __future__ import annotations
@@ -41,12 +41,44 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-COUNTS, LINKS, ATTENTION = "counts", "links", "attention"
-ALL = frozenset({COUNTS, LINKS, ATTENTION})
+COUNTS, LINKS, ATTENTION, WAITING = "counts", "links", "attention", "waiting"
+ALL = frozenset({COUNTS, LINKS, ATTENTION, WAITING})
 _MAX_SCOPES = 64
 
 # Per scope, the part keys the last completed holder read answered. Holder thread only.
 _seen: dict[tuple[str, ...], dict[str, object]] = {}
+_waiting: dict[tuple[str, ...], tuple[tuple[str, frozenset[str]], ...]] = {}
+
+
+def _waiting_key() -> object:
+    """Only complete, portable declarations can certify a waiting answer."""
+    from hermes_cli import kanban_annotation_host as host
+    from hermes_cli import kanban_session_activity as ksa
+
+    sources = dict(ksa._waiting_sources)
+    values, complete = host._waiting_inputs(sources)
+    # Code identity alone does not distinguish two closures registered from the same source.
+    return (tuple(sorted(sources.items())), values) if complete else object()
+
+
+def waiting(read):
+    """Reuse detached waiting output only in the serialized holder pass.
+
+    Requests keep their existing literal behavior. A holder clock, unknown key,
+    replacement or failed projection forces the source again through plan().
+    """
+    from hermes_cli import kanban_session_activity as ksa
+
+    scope = ksa._origin_scope()
+    if getattr(ksa._revalidate.force_read, "scope", None) != scope:
+        return read()
+    if ksa._revalidate.forced(scope, WAITING) or scope not in _waiting:
+        value = read()
+        frozen = tuple((sid, frozenset(ids)) for sid, ids in value.items())
+        while len(_waiting) >= _MAX_SCOPES:
+            del _waiting[next(iter(_waiting))]
+        _waiting[scope] = frozen
+    return {sid: set(ids) for sid, ids in _waiting[scope]}
 
 
 def _signature(scope: tuple[str, ...], paths) -> str:
@@ -118,7 +150,7 @@ def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
     ledger = ksa._origin_ledger_fingerprint()
     plain = _plain_key(scope)
     return {COUNTS: (counts_local, shadows, ledger, plain), LINKS: (links_local, ledger),
-            ATTENTION: (counts_local, _done_key(scope, wall))}
+            ATTENTION: (counts_local, _done_key(scope, wall)), WAITING: _waiting_key()}
 
 
 def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[frozenset, dict[str, object] | None]:
@@ -150,13 +182,14 @@ def done(scope: tuple[str, ...], now: dict[str, object] | None) -> None:
 def failed(scope: tuple[str, ...]) -> None:
     """A holder read of ``scope`` raised: nothing is vouched for."""
     _seen.pop(scope, None)
+    _waiting.pop(scope, None)
 
 
 def measured(part: str, read):
     """Account inclusive part CPU without changing its cache policy or exception behavior.
 
     ``served`` means cache-eligible, NOT a cache hit: TTL expiry can still read. Counts includes its nested
-    links work; do not add those counters together. Waiting sources have no force gate yet.
+    links work; do not add those counters together. Waiting uses its declared holder key.
     """
     from hermes_cli import kanban_session_activity as ksa
     from hermes_cli import loop_accounting as la
@@ -168,3 +201,4 @@ def measured(part: str, read):
 
 def reset() -> None:
     _seen.clear()
+    _waiting.clear()
