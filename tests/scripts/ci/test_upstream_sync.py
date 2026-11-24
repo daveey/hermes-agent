@@ -54,6 +54,20 @@ def test_push_timeout_reports_stage_and_limit(monkeypatch, tmp_path, stage):
     assert isinstance(error.value.__cause__, subprocess.TimeoutExpired)
 
 
+@pytest.mark.parametrize("failure", [
+    "! [remote rejected] HEAD -> sync/upstream-test (failed)",
+    "error: failed to push some refs",
+    "fatal: the remote end hung up unexpectedly",
+])
+def test_push_reports_local_failure_before_remote_hints(monkeypatch, tmp_path, failure):
+    hints = "remote: Create a pull request by visiting: " + "x" * 700
+    monkeypatch.setattr(sync, "_run", lambda *a, **kw:
+                        subprocess.CompletedProcess(a, 1, "", hints + "\n" + failure))
+    with pytest.raises(sync.GateError, match="git push") as error:
+        sync._push(tmp_path, "HEAD", "refs/heads/sync/upstream-test", "stage")
+    assert failure in str(error.value)
+
+
 def git(cwd, *args, env=None):
     return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True,
                           env=env).stdout.strip()

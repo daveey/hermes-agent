@@ -273,9 +273,10 @@ def _push(repo, src: str, ref: str, stage: str) -> None:
         raise GateError(f"git push ({stage}) to {ref} timed out after {PUSH_TIMEOUT_S} seconds") from exc
     if push.returncode:
         lines = [line.strip() for line in (push.stderr or push.stdout or "").splitlines() if line.strip()]
-        remote = [line for line in lines if line.startswith("remote:")]
-        # GitHub's verdict lines first (``remote: error: GH006 …``): the tail is paths and hints
-        message = " | ".join([line for line in remote if "error" in line.lower()] or remote or lines)[:600]
+        # Keep Git's local rejection/transport errors ahead of GitHub's PR hints.
+        errors = [line for line in lines if line.startswith(("!", "error:", "fatal:"))
+                  or (line.startswith("remote:") and "error" in line.lower())]
+        message = " | ".join(errors + [line for line in lines if line not in errors])[:1200]
         if is_protection_refusal(message):
             raise Refused(f"GitHub refused the push to {ref}: {message}")
         raise GateError(f"git push to {ref} failed: {message}")
