@@ -58,7 +58,12 @@ def fields(conn, task, *, replica=False):
 def render(row):
     """Bounded prompt/status line, not a generated executable original-scope instruction."""
     return (f"Actionability: {row['action']}; owner={row['owner']}; "
-            f"{row['instruction']}; deadline={row['escalation']['at']} "
+            f"{row['instruction']}; "
+            # Short form: the full condition (with the recorded note) stays in the row, so the 1800 cap never
+            # cuts off deadline/evidence/violations.
+            + (f"release: hermes kanban release {row['task_id']}; "
+               if (row.get('release') or {}).get('authority') == 'kanban_release' else '')
+            + f"deadline={row['escalation']['at']} "
             f"(null=unrecorded); evidence={row['evidence_state']}; "
             f"violations={','.join(row['violations']) or 'none observed'}")[:1800]
 

@@ -106,6 +106,15 @@ class Reader:
         return {**rows[0], '_ambiguous': len(rows) > 1} if rows else None
 
 
+def _release_offer(conn, tid: str) -> dict | None:
+    """What `hermes kanban release` would act on for ``tid`` (kanban_release.offer), else None. Read-only."""
+    try:
+        from hermes_cli import kanban_release
+        return kanban_release.offer(conn, tid)
+    except EVIDENCE_ERRORS:
+        return None
+
+
 def _unresolved_receipt(events: list[dict]) -> dict | None:
     promoted = False
     for event in events:
@@ -252,6 +261,7 @@ def _describe(conn, tid, *, now, reader):
              'deadline_at': next_action.get('escalate_at') or record(next_action.get('escalation')).get('at'),
              'containment': task.get('containment_episode'), 'pending_command': reader.pending(tid),
              'human_step': _human_step(task.get('human_request')),
+             'release_offer': _release_offer(conn, tid) if stop and not receipt_only else None,
              'unknown': reader.synced or reader.partial or missing or bool(receipt_only) or bool(source and not reader.uid(source))
                         or bool(task.get('human_request') and not _human_step(task['human_request']))}
     if source and not any((stop, facts['containment'], facts['pending_command'])):

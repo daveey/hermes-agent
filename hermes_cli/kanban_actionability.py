@@ -25,6 +25,13 @@ def _block(row: dict, prerequisite: str, trigger: str, *, action: str) -> None:
                blocker={'prerequisite': prerequisite, 'trigger': trigger, 'evidence': row['source_refs']})
 
 
+RELEASE_AUTHORITY = 'kanban_release'
+RELEASE_VERB = ("A human operator, the card's owning chat or a delegate chat runs "
+                "`hermes kanban release {task}` on the card's home gateway "
+                "(goal-level mandate, renew, budget, promote). A condition an earlier run recorded is a note for "
+                "that decision, not a gate")
+
+
 def _decision(row: dict, facts: dict) -> None:
     contract = facts.get('next_action') or {}
     blocker = contract.get('blocker') if isinstance(contract.get('blocker'), dict) else {}
@@ -42,9 +49,24 @@ def _decision(row: dict, facts: dict) -> None:
     if isinstance(evidence, list) and all(isinstance(ref, str) for ref in evidence):
         row['blocker']['evidence'] = list(dict.fromkeys([*row['source_refs'], *evidence]))
     release = contract.get('release')
-    if isinstance(release, dict) and isinstance(release.get('condition'), str) and release['condition'].strip():
-        row['release']['condition'] = release['condition']
-    row['release']['authority'] = 'unavailable'  # recorded conditions never grant release
+    recorded = (release['condition'] if isinstance(release, dict) and isinstance(release.get('condition'), str)
+                and release['condition'].strip() else None)
+    offer = facts.get('release_offer')
+    if (facts['stop'].get('cause') == 'safety_refusal' or facts.get('containment')
+            or not isinstance(offer, dict) or offer.get('task') != row['task_id']):
+        # Only a stop `hermes kanban release` would act on names it (`release_offer` is kanban_release.offer():
+        # held in triage/scheduled on a pending stop, not safety-restricted). Safety refusals, containment holds,
+        # receipt-only and non-held rows keep 'unavailable': only their own authority lifts them.
+        if recorded:
+            row['release']['condition'] = recorded
+        row['release']['authority'] = 'unavailable'  # recorded conditions never grant release
+        return
+    # A scope or spend stop has a release: name it. Reporting 'unavailable' under the run's own prose made chats
+    # treat a worker-invented prerequisite ("policy-owner permission ... no principal can issue it") as binding,
+    # and three Cogamer Tools cards looped on it for a day (2026-11-24). The recorded text never grants release.
+    verb = RELEASE_VERB.format(task=row['task_id'])
+    row['release'] = {'authority': RELEASE_AUTHORITY,
+                      'condition': verb + (f'. Recorded note: {recorded}' if recorded else '')}
 
 
 def _status(row: dict, facts: dict, now: int) -> None:
@@ -185,6 +207,9 @@ def project(facts: dict, *, now: int) -> dict:
         return row
     deps = row['dependencies']
     if deps and all(d.get('restricted') and d.get('evidence_state') == 'known' for d in deps):
+        if row['release']['authority'] == RELEASE_AUTHORITY:
+            row['release']['condition'] = ('Every parent is restricted; a release would only record the decision and '
+                                           'wait on them. ' + row['release']['condition'])
         row['release']['authority'] = 'unavailable'
         if all(d.get('administrative_owner', {}).get('kind') == 'unavailable' for d in deps):
             row['violations'].append('dependency_recovery_unavailable')

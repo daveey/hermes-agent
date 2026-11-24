@@ -7,8 +7,11 @@ SCHEMA = _schema('kanban_retain',
     'End this admitted run in non-executing decision triage. '
     'Does not complete acceptance, renew spend or grant execution. '
     'No synthetic authority or human ask is required. '
-    'Provide an administrative next step, evidence and release prerequisite; unavailable authority '
-    'stays unavailable. Comments, timers and review completion cannot release a restricted scope. '
+    'Provide an administrative next step, evidence and a release_condition: the concrete thing the releaser should '
+    'check, a note and never a gate. Except after a provider safety refusal or a containment hold, the release '
+    "itself is `hermes kanban release <card>` on the card's home gateway by a human operator, the card's owning "
+    "chat or a delegate chat (never this run); never name a permission, principal or grant that does not exist on "
+    'this board as a precondition. Comments, timers and review completion alone do not release a stopped scope. '
     'After terminal_for_run=true stop. Unknown delivery preserves the exact request; do not replace it.',
     {'summary': {'type': 'string', 'minLength': 1,
                  'description': 'Bounded handoff summary, at most 2000 characters.'},

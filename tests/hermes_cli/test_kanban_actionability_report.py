@@ -86,7 +86,7 @@ def test_review_report_propagates_carrier_receipt_custody(delivery):
     pending = delivery in ('pending', 'unknown')
     assert row['owner']['kind'] == ('unknown' if pending else 'task')
     assert row['evidence_state'] == ('unknown' if pending else 'known')
-    assert row['release']['authority'] == 'unavailable'
+    assert row['release']['authority'] == 'kanban_release'  # held root on a real stop: release would act
     assert list(conn.iterdump()) == before
     conn.close()
 

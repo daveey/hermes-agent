@@ -79,6 +79,8 @@ def command(args) -> int:
         for row in result['rows']:
             blocker = row['blocker']
             step = blocker['trigger'] if blocker else row['instruction']
+            if (row.get('release') or {}).get('authority') == 'kanban_release':
+                step += f"; release: hermes kanban release {row['task_id']}"
             print(f"{row['task_id']} {row['status']} owner={row['owner']} {row['action']}: {step}; "
                   f"deadline={row['escalation']['at']} evidence={row['evidence_state']} "
                   f"violations={','.join(row['violations']) or 'none observed'}")

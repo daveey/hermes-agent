@@ -100,6 +100,72 @@ def test_prerequisite_alone_is_the_recorded_trigger_and_valid_release_is_display
     assert row['release'] == {'authority': 'unavailable', 'condition': 'Recorded condition'}
 
 
+OFFER = {'task': 't_x', 'episode': 'stop-1'}  # kanban_release.offer(): held in triage on a pending, unrestricted stop
+
+
+def test_releasable_scope_stop_names_its_release_even_under_an_impossible_recorded_gate():
+    """2026-11-24: runs recorded "authenticated policy-owner permission ... no installed principal can issue a
+    grant" and the row said authority 'unavailable', so the owning chat refused `release` for a day. A stop
+    `hermes kanban release` would act on names the verb; the recorded text is only a note."""
+    gate = 'Authenticated policy-owner permission for the exact request identity; generic user confirmation does not release'
+    for cause in ('scope_stopped', 'capability_unavailable', 'decision_pending', 'spend_budget'):
+        row = project({'task': {'id': 't_x', 'status': 'triage', 'assignee': 'default'}, 'deadline_at': 2000,
+                       'stop': {'cause': cause}, 'release_offer': OFFER,
+                       'next_action': {'release': {'condition': gate}}}, now=1000)
+        assert row['release']['authority'] == 'kanban_release'
+        assert row['release']['condition'].startswith("A human operator, the card's owning chat or a delegate chat "
+                                                      'runs `hermes kanban release t_x`')
+        assert row['release']['condition'].endswith('Recorded note: ' + gate)
+        from hermes_cli.kanban_actionability_evidence import render
+        assert 'release: hermes kanban release t_x;' in render(row)
+
+
+@pytest.mark.parametrize('stop,containment,offer', [
+    ({'cause': 'safety_refusal'}, None, OFFER),          # safety wins even if an offer were computed
+    ({'cause': 'scope_stopped'}, {'episode': 'held'}, OFFER),  # containment hold
+    ({'cause': 'scope_stopped'}, None, None),            # not held / receipt-only: release would refuse not_held
+])
+def test_stops_release_would_refuse_keep_release_unavailable(stop, containment, offer):
+    row = project({'task': {'id': 't_x', 'status': 'triage', 'assignee': 'default'}, 'deadline_at': 2000,
+                   'stop': stop, 'containment': containment, 'release_offer': offer,
+                   'next_action': {'release': {'condition': 'Nominated authority run lifts it'}}}, now=1000)
+    assert row['release'] == {'authority': 'unavailable', 'condition': 'Nominated authority run lifts it'}
+
+
+def test_render_keeps_tail_fields_with_maximum_size_retain():
+    row = project({'task': {'id': 't_x', 'status': 'triage', 'assignee': 'default'}, 'deadline_at': 2000,
+                   'stop': {'cause': 'scope_stopped'}, 'release_offer': OFFER,
+                   'next_action': {'instruction': 'i' * 1000, 'release': {'condition': 'c' * 1000}}}, now=1000)
+    from hermes_cli.kanban_actionability_evidence import render
+    line = render(row)
+    assert 'violations=' in line and 'evidence=' in line and 'deadline=2000' in line
+    assert 'release: hermes kanban release t_x;' in line
+
+
+def test_offer_for_another_card_does_not_name_this_one():
+    """A decision card resolves to its root: the row never names a verb that would act on a different card."""
+    row = project({'task': {'id': 't_decision', 'status': 'triage', 'assignee': 'default'}, 'deadline_at': 2000,
+                   'stop': {'cause': 'scope_stopped'}, 'release_offer': OFFER}, now=1000)
+    assert row['release']['authority'] == 'unavailable'
+
+
+def test_blocked_stopped_card_gets_no_release_offer():
+    conn = held_fixture()
+    conn.execute("UPDATE tasks SET status='blocked' WHERE id='root'")
+    row = describe(conn, 'root', now=200)
+    assert row['release']['authority'] == 'unavailable'
+    conn.close()
+
+
+def test_restricted_parents_downgrade_a_named_release_and_say_why():
+    row = project({'task': {'id': 't_x', 'status': 'triage', 'assignee': 'default'}, 'deadline_at': 2000,
+                   'stop': {'cause': 'scope_stopped'}, 'release_offer': OFFER,
+                   'dependencies': [{'task_id': 'p', 'status': 'triage', 'restricted': True, 'evidence_state': 'known',
+                                     'trigger': 'p released'}]}, now=1000)
+    assert row['release']['authority'] == 'unavailable'
+    assert row['release']['condition'].startswith('Every parent is restricted')
+
+
 @pytest.mark.parametrize('administrative_owner,unknown', [
     ({'kind': 'task', 'refs': ['carrier']}, False),
     ({'kind': 'task', 'refs': []}, True),
@@ -319,7 +385,8 @@ def test_review_carrier_pending_custody_composition(delivery):
     pending = delivery in ('pending', 'unknown')
     assert row['owner']['kind'] == ('unknown' if pending else 'task')
     assert row['evidence_state'] == ('unknown' if pending else 'known')
-    assert row['release']['authority'] == 'unavailable'
+    # root is held in triage on a real scope stop: `hermes kanban release root` would act, so the row names it.
+    assert row['release']['authority'] == 'kanban_release'
     if pending:
         assert carrier['action'] == 'resolve_release_authority'
     conn.close()
