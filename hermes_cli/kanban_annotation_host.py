@@ -719,7 +719,10 @@ def _event_refresh(events) -> float | None:
             _ksa._revalidate.force_read.parts = forced
             try:
                 try:
-                    _ksa._refresh_annotation_locked(scope)
+                    # No part needs a read: avoid prepare/freeze/publication and ordinary inner TTLs.
+                    # Keep the deadline/settle path below: this hint can precede COMMIT visibility.
+                    if forced:
+                        _ksa._refresh_annotation_locked(scope)
                 except BaseException:
                     _parts.failed(scope)
                     raise

@@ -136,6 +136,55 @@ def test_a_write_to_one_source_rereads_only_the_parts_that_read_it(world):
     assert _published()[0] == {}
 
 
+def test_unchanged_source_wakes_skip_the_outer_read_but_keep_confirmations(world, monkeypatch):
+    """A hint before COMMIT must still get a trailing semantic-key probe."""
+    calls = []
+    original = ksa._refresh_annotation_locked
+
+    def read(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ksa, '_refresh_annotation_locked', read)
+    monkeypatch.setattr(host, 'SETTLE_S', (0.25, 2.0))
+    _refresh()
+    assert len(calls) == 1
+    first = _published()
+    for _ in range(5):
+        _refresh()
+    assert len(calls) == 1, 'unchanged source hints entered the expensive outer projection'
+    assert _published() is first
+    assert len(host._settle_deadlines[SCOPE]) == 2
+
+    # Model the WAL append being observed before COMMIT: no further source hint.
+    world.conn.execute("UPDATE tasks SET status='done' WHERE id='t1'")
+    host._clock_deadlines[SCOPE] = [0.0]
+    host._settle_deadlines[SCOPE] = (0.0,)
+    _refresh(source=False)
+    assert len(calls) == 2
+    assert _published()[0] == {}
+
+
+def test_unchanged_keys_do_not_skip_a_provider_clock_or_count_renewal(world, monkeypatch):
+    calls = []
+    original = ksa._refresh_annotation_locked
+
+    def read(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ksa, '_refresh_annotation_locked', read)
+    _refresh()
+    _refresh()
+    assert len(calls) == 1
+    host._clock_deadlines[SCOPE] = [0.0]
+    _refresh(source=False)
+    assert len(calls) == 2, 'provider clock was mistaken for an unchanged source hint'
+    monkeypatch.setattr(host, 'STRICT_REFRESH_AGE_S', 0.0)
+    _refresh()
+    assert len(calls) == 3, 'unchanged inputs suppressed a real counts renewal'
+
+
 def _undated(value):
     """``value`` without the wall times a read stamps on its execution evidence (they date the read itself)."""
     if isinstance(value, dict):
