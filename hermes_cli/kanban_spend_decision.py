@@ -331,6 +331,13 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
     from hermes_cli.kanban_refusal_receipt import restricted
     safety = restricted(conn, task_id)
     stopped = execution_restricted(conn, task_id)
+    # A decision card's only power is ``spend_promote``, which releases an ordinary budget stop and nothing else.
+    # A stop with a cause (capability_unavailable, scope_stopped, safety_refusal) gets no card: its worker could
+    # only retain it, a second stop and no decision. The stranded-park escalation owns it (kanban_stranded_park),
+    # so the card built below is always for an ordinary stop.
+    import json
+    if safety or stopped or (stop and json.loads(stop['payload'] or '{}').get('cause')):
+        return {'kind': 'unavailable'}
     import json as _json
     stop = pending_episode(conn, task_id)
     listed = _json.loads(stop['payload'] or '{}').get('refused_providers') if stop is not None and safety else None
@@ -346,9 +353,7 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
              + "Source title and stop reason (historical evidence):\n" + forwarded_text(task.title) + "\n"
              + forwarded_text(note) + "\n\n" + guidance + action
              + "\n\nApply the disposition on the source before completing this decision card; a recommendation or "
-             "completion alone does not change its hold. If authority/capability is unavailable, retain this "
-             "decision card as a non-executing owner with the exact prerequisite instead of completing and "
-             "leaving the source ownerless. Never renew spend or bypass safety/scope gates implicitly.",
+             "completion alone does not change its hold. Never renew spend or bypass safety/scope gates implicitly.",
         assignee=_supervisor_profile(), created_by="kanban-spend-budget", workspace_kind="scratch",
         idempotency_key=f"spend-budget-decision:{task_id}:{episode}", tenant=task.tenant)
     stop = pending_episode(conn, task_id)

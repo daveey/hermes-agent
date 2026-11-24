@@ -7,7 +7,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_spend_decision as decision
 from hermes_cli.kanban_triage_sweep import sweep_stale_triage
-from tests.hermes_cli.test_kanban_spend_route_repair import _route, _stop
+from tests.hermes_cli.test_kanban_spend_route_repair import _carded_stop, _route, _stop
 from tests.hermes_cli import test_kanban_spend_budget as helpers
 
 kanban_home = helpers.kanban_home
@@ -22,8 +22,7 @@ def _wrappers(conn, tid):
 @pytest.mark.parametrize("cause", [None, "scope_stopped", "safety_refusal"])
 def test_archived_wrapper_not_refiled_same_episode(kanban_home, status, cause):
     with kbc.connect_closing() as conn:
-        tid = _stop(conn, cause)
-        decision.ensure_producer(conn, tid)
+        tid = _carded_stop(conn, cause)
         sup = _route(conn, tid)["task_id"]
         if status == "archived":
             assert kb.archive_task(conn, sup)
