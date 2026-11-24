@@ -94,12 +94,30 @@ def declared_producer(tool_task_id: Optional[str] = None, *, allow_env: bool = T
 
 
 def tool_create_options(tool_task_id: Optional[str], selfwork_intent) -> dict:
-    """``create_task`` owner options for the ``kanban_create`` tool. Receiver-set self-work intake is chat-less
-    by contract, so it gets no owner chat. Any other chat-less caller is owned by its runner's producer: the cron
-    job running this tool call, or (only outside an agent turn: a script calling the tool directly)
-    ``HERMES_KANBAN_PRODUCER``."""
+    """``create_task`` owner options for the ``kanban_create`` tool. A receiver-set self-work intake create needs
+    no requester chat authority (#4252); it is not settled here because the intake home's ``admit`` settles it
+    with its policy slot's producer (:func:`selfwork_producer`) inside its own create transaction. Any other
+    chat-less caller is owned by its runner's producer: the cron job running this tool call, or (only outside an
+    agent turn: a script calling the tool directly) ``HERMES_KANBAN_PRODUCER``."""
     return {"settle_owner_chat": selfwork_intent is None,
             "owner_producer": declared_producer(tool_task_id, allow_env=not tool_task_id)}
+
+
+def selfwork_producer(value: dict) -> str:
+    """The producer of a self-work intake card: its policy slot's repository and area, so every intake card of
+    one slot (created now or backfilled later) shares one standing owner chat."""
+    return f"selfwork:{value['repository']}/{value['area']}"
+
+
+def intake_producer(conn, task_id: str) -> Optional[str]:
+    """:func:`selfwork_producer` of a card the self-work intake admitted (its ``self_work_declared`` event),
+    else None."""
+    from hermes_cli import kanban_selfwork as policy
+    try:
+        value = policy.declared(conn, task_id)
+    except (policy.SelfWorkError, ValueError, TypeError):
+        return None  # a malformed record names no slot: the card keeps its created_by producer
+    return selfwork_producer(value) if value else None
 
 
 def _open_store(path: str):
@@ -336,7 +354,7 @@ def ownerless(conn, live=None) -> list[tuple[str, str]]:
                 "ORDER BY created_at").fetchall():
             if foreign_copy(conn, task_id) or _needs_owner(conn, task_id, links, live) is None:
                 continue
-            out.append((task_id, (created_by or "").strip() or "unattributed"))
+            out.append((task_id, intake_producer(conn, task_id) or (created_by or "").strip() or "unattributed"))
         return out
     finally:
         if db is not None:
