@@ -205,14 +205,70 @@ def validate_text(*values):
                     raise ValueError(f'{ERROR}; refused line: {source_line}{_TEXT_GUIDANCE}')
 
 
+NEUTRAL_ROUTE = 'any qualified route'
+_ROUTE_OCCURRENCE = re.compile(_ROUTE_NAME + r'(?:/[\w-]+)?|' + _PROVIDER_NAME, re.IGNORECASE)
+
+
+def _passes(text):
+    try:
+        validate_text(text)
+    except ValueError:
+        return False
+    return True
+
+
+def neutral_line(line):
+    """The refused line with only the route identities its obligations name made neutral.
+
+    Every other byte, including non-model gates sharing the line and any mention the
+    recognizer accepts (exclusions, provenance), stays verbatim and active. Returns
+    None when no identity substitution can make the line acceptable (a nameless
+    machine directive such as ``require_model: true``). No lexical guess decides
+    which prose is a gate: only the unchanged ingress recognizer is consulted.
+    """
+    spans = [m.span() for m in _ROUTE_OCCURRENCE.finditer(line)]
+
+    def render(chosen):
+        out, last = [], 0
+        for index, (start, end) in enumerate(spans):
+            if index in chosen:
+                out += [line[last:start], NEUTRAL_ROUTE]
+                last = end
+        return ''.join(out) + line[last:]
+
+    chosen = set(range(len(spans)))
+    if not spans or not _passes(render(chosen)):
+        return None
+    # Restore each identity the recognizer does not need neutralized, so author
+    # exclusions and execution provenance on the same line are never rewritten.
+    for index in range(len(spans)):
+        if _passes(render(chosen - {index})):
+            chosen.discard(index)
+    return render(chosen)
+
+
+def retained_line(line, separator='\n'):
+    """Quote a refused line as history and keep its neutralized remainder active.
+
+    Returns None when the line has no acceptable neutral form; callers then decide
+    conservatively rather than silently inactivating unrecognized obligations.
+    """
+    neutral = neutral_line(line)
+    if neutral is None:
+        return None
+    return _EVIDENCE + json.dumps(line, ensure_ascii=False) + separator + neutral
+
+
 def forwarded_text(text):
-    """Retain superseded legacy directives as labelled evidence, not new policy."""
+    """Retain superseded legacy directives as labelled evidence, not new policy.
+
+    A refused line's other obligations are forwarded active with the named route
+    neutralized; only a nameless pure directive line is quoted alone.
+    """
     lines = []
     for line in (text or '').splitlines():
-        try:
-            validate_text(line)
-        except ValueError:
-            line = _EVIDENCE + json.dumps(line, ensure_ascii=False)
+        if not _passes(line):
+            line = retained_line(line) or _EVIDENCE + json.dumps(line, ensure_ascii=False)
         lines.append(line)
     return '\n'.join(lines)
 

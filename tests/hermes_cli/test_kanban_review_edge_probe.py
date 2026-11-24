@@ -76,13 +76,17 @@ def test_evidence_cannot_hide_active_mandates(board, text):
 
 
 def test_forwarded_directives_remain_lossless_inert_evidence(board):
-    from hermes_cli.kanban_model_neutral import forwarded_text
+    from hermes_cli.kanban_model_neutral import forwarded_text, neutral_line
 
     source = 'Review must use gpt-5 only. "quoted"\nrequire_model: true'
     forwarded = forwarded_text(source)
     assert forwarded_text(forwarded) == forwarded
     prefix = 'Historical run instruction (superseded and not active): '
-    assert '\n'.join(json.loads(line.removeprefix(prefix)) for line in forwarded.splitlines()) == source
+    lines = forwarded.splitlines()
+    # The named line keeps its non-model text active right after its exact history.
+    assert lines[1] == neutral_line(json.loads(lines[0].removeprefix(prefix)))
+    assert lines[1].startswith('Review must use any qualified route only.')
+    assert '\n'.join(json.loads(line.removeprefix(prefix)) for line in (lines[0], lines[2])) == source
     with original.kbc.connect() as conn:
         tid = original.kb.create_task(conn, title='remove legacy restriction', body=forwarded,
                                       assignee='default')

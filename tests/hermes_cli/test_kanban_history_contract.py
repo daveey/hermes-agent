@@ -17,9 +17,17 @@ LEGACY = 'Independent primary Opus review required "quoted"\nrequire_model: true
 
 
 def decoded(body):
+    """Historical lines decoded; each one's neutral active companion is asserted and skipped."""
+    from hermes_cli.kanban_model_neutral import neutral_line
     prefix = 'Historical run instruction (superseded and not active): '
-    return '\n'.join(json.loads(line[len(prefix):]) if line.startswith(prefix) else line
-                     for line in body.splitlines())
+    out, lines = [], iter(body.splitlines())
+    for line in lines:
+        if line.startswith(prefix):
+            line = json.loads(line[len(prefix):])
+            if neutral_line(line) is not None:
+                assert next(lines) == neutral_line(line)
+        out.append(line)
+    return '\n'.join(out)
 
 
 def source(conn):

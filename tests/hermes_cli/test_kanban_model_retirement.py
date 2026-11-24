@@ -87,7 +87,8 @@ def test_body_exact_line_roundtrip_and_supported_edit(board, monkeypatch):
         monkeypatch.setattr(edits, 'edit_task', observed)
         assert sweep(conn) == 1
         expected = ('scope  \r\n' + PREFIX + json.dumps('  require_model: true') + '\r\n\n'
-                    + 'exclude: claude-opus-5-5\n' + PREFIX + json.dumps('Use only grok-4.6.') + '\rtrailing no newline')
+                    + 'exclude: claude-opus-5-5\n' + PREFIX + json.dumps('Use only grok-4.6.') + '\r'
+                    + 'Use only any qualified route.\rtrailing no newline')
         assert kb.get_task(conn, tid).body == expected
         assert len(calls) == 1
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='edited'", (tid,)).fetchone()[0] == 1
@@ -148,7 +149,8 @@ def test_all_body_line_endings_and_preexisting_evidence(ending):
     from hermes_cli.kanban_model_retirement import retired_body
     accepted = PREFIX + json.dumps('Use only grok-4.6.') + '\nuntouched λ  \n'
     source = accepted + 'Use only grok-4.6. λ  ' + ending
-    assert retired_body(source) == accepted + PREFIX + json.dumps('Use only grok-4.6. λ  ', ensure_ascii=False) + ending
+    assert retired_body(source) == (accepted + PREFIX + json.dumps('Use only grok-4.6. λ  ', ensure_ascii=False)
+                                    + (ending or '\n') + 'Use only any qualified route. λ  ' + ending)
 
 
 def test_cas_concurrent_set_model_wins(board):

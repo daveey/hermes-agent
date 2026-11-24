@@ -10,7 +10,7 @@ import json
 
 from agent.model_routing import is_class_selector
 from hermes_cli import kanban_db as kb
-from hermes_cli.kanban_model_neutral import validate_text
+from hermes_cli.kanban_model_neutral import _REQUIRED, retained_line, validate_text
 from hermes_cli.kanban_wake_check import foreign_copy, own_gateway
 
 FIELDS = ('model_override', 'provider_override', 'model_pin_mandatory')
@@ -57,7 +57,14 @@ def retire_selectors(conn, row):
 
 
 def retired_body(body):
-    """Quote refused lines only, retaining original line terminators and all other bytes."""
+    """Quote refused lines as history and keep their other obligations active.
+
+    A refused line is followed by itself with only the named route neutralized, so
+    non-model gates sharing it (CI, review, merge rules) never become inactive. A
+    nameless pure directive (``require_model: true``) is quoted alone. A line with no
+    acceptable neutral form is left unchanged for an owner edit rather than
+    inactivating text the recognizer cannot attribute.
+    """
     out = []
     for line in (body or '').splitlines(keepends=True):
         text = line.rstrip('\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029')
@@ -65,7 +72,10 @@ def retired_body(body):
         try:
             validate_text(text)
         except ValueError:
-            text = PREFIX + json.dumps(text, ensure_ascii=False)
+            if _REQUIRED.fullmatch(text):
+                text = PREFIX + json.dumps(text, ensure_ascii=False)
+            else:
+                text = retained_line(text, ending or '\n') or text
         out.append(text + ending)
     return ''.join(out)
 
@@ -78,7 +88,8 @@ def retire_body(conn, row):
         return False
     return edit_task(conn, row['id'], body=body, expected_body=row['body'], home_open_only=True,
                      audit_comment=(AUTHOR, 'Superseded model/provider mandates were retained as JSON historical '
-                                    'evidence (model_policy_no_pins); all other body text is unchanged.'))
+                                    'evidence (model_policy_no_pins); each such line stays active after it '
+                                    'with only the named route made neutral, and all other text is unchanged.'))
 
 
 def sweep(conn, *, limit=64):
