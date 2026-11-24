@@ -249,8 +249,8 @@ _suppress_mouse_residue_early()
 
 _startup_fast.ensure_project_root_on_path()
 from hermes_cli.stdio_pipe import quiet_stdout_pipe
-# ``hermes --version`` is answered before config/logging imports.
-if quiet_stdout_pipe(_startup_fast.try_fast_version)():
+# Read-only fast commands are answered before config/logging imports.
+if quiet_stdout_pipe(_startup_fast.try_fast_readonly)():
     raise SystemExit(0)
 
 import argparse

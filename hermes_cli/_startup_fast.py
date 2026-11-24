@@ -251,6 +251,18 @@ def print_fast_version_info(*, check_updates: bool = True) -> None:
         pass
 
 
+def try_fast_readonly(argv: list[str] | None = None) -> bool:
+    """Version and fresh snapshot diagnostics, without bypassing container routing."""
+    argv = sys.argv[1:] if argv is None else argv
+    if try_fast_version(argv):
+        return True
+    if argv[:2] != ["kanban", "why"] or "--json" not in argv or container_mode_may_be_active():
+        return False
+    from hermes_cli.kanban_why_fast import try_cli
+
+    return try_cli(argv)
+
+
 def try_fast_version(argv: list[str] | None = None) -> bool:
     """Handle ``hermes --version`` before the heavy import wall.
 

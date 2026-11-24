@@ -106,13 +106,9 @@ def why(conn: Any, task_id: str, *, live: bool = False) -> dict[str, Any]:
         from hermes_cli.kanban_governors_explain import explain
 
         return explain(conn, task_id)
-    first = {k: recorded.get(k) for k in ("governor", "label", "scope", "reading", "threshold", "since", "until",
-                                          "detail", "source", "age_s")}
-    first["verdict"] = "stop"
-    return {"task_id": task_id, "board": recorded.get("board"), "source": "snapshot", "status": recorded.get("status"),
-            "first_stop": first, "overlaps": recorded.get("overlaps"),
-            "overlaps_unknown": recorded.get("overlaps_unknown"), "globals": recorded.get("globals"),
-            "chain": [first], "recorded": recorded, "elapsed_s": round(time.monotonic() - started, 3)}
+    from hermes_cli.kanban_why_fast import answer
+
+    return answer(recorded, started=started)
 
 
 def _print_why(answer: dict[str, Any]) -> None:

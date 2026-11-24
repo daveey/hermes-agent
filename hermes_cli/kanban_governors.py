@@ -48,16 +48,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from hermes_cli.kanban_why_fast import STALE_SECONDS, SUFFIX, VERSION
+
 _log = logging.getLogger(__name__)
 
-VERSION = 1
-SUFFIX = ".governors.json"
 MAX_CARDS = 2000  # per-card rows kept in one snapshot; counts stay complete past it
 MAX_IDS = 25  # card ids listed on one governor row
 OVERLAP_BUDGET_SECONDS = 0.3  # per tick, for asking the rules after each card's first stop
 OVERLAP_TTL_SECONDS = 300  # a card's own last evaluation is shown this long while the budget has not reached it
 UNCHANGED_WRITE_SECONDS = 10  # an unchanged snapshot is rewritten (fresh ``tick_at``) at most this often
-STALE_SECONDS = 180  # a snapshot older than this is reported stale: no dispatcher is ticking this board
 
 HOLD, THROTTLE, REORDER = "hold", "throttle", "reorder"
 
@@ -878,6 +877,9 @@ def build(conn: Any, result: Any, capture: Optional[Tick], *, board: str, update
                                previous.get("governors") if isinstance(previous.get("governors"), list) else [], now)
     for card in kept.values():
         card.pop("tick_overlaps", None)
+        known = _BY_ID.get(card.get("governor"))
+        card["label"] = known.label if known else None
+        card["source"] = known.source if known else None
     return {"version": VERSION, "board": board, "tick_at": now, "idle_total": idle_total,
             "caps": dict(capture.caps) if capture is not None else {},  # the limits this tick ran with
             "charged_total": sum(row["cards"] for row in governors), "truncated": len(cards) > len(kept),
