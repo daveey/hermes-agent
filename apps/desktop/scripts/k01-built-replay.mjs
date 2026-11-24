@@ -57,8 +57,9 @@ assert.deepEqual(Object.keys(diagnostic),['readSessionTasksLoadedIdentityJson'])
 const trustedRead=()=>JSON.parse(diagnostic.readSessionTasksLoadedIdentityJson())
 const source=await fs.readFile(companionPath,'utf8')
 assert.equal(await product.loadRuntimePlugin(source,'session-tasks',{file:'/fixture/plugins/session-tasks/plugin.js'}),'session-tasks')
-const identity=product.host.diagnostics.readSessionTasksLoadedIdentity()
+const identity=trustedRead()
 assert.equal(identity.status,'MATCH',JSON.stringify(identity))
+assert.equal(product.host.diagnostics.readSessionTasksLoadedIdentity().status,'MATCH')
 assert.equal(identity.original.sha256,createHash('sha256').update(source).digest('hex'))
 for (const dependency of identity.dependencies) {
   assert.ok(dependency.servedAssets.length>1)
@@ -110,17 +111,20 @@ const reloaded=window.__sessionTasks
 assert.equal(JSON.parse(await endpoint.readSessionTasksLoadedIdentityForWindow(1,inventory)).status,'MATCH')
 await fs.writeFile(path.join(out,'main-route-trace.json'),JSON.stringify(trace,null,2))
 assert.notEqual(reloaded,st)
-const currentIdentity=trustedReadPlaceholder
-assert.deepEqual(trustedReadPlaceholder,identity)
-assert.equal(await st.warm({}),false) // Genuine whole-companion operation in the diagnostic realm.
+const currentIdentity=trustedRead()
+assert.equal(currentIdentity.status,'MATCH',JSON.stringify(currentIdentity))
+assert.notEqual(currentIdentity.activationGeneration,identity.activationGeneration)
+assert.equal(await reloaded.warm({}),false) // Genuine whole-companion operation on the current activation.
 assert.equal(trustedRead().status,'MATCH')
 const honest=product.host.diagnostics.readSessionTasksLoadedIdentity
-st.refresh=st.warm
+reloaded.refresh=reloaded.warm
 assert.equal(honest().reason,'SURFACE_CHANGED')
-product.host.diagnostics.readSessionTasksLoadedIdentity=()=>identity
+assert.equal(trustedRead().reason,'SURFACE_CHANGED')
+product.host.diagnostics.readSessionTasksLoadedIdentity=()=>currentIdentity
 const reimport=await import(pathToFileURL(path.join(out,'dist',root.file)).href)
 assert.equal(reimport.host.diagnostics.readSessionTasksLoadedIdentity().status,'MATCH') // Old consumer's reproduced false authority.
-assert.deepEqual(trustedRead(),{...honest(),reason:'SDK_CHANGED'})
+assert.equal(trustedRead().status,'NOT_READY')
+assert.equal(trustedRead().reason,'SDK_CHANGED')
 product.host.diagnostics.readSessionTasksLoadedIdentity=honest
 assert.equal(trustedRead().reason,'SURFACE_CHANGED')
 product.unloadRuntimePlugin('session-tasks')
