@@ -157,10 +157,11 @@ def _links_diff(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(report, indent=2, default=str))
     else:
-        for k in ("clean", "chats", "ledger_links", "replica_links", "machine_links", "profile_board_links"):
-            print(f"{k:>16}: {report[k]}")
-        for k in ("profile_board", "only_in_ledger", "only_in_replica"):
-            items = [(s, c) for s, cards in report[k].items() for c in cards]
+        for k in ("clean", "chats", "ledger_links", "replica_links", "machine_links", "profile_board_links",
+                  "stale_held_links"):
+            print(f"{k:>16}: {report.get(k, 0)}")
+        for k in ("profile_board", "stale_held", "only_in_ledger", "only_in_replica"):
+            items = [(s, c) for s, cards in (report.get(k) or {}).items() for c in cards]
             print(f"{k:>16}: {len(items)} {items[:8]}")
         for k, diff in (report.get("in_flight") or {}).items():
             items = [(s, c) for s, cards in diff.items() for c in cards]
