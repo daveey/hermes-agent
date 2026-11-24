@@ -152,7 +152,8 @@ class BoardInputSource:
 
     def _fail(self, key):
         old = self.engine.store.snapshot(self.engine.scope).get(key)
-        fact = (evolve(old, health='stale', error_code='board_capture_failed') if old is not None
+        fact = (evolve(old, health='stale', error_code='board_capture_failed')
+                if old is not None and old.health != 'unknown'
                 else Fact(key, {}, error_code='board_capture_failed'))
         self.engine.publish([fact], now=time.time())
 

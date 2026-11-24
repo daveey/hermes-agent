@@ -84,6 +84,37 @@ def test_capture_failure_retains_stale_value_and_recovers(source):
     assert engine.store.snapshot(engine.scope).get(key).health == 'fresh'
 
 
+@pytest.mark.parametrize('warm', [False, True])
+def test_repeated_capture_failure_preserves_evidence_health(source, warm):
+    adapter, engine, _calls, woke = source
+    adapter.want('board', {'n': 1})
+    original = adapter._capture
+    key = adapter.input_key('board', {'n': 1})
+    if warm:
+        settle(adapter, woke)
+    previous = engine.store.snapshot(engine.scope).get(key)
+
+    def fail(*args):
+        raise OSError('controlled repeated failure')
+
+    adapter._capture = fail
+    for _ in range(3):
+        settle(adapter, woke)
+        # Both a failed detached capture and the scheduler failure callback
+        # must preserve unknown until there has actually been a good capture.
+        adapter.failure()
+        fact = engine.store.snapshot(engine.scope).get(key)
+        assert fact.health == ('stale' if warm else 'unknown')
+        assert fact.error_code == 'board_capture_failed'
+        if warm:
+            assert fact.value == previous.value
+            assert fact.observed_at == previous.observed_at
+            assert fact.source_vector == previous.source_vector
+    adapter._capture = original
+    settle(adapter, woke)
+    assert engine.store.snapshot(engine.scope).get(key).health == 'fresh'
+
+
 def test_source_close_forbids_new_demand(source):
     adapter, _, _, _ = source
     adapter.close()
