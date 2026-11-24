@@ -1457,7 +1457,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         from hermes_cli.profiles import current_profile_name
 
         view = {**args, "assignee": assignee, "skills": skills, "parents": parents,
-                "project_id": project_id}
+                "project_id": project_id, "tenant": _ca.effective_tenant(args, None)}
         from hermes_cli import kanban_worker_node as _wn
         # runs_on only works on a board that syncs as primary; the machine check is kp._machine_picks_up.
         from hermes_cli import kanban_sync_runstate as _runstate  # down: a machine pin takes the gateway route
