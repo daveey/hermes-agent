@@ -126,6 +126,6 @@ def bind_turn(session_id, *, source, profile):
     """
     try:
         gateway = _local_gateway()
-    except Exception:
+    except (OSError, ValueError, RuntimeError):  # SyncUnavailable (RuntimeError): not enrolled, no authority
         gateway = ''
     return bound(str(session_id or ''), gateway=gateway, profile=profile or 'default', source=str(source or ''))
