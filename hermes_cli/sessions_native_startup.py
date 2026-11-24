@@ -192,12 +192,17 @@ async def lifespan(app):
     if not enabled or not sys.platform.startswith('linux'):
         yield
         return
-    targets = await asyncio.to_thread(profiles._profile_targets, 'sessions facts startup')
-    runtime = SessionsRuntime(profiles, targets)
+    owner = getattr(app.state, 'early_sessions_owner', None)
+    if owner is None:
+        targets = await asyncio.to_thread(profiles._profile_targets, 'sessions facts startup')
+        runtime = SessionsRuntime(profiles, targets)
+    else:
+        runtime = owner.adopt()
     app.state.sessions_facts = runtime  # custody survives a failed startup/unwind
     try:
-        runtime.start_background()
+        if owner is None:
+            runtime.start_background()
         yield
     finally:
-        await asyncio.to_thread(runtime.close)
+        await asyncio.to_thread(runtime.close if owner is None else owner.close)
         app.state.sessions_facts = None

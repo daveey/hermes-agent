@@ -225,6 +225,8 @@ from hermes_cli.dashboard_auth.body_limit import AuthBodyLimitMiddleware
 app.add_middleware(AuthBodyLimitMiddleware)
 from hermes_cli.sessions_native_startup import SessionsMiddleware
 app.add_middleware(SessionsMiddleware)
+from hermes_cli.web_boot_services import BootServicesMiddleware
+app.add_middleware(BootServicesMiddleware)
 
 
 # Memory-provider OAuth connect routes live in the memory layer, not here.
@@ -1714,6 +1716,7 @@ def _start_server_runtime(
     start_mcp_discovery_after_bind: bool = False,
     ssh_lock_path: Optional[Path] = None,
     ssh_ownership_id: Optional[str] = None,
+    early_sessions_owner=None,
 ):
     """Start the web UI server.
 
@@ -1805,6 +1808,8 @@ def _start_server_runtime(
         _log.warning("eager multi-profile activation failed", exc_info=True)
 
     async def _serve():
+        app.state.early_sessions_owner = early_sessions_owner
+        app.state.http_listener_ready = asyncio.Event()
         # startup split from main_loop so the bound (ephemeral) port is readable.
         if not config.loaded:
             config.load()
@@ -1813,6 +1818,7 @@ def _start_server_runtime(
             await server.startup()
             if server.should_exit:
                 return
+            app.state.http_listener_ready.set()
 
             _on_server_started(
                 server,

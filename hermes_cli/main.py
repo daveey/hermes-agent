@@ -2515,32 +2515,14 @@ def cmd_dashboard(args):
     supported_launch('serve' if _headless_backend else 'dashboard')
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)
+    from hermes_cli.sessions_early_boot import early_sessions
 
-    from hermes_cli.web_server import start_server
-
-    # Interactive auth setup: if this bind will engage the auth gate but no
-    # provider is registered yet, offer to configure one here (TTY only)
-    # instead of hard-failing inside start_server. Non-interactive callers
-    # (Docker/s6, CI, --no-open pipelines) fall through to start_server's
-    # fail-closed SystemExit unchanged.
-    _maybe_setup_dashboard_auth_interactively(args)
-    if _headless_backend:
-        from hermes_cli.observability.shared_metrics_process import begin_process
-        begin_process("serve")
-
-    # The in-browser Chat tab (embedded TUI over PTY/WebSocket) is always
-    # available — desktop and dashboard both rely on `/api/ws` + `/api/pty`.
-    start_server(
-        host=args.host,
-        port=args.port,
-        open_browser=not args.no_open,
-        allow_public=getattr(args, "insecure", False),
-        initial_profile=getattr(args, "open_profile", "") or "",
-        headless=_headless_backend,
-        isolated=getattr(args, "isolated", False),
-        **_ssh_bootstrap_server_kwargs(_token_file, _ssh_session_token, _ssh_owner_nonce),
-        start_mcp_discovery_after_bind=_mcp_discovery_after_bind,
-    )
+    with early_sessions(headless=_headless_backend, isolated=getattr(args, 'isolated', False)) as owner:
+        from hermes_cli.dashboard_server_start import run_server
+        run_server(args, headless=_headless_backend, owner=owner,
+                   prepare_auth=_maybe_setup_dashboard_auth_interactively,
+                   bootstrap=_ssh_bootstrap_server_kwargs(_token_file, _ssh_session_token, _ssh_owner_nonce),
+                   mcp_after_bind=_mcp_discovery_after_bind)
 
 
 def cmd_completion(args, parser=None):
