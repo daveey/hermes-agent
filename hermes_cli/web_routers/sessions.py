@@ -1328,7 +1328,10 @@ async def stripe_report_endpoint(session_id: str, body: SessionStripeReport):
             comparison = {k: v for k, v in current[body.surface].items() if k != "observation"}
         return {"ok": True, "report": entry, "comparison": comparison}
 
-    return await asyncio.to_thread(_with_db, body.profile, _record, read_only=True)
+    # Paint diagnostics must not queue behind unrelated default-executor work. Keep the
+    # complete append/comparison in a bounded lane; overload is an explicit 503, never a
+    # successful reply before the evidence has been recorded and compared.
+    return await run_in_lane("stripe", _with_db, body.profile, _record, read_only=True)
 
 
 @manage_router.get("/api/sessions/{session_id}/outcome")

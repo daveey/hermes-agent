@@ -16,6 +16,8 @@ A lane is a group of routes with its own thread budget:
   count, FTS rebuild status), with a short deadline: they must not wait behind session lists, and a busy
   probe lane only marks those fields unknown/degraded instead of holding the status answer.
 * ``feed`` -- plugin catch-up reads (``session-panel`` ``/changes``, ``user-steps``).
+* ``stripe`` -- Desktop paint/reason diagnostics, including DB reads and JSONL comparison. A paint burst
+  neither consumes the default executor nor queues behind session lists, feeds or control reads.
 
 A full lane holds only its own threads, never the shared pool. A caller waits at most ``queue_deadline_s``
 (below Desktop's 30 s timeout) for one of them; then, or as soon as its client has disconnected (callers that
@@ -44,7 +46,7 @@ from fastapi import HTTPException
 
 _log = logging.getLogger(__name__)
 
-DEFAULT_SIZES = {"control": 4, "sessions": 8, "kanban": 4, "feed": 6, "probe": 2}
+DEFAULT_SIZES = {"control": 4, "sessions": 8, "kanban": 4, "feed": 6, "probe": 2, "stripe": 2}
 QUEUE_DEADLINE_S = 25.0      # below Desktop's 30 s request timeout: a waiter it gave up on never runs
 RETRY_AFTER_S = 2
 DISCONNECT_POLL_S = 1.0
