@@ -146,6 +146,14 @@ def resolve_rejections(conn: sqlite3.Connection, hub, board: str) -> list[dict]:
     from hermes_cli import kanban_sync_dependency_delete as dependency_delete
     reports = []
     for op in ops:
+        if op['op'] == 'retain':
+            from hermes_cli.kanban_rejected_retain_retirement import retire
+            try:
+                reports.append(retire(conn, hub, board, op))
+            except (HubError, SyncUnavailable, OSError, ValueError) as exc:
+                reports.append(dict(op_id=op['op_id'], table=op['table_name'], row_uid=op['row_uid'],
+                                    classification='unresolved', action='retained', proof=str(exc)))
+            continue
         receipt = dependency_delete.receipt_for_op(conn, op)
         if receipt is not None:
             reports.append(dependency_delete.settle(conn, hub, board, op, receipt))
