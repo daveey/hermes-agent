@@ -177,7 +177,14 @@ def test_legacy_registry_missing_child_id_and_invalid_clocks_are_unknown():
 
 @pytest.mark.parametrize("endpoint", ["/api/profiles/sessions", "/api/profiles/sessions/sidebar"])
 def test_profile_lists_http_entry_paths(stored, monkeypatch, endpoint):
+    from functools import partial
+    from hermes_cli import sessions_native_startup as startup
+    from hermes_cli.sessions_capture_worker import capture
     from fastapi.testclient import TestClient
+
+    # The activity clock/scope are parent-local fixture doubles, not child state.
+    # Keep the actual annotation and HTTP path; process integration is separate.
+    monkeypatch.setattr(startup, 'SessionsRuntime', partial(startup.SessionsRuntime, capture_reader=capture))
     from hermes_cli import profiles as profile_config
     from hermes_cli.web_routers import profiles
     from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app

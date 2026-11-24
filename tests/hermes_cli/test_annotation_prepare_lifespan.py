@@ -65,7 +65,15 @@ def test_real_prepare_lifespan_and_canonical_request(kanban_root, tmp_path, monk
 @pytest.mark.parametrize('optional', ['healthy', 'unused-profile', 'no-pr-info'])
 def test_real_serve_composes_annotations_outside_sessions(kanban_root, tmp_path, monkeypatch, optional):
     from contextlib import asynccontextmanager
+    from functools import partial
+    from hermes_cli import sessions_native_startup as sessions_startup
+    from hermes_cli.sessions_capture_worker import capture
     from fastapi.testclient import TestClient
+
+    # Preserve this composition test's explicit roster and annotation doubles;
+    # fresh-process real-home capture is covered by test_sessions_capture_process.
+    monkeypatch.setattr(sessions_startup, 'SessionsRuntime',
+                        partial(sessions_startup.SessionsRuntime, capture_reader=capture))
     from hermes_state import SessionDB
     from hermes_cli import profiles, web_server, web_server_app
     from hermes_cli import kanban_session_activity as kanban

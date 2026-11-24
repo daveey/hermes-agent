@@ -17,6 +17,13 @@ pytestmark = pytest.mark.platforms('linux')
 
 @pytest.mark.asyncio
 async def test_cold_selector_waits_for_owner_then_warm_read_has_no_capture(profiles_on_disk, monkeypatch):
+    from functools import partial
+    from hermes_cli import sessions_native_startup as startup
+    from hermes_cli.sessions_capture_worker import capture
+
+    # This holder-boundary test gates a parent-local annotator with Events.
+    # Actual fresh-process capture has separate real-store integration coverage.
+    monkeypatch.setattr(startup, 'SessionsRuntime', partial(startup.SessionsRuntime, capture_reader=capture))
     entered, release = threading.Event(), threading.Event()
     original = profiles.annotate_kanban_activity
     captures = []
