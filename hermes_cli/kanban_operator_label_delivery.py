@@ -10,21 +10,42 @@ from hermes_cli import kanban_home_command as home, kanban_home_memo as memo
 from hermes_cli import kanban_sync_client as client
 
 
+def _legacy(conn, event_uid, task):
+    """Record producer-version custody BEFORE identity/snapshot I/O can fail.
+
+    Attempts are retry scheduling, not proof that bytes were transmitted. Only
+    pre-upgrade attempted jobs without this durable discriminator stay unknown.
+    """
+    with kb.write_txn(conn):
+        conn.execute('CREATE TABLE IF NOT EXISTS kanban_home_label_capture1 '
+                     '(event_uid TEXT PRIMARY KEY, task_id TEXT NOT NULL, legacy INTEGER NOT NULL)')
+        row = conn.execute('SELECT task_id,legacy FROM kanban_home_label_capture1 WHERE event_uid=?', (event_uid,)).fetchone()
+        if row is not None:
+            if row[0] != task:
+                raise ValueError('label capture identity changed')
+            return bool(row[1])
+        job = conn.execute('SELECT delivery_attempts FROM operator_label_jobs WHERE event_uid=?', (event_uid,)).fetchone()
+        legacy = job is None or job[0] > 0
+        conn.execute('INSERT INTO kanban_home_label_capture1 VALUES (?,?,?)', (event_uid, task, int(legacy)))
+        return legacy
+
+
 def push_event(conn, board, own, task, event_uid, payload):
     from hermes_cli.kanban_operator_call import RESULT_KIND
 
+    legacy = _legacy(conn, event_uid, task)
     hub = client.Hub(client.load_identity())
     try:
         encoded = json.dumps(payload, sort_keys=True)
         op = memo.get(conn, event_uid)
         if op is None:
-            row = conn.execute('SELECT delivery_attempts FROM operator_label_jobs WHERE event_uid=?', (event_uid,)).fetchone()
-            legacy = row is None or row[0] > 0
+
             # Existing attempted jobs have UNKNOWN capture custody. Never enrich
             # them from today's epoch. They remain fail-closed on a moved task.
             evidence = hub.row_evidence(board, 'tasks', task)
             target = evidence.get('row') if evidence.get('state') == 'live' else None
-            epoch = None if legacy else home.from_evidence(task, target)
+            captured = home.from_evidence(task, target)
+            epoch = None if legacy else captured
             with kb.write_txn(conn):
                 raw = {'client_op_id': uuid.uuid4().hex, 'op': 'upsert', 'table': 'task_events', 'uid': event_uid,
                        'hlc': client._next_hlc(conn, own), 'fields': {'task_id': task, 'kind': RESULT_KIND,

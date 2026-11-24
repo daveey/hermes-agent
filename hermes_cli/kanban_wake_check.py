@@ -1043,6 +1043,9 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
     from hermes_cli import kanban_ci_progress  # [daveey] a card parked on a CI run that never starts
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_home_probe import claim_wake
+    from hermes_cli.kanban_home_transfer import frozen
+    from itertools import filterfalse
 
     submitted: list[str] = []
     futures: list[Future] = []
@@ -1059,7 +1062,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
             return {"submitted": [], "in_flight": 0}
         if stale:
             with kb.write_txn(conn):
-                for row in stale:
+                for row in filterfalse(lambda row: frozen(conn, row[0]), stale):
                     conn.execute("DELETE FROM task_wake_checks WHERE task_id = ? AND task_id IN (SELECT w.task_id "
                                  "FROM task_wake_checks w LEFT JOIN tasks t ON t.id = w.task_id "
                                  f"WHERE t.id IS NULL OR NOT {_LIVE_ROW})", (row[0],))
@@ -1098,15 +1101,9 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                 continue
             # Claim the slot first so a crash mid-probe cannot re-run it every tick.
             claim = uuid.uuid4().hex
-            with kb.write_txn(conn):
-                claimed = conn.execute(
-                    "UPDATE task_wake_checks SET next_at = ?, generation = ? "
-                    "WHERE task_id = ? AND cmd = ? AND generation IS ? AND next_at <= ? AND purpose IS ? "
-                    "AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = ?)",
-                    (ts + int(every), claim, task_id, cmd, generation, ts, purpose, task_id,
-                     PURPOSE_STATUS.get(purpose, "scheduled")))
-                if claimed.rowcount != 1:
-                    continue
+            if not claim_wake(conn, task_id, cmd, every, generation, purpose,
+                              PURPOSE_STATUS.get(purpose, "scheduled"), ts, claim):
+                continue
             cwd = probe_cwd(task.workspace_path)
             fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim,
                                  purpose, stale_interval, passive_policy, ts + int(every), notice_interval)

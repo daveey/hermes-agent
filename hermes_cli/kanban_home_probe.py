@@ -48,6 +48,21 @@ def host(conn: sqlite3.Connection, task_id: str, event_id: int, explicit: str | 
     return UNKNOWN
 
 
+def claim_wake(conn, task_id, cmd, every, generation, purpose, status, ts, claim):
+    """Check handoff custody under the same writer lock as the probe claim."""
+    from hermes_cli import kanban_db_connect as dbc
+    from hermes_cli.kanban_home_transfer import frozen
+
+    with dbc.write_txn(conn):
+        if frozen(conn, task_id):
+            return False
+        return conn.execute(
+            "UPDATE task_wake_checks SET next_at = ?, generation = ? "
+            "WHERE task_id = ? AND cmd = ? AND generation IS ? AND next_at <= ? AND purpose IS ? "
+            "AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = ?)",
+            (ts + int(every), claim, task_id, cmd, generation, ts, purpose, task_id, status)).rowcount == 1
+
+
 def require_source_probe(conn: sqlite3.Connection, task_id: str, source: str) -> None:
     """Refuse preparation until an active logical source probe is registered.
 

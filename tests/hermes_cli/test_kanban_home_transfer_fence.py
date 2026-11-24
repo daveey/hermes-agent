@@ -19,7 +19,7 @@ def board(tmp_path, monkeypatch):
 def prepare(conn, tid, nonce="transfer-00000001"):
     from hermes_cli import kanban_home_transfer
 
-    return kanban_home_transfer.prepare(conn, tid, source="worker-a3", destination="hermes-hub",
+    return kanban_home_transfer.prepare(conn, tid, source="worker-a3", destination="hub",
                                        nonce=nonce, expected_version=7)
 
 

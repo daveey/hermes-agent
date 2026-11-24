@@ -13,7 +13,7 @@ import sqlite3
 
 from hermes_cli import kanban_home_abort as abort
 
-_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
+_SOURCE = re.compile(r"worker-[a-z0-9-]{1,24}\Z")
 _NONCE = re.compile(r"[A-Za-z0-9._:-]{16,128}\Z")
 _TABLE = "kanban_home_prepared1"
 
@@ -124,9 +124,9 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
     """
     if not conn.in_transaction:
         raise ValueError("home preparation requires a write transaction")
-    if (not isinstance(source, str) or not _NAME.fullmatch(source)
-            or not isinstance(destination, str) or not _NAME.fullmatch(destination)
-            or source == destination or not isinstance(nonce, str) or not _NONCE.fullmatch(nonce)
+    if (not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", task_id)
+            or not isinstance(source, str) or not _SOURCE.fullmatch(source)
+            or destination != 'hub' or not isinstance(nonce, str) or not _NONCE.fullmatch(nonce)
             or type(expected_version) is not int or expected_version < 1):
         raise ValueError("invalid home preparation identity")
     record = dict(task_id=task_id, source=source, destination=destination,
