@@ -245,8 +245,7 @@ class DispatchResult(QuietResultFields):
     a failure — a long quota window must never trip the circuit breaker."""
     storage_skip_reason: Optional[str] = None  # bounded SQLite wait exhausted; not the dispatch flock
     skipped_locked: bool = False
-    """True when another process held the board's dispatch lock: this tick did
-    no DB writes; this alone does not establish the lock holder's progress."""
+    """Lock held elsewhere: no writes this tick, but holder progress is not established."""
     dispatch_diagnostic: Optional[dict] = None  # historical locked dry-run evidence, never admission
     at_capacity: Optional[str] = None
     """``"max_in_progress=6/6"`` / ``"max_spawn=3/3"`` when the host or board concurrency cap was full this
