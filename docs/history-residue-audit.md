@@ -26,7 +26,11 @@ must precede a same-head empty feed / fresh current observation / empty feed cut
 The consumer matches the full exact source, local event, sealed receipt and
 portable local/replica/canonical parent, and vetoes active workers, claims, leases,
 new local work, tombstones, omissions and quarantine. Existing containment/spend
-restrictions are retained, not released. All network reads occur without SQLite
+restrictions are retained, not released. Unresolved run operations or omissions
+whose run row is already absent cannot be attributed to a parent, so they veto
+this board's audit cut conservatively. Settled tombstones without unresolved
+work do not. No missing run is restored or deleted by this diagnostic.
+All network reads occur without SQLite
 writer reservations. Final zero-wait reservations compare the original snapshots
 and build the actual diff before releasing them. The 30-second monotonic evidence
 budget includes refresh, local lock acquisition, HTTP and final comparisons.

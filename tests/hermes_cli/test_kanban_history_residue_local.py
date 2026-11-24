@@ -121,6 +121,29 @@ def test_recently_ended_run_still_part_of_snapshot(stores):
 
 
 @pytest.mark.parametrize('replica', [False, True])
+@pytest.mark.parametrize('fault', ['omission', 'op'])
+def test_absent_run_unsettled_custody_is_not_hidden(stores, replica, fault):
+    live, shadow, raw = stores
+    conn = shadow if replica else live
+    statements = {
+        'omission': "INSERT INTO kanban_sync_omissions VALUES ('task_runs','gone','ended_at','held')",
+        'op': "INSERT INTO kanban_sync_outbox(op_id,table_name,row_uid,op,fields,state) VALUES ('run-delete','task_runs','gone','delete','{}','pending')",
+    }
+    conn.execute(statements[fault])
+    with pytest.raises(Refused, match='unattributed_run_work'):
+        local.snapshot(conn, raw, board='default', gateway='home', replica=replica)
+
+
+@pytest.mark.parametrize('replica', [False, True])
+def test_settled_absent_run_tombstone_is_not_unsettled_work(stores, replica):
+    live, shadow, raw = stores
+    conn = shadow if replica else live
+    conn.execute("INSERT INTO kanban_sync_tombstones VALUES ('task_runs','gone',99)")
+    conn.execute("INSERT INTO kanban_sync_omissions VALUES ('task_runs','gone','ended_at','delivered')")
+    assert local.snapshot(conn, raw, board='default', gateway='home', replica=replica)['tombstones'] == []
+
+
+@pytest.mark.parametrize('replica', [False, True])
 @pytest.mark.parametrize('fault', ['tombstone','omission','op'])
 def test_run_repair_custody_is_not_hidden_by_terminal_parent(stores, replica, fault):
     live, shadow, raw = stores

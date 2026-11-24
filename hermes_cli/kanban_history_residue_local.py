@@ -67,6 +67,15 @@ def snapshot(conn, exact_source, *, board, gateway, replica):
         _require(key in task and task[key] is None, 'local_executor_active')
     runs = _rows(conn, 'SELECT * FROM task_runs WHERE task_id=? ORDER BY id', (task_id,))
     _require(all(r['ended_at'] is not None and r['status'] != 'running' for r in runs), 'local_running_run')
+    # A run DELETE carries fields={} after its row disappears. Its parent cannot
+    # be recovered from the remaining UID: fail closed on unresolved orphan
+    # work anywhere on this board, not on settled historical tombstones alone.
+    orphan_ops = _rows(conn, "SELECT * FROM kanban_sync_outbox o WHERE table_name='task_runs' "
+                       "AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.uid=o.row_uid) ORDER BY op_id")
+    orphan_omissions = _rows(conn, "SELECT * FROM kanban_sync_omissions o WHERE table_name='task_runs' "
+                             "AND state!='delivered' AND NOT EXISTS "
+                             "(SELECT 1 FROM task_runs r WHERE r.uid=o.row_uid) ORDER BY row_uid,field")
+    _require(not orphan_ops and not orphan_omissions, 'unattributed_run_work')
     events = _rows(conn, 'SELECT * FROM task_events WHERE uid=? ORDER BY id', (event,))
     if replica:
         _require(not events, 'replica_event_present')

@@ -106,6 +106,28 @@ def test_saved_cut_does_not_change_ordinary_diff(cut_inputs):
     assert diff(live, shadow, 'home')['rejected_ops'] == 1
 
 
+@pytest.mark.parametrize('during_http', [False, True])
+def test_absent_run_omission_cannot_clean_cut(cut_inputs, monkeypatch, during_http):
+    live, _shadow, _db, _hub, _data, _calls = cut_inputs
+
+    def insert():
+        live.execute("INSERT INTO kanban_sync_omissions VALUES ('task_runs','gone','ended_at','held')")
+
+    if during_http:
+        old = cut.transport.current
+
+        def current(*args):
+            result = old(*args)
+            insert()
+            return result
+
+        monkeypatch.setattr(cut.transport, 'current', current)
+    else:
+        insert()
+    with pytest.raises(Refused, match='unattributed_run_work'):
+        verify(cut_inputs)
+
+
 def test_unrelated_rejection_is_not_subtracted(cut_inputs):
     live, _shadow, _db, _hub, _data, _calls = cut_inputs
     live.execute("INSERT INTO kanban_sync_outbox(op_id,table_name,row_uid,state) VALUES ('unknown','tasks','unrelated','rejected')")
