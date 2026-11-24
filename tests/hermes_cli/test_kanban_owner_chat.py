@@ -671,13 +671,13 @@ def test_a_new_owner_chat_is_not_left_amber_with_no_outcome(kanban_home, monkeyp
         stored = _parse(db.get_session(sid)["outcome_json"])
         assert stored["kind"] == "done" and stored["source"] == "declared"
         # the live symptom was unresolved{no_summary}; with its open card the chat now derives waiting{card}
-        assert derive_outcome(sid, db=db)["kind"] in ("done", "waiting")
+        assert derive_outcome(sid, db=db)["kind"] == "waiting"
         monkeypatch.setattr(owner, "_ENSURED", {})
         owner.ensure("ci-main-watch")  # a second ensure leaves the stored outcome alone
         assert _parse(db.get_session(sid)["outcome_json"])["at"] == stored["at"]
         db.append_message(sid, "user", "Kanban notice: t_x stopped on its spend budget")
         lapsed = derive_outcome(sid, db=db)
-        assert lapsed.get("source") != "declared"  # a notice makes the idle declaration lapse
+        assert lapsed.get("source") == "derived" and lapsed["kind"] != "done"  # a notice makes the idle done lapse
     finally:
         db.close()
 
