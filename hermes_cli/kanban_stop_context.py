@@ -26,7 +26,7 @@ INTERACTIVE_SOURCES = frozenset({'desktop', 'cli', 'tui', 'acp', 'gui'})
 _ROUTING = ('HERMES_KANBAN_TASK', 'HERMES_KANBAN_WORKER_TASK', 'HERMES_DELEGATED_CHILD_CONTEXT', 'HERMES_CRON_SESSION')
 LOCK_TIMEOUT_S = 5.0
 _GENERATION = itertools.count(1)
-_CURRENT: ContextVar['OwnerToken | None'] = ContextVar('hermes_stop_only_owner_token', default=None)
+_CURRENT: ContextVar[OwnerToken | None] = ContextVar('hermes_stop_only_owner_token', default=None)
 
 
 def _session_source(session_id: str):
@@ -44,7 +44,7 @@ def _routing_context() -> bool:
 class OwnerToken:
     """One interactive turn's stop-only authority. Mutable, shared by copies, closes permanently."""
 
-    def __init__(self, session_id: str, gateway: str, profile: str, *, source_reader=_session_source):
+    def __init__(self, session_id: str, gateway: str, profile: str, *, source_reader=None):
         self.session_id, self.gateway, self.profile = session_id, gateway, profile or 'default'
         self.generation = next(_GENERATION)
         self._lock = threading.Lock()
@@ -73,7 +73,7 @@ class OwnerToken:
             if _routing_context():
                 raise StopRefused('stop_ended_owner_required', 'machine, cron, Kanban or delegated context')
             # Fresh, positive provenance at commit time, not a cached classification.
-            if self._source_reader(self.session_id) not in INTERACTIVE_SOURCES:
+            if (self._source_reader or _session_source)(self.session_id) not in INTERACTIVE_SOURCES:
                 raise StopRefused('stop_ended_owner_required', 'session is not a local interactive chat')
             yield {k: v for k, v in self.identity().items() if k != 'generation'}
         finally:
@@ -99,7 +99,7 @@ def current() -> OwnerToken:
 
 
 @contextmanager
-def bound(session_id: str, *, gateway: str, profile: str, source: str, source_reader=_session_source):
+def bound(session_id: str, *, gateway: str, profile: str, source: str, source_reader=None):
     """Bind around one interactive turn's tool execution; closes permanently on exit (any exit)."""
     token = None
     if (source in INTERACTIVE_SOURCES and isinstance(session_id, str)
@@ -112,3 +112,20 @@ def bound(session_id: str, *, gateway: str, profile: str, source: str, source_re
         if token is not None:
             token.close()
         _CURRENT.reset(reset)
+
+
+def _local_gateway() -> str:
+    from hermes_cli.kanban_sync_client import load_identity
+    return load_identity().gateway
+
+
+def bind_turn(session_id, *, source, profile):
+    """Turn-runner entry: bind a token for an interactive turn, or a refusing (None) binding otherwise.
+
+    Never raises: an unenrolled gateway or unreadable identity just means no stop authority this turn.
+    """
+    try:
+        gateway = _local_gateway()
+    except Exception:
+        gateway = ''
+    return bound(str(session_id or ''), gateway=gateway, profile=profile or 'default', source=str(source or ''))

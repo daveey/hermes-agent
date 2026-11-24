@@ -50,13 +50,12 @@ def ended_card(conn):
     source = kb.create_task(conn, title='source', assignee='default')
     target = kb.create_task(conn, title='M5', assignee='default', parents=[source])
     child = kb.create_task(conn, title='M6', assignee='default', parents=[target])
-    with kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (target,))
-    assert kb.claim_task(conn, target, claimer='default')
-    kb._end_run(conn, target, outcome='crashed', status='crashed')
-    with kb.write_txn(conn):
+    with kb.write_txn(conn):  # an ended attempt (this file's subject is not claim custody)
+        conn.execute("INSERT INTO task_runs (task_id,profile,status,outcome,started_at,ended_at) "
+                     "VALUES (?,'default','crashed','crashed',?,?)", (target, int(time.time()) - 60, int(time.time()) - 30))
         conn.execute("UPDATE tasks SET status='scheduled',current_run_id=NULL,claim_lock=NULL,claim_expires=NULL,"
                      "worker_pid=NULL WHERE id=?", (target,))
+    assert conn.execute('SELECT uid FROM task_runs WHERE task_id=?', (target,)).fetchone()[0]
     _link(conn, target)
     return source, target, child
 
@@ -129,7 +128,9 @@ def test_stopped_card_cannot_be_claimed_reopened_relinked_or_replaced(shadow):
     source, target, child = ended_card(shadow)
     with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE) as token:
         stop.apply(shadow, owner=token, **args(shadow, target))
-    shadow.execute('PRAGMA recursive_triggers=OFF')
+    path = shadow.execute('PRAGMA database_list').fetchone()[2]
+    raw = sqlite3.connect(path, isolation_level=None)  # an older/other local writer: only the stored triggers apply
+    raw.execute('PRAGMA recursive_triggers=OFF')
     assert not kb.claim_task(shadow, target, claimer='default')
     writes = [
         "UPDATE tasks SET status='ready' WHERE id=:t",
@@ -153,9 +154,9 @@ def test_stopped_card_cannot_be_claimed_reopened_relinked_or_replaced(shadow):
     for sql in writes:
         before = state(shadow, target, source, child)
         with pytest.raises(sqlite3.IntegrityError, match='administrative_stop_immutable'):
-            with kb.write_txn(shadow):
-                shadow.execute(sql, {'t': target, 's': source})
+            raw.execute(sql, {'t': target, 's': source})
         assert state(shadow, target, source, child) == before, sql
+    raw.close()
     # Unrelated cards keep progressing.
     assert kb.claim_task(shadow, source, claimer='default')
 
@@ -201,15 +202,15 @@ def test_unauthorized_or_unsafe_calls_write_nothing(shadow, monkeypatch, fault):
     outbox = shadow.execute('SELECT COUNT(*) FROM kanban_sync_outbox').fetchone()[0]
     if fault == 'off':
         sync.set_mode(shadow, 'off')
-    with ctx.bound(session, gateway=gateway, profile='default', source='desktop', source_reader=reader) as token:
-        if fault == 'no_token':
-            token = None
-        if fault == 'closed':
-            token.close()
-        with pytest.raises((stop.StopRefused, AttributeError, Exception)) as exc:
-            owner = token if token is not None else ctx.current()
-            stop.apply(shadow, owner=owner, **a)
-    assert not isinstance(exc.value, AssertionError)
+    if fault == 'no_token':  # outside any interactive turn: nothing to hand to apply
+        with pytest.raises(stop.StopRefused, match='owner_required'):
+            stop.apply(shadow, owner=ctx.current(), **a)
+    else:
+        with ctx.bound(session, gateway=gateway, profile='default', source='desktop', source_reader=reader) as token:
+            if fault == 'closed':
+                token.close()
+            with pytest.raises(stop.StopRefused):
+                stop.apply(shadow, owner=token, **a)
     if fault == 'off':
         sync.set_mode(shadow, 'shadow')
     assert state(shadow, target, source, child) == before
@@ -218,7 +219,7 @@ def test_unauthorized_or_unsafe_calls_write_nothing(shadow, monkeypatch, fault):
 
 
 def test_replay_with_changed_payload_conflicts_and_deadline_is_never_renewed(shadow):
-    source, target, child = ended_card(shadow)
+    _source, target, _child = ended_card(shadow)
     a = args(shadow, target)
     with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE) as token:
         first = stop.apply(shadow, owner=token, **a)
@@ -230,7 +231,7 @@ def test_replay_with_changed_payload_conflicts_and_deadline_is_never_renewed(sha
 
 
 def test_copied_context_shares_invalidation_and_turn_end_closes(shadow):
-    source, target, child = ended_card(shadow)
+    _source, target, _child = ended_card(shadow)
     a = args(shadow, target)
     holder = {}
     with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE) as token:
@@ -249,27 +250,21 @@ def test_copied_context_shares_invalidation_and_turn_end_closes(shadow):
 
 
 def test_cancellation_waits_for_inflight_commit_never_inverse(shadow):
-    source, target, child = ended_card(shadow)
+    """Turn cancellation arriving mid-commit blocks on the token lock until the commit finishes; after it, refused."""
+    _source, target, _child = ended_card(shadow)
     a = args(shadow, target)
     with ctx.bound(SID, gateway=ME, profile='default', source='desktop', source_reader=INTERACTIVE) as token:
-        entered, release, closed = threading.Event(), threading.Event(), threading.Event()
-        def slow_capability(_board):
-            entered.set()
-            release.wait(5)
-            return 1
-        out = {}
-        copied = contextvars.copy_context()
-        worker = threading.Thread(target=lambda: out.setdefault('r', copied.run(
-            lambda: stop.apply(shadow, owner=token, **{**a, 'capability': slow_capability}))))
-        worker.start()
-        entered.wait(5)
+        closed = threading.Event()
         closer = threading.Thread(target=lambda: (token.close(), closed.set()))
-        closer.start()
-        assert not closed.wait(0.2)  # close blocks on the token lock held by the commit
-        release.set()
-        worker.join(5)
+        seen = {}
+        def capability_then_cancel(_board):  # runs inside apply, holding the token lock
+            closer.start()
+            seen['blocked'] = not closed.wait(0.3)
+            return 1
+        result = stop.apply(shadow, owner=token, **{**a, 'capability': capability_then_cancel})
         closer.join(5)
-        assert closed.is_set() and out['r']['ok'] is True
+        assert seen['blocked'] is True and closed.is_set() and result['ok'] is True
+        assert kb.get_task(shadow, target).status == 'triage'
         with pytest.raises(stop.StopRefused, match='owner_required'):
             stop.apply(shadow, owner=token, **a)
 
@@ -279,3 +274,52 @@ def test_existing_primary_off_retain_gate_is_unchanged():
     from hermes_cli import kanban_retain
     src = inspect.getsource(kanban_retain.retain)
     assert "raise ValueError('retain requires owning primary or genuinely local board')" in src
+
+
+def _tool():
+    from tools import kanban_tools
+    return next(item for item in kanban_tools._TOOLS if item[0] == 'kanban_stop_ended')
+
+
+def _local_board(monkeypatch, conn):
+    from contextlib import contextmanager
+    from tools import kanban_tools
+
+    @contextmanager
+    def local(_):
+        yield 'default', conn
+    monkeypatch.setattr(kanban_tools, '_board', local)
+
+
+def test_registered_tool_is_chat_only_and_applies_only_through_the_turn_binding(shadow, monkeypatch):
+    import toolsets
+    from tools import kanban_stop_ended_tools as tool_mod
+    from tools import kanban_tools
+    from agent.transports import hermes_tools_mcp_server as native
+    assert 'kanban_stop_ended' in toolsets.TOOLSETS['kanban']['tools']
+    assert 'kanban_stop_ended' in kanban_tools._ORCHESTRATOR_TOOLS  # hidden from dispatcher task workers
+    assert 'kanban_stop_ended' not in native.EXPOSED_TOOLS  # no stateless worker transport
+    source, target, child = ended_card(shadow)
+    _local_board(monkeypatch, shadow)
+    monkeypatch.setattr(tool_mod, '_hub_ingress', lambda _b: 1)
+    monkeypatch.setattr(ctx, '_local_gateway', lambda: ME)
+    monkeypatch.setattr(ctx, '_session_source', lambda _sid: 'desktop')
+    handler = _tool()[2]
+    snap = json.loads(handler({'task_id': target}))
+    assert snap['mode'] == 'snapshot' and snap['writes'] == 0
+    a = {'task_id': target, 'expected_digest': snap['expected_digest'], 'reason': 'owner stop',
+         'evidence': ['run324 refusal'], 'escalate_at': int(time.time()) + 3600}
+    before = state(shadow, target, source, child)
+    # No turn bound (worker/cron/tool arguments): refused, zero writes.
+    refused = json.loads(handler(a))
+    assert refused['ok'] is False and refused['code'] == 'stop_ended_owner_required'
+    # A non-interactive turn source binds nothing.
+    with ctx.bind_turn(SID, source='kanban', profile='default'):
+        assert json.loads(handler(a))['code'] == 'stop_ended_owner_required'
+    assert state(shadow, target, source, child) == before
+    with ctx.bind_turn(SID, source='desktop', profile='default'):
+        done = json.loads(handler(a))
+    assert done['ok'] is True and done['protection_scope'] == 'LOCAL-SHADOW-ONLY', done
+    back = json.loads(handler({'task_id': target}))
+    assert back['mode'] == 'readback' and back['receipt']['request_uid'] == done['request_uid']
+    assert kb.get_task(shadow, target).status == 'triage'

@@ -1093,7 +1093,13 @@ def _invoke_agent(
         _mid_tool_stop = start_mid_tool_cancel(session, pause_key, agent)  # so is a long tool call, after a grace
     try:
         from agent.notification_presentation import notification_turn, event_presentation_muted
-        with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
+        from gateway.session_context import get_session_env
+        from hermes_cli.kanban_stop_context import bind_turn
+        # Stop-only owner authority lives exactly as long as this interactive turn (kanban_stop_ended).
+        with bind_turn(getattr(agent, "session_id", None) or session.get("session_key"),
+                       source=get_session_env("HERMES_SESSION_SOURCE", ""),
+                       profile=get_session_env("HERMES_SESSION_PROFILE", "")), \
+                notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
             st.result = agent.run_conversation(run_message, **st.run_kwargs)
             # A held last line that never became a marker is part of the reply: deliver it.
             if hold is not None and (rest := hold.finish()) and not getattr(agent, "_mute_notification_reply", False):

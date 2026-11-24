@@ -167,7 +167,7 @@ def apply(conn, *, board: str, task_id: str, expected_digest: str, owner, capabi
                 request = stored['request']
                 if (request['expected_digest'], request['frozen'], request['owner']) != (expected_digest, frozen, who):
                     raise StopRefused('stop_ended_conflict', 'card already stopped by a different frozen request')
-                return {**stored['receipt'], 'replayed': True}
+                return {**stored['receipt'], 'event_uid': stored_row['uid'], 'replayed': True}
             snap = snapshot(conn, task_id)
             _eligible(conn, state, snap)
             if digest(snap) != expected_digest:
