@@ -130,17 +130,19 @@ def own_host(conn: Optional[sqlite3.Connection]) -> str:
     return own_gateway(conn) or "local"
 
 
-def plan(conn: sqlite3.Connection, task_id: str, ctx: dict) -> Optional[dict]:
+def plan(conn: sqlite3.Connection, task_id: str, ctx: dict, *, _wake_row: Any = ...) -> Optional[dict]:
     """How the card is watched: ``{adapter, ref, every, hint}`` or None when nothing watches it. A declared
     ``watch`` on the park wins, then a GitHub run/PR ref of a ``ci`` park, then the park's shell probe."""
     from hermes_cli.kanban_external_adapters import github
     payload, awaiting = ctx["payload"], ctx["awaiting"] or {}
     watch = payload.get("watch") if isinstance(payload.get("watch"), dict) else {}
-    row = None
-    try:
-        row = conn.execute("SELECT cmd, every FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
-    except sqlite3.Error:
-        pass
+    row = _wake_row
+    if row is ...:
+        row = None
+        try:
+            row = conn.execute("SELECT cmd, every FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
+        except sqlite3.Error:
+            pass
     cmd = (row[0] if row else None) or payload.get("wake_check") or ""
     hint = " ".join(x for x in (cmd, str(payload.get("reason") or "")) if x)
     ref = str(watch.get("ref") or awaiting.get("ref") or "")
@@ -156,22 +158,25 @@ def plan(conn: sqlite3.Connection, task_id: str, ctx: dict) -> Optional[dict]:
     return {"adapter": adapter, "ref": ref, "hint": hint, "every": ks.clamp_every(watch.get("every"), default)}
 
 
-def _shell_seen(conn: sqlite3.Connection, task_id: str, rec: dict, every: Any) -> tuple[dict, Any]:
+def _shell_seen(conn: sqlite3.Connection, task_id: str, rec: dict, every: Any, *, _last_at: Any = ...) -> tuple[dict, Any]:
     """A shell probe THIS host runs: its freshness is the check's own machine-local ``last_at`` (an unsynced
     board writes a record on change only). A probe another host runs is judged by its records alone: that host
     writes one per interval (``record_poll``), so the 2-interval rule holds for it too."""
     seen = float(rec.get("observed_at") or 0)
-    try:
-        row = conn.execute("SELECT last_at FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
-        seen = max(seen, float(row[0] or 0) if row else 0.0)
-    except sqlite3.Error:
-        pass
+    if _last_at is ...:
+        try:
+            row = conn.execute("SELECT last_at FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
+            seen = max(seen, float(row[0] or 0) if row else 0.0)
+        except sqlite3.Error:
+            pass
+    else:
+        seen = max(seen, float(_last_at or 0))
     every = ks.clamp_every(every, SHELL_DEFAULT_EVERY)
     return dict(rec, observed_at=seen, next_due_at=seen + ks.clamp_every(rec.get("every"), SHELL_DEFAULT_EVERY)), every
 
 
 def card_state(conn: sqlite3.Connection, task_id: str, *, now: Optional[float] = None,
-               hosts: Optional[dict[str, float]] = None, status: Optional[str] = None) -> Optional[dict]:
+               hosts: Optional[dict[str, float]] = None, status: Optional[str] = None, _capture=None) -> Optional[dict]:
     """The derived external state of one card (see ``kanban_external_state.derive``), or None: not a scheduled
     ci/deploy/external park, an old host's silence, or a deadline-only wait. Adds ``blocker_id`` / ``triage_card``
     to ``external`` while a service-down blocker holds the card."""
@@ -181,13 +186,15 @@ def card_state(conn: sqlite3.Connection, task_id: str, *, now: Optional[float] =
         status = row[0] if row else None
     if status != "scheduled":
         return None
-    ctx = park_context(conn, task_id)
+    ctx = park_context(conn, task_id) if _capture is None else _capture.context(task_id)
     if ctx is None or (ctx["awaiting"] or {}).get("kind") not in ks.EXTERNAL_KINDS:
         return None
-    watch = plan(conn, task_id, ctx)
-    rec = latest_record(conn, task_id, ctx["event_id"])
+    watch = (plan(conn, task_id, ctx) if _capture is None
+             else plan(conn, task_id, ctx, _wake_row=_capture.wakes.get(task_id)))
+    rec = (latest_record(conn, task_id, ctx["event_id"]) if _capture is None
+           else _capture.record(task_id, ctx["event_id"]))
     probe_host = ctx["payload"].get("probe_host")
-    own = own_host(conn)
+    own = own_host(conn) if _capture is None else _capture.own
     hosts = hosts_seen(conn) if hosts is None else hosts
     adapter = (rec or {}).get("adapter") or (watch or {}).get("adapter")
     # A GitHub run/PR is polled by every gateway's own sweep; a shell probe only by its ``probe_host``.
@@ -199,18 +206,24 @@ def card_state(conn: sqlite3.Connection, task_id: str, *, now: Optional[float] =
     else:
         every = (rec or {}).get("every") or (watch or {}).get("every")
         if rec is not None and rec.get("adapter") == "shell" and local:
-            rec, every = _shell_seen(conn, task_id, rec, every)
+            if _capture is None:
+                rec, every = _shell_seen(conn, task_id, rec, every)
+            else:
+                rec, every = _shell_seen(conn, task_id, rec, every, _last_at=_capture.last_at.get(task_id))
         # This host polls the card and wrote some record within the interval: it is alive, only behind here.
         alive = local and adapter != "shell" and now - hosts.get(own, 0.0) <= ks.clamp_every(every) + ks.GRACE
         derived = ks.derive(rec, now=now, every=every, since=ctx["since"], advertises=advertises,
                             adapter=adapter, service_name=(rec or {}).get("service_name"), host_alive=alive)
     if derived is not None:
         derived["adapter"] = derived["external"]["adapter"]
-        _name_blocker(conn, derived, rec)
+        if _capture is None:
+            _name_blocker(conn, derived, rec)
+        else:
+            _name_blocker(conn, derived, rec, _states=_capture.blockers)
     return derived
 
 
-def _name_blocker(conn: sqlite3.Connection, derived: dict, rec: Optional[dict]) -> None:
+def _name_blocker(conn: sqlite3.Connection, derived: dict, rec: Optional[dict], *, _states=None) -> None:
     if derived["state"] != ks.DOWN or not rec or not rec.get("adapter") or not rec.get("scope"):
         return
     if derived["health"] not in SERVICE_HEALTHS:
@@ -218,7 +231,7 @@ def _name_blocker(conn: sqlite3.Connection, derived: dict, rec: Optional[dict]) 
     bid = blocker_id(rec["adapter"], rec["scope"])
     try:
         from hermes_cli import kanban_shared_blockers as ksb
-        st = ksb.blocker_states(conn).get(bid)
+        st = (ksb.blocker_states(conn) if _states is None else _states()).get(bid)
     except (sqlite3.Error, ValueError):
         return
     if st is not None and st.is_open:
@@ -228,16 +241,36 @@ def _name_blocker(conn: sqlite3.Connection, derived: dict, rec: Optional[dict]) 
 
 def card_states(conn: sqlite3.Connection, task_ids: Iterable[str], *, now: Optional[float] = None) -> dict[str, dict]:
     """``{task id: derived state}`` for the scheduled external cards among ``task_ids``. Never raises."""
+    owns = not conn.in_transaction
+    try:
+        if owns:
+            conn.execute('BEGIN')
+        return _card_states(conn, task_ids, now=now)
+    except sqlite3.Error:
+        logger.debug("external card states unavailable", exc_info=True)
+        return {}
+    finally:
+        if owns:
+            conn.rollback()
+
+
+def _card_states(conn, task_ids, *, now):
+    """All captured inputs and lazy blocker reads belong to the caller's snapshot."""
     out: dict[str, dict] = {}
     try:
         hosts = hosts_seen(conn)
         ids = list(dict.fromkeys(str(t) for t in task_ids))
         statuses = dict(conn.execute("SELECT id,status FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
                                      (json.dumps(ids),)))
+        from hermes_cli.kanban_external_display import Capture
+        selected = [tid for tid in ids if statuses.get(tid) == 'scheduled']
+        if not selected:
+            return out
+        capture = Capture(conn, selected)
         for tid in ids:
             if statuses.get(tid) != 'scheduled':
                 continue
-            derived = card_state(conn, tid, now=now, hosts=hosts, status=statuses[tid])
+            derived = card_state(conn, tid, now=now, hosts=hosts, status=statuses[tid], _capture=capture)
             if derived is not None:
                 out[tid] = derived
     except sqlite3.Error:

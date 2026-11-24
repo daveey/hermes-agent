@@ -76,12 +76,20 @@ def samples(conn: sqlite3.Connection, kind: str, target: str, *, now: Optional[f
 def overlay(conn: sqlite3.Connection, info: dict[str, dict[str, Any]], now: Optional[float] = None) -> None:
     """Fill ``expected_s`` / ``estimate_source`` of the ci / deploy waits in ``info`` from the board's history, in
     place. A wait without a comparable target keeps ``no history yet``. Never raises."""
+    from hermes_cli.kanban_wait_history_batch import capture
+
+    by_kind = {}
     for wait in info.values():
         kind = wait.get("wait_kind")
         if kind not in ("ci", "deploy") or not wait.get("wait_target"):
             continue
         try:
-            found = samples(conn, kind, wait["wait_target"], now=now)
+            if kind not in by_kind:
+                try:
+                    by_kind[kind] = capture(conn, kind)
+                except sqlite3.Error:  # legacy/missing history is captured once too
+                    by_kind[kind] = {}
+            found = by_kind[kind].get(wait["wait_target"], [])
         except (sqlite3.Error, ValueError, TypeError):  # display-only: a board without history keeps "no history yet"
             continue
         wait.update(kwi.eta_fields(kind, wait.get("waited_since"), samples=found, target=wait["wait_target"]))
