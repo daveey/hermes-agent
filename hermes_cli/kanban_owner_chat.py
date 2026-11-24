@@ -254,8 +254,13 @@ def _owner_refs(conn, task_id: str, links: bool) -> tuple[list[str], bool]:
             "SELECT chat_session, chat_gateway, chat_profile FROM task_chat_links "
             "WHERE task_id=? AND kind='created' AND released=0", (task_id,))]
     else:
+        # Only an owning subscription (stamped reason not an observer's, as ``_owning_sub`` reads it) is an owner.
+        from hermes_cli.kanban_db_notify import OBSERVER_SUB_REASONS
+        observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
         rows = [(r[0], "/" not in str(r[0] or "")) for r in conn.execute(
-            "SELECT chat_id FROM kanban_notify_subs WHERE task_id=? AND platform='tui'", (task_id,))]
+            "SELECT chat_id FROM kanban_notify_subs WHERE task_id=? AND platform='tui' AND COALESCE("
+            f"CASE WHEN json_valid(delivery_metadata) THEN json_extract(delivery_metadata, '$.reason') END "
+            f"IN ({observers}), 0) = 0", (task_id,))]
     mine = [str(ref) for ref, local in rows if local and str(ref or "").startswith(PREFIX)]
     return mine, len(mine) < len(rows)
 
@@ -263,8 +268,7 @@ def _owner_refs(conn, task_id: str, links: bool) -> tuple[list[str], bool]:
 def _needs_owner(conn, task_id: str, links: bool, live) -> Optional[list[str]]:
     """None when the card is owned; else the dead owner chats to retire before it gets a live one."""
     from hermes_cli import kanban_create_authority as kca
-    if links and conn.execute("SELECT 1 FROM task_chat_links WHERE task_id=? AND kind='created' AND released=1",
-                              (task_id,)).fetchone():
+    if links and _released_by_owner(conn, task_id):
         return None  # its owner let go on purpose; re-owning it would undo that
     mine, other = _owner_refs(conn, task_id, links)
     if other:
@@ -276,6 +280,19 @@ def _needs_owner(conn, task_id: str, links: bool, live) -> Optional[list[str]]:
     if _creator_chain_pending(conn, task_id):
         return None
     return []
+
+
+def _released_by_owner(conn, task_id: str) -> bool:
+    """A released creating link of a real chat. Reconcile also releases links to machine sessions (worker
+    transcripts, ``local-<sha>``): that is cleanup, not an owner letting go."""
+    from hermes_cli.kanban_db_notify import is_machine_session, is_headless_session
+    for gateway, profile, session in conn.execute(
+            "SELECT chat_gateway, chat_profile, chat_session FROM task_chat_links "
+            "WHERE task_id=? AND kind='created' AND released=1", (task_id,)):
+        if not (is_machine_session(gateway, session, profile=profile)
+                or is_headless_session(session, gateway=gateway, profile=profile)):
+            return True
+    return False
 
 
 def _creator_chain_pending(conn, task_id: str) -> bool:

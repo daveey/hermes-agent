@@ -588,3 +588,61 @@ def test_inheritance_falls_back_to_the_nearest_owner_chat(synced):
     from hermes_cli import kanban_creator_chats as creators
     creator = kb.create_task(synced, title="creator", assignee="default", created_by="ci-main-watch")
     assert [o["chat_session"] for o in creators.resolve_chats(synced, creator)] == [owner.session_id("ci-main-watch")]
+
+
+def test_on_a_links_less_board_an_observer_subscription_is_not_an_owner(kanban_home, monkeypatch):
+    from hermes_cli import kanban_db_notify as notify
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Watched only", assignee="default", created_by="self-heal")
+        notify.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="20261124_120000_watcher",
+                              delivery_mode="notify", delivery_metadata={"reason": "shepherd"})
+        monkeypatch.setattr(owner, "enabled", lambda: True)
+        assert owner.backfill(conn, apply=True)["linked"] == 1
+        assert owner.session_id("self-heal") in {r[0] for r in conn.execute(
+            "SELECT chat_id FROM kanban_notify_subs WHERE task_id=?", (tid,))}
+
+
+def test_a_link_released_as_machine_cleanup_is_not_an_owner_letting_go(synced, monkeypatch):
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    tid = kb.create_task(synced, title="Worker transcript link", assignee="default", created_by="self-heal")
+    with kb.write_txn(synced):
+        synced.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,"
+                       "released,created_at) VALUES ('u5',?,'hub',NULL,?,'created',1,0)", (tid, "local-" + "a" * 64))
+    monkeypatch.setattr(owner, "enabled", lambda: True)
+    assert owner.backfill(synced, apply=True)["linked"] == 1
+
+
+def test_inherit_chats_prefers_a_real_replica_chat_over_a_local_owner_chat(synced, monkeypatch):
+    from hermes_cli import kanban_creator_chats as creators
+    creator = kb.create_task(synced, title="creator", assignee="default", created_by="ci-main-watch")
+    real = {"chat_gateway": "away", "chat_profile": "default", "chat_session": "20261124_120000_human",
+            "created_at": 1}
+    monkeypatch.setattr(creators, "_replica_chats", lambda conn, task_id: [real])
+    child = kb.create_task(synced, title="child", assignee="default", created_by="ci-main-watch",
+                           creator_task_id=creator)
+    owned = [tuple(r) for r in synced.execute(
+        "SELECT chat_gateway, chat_session FROM task_chat_links WHERE task_id=? AND kind='created'", (child,))]
+    assert owned == [("away", "20261124_120000_human")]
+
+
+def test_a_worker_child_placed_from_a_producer_card_takes_its_owner_chat_as_origin(synced, monkeypatch):
+    from hermes_cli import kanban_capability_registry as reg
+    from tools import kanban_tools_placement as placement
+    monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
+    creator = kb.create_task(synced, title="creator", assignee="default", created_by="ci-main-watch")
+    assert placement._placement_origin(synced, creator, None)["session_id"] == owner.session_id("ci-main-watch")
+
+
+def test_a_worker_child_of_an_ownerless_creator_waits_for_its_chain_then_gets_an_owner(synced, monkeypatch):
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    creator = kb.create_task(synced, title="creator", assignee="default", created_by="ci-main-watch")
+    monkeypatch.setattr(owner, "enabled", lambda: True)
+    child = kb.create_task(synced, title="child", assignee="default", created_by="self-heal", creator_task_id=creator)
+    assert not synced.execute("SELECT 1 FROM task_chat_links WHERE task_id=? AND chat_session LIKE 'kanban_owner_%'",
+                              (child,)).fetchone()  # no owner chat at create: the chain may still resolve
+    assert child not in {t for t, _ in owner.ownerless(synced)}  # within CREATOR_GRACE_S
+    monkeypatch.setattr(owner, "CREATOR_GRACE_S", 0.0)
+    assert child in {t for t, _ in owner.ownerless(synced)}
+    owner.backfill(synced, apply=True)
+    assert kca.has_authority(synced, child, None, durable=True)
