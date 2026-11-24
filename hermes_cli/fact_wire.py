@@ -25,6 +25,10 @@ def pack(value):
 def _pack(value, bytes_sizes):
     """Transport form of *value*. With a *bytes_sizes* list, bytes pack as an empty chunk list and the length
     their chunks would have added to the encoding is appended to *bytes_sizes* (sizing without base64)."""
+    # Most capture nodes are scalar leaves. Avoid dataclass and Mapping ABC checks on every leaf;
+    # exact types preserve the historical precedence for user-defined scalar/container subclasses.
+    if type(value) in (str, bool, int, float) or value is None:
+        return value
     if is_dataclass(value) and _TYPES.get(type(value).__name__) is type(value):
         return ["record", type(value).__name__,
                 [_pack(getattr(value, f.name), bytes_sizes) for f in fields(value)]]

@@ -13,6 +13,10 @@ Health = Literal["fresh", "stale", "unknown"]
 
 def freeze(value: Any) -> Any:
     """Detach projection data from mutable serializer and caller ownership."""
+    # Scalar leaves dominate detached board/link inventories. Exact types alone bypass the ABC
+    # dispatch: a user-defined scalar subclass can also implement Mapping and must retain its precedence.
+    if value is None or type(value) in (str, bytes, bool, int, float):
+        return value
     if isinstance(value, Mapping):
         return MappingProxyType({key: freeze(item) for key, item in value.items()})
     if isinstance(value, (tuple, list)):
