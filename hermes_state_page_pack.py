@@ -14,6 +14,19 @@ def _quoted(name):
 
 def read_page(conn, sql, params):
     """Return dict rows with SQLite types, order and binary64 values preserved."""
+    return _read(conn, sql, params, None)
+
+
+def read_chunks(conn, sql, params):
+    """Hydrate an unbounded pin set in 64-row transport cells, without truncation.
+
+    The original query still executes once; unlike LIMIT/OFFSET batching this
+    does not repeat its sort or change snapshots between chunks.
+    """
+    return _read(conn, sql, params, 64)
+
+
+def _read(conn, sql, params, chunk):
     # Prepare only: LIMIT 0 never steps the projection or its correlated probes.
     names = [column[0] for column in conn.execute(f'SELECT * FROM ({sql}) LIMIT 0', params).description]
     cells = []
@@ -24,11 +37,20 @@ def read_page(conn, sql, params):
         cells.append(f"json_array(typeof({column}), CASE typeof({column}) "
                      f"WHEN 'real' THEN printf('%!.26g', {column}) "
                      f"WHEN 'blob' THEN hex({column}) ELSE {column} END)")
-    packed = conn.execute(f"WITH _packed_rows AS MATERIALIZED ({sql}) "
-                          f"SELECT json_group_array(json_array({','.join(cells)})) "
-                          "FROM _packed_rows", params).fetchone()[0]
+    prefix = f"WITH _packed_rows AS MATERIALIZED ({sql}) "
+    source, suffix = '_packed_rows', ''
+    if chunk:
+        # Number the materialized, already ordered rows before grouping; never
+        # serialize the entire pin history into one JSON value.
+        prefix += (", _numbered AS MATERIALIZED (SELECT *, "
+                   "row_number() OVER () - 1 AS _pack_ordinal FROM _packed_rows) ")
+        source = '_numbered'
+        suffix = f' GROUP BY _pack_ordinal / {chunk} ORDER BY MIN(_pack_ordinal)'
+    cursor = conn.execute(prefix + f"SELECT json_group_array(json_array({','.join(cells)})) "
+                          f"FROM {source}" + suffix, params)
+    packed_rows = cursor.fetchall() if chunk else [cursor.fetchone()]
     return [dict(zip(names, (_value(kind, value) for kind, value in row)))
-            for row in json.loads(packed)]
+            for packed in packed_rows for row in json.loads(packed[0])]
 
 
 def _value(kind, value):

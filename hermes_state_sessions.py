@@ -1419,7 +1419,9 @@ class SessionSessionsMixin:
                 {pinned_where}
                 ORDER BY s.started_at DESC
             """
-            for row in self._read_all(pinned_query, pinned_params):
+            from hermes_state_page_pack import read_chunks
+            pinned_rows = self._read_retrying_ioerr(lambda conn: read_chunks(conn, pinned_query, pinned_params))
+            for row in pinned_rows:
                 s = self._list_row(row)
                 if s["id"] not in seen_ids:
                     seen_ids.add(s["id"])

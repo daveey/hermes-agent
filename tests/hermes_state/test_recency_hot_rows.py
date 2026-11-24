@@ -146,14 +146,13 @@ def test_cold_and_lowered_reads_step_through_the_page_not_the_store(db, monkeypa
     with _stepped(db) as log:
         cold = _page(db, limit=50)
     assert cold == _exact(db, monkeypatch, limit=50)
-    # No statement steps more than the page (the ranked ids, then the projection); the rebuild alone
-    # stepped 3000 rows and the candidate list ~100 before. (A cold read also opens and probes the store.)
-    assert max(n for _, n in log) == 50
+    # Both ranked IDs and the projection now cross as one packed row.
+    assert max(n for _, n in log) <= 1
     _write(db, "DELETE FROM messages WHERE session_id = 's02999'")  # bumps the lowered counter
     with _stepped(db) as log:
         lowered = _page(db, limit=50)
     assert lowered == _exact(db, monkeypatch, limit=50)
-    assert max(n for _, n in log) == 50 and _rows(log) <= 50 + 50 + 20, _rows(log)
+    assert max(n for _, n in log) <= 1 and _rows(log) <= 20, _rows(log)
     assert memo.OUTCOMES["fallback/lowered"] == 1
 
 

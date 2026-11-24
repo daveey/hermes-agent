@@ -321,11 +321,17 @@ def _memo_rows(db, store, rank_memo, where_sql, where_clauses, params, outer_whe
     ids_head = rank_memo._IDS_HEAD
     key = (where_sql, repr(tuple(params)), seed_from, need)
 
+    def read_ids(sql, values):
+        # Same snapshot and exact ordering, one SQLite/Python handoff instead
+        # of four column conversions per ranked candidate under the store lock.
+        from hermes_state_page_pack import read_page
+        return [tuple(row.values()) for row in read_page(conn, sql, values)]
+
     def restricted(ids_json: str, limit):
         narrowed = _where_sql([*where_clauses, "s.id IN (SELECT value FROM json_each(?))"])
         narrowed_params = [*params, ids_json]
-        return conn.execute(ranked_query(narrowed, narrowed, seed_from, ids_head, ""),
-                            narrowed_params + narrowed_params + [limit, 0]).fetchall()
+        return read_ids(ranked_query(narrowed, narrowed, seed_from, ids_head, ""),
+                        narrowed_params + narrowed_params + [limit, 0])
 
     def exact_ids(*, invalidate_candidates=False):
         if invalidate_candidates:
@@ -333,8 +339,8 @@ def _memo_rows(db, store, rank_memo, where_sql, where_clauses, params, outer_whe
             store.stale = True
         picked = _candidates(conn, store, where_clauses, params, need)
         if picked is None:
-            return conn.execute(ranked_query(where_sql, outer_where, seed_from, ids_head, ""),
-                                params + params + id_params + [need, 0]).fetchall()
+            return read_ids(ranked_query(where_sql, outer_where, seed_from, ids_head, ""),
+                            params + params + id_params + [need, 0])
         return restricted(picked, need)
 
     with db._read_ctx() as conn:

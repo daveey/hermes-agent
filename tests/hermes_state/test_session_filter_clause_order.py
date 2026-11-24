@@ -66,20 +66,21 @@ def test_plain_column_clauses_precede_json_predicates(tmp_path, include_subagent
 
 
 def _pinned_plan(db):
+    import hermes_state_page_pack as page_pack
     seen = []
-    read_all = db._read_all
+    read_chunks = page_pack.read_chunks
 
-    def spy(sql, params=()):
+    def spy(conn, sql, params=()):
         if "_pin_id" in sql:
             seen.append((sql, list(params)))
-        return read_all(sql, params)
+        return read_chunks(conn, sql, params)
 
-    db._read_all = spy
+    page_pack.read_chunks = spy
     try:
         db.list_sessions_rich(source=None, exclude_sources=["kanban"], limit=5, min_message_count=1,
                               order_by_last_active=True, compact_rows=True, include_pinned=True)
     finally:
-        db._read_all = read_all
+        page_pack.read_chunks = read_chunks
     assert len(seen) == 1, seen
     sql, params = seen[0]
     with db._read_ctx() as conn:

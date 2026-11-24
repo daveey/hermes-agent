@@ -58,8 +58,10 @@ def test_project_has_constant_python_row_handoffs(count):
         conn.close()
 
 
-def test_packed_page_preserves_values_and_column_names():
-    from hermes_state_page_pack import read_page
+@pytest.mark.parametrize('reader', ['read_page', 'read_chunks'])
+def test_packed_page_preserves_values_and_column_names(reader):
+    import hermes_state_page_pack
+    read_page = getattr(hermes_state_page_pack, reader)
     conn = sqlite3.connect(':memory:')
     conn.row_factory = sqlite3.Row
     conn.execute('CREATE TABLE cells(value)')
