@@ -188,12 +188,15 @@ def apply(conn, *, board: str, task_id: str, expected_digest: str, owner, capabi
                 'dependency_satisfied': False, 'incomplete': True, 'terminal_for_run': False,
                 'request': {'request_uid': uid, 'expected_digest': expected_digest, 'frozen': frozen, 'owner': who},
                 'receipt': receipt})
-            conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (task_id,))
+            # One statement: with fences already installed by an earlier stop, the event above makes this
+            # card fenced, and a leftover worker_started_at (run endings keep it) would refuse the update.
+            from hermes_cli.kanban_stop_guards import _columns, install
+            token = ',worker_started_at=NULL' if 'worker_started_at' in _columns(conn, 'tasks') else ''
+            conn.execute(f"UPDATE tasks SET status='triage'{token} WHERE id=?", (task_id,))
             # The clock selector only considers scheduled cards. Remove its probe now too,
             # without deleting the historical parking event or changing any dependency.
             from hermes_cli.kanban_wake_check import set_check
             set_check(conn, task_id, None, None)
-            from hermes_cli.kanban_stop_guards import install
             install(conn)
             event_uid = conn.execute('SELECT uid FROM task_events WHERE task_id=? AND kind=?', (task_id, KIND)).fetchone()[0]
             return {**receipt, 'event_uid': event_uid, 'replayed': False}

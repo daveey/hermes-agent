@@ -80,6 +80,26 @@ def install(conn) -> None:
         conn.execute(f'INSERT INTO {MARKER} (version) VALUES (?)', (VERSION,))
 
 
+def clear_stale_worker_start(conn) -> int:
+    """Drop a stopped card's leftover ``worker_started_at``; returns the rows cleared (no write when none).
+
+    Many run endings (timed park, spend triage, no-progress park) clear ``worker_pid`` and keep the start
+    token. ``task_update`` pins ``NEW.worker_started_at IS NOT NULL``, so on such a row the fence refused
+    every later write, including the sync ack's ``sync_version`` stamp: the board's rounds then failed
+    forever (paintbot-tools, t_01a20f92be9a4823). A NULL passes the fence, so this also heals a row
+    stopped before the stop itself cleared the token. Rows with a pid, claim or run are never touched.
+    """
+    if 'worker_started_at' not in _columns(conn, 'tasks'):
+        return 0
+    stale = ('worker_started_at IS NOT NULL AND worker_pid IS NULL AND claim_lock IS NULL '
+             f'AND current_run_id IS NULL AND id IN ({_STOPPED})')
+    if not conn.execute(f'SELECT 1 FROM tasks WHERE {stale} LIMIT 1').fetchone():
+        return 0
+    from hermes_cli import kanban_db as kb
+    with kb.write_txn(conn, allow_nested=True):
+        return conn.execute(f'UPDATE tasks SET worker_started_at=NULL WHERE {stale}').rowcount
+
+
 def installed(conn) -> bool:
     """Fail closed: a stopped card with a missing or partial fence set is reported unguarded."""
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'stop_ended_%'")}
