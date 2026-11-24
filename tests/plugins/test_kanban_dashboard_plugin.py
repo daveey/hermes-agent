@@ -1121,6 +1121,8 @@ def test_specify_resolves_each_profiles_key_under_multiplex(kanban_home, tmp_pat
     monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: kanban_home)
     monkeypatch.setattr(profiles, "_get_profiles_root", lambda: profiles_root)
 
+    from plugins.kanban.dashboard import board_fact_views
+    installed_before = board_fact_views._installed
     seen: list = []
 
     def fake_call_llm(**kwargs):
@@ -1150,9 +1152,23 @@ def test_specify_resolves_each_profiles_key_under_multiplex(kanban_home, tmp_pat
             body = _specify(profile)
             assert body["ok"] is True, body
     finally:
-        ss.set_multiplex_active(was_active)
-        launch_profile_policy._snapshot = snapshot
+        # A secondary-profile request lazily imports web_server and mounts its
+        # bundled board runtime, even though this fixture serves a bare router.
+        # Drain the provider this test installed before its temporary home goes
+        # away. Never reset the global or relax the foreign-home refusal.
+        installed = board_fact_views._installed
+        try:
+            if installed is not installed_before:
+                assert installed is not None
+                assert Path(installed[0].home).is_relative_to(tmp_path)
+                installed[0].close()
+        finally:
+            ss.set_multiplex_active(was_active)
+            launch_profile_policy._snapshot = snapshot
     assert seen == ["key-of-launch-a", "key-of-worker-b", "key-of-launch-a"]
+    # This bare-router test must not leave a mounted provider for its temporary
+    # home behind: the next test has a different authenticated home.
+    assert board_fact_views._installed is installed_before
 
 
 # ---------------------------------------------------------------------------
