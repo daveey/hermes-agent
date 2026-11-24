@@ -181,13 +181,17 @@ def test_attrs_output_guards_refuse_causal_skew(tmp_path, case):
         elif case == 'script-limit':
             frame.f_locals['script'] = 'x' * (ca.MAX_SOURCE + 1)
         elif case == 'encoded-limit':
-            frame.f_locals['script'] = '\\u00e9' * ca.MAX_SOURCE
+            frame.f_locals['script'] = chr(233) * ca.MAX_SOURCE
+            output = frame.f_locals['script'].encode()
         elif case == 'compile-source':
             output = b'sentinel = 2'
         elif case == 'compile-filename':
             frame.f_locals['filename'] = '<forged>'
         if case != 'missing-compile':
             compile_event()
+        if case == 'encoded-limit':
+            assert a._tls.attrs_output is None
+            assert 'attrs-output-overflow' in set(a.unknowns()) - BASE
         if case == 'different-frame':
             frame = SimpleNamespace(**frame.__dict__)
         elif case == 'changed-output':
@@ -211,3 +215,33 @@ def test_attrs_output_guards_refuse_causal_skew(tmp_path, case):
         report()
     '''))
     assert any(reason.startswith('attrs-') for reason in result['unknowns']), result
+
+
+@pytest.mark.parametrize('case', ['valid', 'installer', 'module', 'digest'])
+def test_attrs_descriptor_registration_requires_each_identity(tmp_path, case):
+    result = run(tmp_path, SEAM + textwrap.dedent(f'''
+        # Registration is an earlier boundary than output validation. Assert its
+        # own result, so the event-time provenance checks cannot mask a failure.
+        path = pathlib.Path(make.__file__).resolve()
+        source = path.read_bytes()
+        module = compile(source, str(path), 'exec', dont_inherit=True)
+        a._generators.clear()
+        case = {case!r}
+        if case == 'installer':
+            a._deps.identity = lambda path: ('other', '26.1.0', 'attr/_make.py')
+        elif case == 'module':
+            module = module.replace(co_qualname='not-the-module')
+        elif case == 'digest':
+            source += b'\\n# unreviewed source\\n'
+            module = compile(source, str(path), 'exec', dont_inherit=True)
+        a._attrs_generator(path, module, source)
+        descriptors = list(a._generators.values())
+        if case == 'valid':
+            assert len(descriptors) == 1
+            assert descriptors[0].name == 'attrs:_compile_and_eval'
+        else:
+            assert descriptors == []
+        a._tls.busy = False
+        report()
+    '''))
+    assert result['unknowns'] == []
