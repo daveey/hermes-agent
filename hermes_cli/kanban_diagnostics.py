@@ -735,7 +735,7 @@ def _last_run_end_ts(runs: Iterable[Any]) -> int:
 
 
 def _last_ready_entry_ts(events: Iterable[Any], runs: Iterable[Any] = ()) -> int:
-    """Latest ready-entry floor; a ``continued`` checkpoint counts only when it resumed straight to ready.
+    """Latest ready-entry floor; a conditional kind counts only when it named status=ready.
     The latest run's end bounds it too, whatever event (if any) the requeue left.
 
     A Board grant returned unused (``kanban_unused_grant``) is a reservation, not execution: its ``claimed``
@@ -744,15 +744,17 @@ def _last_ready_entry_ts(events: Iterable[Any], runs: Iterable[Any] = ()) -> int
     loss and ready transitions still count. [daveey]"""
     if isinstance(events, EventHistory):
         return events.ready_floor(runs)
+    from hermes_cli.kanban_ready_events import READY_ENTRY_CONDITIONAL_KINDS
     from hermes_cli.kanban_unused_grant import unused_grant_run_ids
     events, runs = list(events), list(runs)
     unused = unused_grant_run_ids(runs, events)
     if unused:
         events = [ev for ev in events if _task_field(ev, "run_id", None) not in unused]
         runs = [r for r in runs if _task_field(r, "id", None) not in unused]
-    continued_ready = [_event_ts(ev) for ev in events
-                       if _event_kind(ev) == "continued" and _parse_payload(ev).get("status") == "ready"]
-    return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *continued_ready, _last_run_end_ts(runs)])
+    conditional_ready = [_event_ts(ev) for ev in events
+                         if _event_kind(ev) in READY_ENTRY_CONDITIONAL_KINDS
+                         and _parse_payload(ev).get("status") == "ready"]
+    return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *conditional_ready, _last_run_end_ts(runs)])
 
 
 def _guard_clock(events: Iterable[Any], runs: Iterable[Any], cfg,

@@ -126,8 +126,9 @@ def notice_text(payload: Any) -> str:
 
 
 def _floor_kinds() -> str:
+    from hermes_cli.kanban_ready_events import READY_ENTRY_CONDITIONAL_KINDS
     from hermes_cli.kanban_ready_events import READY_WAIT_FLOOR_KINDS as _READY_WAIT_FLOOR_KINDS
-    return ", ".join(f"'{k}'" for k in sorted({*_READY_WAIT_FLOOR_KINDS, "continued"}))
+    return ", ".join(f"'{k}'" for k in sorted({*_READY_WAIT_FLOOR_KINDS, *READY_ENTRY_CONDITIONAL_KINDS}))
 
 
 # Prefilter only (``pu.ready_since`` decides): the same event floor as the diagnostic, and the latest run's end,

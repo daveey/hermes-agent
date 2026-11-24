@@ -238,6 +238,7 @@ def _descendants(tid, children):
 
 def _ready_since(conn: sqlite3.Connection, ids: list[str]) -> dict[str, int]:
     from hermes_cli.kanban_ready_events import READY_WAIT_FLOOR_KINDS as _READY_WAIT_FLOOR_KINDS
+    from hermes_cli.kanban_ready_events import conditional_ready_entry_sql
 
     if not ids:
         return {}
@@ -248,7 +249,7 @@ def _ready_since(conn: sqlite3.Connection, ids: list[str]) -> dict[str, int]:
         f"SELECT id, created_at FROM tasks WHERE id IN ({marks})", ids)}
     for tid, ts in conn.execute(
         f"SELECT task_id, MAX(created_at) FROM task_events WHERE task_id IN ({marks}) AND (kind IN ({kind_marks}) "
-        "OR (kind = 'continued' AND json_extract(payload, '$.status') = 'ready')) GROUP BY task_id",
+        f"OR {conditional_ready_entry_sql()}) GROUP BY task_id",
         (*ids, *kinds)):
         since[tid] = max(since.get(tid, 0), int(ts or 0))
     for tid, ts in conn.execute(

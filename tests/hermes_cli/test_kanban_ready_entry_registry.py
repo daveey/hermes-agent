@@ -80,6 +80,9 @@ def test_long_wait_after_promotion_notifies_exactly_once(conn, monkeypatch):
     "created", "promoted", "promoted_manual", "triage_swept", "containment_released",
     "review_reopened", "reopened", "changes_requested", "reclaimed", "unblocked",
     "continuation_woken", "condition_met", "wake_probe_stale", "wake_check_stale", "owner_restart_lost",
+    "wake_check_broken", "wake_check_lost", "ci_run_unstartable",
+    "wake_check_dead_ancestry", "external_ref_broken", "external_service_down",
+    "supervisor_request_wake", "shared_blocker_cleared",
 ])
 def test_ready_entry_path_floor(conn, kind):
     tid = kb.create_task(conn, title=kind, assignee="default")
@@ -165,3 +168,202 @@ def test_writer_inventory_detects_unregistered_new_kind(sql, writer):
     from hermes_cli.kanban_ready_events import READY_ENTRY_EVENT_KINDS
 
     assert set(_writer_events(source)) - READY_ENTRY_EVENT_KINDS - NON_ENTRY_WRITER_EVENTS == {"new_ready_path"}
+
+
+def _wake_events(source, modules):
+    """Resolve literal/constant wake kinds statically; never import maintenance code.
+
+    Lookup follows the call's lexical scopes, including function-local imports.
+    Ambiguous bindings, cycles and unsupported expressions fail closed as None.
+    """
+    trees = {}
+    scope_bindings = {}
+
+    def module_scope(name):
+        if name not in modules:
+            return None
+        if name not in trees:
+            trees[name] = ast.parse(modules[name])
+        return bindings(trees[name])
+
+    def bindings(scope):
+        if scope in scope_bindings:
+            return scope_bindings[scope]
+        result = {}
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in (*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs):
+                result[arg.arg] = [None]
+
+        def visit(node):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                return
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        result.setdefault(target.id, []).append(node.value)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                result.setdefault(node.target.id, []).append(node.value)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    result.setdefault(alias.asname or alias.name, []).append((node.module, alias.name))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    result.setdefault(alias.asname or alias.name.split('.')[0], []).append(
+                        (alias.name if alias.asname else alias.name.split('.')[0], None))
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        for node in scope.body:
+            visit(node)
+        scope_bindings[scope] = result
+        return result
+
+    def resolve(expr, scopes, seen=frozenset()):
+        if isinstance(expr, ast.Constant):
+            return expr.value if isinstance(expr.value, str) else None
+        if isinstance(expr, ast.Attribute):
+            module = resolve(expr.value, scopes, seen)
+            if isinstance(module, tuple) and module[0] in modules:
+                return resolve(ast.Name(id=expr.attr), [module_scope(module[0])], seen)
+            return None
+        if not isinstance(expr, ast.Name):
+            return None
+        for scope in reversed(scopes):
+            if expr.id not in scope:
+                continue
+            # Repeated identical local imports are common in separate branches.
+            candidates = list({ast.dump(v) if isinstance(v, ast.AST) else v: v
+                               for v in scope[expr.id]}.values())
+            key = (id(scope), expr.id)
+            if key in seen or len(candidates) != 1:
+                return None
+            value = candidates[0]
+            if isinstance(value, tuple):
+                module, name = value
+                if name is None:
+                    return (module,)
+                if module == 'hermes_cli' and 'hermes_cli.' + name in modules:
+                    return ('hermes_cli.' + name,)
+                if module in modules:
+                    return resolve(ast.Name(id=name), [module_scope(module)], seen | {key})
+                return None
+            return resolve(value, scopes, seen | {key})
+        return None
+
+    def walk(node, scopes):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scopes = [*scopes, bindings(node)]
+        if isinstance(node, ast.Call):
+            name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                    else node.func.id if isinstance(node.func, ast.Name) else '')
+            if name == '_wake':
+                expr = node.args[2] if len(node.args) > 2 else next(
+                    (kw.value for kw in node.keywords if kw.arg == 'kind'), None)
+                value = resolve(expr, scopes)
+                yield node.lineno, value if isinstance(value, str) else None
+        for child in ast.iter_child_nodes(node):
+            yield from walk(child, scopes)
+
+    yield from walk(ast.parse(source), [])
+
+
+def test_wake_callers_register_event_kinds():
+    from hermes_cli import kanban_ready_events as kre
+
+    registered = kre.READY_ENTRY_EVENT_KINDS | getattr(kre, "READY_ENTRY_CONDITIONAL_KINDS", frozenset())
+    paths = sorted(Path(kb.__file__).parent.glob('kanban*.py'))
+    modules = {'hermes_cli.' + p.stem: p.read_text() for p in paths}
+    found, failures = set(), []
+    for path in paths:
+        for line, kind in _wake_events(modules['hermes_cli.' + path.stem], modules):
+            found.add(kind)
+            if kind not in registered:
+                failures.append((path.name, line, kind))
+    assert not failures, failures
+    assert {'condition_met', 'wake_check_lost', 'wake_check_stale', 'ci_run_unstartable'} <= found
+    assert 'shared_blocker_cleared' in getattr(kre, "READY_ENTRY_CONDITIONAL_KINDS", frozenset())
+    assert 'shared_blocker_cleared' not in kre.READY_ENTRY_EVENT_KINDS
+
+
+@pytest.mark.parametrize('writer', ['_wake', 'kwc._wake'])
+@pytest.mark.parametrize('expression, expected', [
+    ('NEW_KIND', 'new_ready_path'), ('missing', None), ('factory()', None),
+    ('kwc.NEW_KIND', 'new_ready_path'), ('episode.NEW_KIND', 'new_ready_path'),
+])
+def test_wake_inventory_detects_unregistered_new_kind(writer, expression, expected):
+    from hermes_cli.kanban_ready_events import READY_ENTRY_EVENT_KINDS
+
+    source = f'''from hermes_cli import kanban_wake_check as kwc
+NEW_KIND = "new_ready_path"
+def new_path(conn, tid):
+    from hermes_cli import kanban_wake_episode as episode
+    {writer}(conn, tid, {expression}, {{}})
+'''
+    modules = {name: 'NEW_KIND = "new_ready_path"' for name in (
+        'hermes_cli.kanban_wake_check', 'hermes_cli.kanban_wake_episode')}
+    assert list(_wake_events(source, modules)) == [(5, expected)]
+    assert expected not in READY_ENTRY_EVENT_KINDS
+
+
+@pytest.mark.parametrize('source, expected', [
+    ('KIND = "condition_met"\n_wake(conn, tid, KIND, {})', 'condition_met'),
+    ('from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT as KIND\n'
+     '_wake(conn, tid, KIND, {})', 'condition_met'),
+    ('import hermes_cli.kanban_wake_check as kwc\n'
+     'kwc._wake(conn, tid, kwc.CONDITION_MET_EVENT, {})', 'condition_met'),
+    ('def path(conn, tid):\n'
+     '    from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT as KIND\n'
+     '    from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT as KIND\n'
+     '    _wake(conn, tid, KIND, {})', 'condition_met'),
+    ('KIND: str = "condition_met"\n_wake(conn, tid, kind=KIND, payload={})', 'condition_met'),
+    ('KIND = "condition_met"\ndef path(conn, tid, KIND):\n    _wake(conn, tid, KIND, {})', None),
+    ('KIND = "condition_met"\nKIND = "new_kind"\n_wake(conn, tid, KIND, {})', None),
+    ('A = B\nB = A\n_wake(conn, tid, A, {})', None),
+    ('_wake(conn, tid, 42, {})', None),
+    ('_wake(conn, tid)', None),
+])
+def test_wake_inventory_resolves_constants_or_fails_closed(source, expected):
+    modules = {'hermes_cli.kanban_wake_check': 'CONDITION_MET_EVENT = "condition_met"'}
+    assert [kind for _, kind in _wake_events(source, modules)] == [expected]
+
+
+def test_shared_blocker_cleared_without_status_keeps_ready_clock(conn):
+    """Already-ready hold retirement is not a ready entry (green on base and after)."""
+    tid = kb.create_task(conn, title="already-ready hold retirement", assignee="default")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET created_at=100 WHERE id=?", (tid,))
+        conn.execute("UPDATE task_events SET created_at=100 WHERE task_id=?", (tid,))
+        kb._append_event(conn, tid, "shared_blocker_cleared", {"blocker_id": "quota"})
+        conn.execute(
+            "UPDATE task_events SET created_at=200 WHERE task_id=? AND kind=?",
+            (tid, "shared_blocker_cleared"),
+        )
+    assert pu.ready_since(conn, tid, 100) == 100
+    assert score._ready_since(conn, [tid])[tid] == 100
+
+
+def test_lost_probe_wake_starts_new_ready_interval(conn, monkeypatch):
+    from hermes_cli import kanban_continuation as kc
+    from hermes_cli import kanban_wake_check as kwc
+
+    t0, t1 = 1795470116, 1795483617
+    monkeypatch.setattr('time.time', lambda: t0)
+    tid = kb.create_task(conn, title='lost probe after long park', assignee='default')
+    assert kb.claim_task(conn, tid)
+    parked = kc.continue_task(conn, tid, checkpoint='waiting for external result',
+                              resume_after_seconds=20000, clock_only=True,
+                              awaiting={'kind': 'clock', 'why': 'bounded external-result backstop'})
+    assert parked['ok'], parked
+    assert kb.get_task(conn, tid).status == 'scheduled'
+    assert conn.execute('SELECT ended_at FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == t0
+    base._subscribe(conn, tid)
+    monkeypatch.setattr('time.time', lambda: t1)
+    with kb.write_txn(conn):
+        assert kwc._wake(conn, tid, kwc.LOST_EVENT, {'reason': 'remote_probe_silent'}) == kwc.LOST_EVENT
+    assert kb.get_task(conn, tid).status == 'ready'
+    assert pu.ready_since(conn, tid, t0) == t1
+    assert score._ready_since(conn, [tid])[tid] == t1
+    assert cw.sweep(conn, now=t1) == 0
+    assert cw.sweep(conn, now=t1 + cw.THRESHOLD_SECONDS - 1) == 0
+    assert cw.sweep(conn, now=t1 + cw.THRESHOLD_SECONDS) == 1
+    assert cw.sweep(conn, now=t1 + cw.THRESHOLD_SECONDS + 1) == 0

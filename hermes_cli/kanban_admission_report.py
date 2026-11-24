@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
+from hermes_cli.kanban_ready_events import conditional_ready_entry_sql
 
 SIDE_S = 86_400
 MIN_SAMPLES = 3
@@ -26,7 +27,8 @@ def _waits(conn, start: int, end: int, exclude: str) -> list[int]:
     marks = ",".join("?" for _ in kinds)
     rows = conn.execute(
         "SELECT r.started_at, t.created_at, "
-        f"(SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = r.task_id AND e.kind IN ({marks}) "
+        f"(SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = r.task_id AND "
+        f"(e.kind IN ({marks}) OR {conditional_ready_entry_sql('e.kind', 'e.payload')}) "
         " AND e.created_at <= r.started_at), "
         "(SELECT MAX(p.ended_at) FROM task_runs p WHERE p.task_id = r.task_id AND p.id < r.id) "
         "FROM task_runs r JOIN tasks t ON t.id = r.task_id "
