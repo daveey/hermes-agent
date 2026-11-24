@@ -11,6 +11,7 @@ import sys
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
@@ -26,6 +27,19 @@ async def _rpc_result(ws, rid):
             if reply.get('id') == rid:
                 assert 'result' in reply, reply
                 return reply['result']
+
+
+async def _wait_for_legacy_services(client, *, timeout=40):
+    from tests.waiting import async_wait_until
+
+    async def ready():
+        response = await client.get('/')
+        if response.status_code == 503 and response.json() == {'detail': 'Backend services warming'}:
+            return False
+        response.raise_for_status()
+        return True
+
+    await async_wait_until(ready, timeout=timeout, interval=.1, what='legacy standalone services')
 
 
 async def _legacy_ws_snapshot(root, home, env, requests):
@@ -56,6 +70,10 @@ async def _legacy_ws_snapshot(root, home, env, requests):
                     break
                 await asyncio.sleep(.1)
             assert port, output
+            # READY announces the listener; BootServicesMiddleware still closes RPC
+            # sockets with 1013 until standalone services finish warming.
+            async with httpx.AsyncClient(base_url=f'http://127.0.0.1:{port}', timeout=5, trust_env=False) as client:
+                await _wait_for_legacy_services(client)
             results = []
             async with connect(f'ws://127.0.0.1:{port}/api/ws?token=disposable-discovery-token') as ws:
                 for rid, (method, params) in enumerate(requests):
@@ -187,6 +205,69 @@ sys.__stdout__.write(json.dumps(results) + '\\n')
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_legacy_readiness_waits_for_services_not_listener():
+    from hermes_cli.web_boot_services import BootServicesMiddleware
+    from starlette.responses import Response
+
+    ready, warming_seen = asyncio.Event(), asyncio.Event()
+    app = SimpleNamespace(state=SimpleNamespace(boot_services_ready=ready))
+    paths = []
+
+    async def serve(scope, receive, send):
+        paths.append(scope['path'])
+        await Response(status_code=204)(scope, receive, send)
+
+    middleware = BootServicesMiddleware(serve)
+
+    async def observed(scope, receive, send):
+        scope['app'] = app
+        async def observe_send(message):
+            await send(message)
+            if message['type'] == 'http.response.start' and message['status'] == 503:
+                warming_seen.set()
+        await middleware(scope, receive, observe_send)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=observed), base_url='http://test') as client:
+        # Health is intentionally available before standalone RPC services.
+        assert (await client.get('/api/health')).status_code == 204
+        waiter = asyncio.create_task(_wait_for_legacy_services(client))
+        try:
+            await asyncio.wait_for(warming_seen.wait(), 5)
+            assert not waiter.done()
+            assert paths == ['/api/health']
+            ready.set()
+            await asyncio.wait_for(waiter, 5)
+            assert paths == ['/api/health', '/']
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,body', [(401, {}), (500, {}), (503, {'detail': 'unrelated'})])
+async def test_legacy_readiness_preserves_non_warmup_errors(status, body):
+    calls = []
+    def respond(request):
+        calls.append(request.url.path)
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond), base_url='http://test') as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await _wait_for_legacy_services(client)
+    assert calls == ['/']
+
+
+@pytest.mark.asyncio
+async def test_legacy_readiness_bounds_failed_warmup():
+    def respond(request):
+        return httpx.Response(503, json={'detail': 'Backend services warming'})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond), base_url='http://test') as client:
+        with pytest.raises(AssertionError, match='legacy standalone services'):
+            await _wait_for_legacy_services(client, timeout=0)
 
 
 @pytest.mark.asyncio
