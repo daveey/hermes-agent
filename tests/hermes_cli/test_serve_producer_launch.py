@@ -108,7 +108,7 @@ sys.stdin.readline()
 
 def test_retirement_requires_exact_incarnation_and_same_boot():
     adapter = LinuxProcessCensus()
-    current = adapter.identity(os.getpid(), adapter.boot_id())
+    current = adapter.read_process(os.getpid(), adapter.boot_id()).key
     assert admission.incarnation_exited(adapter, current) is False
     assert admission.incarnation_exited(adapter, replace(current, start_ticks=current.start_ticks + 1)) is True
     with pytest.raises(CensusUnavailable, match='boot'):

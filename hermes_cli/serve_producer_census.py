@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from hermes_cli.serve_producer_identity import process_key
+
 MAX_PROCESSES = 8192
 MAX_OBSERVATION_BYTES = 32 * 1024 * 1024
 _MAX_PROC_FILE = 1024 * 1024
@@ -35,6 +37,7 @@ class IncarnationChanged(CensusUnavailable):
 
 @dataclass(frozen=True, order=True)
 class Incarnation:
+    """Raw kernel birth probe, NOT an admission/retirement identity."""
     boot_id: str
     pid: int
     start_ticks: int
@@ -47,6 +50,11 @@ class ProcessObservation:
     cwd: str
     argv: tuple[str, ...]
     environment: tuple[tuple[str, str], ...]
+    namespace: str = 'pid:[0]'  # synthetic observations cannot match real enrollment
+
+    @property
+    def key(self):
+        return process_key(self)
 
     @property
     def retained_bytes(self) -> int:
@@ -132,6 +140,8 @@ class LinuxProcessCensus:
 
     def namespace_id(self) -> str:
         """PID numbers are meaningful only inside the same kernel PID namespace."""
+        if self.root == Path('/proc') and os.readlink(self.root / 'self') != str(os.getpid()):
+            raise CensusUnavailable('proc mount uses foreign pid numbering')
         value = os.readlink(self.root / 'self/ns/pid')
         if not value.startswith('pid:[') or not value.endswith(']') or not value[5:-1].isdecimal():
             raise CensusUnavailable('invalid pid namespace')
@@ -172,14 +182,16 @@ class LinuxProcessCensus:
         return exe, cwd, argv, tuple(sorted(environment))
 
     def read_process(self, pid: int, boot: str) -> ProcessObservation:
+        namespace = self.namespace_id()
         identity = self.identity(pid, boot)
         details = self._details(pid)
         # exec preserves startticks: compare actual executable/argv/env/cwd too.
         # This detects observed mutation, not an atomic kernel-wide snapshot;
         # supported launch fencing and strict classification remain mandatory.
-        if self._details(pid) != details or self.identity(pid, boot) != identity:
+        if (self._details(pid) != details or self.identity(pid, boot) != identity
+                or self.namespace_id() != namespace):
             raise IncarnationChanged('process changed while reading')
-        return ProcessObservation(identity, *details)
+        return ProcessObservation(identity, *details, namespace)
 
     def _observe(self, pid, boot, processes, exited, errors):
         identity = None
@@ -214,6 +226,7 @@ class LinuxProcessCensus:
         processes, exited, errors = [], [], []
         try:
             boot = self.boot_id()
+            namespace = self.namespace_id()
             pids = self.pids()
             if len(pids) > MAX_PROCESSES:
                 raise CensusUnavailable('process_budget')
@@ -230,12 +243,14 @@ class LinuxProcessCensus:
                 errors.append('census:membership_changed')
             for record in processes:
                 try:
-                    if self.read_process(record.identity.pid, boot) != record:
+                    if self.read_process(record.key.pid, boot).key != record.key:
                         errors.append(f'pid:{record.identity.pid}:final_identity_changed')
                 except (OSError, ValueError, IndexError, CensusUnavailable) as exc:
                     errors.append(f'pid:{record.identity.pid}:final:{type(exc).__name__}')
             if self.boot_id() != boot:
                 errors.append('census:boot_changed')
+            if self.namespace_id() != namespace:
+                errors.append('census:namespace_changed')
         except CensusUnavailable as exc:
             errors.append(f'census:{exc}')
         except (OSError, ValueError, IndexError) as exc:

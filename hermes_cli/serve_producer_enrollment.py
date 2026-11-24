@@ -11,7 +11,7 @@ from pathlib import Path
 
 from hermes_cli.serve_producer_admission import (
     AdmissionUnavailable, LaunchGate, classify_process, enroll_launch,
-    launcher_generation, observation_digest, read_participants_strict,
+    launcher_generation, read_participants_strict,
 )
 from hermes_cli.serve_producer_census import LinuxProcessCensus
 from hermes_cli.serve_producer_custody import FamilyCustody
@@ -43,8 +43,7 @@ class BrokerEnrollment:
             if len(record.argv) < 5 or record.argv[1:4] != ('-I', expected, 'broker'):
                 raise AdmissionUnavailable('only exec broker can claim custody enrollment')
             if (ticket not in read_participants_strict(runtime)
-                    or ticket.identity != record.identity
-                    or ticket.observation != observation_digest(record)):
+                    or ticket.key != record.key):
                 raise AdmissionUnavailable('broker enrollment changed')
             owner = FamilyCustody.acquire(runtime, 'panel')
             try:
@@ -55,11 +54,11 @@ class BrokerEnrollment:
 
     def matches(self, record, *, runtime, installation, generation):
         """Read local custody, never trust ticket.guarded or a caller readiness bit."""
-        if (self.owner.fd is None or record.identity.pid != os.getpid()
+        if (self.owner.fd is None
                 or Path(runtime).resolve() != self.runtime
                 or str(self.installation) != installation
-                or self.ticket.identity != record.identity
-                or self.ticket.observation != observation_digest(record)
+                or self.ticket.key != record.key
+                or LinuxProcessCensus().read_process(os.getpid(), self.ticket.key.boot_id).key != self.ticket.key
                 or self.ticket.generation != generation
                 or launcher_generation(self.installation) != generation):
             return False
@@ -88,5 +87,5 @@ def classify_with_broker(record, participants, generation, *, installation, runt
     if (baseline.kind == 'legacy' and type(broker) is BrokerEnrollment
             and broker.ticket in participants
             and broker.matches(record, runtime=runtime, installation=installation, generation=generation)):
-        return Classification(record.identity, 'participant', f'panel-broker-custody:{generation}')
+        return Classification(record.key, 'participant', f'panel-broker-custody:{generation}')
     return baseline

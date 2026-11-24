@@ -24,6 +24,8 @@ def _proc(root, pid=123, birth=42, *, uid=None):
 def _reader(tmp_path):
     (tmp_path / 'sys/kernel/random').mkdir(parents=True)
     (tmp_path / 'sys/kernel/random/boot_id').write_text('test-boot\n')
+    (tmp_path / 'self/ns').mkdir(parents=True)
+    (tmp_path / 'self/ns/pid').symlink_to('pid:[42]')
     return census.LinuxProcessCensus(tmp_path)
 
 

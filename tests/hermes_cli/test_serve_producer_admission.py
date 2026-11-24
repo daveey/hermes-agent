@@ -20,7 +20,7 @@ def _collectors():
 
 
 def _classified(record):
-    return admission.Classification(record.identity, 'participant', 'verified-launch-receipt')
+    return admission.Classification(record.key, 'participant', 'verified-launch-receipt')
 
 
 def _cut(gate, **kwargs):
@@ -84,7 +84,7 @@ def test_every_required_collector_must_prove_success(tmp_path, failure):
 @pytest.mark.parametrize('kind', ['legacy', 'unknown'])
 def test_unknown_python_and_legacy_snapshots_never_admit(tmp_path, kind):
     with admission.LaunchGate.acquire(tmp_path / 'runtime') as gate:
-        cut = _cut(gate, classify=lambda record: admission.Classification(record.identity, kind, '/snapshot'))
+        cut = _cut(gate, classify=lambda record: admission.Classification(record.key, kind, '/snapshot'))
         assert not cut.complete
         with pytest.raises(admission.AdmissionUnavailable, match='incomplete'):
             gate.require(cut, boot_id='boot', generation='generation', installation='/installation')
@@ -92,7 +92,7 @@ def test_unknown_python_and_legacy_snapshots_never_admit(tmp_path, kind):
 
 @pytest.mark.platforms('posix')
 def test_legacy_spawner_must_be_affirmatively_retired_not_missing_from_census(tmp_path):
-    legacy = Incarnation('boot', 456, 7)
+    legacy = ProcessObservation(Incarnation('boot', 456, 7), '/python', '/old', ('python',), ()).key
     with admission.LaunchGate.acquire(tmp_path / 'runtime') as gate:
         assert not _cut(gate, legacy_candidates=(legacy,)).complete
         assert _cut(gate, legacy_candidates=(legacy,), exited=lambda value: value == legacy).complete
@@ -108,4 +108,4 @@ def test_empty_best_effort_and_stale_census_are_not_positive_proof(tmp_path):
         assert not cut.complete
         assert not _cut(gate, census=lambda: replace(_processes(), boot_id='old-boot')).complete
         assert not _cut(gate, classify=lambda record: admission.Classification(
-            replace(record.identity, start_ticks=41), 'participant', 'wrong-incarnation')).complete
+            replace(record.key, start_ticks=41), 'participant', 'wrong-incarnation')).complete

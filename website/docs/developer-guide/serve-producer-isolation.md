@@ -30,6 +30,43 @@ launch, not reuse a cached COMPLETE after custody closes.
 
 ## Current boundary
 
+### Admission identity
+
+`serve_producer_identity.ProcessKey` is the only admission identity: boot ID,
+PID-namespace inode (`pid:[...]`), PID, kernel start ticks and launcher-incarnation
+digest. The last component hashes the twice-read executable/argv/environment/cwd
+observation, including its namespace. Source-boundary generation and installation
+are separate validity checks, not substitutes for process identity. A role label
+does not create a different process. Receipt replacement, duplicate rejection,
+classification, broker liveness, explicit legacy retirement and final census
+revalidation use this key. The raw `Incarnation` triple is only a kernel birth
+probe: it cannot authorize classification or be supplied as a retirement ticket.
+
+Shared-home foreign-namespace rows are retained verbatim without probing their
+PIDs, even on numeric identity collisions. Same-boot foreign evidence keeps the
+strict census INCOMPLETE. Uncertain own-namespace retirement (including zombies
+and unreadable exec details) retains evidence without breaking ordinary launch;
+it does not certify retirement. PID reuse may positively retire an old key after
+kernel birth recheck. A changed exec observation alone never does. Missing exec
+details require a separate birth recheck. Boot/namespace changes or incoherent
+observations refuse retirement. A foreign `/proc` numbering view is refused.
+
+Adversarial review of the key found and covered two additional liveness cases:
+an unreadable different-UID successor on a reused PID and a zombie/incomplete
+receipt blocking unrelated startup. Both now retain uncertain evidence; readable
+kernel reuse remains positive retirement. Tests also cover every key component,
+same-namespace duplicates versus two-namespace shared homes, repeated foreign
+retention, raw-birth rejection, missing exec versus actual exit and mismatched
+observations. The three original independent review probe files are preserved
+verbatim alongside the matrix.
+
+This is an observed exec identity, not a kernel exec counter: an unobserved
+identical self-exec cannot be distinguished by procfs. Enrollment remains
+unguarded; only a live process-local broker object plus kernel flock can promote
+it, and that object cannot survive exec. This limitation is not production
+activation evidence. Old-boot foreign rows remain retained within the existing
+hard ledger budgets; no cross-namespace retirement authority is inferred.
+
 Only `ProjectionRelay.start_for_fixture` starts this skeleton, and it refuses
 non-pytest callers. No production startup method or release flag is introduced.
 Non-Linux fixtures retain POSIX family custody without claiming Linux enrollment.

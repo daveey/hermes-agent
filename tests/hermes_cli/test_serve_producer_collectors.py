@@ -102,7 +102,7 @@ def test_real_collectors_can_cut_complete_only_with_unrelated_census(tmp_path, m
         cut = gate.inspect(
             boot_id='boot', generation='generation', installation=str(installation),
             census=lambda: census, collectors=admission.host_collectors(root, installation),
-            classify=lambda record: admission.Classification(record.identity, 'unrelated', 'exe'),
+            classify=lambda record: admission.Classification(record.key, 'unrelated', 'exe'),
             legacy_candidates=(), exited=lambda identity: False)
         assert cut.complete
         gate.require(cut, boot_id='boot', generation='generation', installation=str(installation))

@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from hermes_cli.serve_producer_census import (
@@ -23,6 +23,7 @@ from hermes_cli.serve_producer_census import (
     _bounded_names, _read_bytes, read_ledger_strict,
 )
 from hermes_cli.serve_producer_custody import CustodyConflict, FamilyCustody, _acquire_runtime
+from hermes_cli.serve_producer_identity import ProcessKey, observation_digest, receipt_key
 
 SUPPORTED_LAUNCHES = frozenset(('serve', 'dashboard', 'gateway', 'agent_startup',
                                 'tui_gateway', 'gateway_spawner', 'plugin_host', 'producer_broker'))
@@ -30,7 +31,8 @@ SUPPORTED_LAUNCHES = frozenset(('serve', 'dashboard', 'gateway', 'agent_startup'
 LAUNCH_SOURCES = ('hermes_cli/main.py', 'gateway/run.py', 'tui_gateway/entry.py',
                   'hermes_cli/gateway_runtime_start.py', 'hermes_cli/plugin_host_child.py',
                   'hermes_cli/serve_producer_admission.py', 'hermes_cli/serve_producer_census.py',
-                  'hermes_cli/serve_producer_process.py', 'hermes_cli/serve_producer_enrollment.py')
+                  'hermes_cli/serve_producer_process.py', 'hermes_cli/serve_producer_enrollment.py',
+                  'hermes_cli/serve_producer_identity.py')
 _MAX_PARTICIPANTS = 8192
 _MAX_RECEIPTS = 8 * 1024 * 1024
 
@@ -46,10 +48,9 @@ class LaunchReceipt:
     guarded: bool = False
 
 
-def observation_digest(record) -> str:
-    """Bind receipt to observed exec identity without persisting argv or environment."""
-    return hashlib.sha256(json.dumps(asdict(record), sort_keys=True,
-                                     ensure_ascii=True).encode('ascii')).hexdigest()
+    @property
+    def key(self) -> ProcessKey:
+        return receipt_key(self)
 
 
 def launcher_generation(installation: Path) -> str:
@@ -111,7 +112,7 @@ def read_participants_strict(runtime: Path, *, allow_foreign_namespace: bool = F
         if not allow_foreign_namespace and any(
                 row.identity.boot_id == boot and row.namespace != namespace for row in receipts):
             raise CensusUnavailable('foreign pid namespace')
-        if len({receipt.identity for receipt in receipts}) != len(receipts):
+        if len({receipt.key for receipt in receipts}) != len(receipts):
             raise CensusUnavailable('duplicate participant incarnation')
         if _read_bytes(path, _MAX_RECEIPTS, nofollow=True) != raw:
             raise CensusUnavailable('participant ledger changed')
@@ -120,20 +121,58 @@ def read_participants_strict(runtime: Path, *, allow_foreign_namespace: bool = F
         raise CensusUnavailable(f'participants:{type(exc).__name__}') from exc
 
 
-def incarnation_exited(adapter: LinuxProcessCensus, identity: Incarnation) -> bool:
-    """Positive retirement includes PID reuse, never permission failure or a new boot."""
-    if adapter.boot_id() != identity.boot_id:
+def incarnation_exited(adapter: LinuxProcessCensus, key: ProcessKey) -> bool:
+    """Only probe our namespace. Changed exec is uncertainty, NOT retirement."""
+    if not isinstance(key, ProcessKey):
+        raise CensusUnavailable('full launcher identity required')
+    if adapter.boot_id() != key.boot_id:
         raise CensusUnavailable('retirement boot changed')
+    if adapter.namespace_id() != key.namespace:
+        raise CensusUnavailable('retirement foreign pid namespace')
     try:
-        current = adapter.identity(identity.pid, identity.boot_id)
-    except FileNotFoundError:
-        current = None
-    if adapter.boot_id() != identity.boot_id:
+        current = adapter.read_process(key.pid, key.boot_id).key
+    except OSError:
+        # Missing cmdline/exe/environment is not process death. Recheck the raw
+        # kernel birth; preserve the expected launcher component, never mint one.
+        try:
+            birth = adapter.identity(key.pid, key.boot_id)
+        except FileNotFoundError:
+            current = None
+        else:
+            current = replace(key, boot_id=birth.boot_id, pid=birth.pid,
+                              start_ticks=birth.start_ticks, namespace=adapter.namespace_id())
+            if current == key:
+                raise CensusUnavailable('live launcher observation unavailable') from None
+    if adapter.boot_id() != key.boot_id:
         raise CensusUnavailable('retirement boot changed')
-    return current != identity
+    if adapter.namespace_id() != key.namespace:
+        raise CensusUnavailable('retirement namespace changed')
+    if current is not None and replace(current, start_ticks=key.start_ticks,
+                                       launcher_incarnation=key.launcher_incarnation) != key:
+        raise CensusUnavailable('incoherent retirement observation')
+    if current == key:
+        return False
+    if current is not None and replace(current, launcher_incarnation=key.launcher_incarnation) == key:
+        return False  # changed exec is not positive process retirement; retain old evidence
+    return True
+
+
+def _retain_receipt(adapter, row, receipt) -> bool:
+    """Launch compatibility never turns uncertain retirement into deletion."""
+    key = row.key
+    if key.namespace != receipt.key.namespace:
+        return True
+    if key.boot_id != receipt.key.boot_id or key == receipt.key:
+        return False
+    try:
+        return not incarnation_exited(adapter, key)
+    except (OSError, ValueError, IndexError, CensusUnavailable):
+        return True
 
 
 def _write_participants(runtime: Path, receipts):
+    if len({row.key for row in receipts}) != len(receipts):
+        raise CensusUnavailable('duplicate participant incarnation')
     raw = json.dumps([asdict(receipt) for receipt in receipts], ensure_ascii=True).encode('ascii')
     if len(raw) > _MAX_RECEIPTS:
         raise CensusUnavailable('participant byte budget')
@@ -191,16 +230,13 @@ def enroll_launch(runtime: Path, role: str, *, installation: Path, timeout: floa
         boot = adapter.boot_id()
         record = adapter.read_process(os.getpid(), boot)
         receipt = LaunchReceipt(record.identity, str(installation), launcher_generation(installation),
-                                role, observation_digest(record), adapter.namespace_id())
-        namespace = adapter.namespace_id()
+                                role, observation_digest(record), record.namespace)
         # Foreign-namespace rows cannot be probed from here: keep them (never proof of absence);
         # the census refuses them, so the cut stays INCOMPLETE until their namespace retires them.
-        kept = [row for row in receipts if row.identity.boot_id == boot
-                and row.identity != record.identity
-                and (row.namespace != namespace or not incarnation_exited(adapter, row.identity))]
+        kept = [row for row in receipts if _retain_receipt(adapter, row, receipt)]
         if len(kept) >= _MAX_PARTICIPANTS:
             raise CensusUnavailable('participant count budget')
-        if adapter.read_process(os.getpid(), boot) != record or adapter.boot_id() != boot:
+        if adapter.read_process(os.getpid(), boot).key != receipt.key or adapter.boot_id() != boot:
             raise CensusUnavailable('enrolling process changed')
         _write_participants(runtime, (*kept, receipt))
         if receipt not in read_participants_strict(runtime, allow_foreign_namespace=True):
@@ -322,23 +358,22 @@ def _module_token(argv: tuple[str, ...]) -> str | None:
 def classify_process(record, participants: tuple[LaunchReceipt, ...], generation: str,
                      *, installation: str, home: str = '') -> Classification:
     """Exact enrollment is unguarded legacy; unrelated needs a path-free identity."""
-    namespace = LinuxProcessCensus().namespace_id()
-    matching = [row for row in participants if row.identity == record.identity and row.namespace == namespace
+    matching = [row for row in participants if row.key == record.key
                 and row.installation == installation
-                and row.observation == observation_digest(record) and row.generation == generation]
+                and row.generation == generation]
     if len(matching) == 1:
         receipt = matching[0]
         # No broker/custody hook exists yet, even an in-memory guarded bit is not authority.
-        return Classification(record.identity, 'legacy',
+        return Classification(record.key, 'legacy',
                               f'enrollment:{receipt.generation}:{receipt.role}')
     module = _module_token(record.argv)
     if module in _KNOWN_MODULES:
         # Explicit Hermes launcher: a separate install sharing the default home, or an
         # editable/.pth import, leaves no path evidence, so it is never positively unrelated.
-        return Classification(record.identity, 'legacy', f'launcher:{module}')
+        return Classification(record.key, 'legacy', f'launcher:{module}')
     if not _record_touches(record, installation, home):
-        return Classification(record.identity, 'unrelated', f'exe:{record.exe}')
-    return Classification(record.identity, 'unknown', 'no exact guarded launch receipt')
+        return Classification(record.key, 'unrelated', f'exe:{record.exe}')
+    return Classification(record.key, 'unknown', 'no exact guarded launch receipt')
 
 # Each collector must enumerate its exact configured scope (including disabled or
 # empty scope receipts), distinguish errors and return positive evidence refs.
@@ -358,7 +393,7 @@ class CollectorEvidence:
 
 @dataclass(frozen=True)
 class Classification:
-    identity: Incarnation
+    identity: ProcessKey
     kind: str  # participant or positively unrelated; legacy/unknown are conflicts
     proof: str
 
@@ -371,8 +406,8 @@ class AdmissionCut:
     census: ProcessCensus | None
     collectors: tuple[tuple[str, CollectorEvidence], ...]
     classifications: tuple[Classification, ...]
-    legacy_candidates: tuple[Incarnation, ...]
-    retired: tuple[Incarnation, ...]
+    legacy_candidates: tuple[ProcessKey, ...]
+    retired: tuple[ProcessKey, ...]
     errors: tuple[str, ...]
     _acquisition: object
 
@@ -412,7 +447,7 @@ class LaunchGate:
             raise AdmissionUnavailable('launch gate must remain held by collecting process')
 
     def inspect(self, *, boot_id: str, generation: str, installation: str,
-                census, collectors: dict, classify, legacy_candidates: tuple[Incarnation, ...],
+                census, collectors: dict, classify, legacy_candidates: tuple[ProcessKey, ...],
                 exited) -> AdmissionCut:
         """Run strict host observations inside the gate; never from an HTTP path.
 
@@ -432,6 +467,8 @@ class LaunchGate:
                 _classify(record, classify, classified, errors)
         for identity in legacy_candidates:
             try:
+                if not isinstance(identity, ProcessKey):
+                    raise CensusUnavailable('full launcher identity required')
                 if exited(identity) is not True:
                     errors.append(f'legacy:{identity.pid}:not_retired')
                 else:
@@ -486,7 +523,7 @@ def _census(callback, boot_id, errors):
 def _classify(record, callback, classified, errors):
     try:
         result = callback(record)
-        if not isinstance(result, Classification) or result.identity != record.identity:
+        if not isinstance(result, Classification) or result.identity != record.key:
             errors.append(f'pid:{record.identity.pid}:classification_identity')
             return
         classified.append(result)
@@ -676,7 +713,7 @@ def launcher_coverage(installation: Path) -> dict:
 
 
 def inspect_host(runtime: Path, installation: Path, *, root: Path, timeout: float = 10,
-                  legacy_candidates: tuple[Incarnation, ...] = (), broker=None) -> AdmissionCut:
+                  legacy_candidates: tuple[ProcessKey, ...] = (), broker=None) -> AdmissionCut:
     """Gate-held strict cut. Enrollment remains unguarded; COMPLETE stays conservative."""
     if sys.platform != 'linux':
         raise AdmissionUnavailable('no linux census adapter')

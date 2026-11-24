@@ -69,8 +69,8 @@ def test_complete_controlled_hub_shaped_cut_requires_guarded_broker_and_legacy_r
         with admission.LaunchGate.acquire(runtime) as gate:
             assert not cut(gate, guarded=False).complete
             assert cut(gate, guarded=True).complete
-            assert not cut(gate, guarded=True, legacy=(unrelated.identity,)).complete
-            assert cut(gate, guarded=True, legacy=(unrelated.identity,), exited=lambda _: True).complete
+            assert not cut(gate, guarded=True, legacy=(unrelated.key,)).complete
+            assert cut(gate, guarded=True, legacy=(unrelated.key,), exited=lambda _: True).complete
             broker.close()
             assert not cut(gate, guarded=True).complete
     finally:
