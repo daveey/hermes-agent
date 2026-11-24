@@ -18,16 +18,18 @@ from tests.waiting import wait_until
 
 
 def dispatch_started(conn, tid):
-    """A busy admission lock defers a tick without opening an attempt."""
+    """A busy admission lock reports its refused claim without opening an attempt."""
     from hermes_cli import kanban_db as kb, kanban_db_dispatch as dispatch
 
     result = dispatch.dispatch_once(conn, board='owned', max_spawn=1)
     if result.spawned:
         assert [s[0] for s in result.spawned] == [tid], result
         return result
-    # Only an uneventful deferral is repeatable, never a failed/guarded spawn or
-    # a lost attempt. A descheduled reservation publisher can still own the flock.
-    assert result == dispatch.DispatchResult(scheduling_admitted=True), result
+    # Only the typed admission-lock refusal is repeatable, never a failed/guarded
+    # spawn or a lost attempt. The reservation publisher can still own the flock.
+    assert result == dispatch.DispatchResult(
+        scheduling_admitted=True, lane_candidates=1,
+        claim_deferred=[(tid, 'claim_not_acquired')]), result
     task = kb.get_task(conn, tid)
     assert task is not None and task.status == 'ready' and task.current_run_id is None, task
     return None
