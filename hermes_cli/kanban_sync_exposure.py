@@ -34,35 +34,63 @@ def task_insert(uid: str, fields: str, uuid: str, clock: str) -> str:
             "'{\"protocol\":\"exposure1\",\"coverage\":\"candidate\",\"certified\":false,\"exposures\":[]}' END FROM capture;")
 
 
-def _observe(conn, ops, board, endpoint, ident, capability):
+class ExposureCustodyError(OSError):
+    """A board-local refusal, caught by the sync round without losing custody."""
+
+
+def _sources(conn, op, ops, legacy_parents):
+    op_id = op.get('client_op_id')
+    row = conn.execute('SELECT rowid,exposure_history FROM kanban_sync_outbox WHERE op_id=?', (op_id,)).fetchone()
+    if row is not None:
+        return [('kanban_sync_outbox', row)]
+    row = conn.execute('SELECT rowid,exposure_history FROM kanban_sync_parent_envelopes '
+                       "WHERE json_extract(wire,'$.client_op_id')=?", (op_id,)).fetchone()
+    if row is not None:
+        return [('kanban_sync_parent_envelopes', row)]
+    sources = []
+    # Only the legacy batch builder can declare an intentionally unsaved parent.
+    # Its pending children own the support operation's exposure, not its capture
+    # identity. A lost persisted/frozen parent must still refuse, never downgrade.
+    if op in legacy_parents and not op.get('frozen_replay'):
+        for child in ops:
+            refs = (str(child.get('uid', '')).split('>') if child.get('table') == 'task_links'
+                    else [child.get('fields', {}).get('task_id')])
+            if op.get('uid') in refs:
+                row = conn.execute('SELECT rowid,exposure_history FROM kanban_sync_outbox WHERE op_id=?',
+                                   (child.get('client_op_id'),)).fetchone()
+                if row is None:
+                    raise ExposureCustodyError('exposure child custody missing')
+                sources.append(('kanban_sync_outbox', row))
+    if not sources:
+        raise ExposureCustodyError('exposure source custody missing')
+    return sources
+
+
+def _observe(conn, ops, board, endpoint, ident, capability, *, legacy_parents=()):
     """Append under the writer reservation; COMMIT is a prerequisite to sending."""
     principal = capability.get('gateway_principal')
     incarnation = capability.get('board_incarnation')
     authenticated = all(isinstance(value, str) and value for value in (principal, incarnation))
     with write_txn(conn):
         for op in ops:
-            op_id = op.get('client_op_id')
-            row = conn.execute('SELECT rowid,exposure_history FROM kanban_sync_outbox WHERE op_id=?', (op_id,)).fetchone()
-            table = 'kanban_sync_outbox'
-            if row is None:
-                table = 'kanban_sync_parent_envelopes'
-                row = conn.execute('SELECT rowid,exposure_history FROM kanban_sync_parent_envelopes '
-                                   "WHERE json_extract(wire,'$.client_op_id')=?", (op_id,)).fetchone()
-            if row is None:
-                raise ValueError('exposure source custody missing')
-            history = json.loads(row[1]) if row[1] is not None else dict(
-                protocol='exposure1', coverage='unknown', certified=False, exposures=[])
-            if (history.get('protocol') != 'exposure1' or history.get('certified') is not False or
-                    history.get('coverage') not in ('unknown', 'candidate') or not isinstance(history.get('exposures'), list)):
-                raise ValueError('unsupported exposure history; preserve custody')
-            exposure = dict(board=board, endpoint=endpoint, url=ident.url,
-                            credential_epoch=hashlib.sha256(ident.key.encode()).hexdigest(),
-                            gateway_principal=principal if authenticated else None,
-                            board_incarnation=incarnation if authenticated else None, wire=op)
-            if exposure not in history['exposures']:
-                history['exposures'].append(exposure)
-            conn.execute(f'UPDATE {table} SET exposure_history=? WHERE rowid=?',
-                         (json.dumps(history, sort_keys=True, separators=(',', ':'), allow_nan=False), row[0]))
+            for table, row in _sources(conn, op, ops, legacy_parents):
+                _append(conn, table, row, op, board, endpoint, ident, principal, incarnation, authenticated)
+
+
+def _append(conn, table, row, op, board, endpoint, ident, principal, incarnation, authenticated):
+    history = json.loads(row[1]) if row[1] is not None else dict(
+        protocol='exposure1', coverage='unknown', certified=False, exposures=[])
+    if (history.get('protocol') != 'exposure1' or history.get('certified') is not False or
+            history.get('coverage') not in ('unknown', 'candidate') or not isinstance(history.get('exposures'), list)):
+        raise ExposureCustodyError('unsupported exposure history; preserve custody')
+    exposure = dict(board=board, endpoint=endpoint, url=ident.url,
+                    credential_epoch=hashlib.sha256(ident.key.encode()).hexdigest(),
+                    gateway_principal=principal if authenticated else None,
+                    board_incarnation=incarnation if authenticated else None, wire=op)
+    if exposure not in history['exposures']:
+        history['exposures'].append(exposure)
+    conn.execute(f'UPDATE {table} SET exposure_history=? WHERE rowid=?',
+                 (json.dumps(history, sort_keys=True, separators=(',', ':'), allow_nan=False), row[0]))
 
 
 @contextmanager
@@ -92,7 +120,7 @@ def replay_session(hub, board):
         transport.close()
 
 
-def send(hub, conn, board, ops, *, replay=None):
+def send(hub, conn, board, ops, *, replay=None, legacy_parents=()):
     """Pin the credentials for capability AND mutation, including header creation.
 
     A fresh transport prevents a caller replacing hub.ident during the probe from
@@ -112,7 +140,8 @@ def send(hub, conn, board, ops, *, replay=None):
             if exc.status not in (404, 405, 501, 503):
                 raise
             capability = {}
-        _observe(conn, ops, board, endpoint, transport.ident, capability)
+        _observe(conn, ops, board, endpoint, transport.ident, capability,
+                 legacy_parents=legacy_parents if replay is None else ())
         body = dict(replay, ops=ops) if replay is not None else dict(ops=ops)
         return transport._call('POST', endpoint, body)
     finally:
