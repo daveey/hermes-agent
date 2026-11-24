@@ -5,7 +5,7 @@ import json
 import sqlite3
 import time
 
-from hermes_cli.kanban_actionability import owner, project, valid_awaiting
+from hermes_cli.kanban_actionability import owner, positive_time, project, valid_awaiting
 from hermes_cli.kanban_actionability_evidence import EVIDENCE_ERRORS, effective
 from hermes_cli.kanban_actionability_selection import KINDS as SOURCE_KINDS, select
 
@@ -204,7 +204,6 @@ def _route_owner(reader: Reader, route: dict) -> dict:
 def _administration(reader: Reader, events: list[dict], episode: str | None) -> tuple[dict, dict]:
     scoped = [e for e in events if episode and (e['data'].get('episode') or e['data'].get('episode_uid')) == episode]
     routes, deadlines = [], []
-    from hermes_cli.kanban_actionability import positive_time
     for event in scoped:
         p = event['data']
         next_action = record(p.get('next_action'))
@@ -235,6 +234,43 @@ def describe(conn: sqlite3.Connection, tid: str, *, now: int | None = None, read
         row['violations'] = ['evidence_unavailable']
         row.update(action='repair_lifecycle_contract', instruction='Recover authoritative task evidence')
         return row
+
+
+def _private_reason(conn, task, reader) -> str | None:
+    """Local-order hold. A missing event column is not a hold; scope digests stay unverified."""
+    if not reader.events_complete:
+        return None
+    from hermes_cli.kanban_actionability_private import DECISIONS, PRIVATE, held
+    kinds = tuple(PRIVATE | DECISIONS)
+    live = ' AND deleted_at IS NULL' if 'deleted_at' in reader.event_columns else ''
+    try:
+        rows = reader.rows(
+            f"SELECT * FROM task_events WHERE task_id=? AND kind IN ({','.join('?' * len(kinds))}){live} ORDER BY id",
+            (task['id'], *kinds))
+    except sqlite3.OperationalError:
+        return None
+    private = [row for row in rows if row['kind'] in PRIVATE]
+    if not private or any(not reader.uid(row) for row in private):
+        return None  # Unattributed (synced, UIDless) history stays UNKNOWN, not a positive hold classification.
+    events = [{'uid': str(row['id']), 'kind': row['kind'], 'ord': row['id'], 'payload': row['payload']} for row in rows]
+    return held(task['status'], events)
+
+
+def _lane_gate_at(conn, tid, reader) -> int | None:
+    """Creation time of the latest lane_gated event while the lane still holds the card, else None."""
+    if ('block_kind' not in reader.columns('tasks') or
+            not {'task_id'} <= reader.columns('task_runs') or not reader.events_complete):
+        return None
+    from hermes_cli.kanban_lanes import HELD
+    live = ' AND deleted_at IS NULL' if 'deleted_at' in reader.event_columns else ''
+    try:
+        if conn.execute(f'SELECT 1 FROM tasks WHERE id=? AND {HELD}', (tid,)).fetchone() is None:
+            return None
+        gate = conn.execute(f"SELECT created_at FROM task_events WHERE task_id=? AND kind='lane_gated'{live} "
+                            'ORDER BY id DESC LIMIT 1', (tid,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return positive_time(gate[0]) if gate else None
 
 
 def _describe(conn, tid, *, now, reader):
@@ -287,6 +323,26 @@ def _describe(conn, tid, *, now, reader):
             facts['unknown'] = True
     if schedule:
         facts.update(wake_at=schedule['data'].get('wake_at'), awaiting=schedule['data'].get('awaiting'))
+    if not facts.get('deadline_at'):
+        reason = _private_reason(conn, task, reader)
+        if reason is None:
+            for dep in deps:
+                parent = reader.task(dep['task_id'])
+                if parent is None:
+                    continue
+                parent_reason = _private_reason(conn, parent, reader)
+                if parent_reason:
+                    reason = f"parent {dep['task_id']} {parent_reason}"
+                    break
+        if reason:
+            facts['private_hold'] = reason
+    lane_deadline = None
+    if not facts.get('stop') and not facts.get('private_hold') and not deps:
+        gate_at = _lane_gate_at(conn, tid, reader)
+        if gate_at:
+            facts['lane_hold'] = True
+            # Fixed at the source, never renewed by a later census observation; a recorded contract wins.
+            lane_deadline = gate_at + 86400
     wake_columns = reader.columns('task_wake_checks')
     if {'task_id', 'cmd'} <= wake_columns:
         probe = conn.execute('SELECT cmd FROM task_wake_checks WHERE task_id=?', (tid,)).fetchone()
@@ -299,4 +355,10 @@ def _describe(conn, tid, *, now, reader):
     facts['unknown'] |= bool(stop and not episode)
     from hermes_cli.kanban_actionability_confirmed import compose
     observed_at = int(time.time()) if now is None else now
-    return compose(reader, task, facts, project(facts, now=observed_at), now=observed_at)
+    row = compose(reader, task, facts, project(facts, now=observed_at), now=observed_at)
+    if lane_deadline and not row['escalation']['at'] and 'escalation_deadline_missing' in row['violations']:
+        row['escalation'].update(at=lane_deadline, state='pending')
+        row['violations'] = [v for v in row['violations'] if v != 'escalation_deadline_missing']
+        if row['blocker'] and observed_at >= lane_deadline:
+            row['violations'].append('escalation_overdue')
+    return row

@@ -1,17 +1,18 @@
 """Authenticated source discovery for explicit administrative recovery. [daveey]
 
-Fail closed on private stop/renewal provenance: execution inventory deliberately
-cannot attest that authority. Canonical ingress still repeats every premise CAS.
-No replica IDs, local clock, source-subset selection or new release permission.
+Fail closed on private stop/renewal provenance that is still in force. Only history the
+Board's ordered record shows resolved (``kanban_actionability_private``) may be observed,
+and a held card raises ``PrivateHold``. A scope renewal whose mandate digest cannot be
+re-checked from the event stream stays held. Canonical ingress still repeats every premise
+CAS. No replica IDs, local clock, source-subset selection or new release permission.
 """
 from __future__ import annotations
 
 from urllib.parse import quote
 
 from hermes_cli.kanban_actionability import NONTERMINAL
+from hermes_cli.kanban_actionability_private import PrivateHold, held
 from hermes_cli.kanban_actionability_selection import select
-
-PRIVATE = {'spend_budget_triaged', 'decision_hold_restricted', 'scope_renewed'}
 
 
 def _invalid():
@@ -42,11 +43,13 @@ def _inventory(hub, board, task_id):
                 or event['uid'] in uids or event.get('task_id') != task_id
                 or not _integer(event.get('ord'), 1) or event['ord'] in orders
                 or not _integer(event.get('version'), 1) or not _integer(event.get('created_at'))
-                or event.get('deleted_at') is not None or not isinstance(event.get('kind'), str)
-                or event['kind'] in PRIVATE):
+                or event.get('deleted_at') is not None or not isinstance(event.get('kind'), str)):
             raise _invalid()
         uids.add(event['uid'])
         orders.add(event['ord'])
+    reason = held(task['status'], data['events'])
+    if reason is not None:
+        raise PrivateHold(task_id, reason)
     return data
 
 

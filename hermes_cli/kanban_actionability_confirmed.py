@@ -98,7 +98,7 @@ def compose(reader, task, facts, row, *, now):
     if (row['status'] not in NONTERMINAL or facts.get('pending_command')):
         return row
     needs_deadline = (not row['escalation']['at'] and row['escalation']['state'] == 'unavailable'
-                      and 'escalation_deadline_missing' in row['violations'])
+                      and bool({'escalation_deadline_missing', 'private_hold'} & set(row['violations'])))
     needs_owner = row['owner']['kind'] == 'unavailable' and 'owner_missing' in row['violations']
     if row['escalation']['state'] == 'not_applicable' or (
             not needs_deadline and not needs_owner and 'escalation_overdue' not in row['violations']):
@@ -118,7 +118,7 @@ def compose(reader, task, facts, row, *, now):
     if needs_deadline:
         row['escalation']['at'] = deadline
         row['escalation']['state'] = 'pending'
-        row['violations'] = [v for v in row['violations'] if v != 'escalation_deadline_missing']
+        row['violations'] = [v for v in row['violations'] if v not in ('escalation_deadline_missing', 'private_hold')]
         if row['blocker'] and now >= deadline and 'escalation_overdue' not in row['violations']:
             row['violations'].append('escalation_overdue')
     if row['escalation']['at'] == deadline:

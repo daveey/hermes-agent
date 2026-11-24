@@ -95,6 +95,10 @@ def _status(row: dict, facts: dict, now: int) -> None:
         deps = facts['dependencies']
         _block(row, '; '.join(f"{d['task_id']} ({d['status'] or 'unknown'})" for d in deps),
                '; '.join(d['trigger'] for d in deps), action='satisfy_dependency')
+    elif facts.get('lane_hold') and not facts.get('stop'):
+        row['owner'] = {'kind': 'assignee', 'refs': ['lane-planner']}
+        _block(row, 'lane capacity', 'lane admission', action='wait_for_lane_admission')
+        row['release']['authority'] = 'unavailable'
     elif status == 'scheduled':
         _schedule(row, facts, now)
     elif status == 'running':
@@ -223,7 +227,14 @@ def project(facts: dict, *, now: int) -> dict:
     if invalid_creation:
         row['violations'].append('creation_intent_invalid')
         row['evidence_state'] = 'unknown'
-    if not deadline:
+    if not deadline and facts.get('private_hold'):
+        # Record path refuses this card (PrivateHold): name that blocker instead of a missing deadline.
+        # Action, blocker and release policy stay source-derived.
+        row['violations'].append('private_hold')
+        row['escalation']['state'] = 'unavailable'
+        row['instruction'] = f"{row.get('instruction') or ''} Private hold: {facts['private_hold']}".strip()
+        row['evidence_state'] = 'unknown'
+    elif not deadline:
         row['violations'].append('escalation_deadline_missing')
         row['escalation']['state'] = 'unavailable'
         row['evidence_state'] = 'unknown'
