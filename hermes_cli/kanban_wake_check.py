@@ -1012,9 +1012,6 @@ def _wake(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> O
         conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
         episode.reset(conn, task_id)
         return None
-    from hermes_cli.kanban_terminal_run import reserve
-    if reserve(conn, task_id, kind):
-        return None
     park = pending_wake(conn, task_id) or {}
     resume = park.get("resume_status") if park.get("resume_status") in ("ready", "review") else "ready"
     landing = kb._landing_status_after_parents(conn, task_id)

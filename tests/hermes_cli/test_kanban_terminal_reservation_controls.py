@@ -39,6 +39,19 @@ def test_implied_local_timer_keeps_last_run_and_backs_off(kanban_home, tmp_path)
         assert pending == now + 120  # an expired implied timer must not stay hot
 
 
+@pytest.mark.parametrize('runs_left', [2, 3])
+def test_implied_local_timer_wakes_with_multiple_runs_left(kanban_home, tmp_path, runs_left):
+    from hermes_cli.kanban_continuation import _wake_parks
+    with kbc.connect_closing() as conn:
+        tid = _park_one_run_left(conn, tmp_path, remote=False, timed=False)
+        budget.set_override(conn, tid, runs=runs_left, by='owner', reason='multiple authorized runs')
+        # Fast parking has spent no runs; the final-run boundary must not reserve an ordinary timer.
+        assert budget.spend(conn, tid).runs == 0
+        woken, _ = _wake_parks(conn, 4070908801)
+        assert woken == [tid] and kb.get_task(conn, tid).status != 'scheduled'
+        assert not _events(conn, tid, 'terminal_run_reserved')
+
+
 def test_timed_relayed_park_keeps_last_run(kanban_home, tmp_path):
     from hermes_cli.kanban_continuation import _wake_parks
     with kbc.connect_closing() as conn:
