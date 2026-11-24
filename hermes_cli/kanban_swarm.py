@@ -22,6 +22,7 @@ import time
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_owner_chat import declared_producer as _declared_producer
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
 
@@ -191,6 +192,7 @@ def _create_swarm_uncommitted(
         workspace_kind=workspace_kind, workspace_path=workspace_path,
         session_id=session, creator_task_id=creator,
         require_scope_authority=bool(creator) or _agent_invoked(),
+        owner_producer=None if creator or _agent_invoked() else _declared_producer(),
     )
     root = kb.create_task(
         conn,

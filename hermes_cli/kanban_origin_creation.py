@@ -189,7 +189,8 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
             if held:
                 raise OriginError("origin_idempotency_conflict",
                                   f"idempotency_key {key!r} already names card {held['id']} on this board")
-        task_id = kb.create_task(conn, **options, placement_checked=True)  # courier retains owner placement
+        task_id = kb.create_task(conn, **options, placement_checked=True,  # courier retains owner placement
+                                 settle_owner_chat=False)  # its origin chat is linked below, then required
         marker = {"binding_id": "binding-" + secrets.token_hex(16), "version": 1,
                   "owner": {**intent["owner"], "task_id": task_id}, "origin": intent["origin"],
                   "task_record_key": f"{intent['owner']['profile']}/{intent['owner']['board']}/{task_id}"}

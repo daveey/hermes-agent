@@ -473,6 +473,7 @@ def cron_runner_label() -> str:
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, interpreter: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Execute a cron job's script and return ``(success, output)``; on failure *output* is the
     error message for the LLM to report. Env goes through ``build_subprocess_env`` (SECURITY.md
@@ -525,6 +526,9 @@ def _run_job_script(
         # env itself — no raw copy at the spawn site (test_subprocess_env_guard).
         env = with_sane_path(build_subprocess_env(strip_launch_profile=True))
         env.update(env_overlay)
+        if job_id:  # cards this script creates are owned by the job's standing owner chat (kanban_owner_chat)
+            from hermes_cli.kanban_owner_chat import ENV as _OWNER_ENV
+            env.setdefault(_OWNER_ENV, f"cron:{job_id}")
         logger.info("Cron script %s running on %s", path.name, cron_runner_label())
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
@@ -607,7 +611,7 @@ def _run_job_script_with_claim_heartbeat(
     dispatched job, never re-read, so a stale runner cannot extend a replacement owner's claim."""
     def run() -> tuple[bool, str]:
         return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event,
-                               interpreter=job.get("interpreter"))
+                               interpreter=job.get("interpreter"), job_id=str(job.get("id") or "") or None)
 
     schedule = job.get("schedule")
     claim = job.get("run_claim")

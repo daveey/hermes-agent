@@ -751,6 +751,22 @@ there but undecided after 30 minutes gets the same single review. Scope and
 safety stops are never reviewed; `kanban.spend_review: false` turns the
 reviewer off.
 
+Every card has an owning chat. A card created from a chat is owned by that
+chat, and a worker's card by its creator's. Any other card gets its producer's
+standing owner chat: one pinned chat per producer, titled
+`Kanban owner: <producer>`. It is created on first use and seeded with a note
+on what it decides. The producer is the card's `created_by` for system
+monitors and watchers, the cron job for cards created from a cron run, and
+`terminal` for a human's `hermes kanban create`. A scope or budget stop on the
+card then routes to that chat, which can release, re-scope or archive it,
+instead of waiting for an operator. An agent with no chat of its own is still
+refused (`scope_authority_missing`). If the owner chat cannot be made, a
+system card is created without an owner (`owner_chat_unavailable`).
+`hermes kanban owner-chats [--apply] [--json]` lists open cards with no owner
+and, with `--apply`, links each one to its producer's owner chat. A card whose
+chat deliberately released it is left alone. `kanban.owner_chats: false`
+restores the old behaviour.
+
 `hermes kanban release <id> [--ids <id>...] [--runs N] [--note TEXT] [--seen ID]` is the one-step release
 of a spend or scope stop. Per card it writes one goal-level mandate comment (finish the card's
 acceptance; stop only on a provider safety refusal, a step that needs David physically, the same

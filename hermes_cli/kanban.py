@@ -12,6 +12,7 @@ import importlib
 import json
 
 from hermes_cli.kanban_published_worktree import publication_scope
+from hermes_cli.kanban_owner_chat import TERMINAL as TERMINAL_OWNER, declared_producer as _declared_producer
 import logging
 import os
 import re
@@ -513,7 +514,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
                 validate_workspace=True, validate_skills=True, placement_checked=True, board=board,
-                require_scope_authority=in_worker or _agent_invoked(),  # human terminals keep human authority
+                require_scope_authority=in_worker or _agent_invoked(),  # agents need their own chat
+                # a human terminal's card is owned by the standing "terminal" owner chat (or its script's producer)
+                owner_producer=None if in_worker or _agent_invoked() else (_declared_producer() or TERMINAL_OWNER),
                 # [daveey] no --runs-on: queue for the worker pool; hub admission's placement and receipt
                 **cli_create_fields(conn, plan, args, body, ws_kind, ws_path, board, assignee=assignee),
                 insert_guard=after_create.guard,  # re-checks overlap under the write lock [daveey]
@@ -1872,6 +1875,7 @@ _HANDLERS = {
     **dict.fromkeys(("contain", "resume-contained"), lambda a: importlib.import_module("hermes_cli.kanban_containment_cli").command(a)),
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "renew-scope": lambda a: importlib.import_module("hermes_cli.kanban_scope_renewal_cli").command(a),
+    "owner-chats": lambda a: importlib.import_module("hermes_cli.kanban_owner_chat").command(a),
     "delegate": lambda a: importlib.import_module("hermes_cli.kanban_scope_delegate").command(a),
     "release": lambda a: importlib.import_module("hermes_cli.kanban_release").command(a),
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,

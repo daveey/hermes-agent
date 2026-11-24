@@ -11,6 +11,7 @@ import functools
 import json
 
 from hermes_cli.kanban_published_worktree import publication_scope
+from hermes_cli.kanban_owner_chat import tool_create_options as _owner_options
 from tools.kanban_tools_model_neutral import model_neutral_create, model_neutral_review
 import logging
 import os
@@ -1683,11 +1684,10 @@ def _handle_create(args: dict, **kw) -> str:
                 created_by=(selfwork_intent['sender'] if selfwork_intent is not None else _persisted_identity()), session_id=session_id,
                 native_origin=native_origin,
                 origin_intent=origin_intent, chat_origin=origin.ref if origin else args.get("origin_session"),
-                # Reject a worktree path the dispatcher could never resolve now, to the
-                # creator, instead of burning spawn retries on it later. [daveey]
+                # Reject a worktree path the dispatcher could never resolve now, to the creator, instead of burning spawn retries on it later. [daveey]
                 validate_workspace=True, validate_skills=True,
-                # origin courier checks after binding; self-work intake (receiver-set selfwork_intent) is chat-less by contract
-                require_scope_authority=origin_intent is None and selfwork_intent is None,
+                require_scope_authority=origin_intent is None and selfwork_intent is None,  # courier: after binding
+                **_owner_options(kw.get("task_id"), selfwork_intent),  # self-work intake is chat-less by contract
                 insert_guard=after_create.guard)  # re-checks overlap under the write lock [daveey]
             if self_work is not None:
                 from hermes_cli.kanban_selfwork_owner import create

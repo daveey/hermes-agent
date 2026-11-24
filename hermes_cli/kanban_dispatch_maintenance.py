@@ -11,6 +11,18 @@ def sweep(conn, result, guard_notice, parent_unclaimed):
     drain_owner(conn)
     parent_unclaimed.safe_sweep(conn)  # A capped host is when a parent starves.
     _start_spend_reviews(conn)
+    _own_ownerless_cards(conn)
+
+
+def _own_ownerless_cards(conn):
+    """Hourly: every open card gets a live owning chat, including ones created while state.db was down."""
+    import logging
+    import time
+    from hermes_cli.kanban_owner_chat import maybe_backfill
+    try:
+        maybe_backfill(conn, now=time.monotonic())
+    except Exception:  # health: allow BLE001 -- ownerless cards stay as they were; the next hour retries
+        logging.getLogger(__name__).warning("kanban: owner-chat backfill failed", exc_info=True)
 
 
 def _start_spend_reviews(conn):

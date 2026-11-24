@@ -1194,7 +1194,7 @@ def create_task(
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
     admission_class: str = "normal", admission_frees: Optional[str] = None,
     self_work: Optional[dict] = None, creation_receipt: Optional[dict] = None,
-    require_scope_authority: bool = False,
+    require_scope_authority: bool = False, owner_producer: Optional[str] = None, settle_owner_chat: bool = True,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1359,9 +1359,9 @@ def create_task(
                     creation_receipt=creation_receipt, board=board)
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin, native_origin)
-                if require_scope_authority:  # agent/CLI ingress: refuse (roll back) an authority-less card
-                    from hermes_cli.kanban_create_authority import require
-                    require(conn, task_id, creator_task_id)
+                if settle_owner_chat:  # every card leaves owned or is refused (kanban_owner_chat.settle) [daveey]
+                    from hermes_cli.kanban_owner_chat import settle as settle_owner
+                    settle_owner(conn, task_id, creator_task_id, created_by=created_by, strict=require_scope_authority, producer=owner_producer)
                 native_admission.require_receipt(conn, task_id)
             return task_id
         except sqlite3.IntegrityError:

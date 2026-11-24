@@ -660,6 +660,10 @@ _SPECS = [
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
     ], help="Manually move one or more todo/blocked/triage tasks to ready (recovery path)"),
+    _cmd("owner-chats", [
+        _arg("--apply", action="store_true", help="Link each ownerless open card to its producer's owner chat"),
+        _json_flag(),
+    ], help="List open home cards with no owning chat; --apply gives each its producer's standing owner chat"),
     _cmd("renew-scope", [
         _TASK_ID,
         _arg("--episode", required=True, help="Uid of the scope stop (spend_budget_triaged event) being renewed"),

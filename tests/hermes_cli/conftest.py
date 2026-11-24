@@ -31,6 +31,21 @@ def _spend_reviewer_off(request, monkeypatch):
     monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (False, reviewer.DEFAULT_MAX_GRANTS))
 
 
+@pytest.fixture(autouse=True)
+def _owner_backfill_off(request, monkeypatch):
+    """The dispatcher's hourly owner-chat backfill (``kanban_owner_chat.maybe_backfill``) stays out of the
+    dispatcher suites, which pin exact links and subscriptions; ``owner_backfill`` opts a test in. [daveey]"""
+    if "owner_backfill" in request.fixturenames:
+        return
+    from hermes_cli import kanban_owner_chat as owner
+    monkeypatch.setattr(owner, "maybe_backfill", lambda conn, *, now: None)
+
+
+@pytest.fixture
+def owner_backfill():
+    """Run the real hourly owner-chat backfill from dispatcher maintenance."""
+
+
 @pytest.fixture
 def spend_reviewer(monkeypatch):
     """The reviewer on, its judge a scripted double: append verdict dicts to the returned list."""
