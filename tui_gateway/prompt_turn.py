@@ -137,7 +137,7 @@ def _admit_prompt_turn(
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
-    from tui_gateway import owner_forward
+    from tui_gateway.gateway_background_holder import automatic_owner_wait
     from tui_gateway.turn_admission import live_turn_holds, mark_live_turn, note_refusal, owns
     note_refusal(spared_live_turn=False)
     with session["history_lock"]:
@@ -173,10 +173,8 @@ def _admit_prompt_turn(
         if spared:
             logger.info("Refused submit for session %s left the live turn's state alone",
                         session.get("session_key") or sid)
-        elif session.get("_synthesized_turn") and (
-                getattr(ownership_refusal, "ledger_status", None) in owner_forward.FORWARDABLE_LEDGER_STATES):
-            logger.info("automatic turn for %s deferred: gateway queue holds %s work",
-                        session.get("session_key") or sid, ownership_refusal.ledger_status)
+        elif (wait_reason := automatic_owner_wait(session, ownership_refusal, foreign_owner=_foreign_turn_owner)):
+            logger.info("automatic turn for %s deferred: %s", session.get("session_key") or sid, wait_reason)
         elif _transient_ownership_refusal(ownership_refusal):
             logger.info("turn for %s deferred: ownership coordination pending (%s, pid=%s)",
                         session.get("session_key") or sid, ownership_refusal.ownership_cause,

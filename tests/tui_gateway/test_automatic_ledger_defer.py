@@ -92,6 +92,54 @@ def test_actionable_refusal_keeps_exponential_backoff(admission, status):
     assert admission.session["_notif_owner_refusal_delay"] == 120
 
 
+@pytest.mark.parametrize("gateway_owner", [True, False, None])
+@pytest.mark.parametrize("typed", [False, True])
+@pytest.mark.parametrize("reason,cause", [
+    ("SESSION_NOT_OWNED", "lease_foreign"),
+    ("SESSION_COORDINATION_UNAVAILABLE", "lease_foreign"),
+    ("SESSION_NOT_OWNED", "lease_self_orphan"),
+])
+def test_durable_gateway_notification_refusal_is_not_a_takeover(
+    admission, monkeypatch, gateway_owner, typed, reason, cause
+):
+    """Real notification submit/admission, not a mock of the second ownership gate."""
+    from tui_gateway import gateway_background_holder as holders
+    from hermes_cli import active_sessions
+    import hermes_state_pidns
+    import os
+
+    pid = os.getpid() + 100000
+    admission.refusal = SimpleNamespace(
+        reason=reason, ownership_cause=cause, holder_pid=pid)
+    owner = {"holder": f"pid={pid}:pidns=fixture:platform=tui"}
+    monkeypatch.setattr(server, "_foreign_turn_owner", lambda _: owner)
+    monkeypatch.setattr(active_sessions, "active_session_registry_snapshot", lambda _: [])
+    monkeypatch.setattr(hermes_state_pidns, "holder_pid_checkable", lambda _: True)
+    monkeypatch.setattr(holders, "dialed_gateway", lambda _: (
+        None if gateway_owner is None else
+        holders.DialedGateway(pid if gateway_owner else pid + 1, object())))
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _: True)
+    before_history = list(admission.session["history"])
+    admission.session["_turn_marker_key"] = "original-live-marker"
+
+    if typed:
+        assert _admit(admission) is None
+    else:
+        assert server._notif_run_submit("rid", "live", admission.session, "notice") is False
+        assert admission.session["_notif_owner_refused_until"] == admission.now + 30
+        assert admission.session["_notif_owner_refusal_delay"] == 60
+        assert "_synthesized_turn" not in admission.session
+        # Repeated polls defer before attempting another submit during the backoff.
+        assert server._notif_owner_refused(admission.session)
+
+    deferred = not typed and gateway_owner is True and reason == "SESSION_NOT_OWNED" and cause == "lease_foreign"
+    assert len(admission.errors) == int(not deferred)
+    assert admission.starts == []
+    assert admission.session["history"] == before_history
+    assert admission.session["running"] is False
+    assert admission.session["_turn_marker_key"] == "original-live-marker"
+
+
 def test_typed_ledger_refusal_is_not_silenced(admission):
     admission.refusal = SimpleNamespace(reason="SESSION_NOT_OWNED", ledger_status="queued")
     assert _admit(admission) is None

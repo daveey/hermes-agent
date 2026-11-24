@@ -127,6 +127,26 @@ def gateway_background_holder(session: dict, *, foreign_owner: Callable[[dict], 
     return gateway
 
 
+def automatic_owner_wait(session: dict, refusal, *, foreign_owner: Callable[[dict], Optional[dict]]) -> Optional[str]:
+    """Presentation only: automatic work retries behind its ready gateway, never takes custody.
+
+    A durable gateway lease and a gateway queue are two representations of the same busy owner.
+    Unproved/foreign writers and typed sends retain their existing actionable refusal.
+    """
+    if not session.get("_synthesized_turn"):
+        return None
+    from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
+    status = getattr(refusal, "ledger_status", None)
+    if status in FORWARDABLE_LEDGER_STATES:
+        return f"gateway queue holds {status} work"
+    if (getattr(refusal, "reason", None) != "SESSION_NOT_OWNED"
+            or getattr(refusal, "ownership_cause", None) != "lease_foreign"):
+        return None
+    if gateway_background_holder(session, foreign_owner=foreign_owner) is not None:
+        return "local gateway holds the durable turn lease"
+    return None
+
+
 def retiring_owner_reason(session: dict, *, foreign_owner: Callable[[dict], Optional[dict]],
                           registry: Optional[Callable[[], list]] = None,
                           reason_of: Optional[Callable[[int], Optional[str]]] = None,
