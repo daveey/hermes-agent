@@ -165,7 +165,8 @@ def project(facts: dict, *, now: int) -> dict:
     first = positive_time(facts.get('source_at')) or positive_time(task.get('created_at'))
     deadline = positive_time(facts.get('deadline_at'))
     wake = positive_time(facts.get('wake_at'))
-    if task['status'] == 'scheduled' and wake and not any(
+    invalid_creation = facts.get('invalid_creation_intent')
+    if task['status'] == 'scheduled' and wake and not invalid_creation and not any(
             facts.get(k) for k in ('pending_command', 'stop', 'containment', 'human_step', 'dependencies')):
         deadline = max(deadline or 0, wake + 600)
     row = {'version': 1, 'task_id': task['id'], 'status': task['status'], 'contract_key': key,
@@ -193,6 +194,9 @@ def project(facts: dict, *, now: int) -> dict:
         if not (facts.get('stop') and facts.get('human_step') and task['status'] in ('triage', 'blocked')):
             row['violations'].append('owner_missing')
     elif row['owner']['kind'] == 'unknown' or not row['owner'].get('refs'):
+        row['evidence_state'] = 'unknown'
+    if invalid_creation:
+        row['violations'].append('creation_intent_invalid')
         row['evidence_state'] = 'unknown'
     if not deadline:
         row['violations'].append('escalation_deadline_missing')

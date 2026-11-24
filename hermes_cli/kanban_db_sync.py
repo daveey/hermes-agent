@@ -1565,6 +1565,8 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))
     if table == "task_events" and task_id:
+        from hermes_cli.kanban_actionability_intents import capture
+        capture(conn, ch.uid)
         from hermes_cli.kanban_terminal_guard import is_reopen
         if is_reopen({"kind": cols.get("kind"), "payload": cols.get("payload")}):
             result.reopened.add(str(task_id))

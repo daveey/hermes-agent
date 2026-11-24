@@ -33,9 +33,18 @@ def append_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: dic
             task_id, run_id, episode.EVIDENCE_EVENT, json.dumps(evidence), int(time.time())))
         assert cur.lastrowid is not None
         episode.consumed(conn, task_id, cur.lastrowid)
+    from hermes_cli.kanban_actionability_creation import stamp as stamp_actionability
+    now = int(time.time())
+    payload = stamp_actionability(conn, task_id, kind, payload, now=now)
     stamped = stamp(conn, task_id, kind, payload, run_id)
     cur = conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)", (
-        task_id, run_id, kind, json.dumps(stamped, ensure_ascii=False) if stamped else None, int(time.time())))
+        task_id, run_id, kind, json.dumps(stamped, ensure_ascii=False) if stamped else None, now))
+    if isinstance(payload, dict) and 'actionability_intent' in payload:
+        from hermes_cli.kanban_actionability_intents import capture
+        from hermes_cli import kanban_db_sync as sync
+        if sync.board_mode(conn) == 'primary':
+            event = conn.execute('SELECT uid FROM task_events WHERE id=?', (cur.lastrowid,)).fetchone()
+            capture(conn, event[0])
     if payload is not None and "_wake_episode_v1" in payload:
         assert cur.lastrowid is not None
         episode.consumed(conn, task_id, cur.lastrowid)

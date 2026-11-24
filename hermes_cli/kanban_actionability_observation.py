@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 from hermes_cli.kanban_actionability import NONTERMINAL
 
-KINDS = {'todo': ('created', 'linked'), 'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
+KINDS = {'todo': ('created', 'linked', 'dependency_wait'), 'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
          'review': ('review_requested', 'created'), 'blocked': ('blocked',),
          'scheduled': ('scheduled', 'continued'),
          'triage': ('failure_finalized', 'spend_budget_decision_ready', 'created'), 'running': ('claimed',)}
@@ -77,7 +77,7 @@ def _links(hub, board, head):
     raise _invalid()
 
 
-def observe(hub, board, task_id):
+def observe(hub, board, task_id, *, include_source=False):
     """Bounded canonical observation; unavailable authority remains unavailable.
 
     Every inventory/page shares one head. Busy boards may require a later explicit
@@ -98,19 +98,23 @@ def observe(hub, board, task_id):
     parent_ids = sorted(l['parent_id'] for l in links if l['child_id'] == task_id)
     if len(parent_ids) > 128 or len(set(parent_ids)) != len(parent_ids):
         raise _invalid()
-    dependencies, owner_task_refs = [], []
+    dependencies, owner_task_refs, raw_parent_states = [], [], []
     for pid in parent_ids:
         parent = _inventory(hub, board, pid)
         if parent['head'] != head:
             raise _invalid()
         p = parent['task']
+        raw_parent_states.append({'id': pid, 'status': p['status'], 'containment_episode': p['containment_episode']})
         if pid != task_id and p['status'] in NONTERMINAL:
             owner_task_refs.append(pid)
         status = 'triage' if p['status'] in ('done', 'archived') and p['containment_episode'] else p['status']
         dependencies.append({'id': pid, 'status': status})
-    return {'home_gateway': task['created_on'], 'first_observed': event['created_at'],
+    result = {'home_gateway': task['created_on'], 'first_observed': event['created_at'],
             'owner_task_refs': owner_task_refs,
             'facts': {'status': task['status'], 'assignee': task['assignee'],
                       'current_run_uid': task['current_run_uid'], 'root_episode': episode,
                       'source_uids': [{'uid': event['uid'], 'version': event['version']}],
                       'dependencies': dependencies}}
+    if include_source:
+        result.update(source_event=event, source_task=task, raw_parent_states=raw_parent_states)
+    return result

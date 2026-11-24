@@ -1108,6 +1108,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             backlog.note(path, result.behind)  # the pulls landed: a board still behind reruns at once
             raise
         if mode == "primary":
+            from hermes_cli.kanban_actionability_intents import materialize
+            materialize(live, hub, slug)
             from hermes_cli.kanban_worker_placement import reevaluate
             with credited(live):  # reservation observations and the feed pull after them
                 reevaluate(live, hub, slug, gateway)

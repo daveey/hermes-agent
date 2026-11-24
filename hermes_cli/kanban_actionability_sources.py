@@ -8,7 +8,7 @@ import time
 from hermes_cli.kanban_actionability import owner, project, valid_awaiting
 from hermes_cli.kanban_actionability_evidence import EVIDENCE_ERRORS, effective
 
-KINDS = ('created', 'blocked', 'scheduled', 'continued', 'spend_budget_triaged',
+KINDS = ('created', 'blocked', 'dependency_wait', 'scheduled', 'continued', 'spend_budget_triaged',
          'decision_hold_restricted', 'decision_retained', 'decision_protected_stopped',
          'spend_budget_decision_ready', 'promoted_manual', 'archived', 'contained')
 
@@ -252,6 +252,15 @@ def _describe(conn, tid, *, now, reader):
              'human_step': _human_step(task.get('human_request')),
              'unknown': reader.synced or reader.partial or missing or bool(receipt_only) or bool(source and not reader.uid(source))
                         or bool(task.get('human_request') and not _human_step(task['human_request']))}
+    if source and not any((stop, facts['containment'], facts['pending_command'])):
+        from hermes_cli.kanban_actionability_creation import validated_intent
+        parent_ids = [r[0] for r in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (tid,))]
+        intent = validated_intent(task, source, parent_ids=parent_ids)
+        if intent:
+            facts['deadline_at'] = intent['deadline_at']
+        elif 'actionability_intent' in source['data']:
+            facts['invalid_creation_intent'] = True
+            facts['unknown'] = True
     if schedule:
         facts.update(wake_at=schedule['data'].get('wake_at'), awaiting=schedule['data'].get('awaiting'))
     wake_columns = reader.columns('task_wake_checks')
