@@ -87,6 +87,51 @@ async def test_a_final_verdict_after_starting_ends_the_wait_at_once(tmp_path, mo
     assert len(seen) == 3
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('settling', [STARTING, GatewayDiscovery('draining')])
+async def test_a_restart_budget_ending_on_a_stall_answers_the_restart(tmp_path, monkeypatch, settling):
+    """Hub, 2026-11-24 16:00Z: a core-update restart took over 40 s and its loop stalled 1.5-4.8 s,
+    so an archive saw ``starting`` and then only missed identifies until the budget ran out. That
+    write must answer the restart verdict (Desktop replays it), not ``control_timeout`` (final)."""
+    clock = _Clock()
+    start = clock.now
+    _reads(monkeypatch, [settling, TIMEOUT], clock)
+    verdict = await sod.discover_session_owner(tmp_path, clock=clock, sleep=clock.sleep)
+    assert verdict is settling
+    assert sod.owner_unavailable_detail(verdict, DRAIN_ADVICE) != sod.CONTROL_TIMEOUT_DETAIL
+    assert clock.now - start <= sod.OWNER_STARTING_BUDGET_S
+
+
+@pytest.mark.asyncio
+async def test_a_stall_without_a_restart_seen_stays_control_timeout(tmp_path, monkeypatch):
+    clock = _Clock()
+    seen = _reads(monkeypatch, [TIMEOUT], clock)
+    assert sod.is_transient(await sod.discover_session_owner(tmp_path, clock=clock, sleep=clock.sleep))
+    assert len(seen) == sod.OWNER_DISCOVERY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_a_start_ending_on_stalls_answers_the_starting_503(tmp_path, monkeypatch):
+    """The write path: the starting 503 that Desktop's restart replay matches, nothing forwarded."""
+    from hermes_cli import web_server_sessions
+
+    _fast_poll(monkeypatch)
+    monkeypatch.setattr(sod, 'OWNER_STARTING_BUDGET_S', 0.3)
+    request = _standalone_request(monkeypatch, tmp_path)
+    _reads(monkeypatch, [STARTING, TIMEOUT])
+    attempts, connects = [], []
+    monkeypatch.setattr('hermes_cli.gateway_client.connect_gateway', lambda **kw: connects.append(kw))
+    with _held(attempts) as held:
+        monkeypatch.setattr('gateway.runtime_ownership.exclusive_maintenance', held)
+        with pytest.raises(HTTPException) as exc:
+            await web_server_sessions._mutate_session_request(
+                request, None, 's1', request_id='req-1', expected_revision=0,
+                operation='sidebar', payload={'archived': True})
+    assert exc.value.status_code == 503
+    assert exc.value.detail == sod.STARTING_DETAIL
+    assert len(attempts) == 1 and connects == []
+
+
 def test_only_a_starting_verdict_without_an_endpoint_is_starting():
     assert sod.is_starting(STARTING) and sod.is_starting(GatewayDiscovery('starting', reason_code='deadline'))
     assert not sod.is_starting(SimpleNamespace(state='starting', endpoint='owner', reason_code=None))

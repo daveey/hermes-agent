@@ -172,11 +172,18 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
     ``OWNER_STARTING_BUDGET_S`` after the first read began and lifts the read cap: from then on
     both transient verdicts are re-read until another verdict or that deadline.
 
+    A budget that saw ``starting`` or ``draining`` and ends on a ``control_timeout`` answers the
+    newest of those settling verdicts: the owner is still mid-restart, its busy loop only missed the
+    last identify. A bare ``control_timeout`` is not replayed by Desktop (it reads it as a stall the
+    server already rode out), so a slow restart turned into a manual Retry (hub, 2026-11-24 16:00Z:
+    a core-update restart took over 40 s with 1.5-4.8 s loop stalls; an archive sent 15 s in ended
+    on ``control_timeout`` after the full 24 s starting budget).
+
     Reads are shared with concurrent callers for the same home (``_shared_read``); the shared
     read is shielded, so a caller that leaves on its own deadline never cancels it for others."""
     began = clock()
     deadline = began + OWNER_DISCOVERY_BUDGET_S
-    discovery, starting, attempt, last = None, False, 0, None
+    discovery, starting, attempt, last, settled = None, False, 0, None, None
     while starting or attempt < OWNER_DISCOVERY_ATTEMPTS:
         pause = OWNER_STARTING_POLL_S if _settling(discovery) else OWNER_DISCOVERY_BACKOFF_S
         remaining = deadline - clock()
@@ -194,8 +201,11 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
         except TimeoutError:
             discovery = _timed_out()
         if _settling(discovery):
+            settled = discovery
             if not starting:
                 starting, deadline = True, began + OWNER_STARTING_BUDGET_S
         elif not is_transient(discovery):
             return discovery
+    if settled is not None and is_transient(discovery):
+        return settled  # still restarting: the retryable verdict Desktop replays
     return discovery or _timed_out()  # the first read always runs; this only types the result
