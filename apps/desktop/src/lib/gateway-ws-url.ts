@@ -12,7 +12,14 @@ export function resolveDesktopGatewayWsUrl(
   const { connectionId, profile, registryScoped } = connection
 
   if (!registryScoped || !connectionId) {
-    return resolveGatewayWsUrl(desktop, connection)
+    const mint = desktop.getGatewayWsUrl
+
+    const deps =
+      connection.inheritsPrimary && mint
+        ? { getGatewayWsUrl: (profile?: null | string) => mint(profile, { inheritsPrimary: true }) }
+        : desktop
+
+    return resolveGatewayWsUrl(deps, connection)
   }
 
   const mint = desktop.getGatewayWsUrlFor

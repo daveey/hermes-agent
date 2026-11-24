@@ -90,7 +90,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     sessionsMoved: (connectionId, sessions) =>
       ipcRenderer.send('hermes:transcript-cache:sessions-moved', { connectionId, sessions })
   },
-  getGatewayWsUrl: profile => ipcRenderer.invoke('hermes:gateway:ws-url', profile),
+  getGatewayWsUrl: (profile, opts) => ipcRenderer.invoke('hermes:gateway:ws-url', profile, opts),
   // Registry-scoped fresh WS URL: { connectionId, profile } → result shape of
   // getGatewayWsUrl, minted against that connection's backend.
   getGatewayWsUrlFor: payload => ipcRenderer.invoke('hermes:gateway:ws-url-for', payload),

@@ -38,7 +38,7 @@ declare global {
       // the window's backend; pass a named profile to dial/reuse that profile's
       // cached gateway descriptor.
       getStartupConnection?: (route?: { connectionId?: null | string; profile?: null | string } | null) => Promise<StartupConnectionResult<HermesConnection>>
-      getConnection: (profile?: string | null) => Promise<HermesConnection>
+      getConnection: (profile?: string | null, opts?: { inheritsPrimary?: boolean }) => Promise<HermesConnection>
       // Registry-scoped backend resolution: dial (connectionId, profile). An
       // empty/local connectionId delegates to the legacy getConnection path.
       getConnectionFor?: (payload: {
@@ -130,7 +130,7 @@ declare global {
         /** [daveey] Forward a gateway socket's `sessions.moved` push to main's prefetcher ('' = registry primary). */
         sessionsMoved?: (connectionId: string, sessions: unknown[]) => void
       }
-      getGatewayWsUrl: (profile?: null | string) => Promise<GatewayWsUrlResult>
+      getGatewayWsUrl: (profile?: null | string, opts?: { inheritsPrimary?: boolean }) => Promise<GatewayWsUrlResult>
       // Browser host only: before a pick routes `profile`, re-read the served
       // set when its cached answer does not serve that profile. Bounded, and
       // never rejects: on a timeout or failure the cached set stands.
@@ -1254,6 +1254,8 @@ export interface HermesConnection {
   // An inferred connectionId identifies the visible source but its v1 profile
   // name may still be a client-side routing alias rather than a backend profile.
   registryScoped?: boolean
+  // Retain legacy primary ownership: profile can be a client-side alias.
+  inheritsPrimary?: boolean
   // True only when `profile` is a request scope on the shared primary backend.
   // A pooled backend also carries `profile`, so presence alone cannot identify
   // the shared-primary routing case.

@@ -26,6 +26,7 @@ import {
 import { resolveDesktopGatewayWsUrl } from '@/lib/gateway-ws-url'
 import { hostHas } from '@/lib/host-capabilities'
 import { browserLaunchProfile } from '@/lib/platform'
+import { primaryReconnectConnection } from '@/lib/primary-reconnect-connection'
 import { BACKEND_BOOT_WAIT_TIMEOUT_MS, RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 import {
   $desktopBoot,
@@ -531,12 +532,7 @@ export function useGatewayBoot({
         const lookupRevision = primaryRouteRevision
 
         const conn = await withTimeout(
-          primaryConnection?.registryScoped && primaryConnection.connectionId
-            ? (desktop.getConnectionFor?.({
-                connectionId: primaryConnection.connectionId,
-                profile: primaryConnection.profile
-              }) ?? Promise.reject(new Error('Registry gateway connection is unavailable')))
-            : desktop.getConnection(primaryConnection?.profile),
+          primaryReconnectConnection(desktop, primaryConnection),
           RECONNECT_ATTEMPT_TIMEOUT_MS,
           'Timed out reconnecting to Hermes backend'
         )

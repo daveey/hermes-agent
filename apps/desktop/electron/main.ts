@@ -7356,17 +7356,15 @@ async function mintGatewayWsTicket(baseUrl: string, headers: Record<string, stri
 // calls this immediately before every gateway.connect() so each WS upgrade
 // carries a freshly-minted ticket. For local/token connections this just
 // reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile, webContentsId) {
-  // Mint for the requested profile's backend, NOT always the primary. The
-  // renderer re-mints right before every gateway.connect(); when swapping to a
-  // pooled profile we must return THAT backend's ws URL, otherwise the connect
-  // silently lands back on the primary (default) backend and writes sessions to
-  // the wrong profile's DB. A null/empty profile resolves to the primary, so
-  // legacy callers and single-profile users are unchanged.
-  const connection = await ensureBackend(profile)
+async function freshGatewayWsUrl(profile, webContentsId, opts = {}) {
+  // Named pool callers mint on their own backend. Primary descriptors must
+  // retain inheritance: their alias/name may also identify a local pool.
+  // Descriptor lookup and ticket mint must make the same backend choice.
+  const ensure = () => ensureBackend(profile, opts)
+  const connection = await ensure()
 
   if (connection.gatewayEndpoint) {
-    return localGatewayDial({ ensure: () => ensureBackend(profile), forget: () => forgetLocalGatewayDescriptor(profile), launchHome: HERMES_HOME,
+    return localGatewayDial({ ensure, forget: () => forgetLocalGatewayDescriptor(profile), launchHome: HERMES_HOME,
       prepare: (baseUrl, ticket) => localGatewayDials.prepare(baseUrl, ticket, webContentsId), profile: String(profile ?? '') })
   }
 
@@ -10104,7 +10102,7 @@ async function ensureBackend(
 
     setWslBridgeProfileState(joined.key, joined.connection.mode !== 'remote')
 
-    return joined.descriptor
+    return { ...joined.descriptor, inheritsPrimary: request.inheritsPrimary }
   }
 
   const existing = backendPool.get(key)
@@ -13635,12 +13633,12 @@ function createWindow() {
   })
 }
 
-ipcMain.handle('hermes:connection', async (event, profile) => {
+ipcMain.handle('hermes:connection', async (event, profile, opts) => {
   const source = windowConnectionRoutes.get(event.sender.id) ?? null
-  const route = resolveDesktopConnectionRequest(profile, source, primaryProfileKey())
+  const route = resolveDesktopConnectionRequest(profile, source, primaryProfileKey(), opts?.inheritsPrimary === true)
 
   // A profile-less request follows the primary even though the route carries its name.
-  return captureStartupDeadline(connectDesktopProfileRoute(route, event.sender, desktopConnectionRequestInheritsPrimary(profile, source)))
+  return captureStartupDeadline(connectDesktopProfileRoute(route, event.sender, desktopConnectionRequestInheritsPrimary(profile, source, opts?.inheritsPrimary === true)))
 })
 
 async function connectDesktopProfileRoute(route: DesktopProfileRoute, sender?: Electron.WebContents, inherits = false) {
@@ -13829,7 +13827,7 @@ function revalidateSuspectPoolAfterResume() {
   )
 }
 
-ipcMain.handle('hermes:gateway:ws-url', (e, p) => gatewayWsUrlIpcResult(() => freshGatewayWsUrl(p, e.sender.id)))
+ipcMain.handle('hermes:gateway:ws-url', (e, p, opts) => gatewayWsUrlIpcResult(() => freshGatewayWsUrl(p, e.sender.id, { inheritsPrimary: opts?.inheritsPrimary === true })))
 registerGatewayConnectIpc(ipcMain, rememberLog) // [daveey] the chat WebSocket's connect limit follows slow-link mode
 ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
   if (typeof sessionId !== 'string' || !sessionId.trim()) {

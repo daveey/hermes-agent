@@ -86,11 +86,12 @@ export function resolveDesktopWindowLaunch(
 export function resolveDesktopConnectionRequest(
   profile: unknown,
   source: WindowConnectionRoute | null,
-  primaryProfile: string
+  primaryProfile: string,
+  inheritsPrimary = false
 ): DesktopProfileRoute {
   const requested = typeof profile === 'string' ? profile.trim() : ''
 
-  if (source?.profile && !requested) {
+  if (source?.profile && !requested && !inheritsPrimary) {
     return resolveDesktopWindowRoute(undefined, source, { connectionId: null, profile: primaryProfile })
   }
 
@@ -101,9 +102,10 @@ export function resolveDesktopConnectionRequest(
  *  the caller named none and its window has no route of its own. */
 export function desktopConnectionRequestInheritsPrimary(
   profile: unknown,
-  source: WindowConnectionRoute | null
+  source: WindowConnectionRoute | null,
+  inheritsPrimary = false
 ): boolean {
-  return !(typeof profile === 'string' && profile.trim()) && !source?.profile
+  return inheritsPrimary || (!(typeof profile === 'string' && profile.trim()) && !source?.profile)
 }
 
 /** The preference IPC the renderer reaches. Main owns each connection's
