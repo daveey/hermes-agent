@@ -1287,7 +1287,8 @@ def remote_body(args: dict, *, self_gw: str, target: str, carried: bool = False)
 def create_remote(args: dict, *, target: str, origin_session: Optional[str], origin_profile: str,
                   self_gw: str, cfg: Optional[dict] = None, hub_cli: str = "hermes-hub",
                   transport_key: Optional[str] = None, origin_gateway: Optional[str] = None,
-                  creator: Optional[dict] = None, run_uid: Optional[str] = None) -> dict:
+                  creator: Optional[dict] = None, run_uid: Optional[str] = None,
+                  canonical_home: bool = False) -> dict:
     """Queue on ``target``; a fatal refusal must not fall back to a second local card."""
     c = _Cfg(config() if cfg is None else cfg)
     foreign_origin = bool(origin_gateway and origin_gateway != self_gw)
@@ -1298,6 +1299,9 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
         return {"ok": False, "fatal": True, "error": "create identity requires hermes-hub create-task --option"}
     try:
         options = carried_options(args) if carried else {}
+        if canonical_home:
+            from hermes_cli.kanban_creation_home import transport_options
+            options.update(transport_options(args, hub_cli=hub_cli))
     except (TypeError, ValueError) as exc:
         return {"ok": False, "fatal": True, "error": str(exc)}
     transport_args = {**args, "idempotency_key": transport_key} if transport_key else args

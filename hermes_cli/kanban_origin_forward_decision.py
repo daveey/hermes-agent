@@ -35,11 +35,13 @@ def _canonical(value):
 def _validate_create(create):
     # Match the placement courier's surface, not arbitrary owner-tool parameters.
     strings = {"title", "body", "assignee", "session_id", "admission_class", "admission_frees",
-               "model", "provider", "completion_contract", "idempotency_key", "distinct_reason"}
-    lists = {"skills", "requires", "distinct_from"}
-    integers = {"max_runtime_seconds", "priority", "goal_max_turns"}
+               "model", "provider", "completion_contract", "idempotency_key", "distinct_reason",
+               "tenant", "initial_status"}
+    lists = {"skills", "requires", "distinct_from", "runs_on", "parents"}
+    integers = {"max_runtime_seconds", "priority", "goal_max_turns", "max_retries"}
     booleans = {"goal_mode", "review_required", "triage"}
-    allowed = strings | lists | integers | booleans
+    objects = {"human_request"}
+    allowed = strings | lists | integers | booleans | objects
     if (not set(create) <= allowed
             or not all(isinstance(create.get(key), str) and create[key].strip()
                        for key in ("title", "assignee", "session_id"))
@@ -49,7 +51,8 @@ def _validate_create(create):
         if ((key in strings and not isinstance(value, str))
                 or (key in lists and (not isinstance(value, list) or not all(isinstance(v, str) for v in value)))
                 or (key in integers and type(value) is not int)
-                or (key in booleans and type(value) is not bool)):
+                or (key in booleans and type(value) is not bool)
+                or (key in objects and not isinstance(value, dict))):
             raise ValueError("origin_forward_create_invalid")
 
 

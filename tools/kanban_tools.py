@@ -1450,6 +1450,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
     Returns a remote result/refusal, or local placement metadata. Worker-policy metadata
     must reach the initial task INSERT; local storage is not permission to execute.
     """
+    home = None
     try:
         from hermes_cli import kanban_placement as kp
         from hermes_cli import kanban_capability_registry as reg
@@ -1462,7 +1463,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         from hermes_cli import kanban_sync_runstate as _runstate  # down: a machine pin takes the gateway route
         machine_ok = ((lambda m: _wn.sync.board_mode(conn) == "primary" and kp._machine_picks_up(m)
                        and not _runstate.down()) if conn is not None else None)
-        decision = kp.decide(view, machine_ok=machine_ok)
+        from hermes_cli.kanban_creation_home import prepare as creation_home, result as home_result
+        cfg, self_gw = kp.config(), reg.self_gateway() or "local"
+        home, view, decision = creation_home(view, cfg=cfg, gateway=self_gw, machine_ok=machine_ok)
         target = decision["where"]
         if target == "refuse":
             return _placement_refused(decision.get("pin", "hub"), decision.get("why", ""),
@@ -1472,16 +1475,15 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin, origin_gateway=origin_gateway)
             stranded = _runstate.stranded_create((local or {}).get("runs_on"))
             return (tool_error(stranded, rejection="sync_not_running"), None) if stranded else (None, local)
-        self_gw = reg.self_gateway() or "local"
-        cfg = kp.config()
         forwarding = _forwarding_fields(conn, origin_gateway, creator_task_id, self_gw, _worker_run_id)
         placed = kp.create_remote(view, target=target, origin_session=session_id,
                                   origin_profile=origin_profile or current_profile_name("default") or "default",
-                                  self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), **forwarding)
+                                  self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")),
+                                  **({"canonical_home": True} if home is not None else {}), **forwarding)
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s)",
                            target, placed.get("error"))
-            if forwarding or placed.get("fatal") or kp.explicit_foreign_pin(view, reg.self_gateway()):
+            if home is not None or forwarding or placed.get("fatal") or kp.explicit_foreign_pin(view, reg.self_gateway()):
                 return _placement_refused(target, f"{target} refused the card: {placed.get('error')}"), None
             return None, None
         rid = placed["request_id"]
@@ -1495,6 +1497,10 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                  "the same card. " if placed.get("retry") else "")
         fields = {"placed": {"gateway": target, "request_id": rid, "task_id": tid, "origin_session": session_id,
                              "queued_only": bool(placed.get("queued_only")), "retry": bool(placed.get("retry")), **kp.owner_chat_link(owner.get("result"))}}
+        if not tid and not placed.get("queued_only") and (refused := _placed_rejection(kp, rid, target, fields)):
+            return refused, None  # the target refused it: no card, never "IS created" [daveey]
+        if home is not None:
+            return _ok(**home_result(view, fields, tid=tid, status=remote_status, target=target)), None
         from tools import kanban_tools_board_delivery as kbd_words  # [daveey] the stopped-sync rewrite's anchors
         if tid:
             shows = kbd_words.CHAT_TASKS_SHOWS if session_id else ""
@@ -1503,8 +1509,6 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                     f"`hermes-hub tasks --gw {target}`.")
             return _ok(task_id=tid, status=remote_status or "created", **fields, runs_where=target,
                        note=note), None
-        if not placed.get("queued_only") and (refused := _placed_rejection(kp, rid, target, fields)):
-            return refused, None  # the target refused it: no card, never "IS created" [daveey]
         note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request. Changed calls with an explicit "
@@ -1514,9 +1518,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
     except Exception as exc:
         logger.warning("kanban placement failed", exc_info=True)
-        if origin_gateway:
+        if home is not None or origin_gateway:
             return _placement_refused(str(args.get("placement") or "auto"),
-                                      f"qualified origin forwarding failed: {exc}"), None
+                                      f"canonical home or qualified origin forwarding failed: {exc}"), None
         try:
             from hermes_cli import kanban_placement as kp2
             from hermes_cli import kanban_capability_registry as reg2
