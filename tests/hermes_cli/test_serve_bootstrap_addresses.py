@@ -62,6 +62,55 @@ def test_hostname_skips_unavailable_resolved_address(monkeypatch, unavailable_fi
     assert owned.fileno() == -1
 
 
+@pytest.mark.parametrize('unavailable_first', [True, False])
+def test_hostname_skips_unsupported_socket_family(monkeypatch, unavailable_first):
+    """Simulate disabled IPv6 at socket(), retaining the real IPv4 listener."""
+    unavailable = (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('::1', 0, 0, 0))
+    available = (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 0))
+    addresses = [unavailable, available] if unavailable_first else [available, unavailable]
+    original = socket.socket
+
+    def create(family=socket.AF_INET, *args, **kwargs):
+        if family == socket.AF_INET6:
+            raise OSError(errno.EAFNOSUPPORT, 'controlled disabled family')
+        return original(family, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(bootstrap.socket, 'getaddrinfo', lambda *args, **kwargs: addresses)
+        patch.setattr(bootstrap.socket, 'socket', create)
+        listener = bootstrap.BootstrapListener('localhost', 0)
+    with listener:
+        assert len(listener.servers) == 1
+        assert request(listener.port, '/api/health')[0] == 503
+        owned = listener.handoff()
+        assert owned.fileno() >= 0
+    assert owned.fileno() == -1
+
+
+@pytest.mark.parametrize('error', [errno.EAFNOSUPPORT, errno.EACCES, errno.EMFILE])
+def test_socket_creation_failure_preserves_refusal_and_cleanup(monkeypatch, error):
+    original = socket.socket
+    sockets = []
+
+    def create(family=socket.AF_INET, *args, **kwargs):
+        if family == socket.AF_INET6:
+            raise OSError(error, 'controlled socket creation failure')
+        result = original(family, *args, **kwargs)
+        sockets.append(result)
+        return result
+
+    addresses: list[tuple] = [(socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('::1', 0, 0, 0))]
+    if error != errno.EAFNOSUPPORT:
+        addresses.insert(0, (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 0)))
+    with monkeypatch.context() as patch:
+        patch.setattr(bootstrap.socket, 'getaddrinfo', lambda *args, **kwargs: addresses)
+        patch.setattr(bootstrap.socket, 'socket', create)
+        with pytest.raises(OSError) as caught:
+            bootstrap.BootstrapListener('localhost', 0)
+    assert caught.value.errno == (errno.EADDRNOTAVAIL if error == errno.EAFNOSUPPORT else error)
+    assert all(sock.fileno() == -1 for sock in sockets)
+
+
 def test_no_available_address_raises_oserror(monkeypatch):
     monkeypatch.setattr(bootstrap.socket, 'getaddrinfo', lambda *args, **kwargs: [
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.1', 0))])

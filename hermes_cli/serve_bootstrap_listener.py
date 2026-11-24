@@ -98,11 +98,11 @@ class BootstrapListener:
                 try:
                     server = Server(bound, _Handler)
                 except OSError as exc:
-                    # A resolved family may be disabled on this host. Like
-                    # asyncio, retain the other addresses, but never hide a
-                    # conflict or permission failure. HTTPServer closes the
-                    # failed socket before propagating its bind error.
-                    if exc.errno != errno.EADDRNOTAVAIL:
+                    # A resolved family may be disabled at socket() or bind().
+                    # Retain other addresses, but never hide conflicts, resource
+                    # exhaustion or permission failures. HTTPServer closes a
+                    # created socket before propagating its bind error.
+                    if exc.errno not in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL):
                         raise
                     continue
                 self.servers.append(server)
