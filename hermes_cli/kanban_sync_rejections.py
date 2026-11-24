@@ -149,7 +149,12 @@ def resolve_rejections(conn: sqlite3.Connection, hub, board: str) -> list[dict]:
         if op['op'] == 'retain':
             from hermes_cli.kanban_rejected_retain_retirement import retire
             try:
-                reports.append(retire(conn, hub, board, op))
+                report = retire(conn, hub, board, op)
+                if report['action'] == 'retained':
+                    from hermes_constants import get_hermes_home
+                    from hermes_cli import kanban_rejected_retain_history as history
+                    report = history.retire(conn, hub, board, op, get_hermes_home() / 'state.db')
+                reports.append(report)
             except (HubError, SyncUnavailable, OSError, ValueError) as exc:
                 reports.append(dict(op_id=op['op_id'], table=op['table_name'], row_uid=op['row_uid'],
                                     classification='unresolved', action='retained', proof=str(exc)))
