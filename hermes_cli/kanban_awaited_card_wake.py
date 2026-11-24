@@ -252,12 +252,15 @@ def report_lag(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list
 def changes_page(hub: Any, board: str, cursor: int, applied: Mapping[str, str]) -> dict:
     """``hub.changes(board, cursor)``; a Resync it raises carries ``status_changed``, the status changes the pull
     already applied from earlier pages (the rebuild's pre-read sees them as the old state, so its diff would not)."""
-    from hermes_cli.kanban_sync_client import Resync
+    from hermes_cli.kanban_sync_client import HubError, Resync
     try:
-        return hub.changes(board, cursor)
+        page = hub.changes(board, cursor)
     except Resync as exc:
         exc.status_changed = dict(applied)  # type: ignore[attr-defined]
         raise
+    if not isinstance(page, dict):
+        raise HubError(200, 'changes envelope malformed')
+    return page
 
 
 def _statuses(conn: sqlite3.Connection) -> Optional[dict[str, str]]:

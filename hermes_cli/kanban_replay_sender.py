@@ -64,7 +64,7 @@ def _push(conn, hub, board, gateway, *, primary, max_batches, before_head, seen)
     guard(conn)
     if (sync.sync_state(conn) or {}).get('mode') == 'off':
         raise ValueError('sync is detached; sender disabled')
-    if (sync.sync_state(conn) or {}).get('journal_id') is not None:
+    if journal.bound_custody(conn):
         from hermes_cli import kanban_replay_existence as existence
         existence.guard(conn)
         try:
@@ -221,8 +221,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             return None
         from hermes_cli.kanban_replay_existence import CurrentRowHold
         try:
-            evidence = hub.row_evidence(board, 'tasks', row['row_uid'])
-        except (OSError, client.HubError, client.Resync) as exc:
+            from hermes_cli.kanban_replay_reply import row_evidence_envelope
+            evidence = row_evidence_envelope(hub.row_evidence(board, 'tasks', row['row_uid']))
+        except (OSError, client.HubError, client.Resync, ValueError) as exc:
             raise CurrentRowHold(f'synthetic parent current row unavailable: {exc}', transient=True) from exc
         state = evidence.get('row')
         if (evidence.get('board') != board or evidence.get('table') != 'tasks' or

@@ -438,8 +438,9 @@ class Hub(HubRoutesMixin):
     def row_evidence(self, board: str, table: str, uid: str, *, max_response_bytes: Optional[int] = None) -> dict:
         """Exact authoritative evidence; optional wire/decoded cap is enforced before JSON parsing."""
         from urllib.parse import urlencode
+        from hermes_cli.kanban_replay_reply import row_evidence_envelope
         bounded: dict[str, Any] = {} if max_response_bytes is None else {"max_response_bytes": max_response_bytes}
-        return self._call("GET", f"/v2/boards/{board}/evidence?" + urlencode({"table": table, "uid": uid}), **bounded)
+        return row_evidence_envelope(self._call("GET", f"/v2/boards/{board}/evidence?" + urlencode({"table": table, "uid": uid}), **bounded))
 
     def sessions(self, board: str, body: dict) -> dict:
         """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal
@@ -1146,7 +1147,7 @@ def sync_all_once(hub: Optional[Hub] = None, *,
             # (no WARNING, the board is not marked failed, the outbox-age alarm keeps its last verdict).
             _log.debug("kanban sync: round for %s skipped (%s)", slug, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"SyncRoundBusy: {exc}", skipped=True))
-        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, RestoreRequired, ReplayFault) as exc:
+        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, RestoreRequired, ReplayFault, ValueError) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)%s", slug, type(exc).__name__, exc,
                          udf_errors.error_suffix(exc))
             from hermes_cli.kanban_sync_host_outage import classify  # one host card, not one per board [daveey]

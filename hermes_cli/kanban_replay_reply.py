@@ -13,6 +13,13 @@ _TRANSPORT = frozenset({'consumed', 'sequence', 'payload_sha256', 'h', 'dup',
                         'row', 'source_predecessor'})
 
 
+def mapping_envelope(payload, label):
+    """Refuse a non-object Board payload as a typed board-local fault."""
+    if not isinstance(payload, dict):
+        raise ValueError(f'replay {label} envelope malformed')
+    return payload
+
+
 def capability_envelope(payload):
     """Refuse a non-object capability as a board-local stream fault."""
     if not isinstance(payload, dict):
@@ -22,12 +29,16 @@ def capability_envelope(payload):
 
 def slot_envelope(payload):
     """Refuse a missing or non-object serving slot as a board-local stream fault."""
-    if not isinstance(payload, dict):
-        raise ValueError('replay serving envelope malformed')
+    mapping_envelope(payload, 'serving')
     slot = payload.get('slot')
     if not isinstance(slot, dict):
         raise ValueError('replay serving envelope malformed')
     return slot
+
+
+def row_evidence_envelope(payload):
+    """Refuse a non-object current-row evidence payload before dereference."""
+    return mapping_envelope(payload, 'current-row')
 
 
 def consumed_slot(reply, wire, previous, local):

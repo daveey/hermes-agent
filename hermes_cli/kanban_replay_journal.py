@@ -125,6 +125,15 @@ def _bound_custody(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def bound_custody(conn: sqlite3.Connection) -> bool:
+    """True only for a live bound journal.
+
+    Missing, NULL or recreated anchors with surviving journal, wire or loss
+    evidence raise instead of looking never-enrolled.
+    """
+    return _bound_custody(conn)
+
+
 def guard_import(conn: sqlite3.Connection, tables: tuple[str, ...], only: Mapping[str, set[str]] | None) -> bool:
     """Fence import scopes under the writer reservation; imports are not replay repair."""
     _transaction(conn)

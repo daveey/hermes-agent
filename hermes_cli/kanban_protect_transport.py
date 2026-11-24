@@ -107,7 +107,9 @@ def confirm(conn, hub, board, request_uid):
     proof.frozen(old, wire, board)
     capability(hub,board)  # Old serving DO/unsupported route cannot consume this identity.
     actor_gateway = proof.request(hub, board, old, wire)
-    reply=hub.ops(board,[wire])
+    from hermes_cli.kanban_replay_controls import confirmed_transport
+    strict = confirmed_transport(conn, old)
+    reply=None if strict else hub.ops(board,[wire])
     results=reply.get('results',[]) if isinstance(reply,dict) else []
     if (isinstance(results,list) and len(results)==1 and isinstance(results[0],dict)
             and results[0].get('client_op_id')==wire['client_op_id'] and results[0].get('status')=='rejected'
@@ -119,7 +121,7 @@ def confirm(conn, hub, board, request_uid):
                          "WHERE request_uid=? AND request_sha256=? AND delivery_state!='confirmed'",
                          (wireutil.canonical(rejection),request_uid,old['request_sha256']))
         raise Rejected(results[0])
-    if (not isinstance(results,list) or len(results)!=1 or not isinstance(results[0],dict)
+    if not strict and (not isinstance(results,list) or len(results)!=1 or not isinstance(results[0],dict)
             or results[0].get('client_op_id')!=wire['client_op_id'] or results[0].get('status')!='applied'):
         raise ValueError('protect delivery unknown; preserve exact request')
     gateway=old['home']
