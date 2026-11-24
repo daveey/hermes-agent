@@ -181,8 +181,22 @@ Full reconciliation of1213 generated variants is excluded, not claimed complete.
    board-local durable-token assertion kills it. Empty feed/receiver fixtures are
    not real Board interoperability. No sender/round/journal function is replaced.
 
-   Malformed peer-response behavior at the supported transport boundary remains
-   the next sender gate. Residual unreconciled generated classes include defensive
+   Malformed peer responses now have a table-driven production Hub/loopback HTTP
+   audit:20 ops-reply cases and9 retained-slot cases. The peer accepts exactly one
+   original operation, then returns bad envelopes/protocol/results/status/bindings,
+   missing fields, actual truncated JSON/UTF-8 bodies, duplicate results/dup flags,
+   regressed or out-of-sequence counters, and malformed retained verdicts. Unusable
+   inspection is deliberately independent of the damaged ops reply. Every case
+   refuses or inspects without settlement, ACK or uncertain resend; exact journal,
+   frozen wire, outbox and parent custody survive SQLite reopen and another refused
+   inspection. Only repaired authoritative inspection settles the same accepted
+   original, with no second ops request and the expected source/version update.
+   Baseline production is GREEN: no product defect or assertion-RED is invented.
+   Four class mutants omit protocol, digest completeness, single-result cardinality
+   or exact sequence validation; each fails at an intended assertion, and source
+   bytes are restored before final tests. This is not real Board interoperability.
+
+   Residual unreconciled generated classes include defensive
    identity-race/schema-probe/error-format combinations; full clause enumeration is
    explicitly out of renewed D scope, not labeled equivalent or killed. A
    generated count of1213 syntactic mutants is neither1213 distinct behavior
