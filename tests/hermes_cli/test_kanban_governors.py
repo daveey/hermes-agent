@@ -326,3 +326,91 @@ def test_no_snapshot_and_a_stale_one_read_as_unknown_not_as_nothing_held(board):
         waiting = tid if kb.get_task(conn, tid).status == "ready" else other
         assert governors.card(conn, waiting)["governor"] == "host_slots"
         assert governors.card(conn, waiting, now=time.time() + governors.STALE_SECONDS + 5)["stale"]
+
+
+def _chain_step(answer, governor):
+    return next(step for step in answer["chain"] if step["governor"] == governor)
+
+
+def _printed_verdict(text, label):
+    """The verdict token on the dry-run chain line for ``label``, or None."""
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] in {"pass", "stop", "throttle", "unknown"} and label in line:
+            return parts[0]
+    return None
+
+
+def test_never_ticked_unknown_does_not_say_nothing_holds_it(board, monkeypatch, capsys):
+    """A card no tick has judged is unknown, not 'nothing holds it'. Missing and stale text too."""
+    _usage(monkeypatch, [10.0])
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="not yet observed", assignee="default")
+        answer = gcli.why(conn, tid)
+        gcli._print_why(answer)
+        text = capsys.readouterr().out
+        unknown = [step["governor"] for step in answer["chain"] if step["verdict"] == "unknown"]
+        assert {"board_share", "hub_claim_screen", "admission_pool", "board_lease"} <= set(unknown), unknown
+        assert "nothing holds it" not in text, text
+        assert "unknown whether anything holds it" in text, text
+        slash = kcli.run_slash(f"why {tid}")
+        assert "nothing holds it" not in slash, slash
+        assert "unknown whether anything holds it" in slash, slash
+
+        _tick(conn, max_in_progress=1)
+        other = kb.create_task(conn, title="second", assignee="default")
+        _tick(conn, max_in_progress=1)
+        first = kb.get_task(conn, tid)
+        waiting = tid if first is not None and first.status == "ready" else other
+        stale_at = time.time() + governors.STALE_SECONDS + 5
+        recorded = governors.card(conn, waiting, now=stale_at)
+        assert recorded is not None and recorded["stale"]
+        monkeypatch.setattr(time, "time", lambda: stale_at)
+        stale = gcli.why(conn, waiting)
+        stale_text = kcli.run_slash(f"why {waiting}")
+        assert stale["source"] == "dry_run"
+        lease = _chain_step(stale, "board_lease")
+        assert lease["verdict"] == "unknown", lease
+        assert _printed_verdict(stale_text, "Board lease") == "unknown", stale_text
+        if stale.get("first_stop") is None:
+            assert "nothing holds it" not in stale_text, stale_text
+            assert "unknown whether anything holds it" in stale_text, stale_text
+
+
+def test_unreached_tick_only_gate_is_unknown(board, monkeypatch):
+    """A tick that stops before claim did not pass the Board lease; absence is not a pass."""
+    _usage(monkeypatch, [10.0])
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="globally stopped", assignee="default")
+        _tick(conn, max_spawn=0)
+        answer = gcli.why(conn, tid, live=True)
+        lease = _chain_step(answer, "board_lease")
+        assert lease["verdict"] == "unknown", lease
+        assert lease["verdict"] != "pass"
+
+
+def test_refresh_false_alternate_does_not_read_usage(board, monkeypatch):
+    """A read-only why must not refresh an alternate pool or rewrite pacing state."""
+    cfg = json.loads(board.joinpath("config.yaml").read_text())
+    for routes in cfg["model_routing"]["routes"].values():
+        routes.append({**routes[0], "model": "gpt-6-astra", "provider": "openai-codex"})
+    board.joinpath("config.yaml").write_text(json.dumps(cfg))
+    from hermes_cli import kanban_provider_walls as pw
+    monkeypatch.setattr(pw, "live_pool_serving", lambda *a: True)
+    monkeypatch.setattr(pw, "live_quota_wall", lambda *a: None)
+    reads = []
+
+    def read_pool(provider, now):
+        reads.append(provider)
+        used = 99.0 if provider == "anthropic" else 10.0
+        return [lp.Reading(now, provider + "-acct", lp.SEVEN_DAY, used, now + 86400)]
+
+    monkeypatch.setattr(pd, "read_pool", read_pool)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="two eligible pools", assignee="default")
+        pd.pace_for(conn, "anthropic", pd.load_config(), time.time())
+        reads.clear()
+        before = pd.state_path().read_bytes()
+        gcli.why(conn, tid, live=True)
+        after = pd.state_path().read_bytes()
+        assert reads == [] and after == before, {"reads": reads, "state_changed": after != before}

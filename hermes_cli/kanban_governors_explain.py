@@ -113,7 +113,9 @@ def _recorded(card: Card, governor_id: str) -> Answer:
     named = [rec] + [o for o in (rec.get("overlaps") or []) if isinstance(o, dict)]
     hit = next((entry for entry in named if entry.get("governor") == governor_id), None)
     if hit is None:
-        return {"verdict": PASS, "age_s": rec.get("age_s"), "detail": {"reason": "not charged by the last tick"}}
+        # Absence of a charge is not a pass: the tick may have stopped before this rule, or never recorded overlaps.
+        return {"verdict": UNKNOWN, "age_s": rec.get("age_s"),
+                "detail": {"reason": "not charged by the last tick; no recorded pass"}}
     return _stop(scope=hit.get("scope"), reading=hit.get("reading"), threshold=hit.get("threshold"),
                  detail=hit.get("detail"), age_s=rec.get("age_s"))
 

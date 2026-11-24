@@ -117,7 +117,11 @@ def _print_why(answer: dict[str, Any]) -> None:
         return
     first = answer.get("first_stop")
     head = f"{answer['task_id']} ({answer.get('status')}, board {answer.get('board')})"
-    if first is None:
+    unknowns = [step for step in (answer.get("chain") or ()) if step.get("verdict") == "unknown"]
+    if first is None and unknowns:
+        note = f" ({answer['note']})" if answer.get("note") else ""
+        print(f"{head}: unknown whether anything holds it ({len(unknowns)} rules not evaluated){note}")
+    elif first is None:
         print(f"{head}: nothing holds it" + (f" ({answer['note']})" if answer.get("note") else ""))
     else:
         measure = f" {_measure(first)}" if _measure(first) else ""

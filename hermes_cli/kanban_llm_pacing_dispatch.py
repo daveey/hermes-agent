@@ -393,10 +393,11 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
 
 
 def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.PacingConfig,
-                    host: sqlite3.Connection, verdicts: list[dict]) -> Optional[tuple[str, str, str, tuple]]:
+                    host: sqlite3.Connection, verdicts: list[dict], *,
+                    refresh: bool = True) -> Optional[tuple[str, str, str, tuple]]:
     """``(model, provider, paced, judged)``: a route of the card's own class on a pool that is NOT at reserve, for a
     card a candidate pool holds (``verdicts``: the pools at reserve); ``judged`` is the ``(model, provider)`` route
-    it moves from. None keeps the hold. [daveey]
+    it moves from. None keeps the hold. ``refresh=False`` judges stored pools only (no usage read, no write). [daveey]
 
     The move uses the quota-episode probe (``alternate_route``: unpinned default or strong-class routes only, the
     worker's own billing/capability eligibility, never a mandatory or ``require_model`` card, never a walled provider)
@@ -418,13 +419,13 @@ def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.Paci
             if not model:
                 return None
             route = (model, provider, reason)
-        return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts)
+        return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, refresh=refresh)
     except Exception as exc:  # health: allow BLE001 -- a failed probe keeps today's hold, never starts a paced card
         _warn("alternate", "kanban pacing: pace alternate probe failed (%s: %s); holding", type(exc).__name__, exc)
         return None
 
 
-def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts):
+def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, *, refresh=True):
     from hermes_cli import kanban_provider_walls as pw
     from hermes_cli.kanban_quota_episode import alternate_route
     if pw.requires_model(task):
@@ -459,7 +460,9 @@ def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts):
             unusable[target] = now
             continue
         if target in cfg.providers:
-            pace_for(host, target, cfg, now)
+            # refresh=False (a read-only why / overlap walk) judges the stored pool only: no usage read, no write.
+            if refresh:
+                pace_for(host, target, cfg, now)
             held = reserve_hold(_hold_state(), target, now, cfg)
             if held is not None:
                 paced[target] = float(held["until"] or now + cfg.read_interval)
@@ -550,7 +553,7 @@ def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run:
         verdicts = _verdicts(conn, task, providers, lane, cfg, refresh=refresh)
         if verdicts is None:
             return False
-        moved = _pace_alternate(conn, task, lane, cfg, conn, verdicts)
+        moved = _pace_alternate(conn, task, lane, cfg, conn, verdicts, refresh=refresh)
         if moved is not None:
             # Start it on a pool with room instead of holding it; the applier moves the route after the claim.
             from hermes_cli.kanban_pace_reroute import offer
