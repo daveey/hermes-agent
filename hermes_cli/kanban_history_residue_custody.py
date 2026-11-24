@@ -72,6 +72,12 @@ def lookup(conn, scope, op_id):
 
 def stage(conn, scope, request_json):
     """Commit exact intent before network I/O. Caller must separately prove live inputs."""
+    stage_once(conn, scope, request_json)
+    return _request(request_json)[1]['op_id']
+
+
+def stage_once(conn, scope, request_json):
+    """Return true only to the transaction that first commits this exact intent."""
     scope = _scope(scope)
     _, row = _request(request_json)
     _require(not conn.in_transaction, 'custody_nested_transaction')
@@ -82,7 +88,7 @@ def stage(conn, scope, request_json):
             _require(old['request_json'] == request_json, 'intent_conflict')
         else:
             conn.execute(f'INSERT INTO {INTENTS} VALUES(?,?,?,?,?,?)', (*scope, row['op_id'], row['row_uid'], request_json))
-    return row['op_id']
+    return old is None
 
 
 def seal(conn, scope, op_id, receipt_json):
