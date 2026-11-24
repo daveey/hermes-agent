@@ -32,19 +32,27 @@ def plan(args, *, cfg, gateway, machine_ok):
                       'why': 'publish host-local source before forwarding to the canonical creation home'}
     labels = args.get('runs_on')
     pin = placement.canonical_pin(args.get('placement') or 'auto', gateway, cfg)
-    if labels is None and pin not in ('', 'auto', 'local', 'here', gateway):
-        if not machine_ok(pin):
-            return args, {'where': 'refuse', 'pin': pin, 'why': 'execution pin is not an enrolled pickup machine'}
-        labels = placement.route_labels(pin)
+    if labels is None and pin not in ('', 'auto'):
+        execution = gateway if pin in ('local', 'here') else pin
+        if not machine_ok or not machine_ok(execution):
+            return args, {'where': 'refuse', 'pin': execution, 'why': 'execution pin is not an enrolled pickup machine'}
+        labels = placement.route_labels(execution)
     if not labels:
-        # Local means caller affinity, not evidence of a machine-only need. The
-        # queue planner supplies marker/coordination capabilities without a pin.
-        portable = {k: v for k, v in args.items() if k not in ('placement', 'runs_on')}
-        queued = workers.queue_decision(portable, cfg, gateway, 'auto', machine_ok)
-        if not queued or not queued.get('runs_on'):
-            return args, {'where': 'refuse', 'pin': 'hub',
-                          'why': 'cannot establish a claimable execution route for canonical creation'}
-        labels = queued['runs_on']
+        # Determine execution independently: a real creator-local artifact or
+        # operator/this-host requirement remains pinned, but never owns storage.
+        from hermes_cli import kanban_home_marker_placement as markers
+        local = markers.classify(args, cfg, gateway)
+        if local and local.get('decision') == 'keep':
+            if not machine_ok or not machine_ok(gateway):
+                return args, {'where': 'refuse', 'pin': gateway, 'why': 'local execution need has no enrolled pickup machine'}
+            labels = placement.route_labels(gateway)
+        else:
+            portable = {k: v for k, v in args.items() if k not in ('placement', 'runs_on')}
+            queued = workers.queue_decision(portable, cfg, gateway, 'auto', machine_ok)
+            if not queued or not queued.get('runs_on'):
+                return args, {'where': 'refuse', 'pin': 'hub',
+                              'why': 'cannot establish a claimable execution route for canonical creation'}
+            labels = queued['runs_on']
     view = {**args, 'placement': 'auto', 'runs_on': list(labels)}
     return view, {'where': 'hub', 'canonical_home': True,
                   'why': 'shared administrative home; execution remains constrained by runs_on'}
@@ -71,8 +79,8 @@ def transport_options(args, *, hub_cli):
     if args.get('pin_mandatory'):
         raise ValueError('canonical_home_transport_unavailable: mandatory model pin cannot be forwarded')
     keys = ('runs_on', 'parents', 'tenant', 'max_retries', 'initial_status', 'human_request')
-    # Preserve zero retries and empty label/dependency lists. Core's normal owner
-    # entrypoint validates typed values; never stringify structured safety fields.
+    # Preserve explicit retry overrides and empty label/dependency lists. The
+    # core owner entrypoint validates typed values; never stringify safety fields.
     return {key: args[key] for key in keys if args.get(key) is not None}
 
 

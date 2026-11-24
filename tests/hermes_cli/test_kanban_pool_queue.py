@@ -26,6 +26,20 @@ from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gateway
 
 POOL = "pool:worker"
+
+
+@pytest.fixture(autouse=True)
+def execution_policy_layer(monkeypatch):
+    """This legacy suite proves execution policy, not administrative transport.
+
+    Canonical-home integration is exercised without this seam in
+    tests/tools/test_kanban_worker_canonical_home.py. Retain these local INSERT
+    assertions to audit queue labels, marker evidence, admission and source
+    custody at the execution-policy layer, including direct DB/CLI producers.
+    """
+    from hermes_cli import kanban_creation_home
+    monkeypatch.setattr(kanban_creation_home, 'plan', lambda *a, **kw: None)
+
 CFG = {"worker_queue": {HUB: POOL}}
 TAILNET = "capability:tailnet-exec"
 HUB_WRITE = "capability:hub-write"

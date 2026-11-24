@@ -77,6 +77,11 @@ def test_canonical_home_failure_never_falls_back_local(gws, monkeypatch):
     ({'title': 'Inspect Desktop DOM', 'skills': ['session-status-panel', 'inspecting-hermes-desktop-dom']},
      ['pool:worker', 'capability:tailnet-exec']),
     ({'title': 'Machine-only installed Desktop inspection', 'placement': 'macbook'}, ['machine:macbook']),
+    ({'title': 'Rotate Keychain token'}, ['pool:worker', 'capability:tailnet-exec']),
+    ({'title': 'Read browser state in Chrome'}, ['pool:worker']),
+    ({'title': 'Inspect process on this host'}, ['machine:worker-1']),
+    ({'title': 'Explicit creator execution', 'placement': 'local'}, ['machine:worker-1']),
+    ({'title': 'Explicit creator execution by name', 'placement': 'worker-1'}, ['machine:worker-1']),
 ])
 def test_disposable_hub_really_owns_worker_created_card(gws, monkeypatch, card, expected):
     hub, worker = gws
@@ -109,3 +114,31 @@ def test_disposable_hub_really_owns_worker_created_card(gws, monkeypatch, card, 
     assert stored['created_on'] == nodes.HUB
     assert sorted(json.loads(stored['runs_on'])) == sorted(expected)
     assert worker.conn.execute('SELECT 1 FROM tasks WHERE id=?', (tid,)).fetchone() is None
+
+
+def test_worker_artifact_keeps_execution_not_storage(gws, monkeypatch):
+    _hub, worker = gws
+    worker.enter()
+    monkeypatch.setattr(Path, 'home', lambda: Path(os.environ['HERMES_HOME']).parent)
+    artifact = Path.home() / '.hermes' / 'cache' / 'scratch' / 'owned' / 'proof.txt'
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('preserved source')
+    monkeypatch.setattr(placement.reg, 'self_gateway', lambda: Path(os.environ['HERMES_HOME']).parent.name)
+    monkeypatch.setattr(placement, 'config', lambda: {'worker_queue': {nodes.WORKER: 'pool:worker'}})
+    monkeypatch.setattr(placement, '_machine_picks_up', lambda labels: True)
+    sent = []
+
+    def courier(view, **kwargs):
+        sent.append((view, kwargs))
+        return {'ok': True, 'request_id': 'artifact-home-test', 'queued_only': True}
+
+    monkeypatch.setattr(placement, 'create_remote', courier)
+    before = worker.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+    out = json.loads(tools._handle_create({'title': 'Read preserved source',
+                                         'body': 'Read ~/.hermes/cache/scratch/owned/proof.txt',
+                                         'assignee': 'default', 'requires': []}))
+    assert out.get('placed', {}).get('gateway') == nodes.HUB, out
+    assert sent[0][0]['runs_on'] == ['machine:' + nodes.WORKER]
+    assert worker.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == before
+    assert artifact.read_text() == 'preserved source'
+
