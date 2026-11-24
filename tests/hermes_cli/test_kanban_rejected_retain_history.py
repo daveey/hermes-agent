@@ -163,3 +163,51 @@ def test_source_blob_archive_is_lossless_and_collision_free(case):
     assert history._typed(b'\x00\xff') != history._typed(['bytes', 'AP8='])
 
 
+@pytest.mark.parametrize('field,value', [('table_name','task_events'),('op','compat'),('state','pending'),('last_error','other'),('fields','noncanonical')])
+def test_transport_envelope_refusal(case,field,value):
+    history,db,op,_wire,path,_rows,hub=case
+    if value=='noncanonical':value=op['fields']+' '
+    op[field]=value
+    db.execute(f'UPDATE kanban_sync_outbox SET {field}=? WHERE op_id=?',(value,op['op_id']))
+    db.commit()
+    assert history.retire(db,hub,'default',op,path)['action']=='retained'
+
+
+@pytest.mark.parametrize('table,field,value', [
+    ('tasks','state','never_existed'), ('task_runs','state','never_existed'),
+    ('task_events','state','live'),('tasks','tombstone',{}),('task_runs','tombstone',{}),
+    ('task_events','row',{}), ('tasks','table','wrong'),
+    ('tasks','head',-1),('tasks','floor',-1),('tasks','floor',True),('task_events','floor',False),
+])
+def test_evidence_envelope_refusal(case,table,field,value):
+    history,db,op,_wire,path,_rows,hub=case
+    original=hub.row_evidence
+    def read(*args):
+        evidence=original(*args)
+        if args[1]==table:evidence[field]=value
+        return evidence
+    hub.row_evidence=read
+    assert history.retire(db,hub,'default',op,path)['action']=='retained'
+
+
+def test_deleted_transport_during_read_cannot_be_archived(case):
+    history,db,op,_wire,path,_rows,hub=case
+    original=hub.row_evidence
+    def read(*args):
+        result=original(*args)
+        db.execute('DELETE FROM kanban_sync_outbox');db.commit()
+        return result
+    hub.row_evidence=read
+    assert history.retire(db,hub,'default',op,path)['action']=='retained'
+
+
+def test_replayed_archive_cannot_replace_first_wins_receipt(case):
+    history,db,op,_wire,path,_rows,hub=case
+    assert history.retire(db,hub,'default',op,path)['action']=='retired'
+    before=dict(db.execute('SELECT * FROM kanban_rejected_retain_history_receipts').fetchone())
+    db.execute('INSERT INTO kanban_sync_outbox VALUES (?,?,?,?,?,?,?)',tuple(op.values()));db.commit()
+    assert history.retire(db,hub,'default',op,path)['action']=='retained'
+    assert dict(db.execute('SELECT * FROM kanban_rejected_retain_history_receipts').fetchone())==before
+
+
+
