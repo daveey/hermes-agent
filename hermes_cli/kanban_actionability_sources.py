@@ -69,7 +69,9 @@ class Reader:
     def events(self, tid: str) -> list[dict]:
         if not self.events_complete:
             return []
-        order = 'created_at DESC,uid DESC' if 'uid' in self.event_columns else 'created_at DESC,id DESC'
+        # UUIDv7 random bits do not order two appends in one millisecond.
+        # Local insertion order is diagnostic only; canonical issuance uses inventory ord.
+        order = 'created_at DESC,id DESC'
         marks = ','.join('?' for _ in KINDS)
         live = ' AND deleted_at IS NULL' if 'deleted_at' in self.event_columns else ''
         rows = self.rows(f'SELECT * FROM task_events WHERE task_id=? AND kind IN ({marks}){live} ORDER BY {order}',

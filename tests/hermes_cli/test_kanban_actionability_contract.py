@@ -435,13 +435,14 @@ def test_empty_event_payload_is_valid_not_malformed(raw):
     conn.close()
 
 
-def test_event_reader_uses_uid_tiebreak_and_excludes_deleted_rows():
+def test_event_reader_uses_append_tiebreak_and_excludes_deleted_rows():
     from hermes_cli.kanban_actionability_sources import Reader
     conn = complete_fixture()
     for uid in ('z', 'a', 'deleted'):
         event(conn, uid, 'created', {}, 100)
     conn.execute("UPDATE task_events SET deleted_at=1 WHERE uid='deleted'")
-    assert [e['uid'] for e in Reader(conn).events('root')] == ['z', 'a']
+    # Same-clock UUID suffixes are not causal; the later append wins, even with a lower uid.
+    assert [e['uid'] for e in Reader(conn).events('root')] == ['a', 'z']
     conn.close()
 
 

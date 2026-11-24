@@ -13,6 +13,37 @@ from tests.hermes_cli import test_kanban_actionability_recovery as recovery
 live = journal.live
 
 
+@pytest.mark.parametrize('status,kind,expected', [('todo', 'created', 'pending'), ('ready', 'unblocked', 'stale')])
+def test_dependency_compatibility_cannot_hide_positive_successor(live, status, kind, expected):
+    event, hub = setup(live)
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_actionability_intents SET source_kind='dependency_wait'")
+    data = hub.data[event['task_id']]
+    data['task']['status'] = status
+    data['events'][0].update(uid='different-source', kind=kind)
+    intents.materialize(live, hub, 'default')
+    assert live.execute('SELECT state FROM kanban_actionability_intents').fetchone()[0] == expected
+    assert not hub.sent
+
+
+def test_no_transport_repeated_round_has_no_writes(live, monkeypatch):
+    _, hub = setup(live)
+    monkeypatch.setattr(hub, '_call', None)
+    intents.materialize(live, hub, 'default')
+    before = live.total_changes
+    intents.materialize(live, hub, 'default')
+    assert live.total_changes == before
+
+
+def test_empty_journal_does_not_enter_writer(live, monkeypatch):
+    _, hub = setup(live)
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_actionability_intents')
+    from hermes_cli import kanban_actionability_materialize as materializer
+    monkeypatch.setattr(materializer, 'write_txn', lambda *a: pytest.fail('empty intent window entered writer'))
+    intents.materialize(live, hub, 'default')
+
+
 def setup(conn):
     event = dict(journal.new_park(conn))
     tid = event['task_id']

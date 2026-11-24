@@ -490,14 +490,20 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         assert kb.get_task(conn, worker_env).status == "scheduled"
         run = kb.latest_run(conn, worker_env)
         assert (run.outcome, run.summary) == ("scheduled", reason)
-        assert any(
-            event.kind == "scheduled" and event.payload == {
-                "reason": reason, "wake_at": event.payload.get("wake_at"),
-                # the declared wake reason (a scheduled wait needs one); a clock never escalates, so no premise
-                "awaiting": {"kind": "clock", "why": "reconnect window"}}
-            and event.payload["wake_at"]  # SCHEDULED_UNTIL= sets a real wake time
-            for event in kb.list_events(conn, worker_env)
-        )
+        event = next(event for event in kb.list_events(conn, worker_env) if event.kind == 'scheduled')
+        assert event.payload is not None
+        intent = event.payload['actionability_intent']
+        assert intent['version'] == 1
+        assert intent['execution_authority'] is False
+        assert intent['policy'] == 'scheduled-wake-grace-v1'
+        assert intent['deadline_at'] == (event.payload['wake_at'] + 600 if not intent['invalid_reason'] else None)
+        assert event.payload == {
+            "reason": reason, "wake_at": event.payload['wake_at'],
+            "awaiting": {"kind": "clock", "why": "reconnect window"},
+            "actionability_intent": intent, "actionability_parent_ids": [],
+            "actionability_parent_states": [], "actionability_run_uid": event.payload['actionability_run_uid'],
+        }
+        assert event.payload['wake_at']  # SCHEDULED_UNTIL= still sets a real wake time
 
 
 def test_schedule_rejects_invalid_reason_and_unowned_contexts(monkeypatch, worker_env):

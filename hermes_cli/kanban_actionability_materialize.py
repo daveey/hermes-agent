@@ -22,7 +22,8 @@ def _payload(conn, hub, board, row):
     event, task = source['source_event'], source['source_task']
     if not isinstance(event.get('payload'), str):
         raise ValueError('canonical original source payload unavailable')
-    if event['uid'] != row['event_uid'] and row['source_kind'] == 'dependency_wait':
+    if (event['uid'] != row['event_uid'] and row['source_kind'] == 'dependency_wait'
+            and task['status'] == 'todo' and event['kind'] in ('created', 'linked')):
         raise ValueError('canonical dependency source unavailable')
     if (task['containment_episode'] or event['uid'] != row['event_uid']
             or event['kind'] != row['source_kind'] or event['created_at'] != row['source_at']
@@ -64,9 +65,19 @@ def run(conn, hub, board):
         return
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_actionability_intents'").fetchone():
         return
+    select = ('SELECT * FROM kanban_actionability_intents '
+              "WHERE state IN ('pending','reserved') ORDER BY last_checked_at,event_uid LIMIT 8")
+    rows = [dict(r) for r in conn.execute(select)]
+    if not rows:
+        return
+    if not callable(getattr(hub, '_call', None)):
+        reason = 'canonical execution inventory transport unavailable'
+        for row in rows:
+            if row['reason'] != reason:
+                _set(conn, row, row['state'], reason)
+        return
     with write_txn(conn):
-        rows = [dict(r) for r in conn.execute('SELECT * FROM kanban_actionability_intents '
-                "WHERE state IN ('pending','reserved') ORDER BY last_checked_at,event_uid LIMIT 8")]
+        rows = [dict(r) for r in conn.execute(select)]
         conn.executemany(f'UPDATE kanban_actionability_intents SET last_checked_at={sync._NOW_MS_SQL} WHERE event_uid=?',
                          [(r['event_uid'],) for r in rows])
     for row in rows:

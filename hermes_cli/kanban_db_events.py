@@ -42,7 +42,7 @@ def append_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: dic
     if isinstance(payload, dict) and 'actionability_intent' in payload:
         from hermes_cli.kanban_actionability_intents import capture
         from hermes_cli import kanban_db_sync as sync
-        if sync.board_mode(conn) == 'primary':
+        if sync.board_mode(conn) == 'primary' and sync.sync_state(conn) is not None:
             event = conn.execute('SELECT uid FROM task_events WHERE id=?', (cur.lastrowid,)).fetchone()
             capture(conn, event[0])
     if payload is not None and "_wake_episode_v1" in payload:
