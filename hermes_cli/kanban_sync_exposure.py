@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from urllib.parse import quote
 
 from hermes_cli.kanban_db_connect import write_txn
@@ -62,6 +63,33 @@ def _observe(conn, ops, board, endpoint, ident, capability):
                 history['exposures'].append(exposure)
             conn.execute(f'UPDATE {table} SET exposure_history=? WHERE rowid=?',
                          (json.dumps(history, sort_keys=True, separators=(',', ':'), allow_nan=False), row[0]))
+
+
+@contextmanager
+def replay_session(hub, board):
+    """One immutable credential snapshot owns capability, session and ops I/O.
+
+    Reuse is confined to this sender turn, never across reenrollment or boards.
+    The closure retains its own capability copy so callers cannot relabel an
+    exposure by changing the returned capability. Each exposure still commits
+    before its operation body; a connection failure never skips that commit.
+    """
+    from hermes_cli.kanban_sync_client import Hub
+    root = f'/v2/boards/{quote(board, safe="")}/replay/'
+    transport = Hub(hub.ident, timeout=hub.timeout, deadline=hub.deadline)
+    try:
+        capability = transport._call('GET', root + 'capability')
+        observed_capability = dict(capability)
+
+        def send_ops(conn, ops, replay):
+            if conn.in_transaction:
+                raise ValueError('exposure requires a standalone durable commit before I/O')
+            _observe(conn, ops, board, root + 'ops', transport.ident, observed_capability)
+            return transport._call('POST', root + 'ops', dict(replay, ops=ops))
+
+        yield transport, capability, send_ops
+    finally:
+        transport.close()
 
 
 def send(hub, conn, board, ops, *, replay=None):

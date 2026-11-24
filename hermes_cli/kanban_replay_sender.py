@@ -67,7 +67,7 @@ def _push(conn, hub, board, gateway, *, primary, max_batches, before_head, seen)
         from hermes_cli import kanban_replay_existence as existence
         existence.guard(conn)
         try:
-            return _push_strict(conn, hub, board, gateway, max_batches=max_batches,
+            return _push_authenticated(conn, hub, board, gateway, max_batches=max_batches,
                                 primary=primary, before_head=before_head, seen={} if seen is None else seen)
         except existence.CurrentRowHold as exc:
             from hermes_cli.kanban_replay_episodes import interrupt
@@ -86,12 +86,28 @@ def _push(conn, hub, board, gateway, *, primary, max_batches, before_head, seen)
                                max_batches=max_batches, before_head=before_head, seen=seen)
 
 
-def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head, seen):
+def _push_authenticated(conn, hub, board, gateway, *, max_batches, primary, before_head, seen):
+    from hermes_cli import kanban_sync_client as client
+    if isinstance(hub, client._HTTP_HUB):
+        journal.snapshot(conn)  # Corrupt local custody refuses before even a read-only probe.
+        from hermes_cli.kanban_sync_exposure import replay_session
+        with replay_session(hub, board) as (transport, capability, send_ops):
+            return _push_strict(conn, transport, board, gateway, max_batches=max_batches,
+                                primary=primary, before_head=before_head, seen=seen,
+                                capability=capability, send_ops=send_ops)
+    return _push_strict(conn, hub, board, gateway, max_batches=max_batches,
+                        primary=primary, before_head=before_head, seen=seen)
+
+
+def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head, seen,
+                 capability=None, send_ops=None):
     from hermes_cli import kanban_sync_client as client
     root = f'/v2/boards/{quote(board, safe="")}/replay/'
     out = client.PushResult()
     local = journal.snapshot(conn)
-    cap = hub._call('GET', root + 'capability')
+    if isinstance(hub, client._HTTP_HUB) and send_ops is None:
+        raise ValueError('strict HTTP transport requires pinned session')
+    cap = hub._call('GET', root + 'capability') if capability is None else capability
     if (cap.get('processed_prefix') is not True or
             cap.get('board_incarnation') != local['board_incarnation'] or
             cap.get('gateway_principal') != local['gateway_principal']):
@@ -382,9 +398,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             if not allowed:
                 break
         wire['replay']['session'] = remote['session']
-        if isinstance(hub, client._HTTP_HUB):
-            from hermes_cli.kanban_sync_exposure import send
-            reply = send(hub, conn, board, [wire], replay=identity)
+        if send_ops is not None:
+            reply = send_ops(conn, [wire], identity)
         else:
             reply = hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
         out.sent += 1

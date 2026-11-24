@@ -261,18 +261,32 @@ def test_reservation_work_is_bounded_with_large_tracked_task_set(live):
     local = journal.snapshot(live)
     with kbc.write_txn(live):
         live.execute(deferred._SCHEMA)
-        live.executemany('INSERT INTO kanban_replay_deferred1 VALUES (?,?,?,?,?)',
-                         [(local['board_incarnation'], f'task-{i:04d}', 'origin', 'done', 'hlc')
-                          for i in range(500)])
-    # Warm lazy schema creation before measuring the indexed selection work.
+        live.execute('INSERT INTO kanban_replay_deferred1 VALUES (?,?,?,?,?)',
+                     (local['board_incarnation'], 'task-0000', 'origin', 'done', 'hlc'))
+    # Warm lazy schema creation. Measure the entire reservation on the same
+    # connection: shared transaction/schema overhead may grow with core's schema,
+    # but adding tracked tasks must not add a table scan under the reservation.
     observation._reserve(live, local)
-    steps = []
-    live.set_progress_handler(lambda: steps.append(100) or 0, 100)
-    try:
-        assert observation._reserve(live, local)[0] == 'task-0001'
-    finally:
-        live.set_progress_handler(None, 0)
-    assert sum(steps) < 2000
+
+    def measure():
+        steps = []
+        live.set_progress_handler(lambda: steps.append(100) or 0, 100)
+        try:
+            task = observation._reserve(live, local)[0]
+        finally:
+            live.set_progress_handler(None, 0)
+        return task, sum(steps)
+
+    small_task, small_steps = measure()
+    assert small_task == 'task-0000'
+    with kbc.write_txn(live):
+        live.executemany('INSERT INTO kanban_replay_deferred1 '
+                         '(board_incarnation,task,origin,status,hlc) VALUES (?,?,?,?,?)',
+                         [(local['board_incarnation'], f'task-{i:04d}', 'origin', 'done', 'hlc')
+                          for i in range(1, 500)])
+    large_task, large_steps = measure()
+    assert large_task == 'task-0001'
+    assert large_steps <= small_steps + 200
 
 
 def test_observation_and_retirement_rollback_together(live, monkeypatch):

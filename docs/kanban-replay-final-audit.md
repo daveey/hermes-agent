@@ -47,10 +47,25 @@ in the diagnostic producer test file.
    settlements, uncertain successor/reopen, bad consuming metadata, compact JSON,
    changed verdict refusal and exclusion of current-row reply enrichment.
 
-   This is **not yet production HTTP one-round-trip or throughput acceptance**:
-   `kanban_sync_exposure.send` still performs a pinned credential capability probe
-   for each mutation. Preserve that exposure/authentication boundary while designing
-   session-scoped reuse; never simply omit the probe. The real receiver's reply
+   The production HTTP sender now pins a private transport, immutable credential
+   snapshot and one capability response for the entire sender turn. Capability,
+   inspect, session, mutation, recovery and final ACK all use that same transport;
+   each mutation still commits exposure before its body leaves. A new public turn
+   starts a new snapshot/probe, never a cross-turn or cross-Board cache. Legacy
+   sends retain their independent per-mutation pin/probe.
+
+   Seven real-loopback tests exercise20 settled operations with one kept-alive
+   connection and exactly capability→inspect→session→20ops→ACK, replacement of the
+   outer credential during the initial probe, capability refusal, turn boundaries,
+   actual accepted-body/lost-reply→reopen→no-resend recovery, and read-only or open
+   transaction exposure refusal. Separate SQLite readers verify each exposure is
+   committed, bound to its full wire and matching authenticated identity before
+   the HTTP body is processed. This proves the production HTTP request sequence
+   against a fixture, **not realistic-latency/lease throughput or real Board
+   interoperability**. Two unchanged-source assertions failed first: redundant
+   probes and outer-credential replacement during the initial session probe.
+
+   The real receiver's reply
    shape was read from `settleReplay` at hub main f6f535ae7205cdf07239248bf48d165f712f9f11,
    not invented from client expectations. Its current ingress reads top-level
    `op.ack`, whereas the frozen sender stores `op.replay.ack`; this interoperability
