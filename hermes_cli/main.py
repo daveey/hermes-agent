@@ -2514,15 +2514,13 @@ def cmd_dashboard(args):
     from hermes_cli.serve_producer_admission import supported_launch
     supported_launch('serve' if _headless_backend else 'dashboard')
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
-    _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)
-    from hermes_cli.sessions_early_boot import early_sessions
-
-    with early_sessions(headless=_headless_backend, isolated=getattr(args, 'isolated', False)) as owner:
-        from hermes_cli.dashboard_server_start import run_server
-        run_server(args, headless=_headless_backend, owner=owner,
-                   prepare_auth=_maybe_setup_dashboard_auth_interactively,
-                   bootstrap=_ssh_bootstrap_server_kwargs(_token_file, _ssh_session_token, _ssh_owner_nonce),
-                   mcp_after_bind=_mcp_discovery_after_bind)
+    from hermes_cli.dashboard_server_start import prepare_and_run_server
+    prepare_and_run_server(
+        args, headless=_headless_backend,
+        prepare_runtime=_dashboard_prepare_runtime,
+        prepare_auth=_maybe_setup_dashboard_auth_interactively,
+        bootstrap=_ssh_bootstrap_server_kwargs(_token_file, _ssh_session_token, _ssh_owner_nonce),
+    )
 
 
 def cmd_completion(args, parser=None):

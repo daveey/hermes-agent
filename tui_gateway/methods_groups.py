@@ -44,10 +44,11 @@ def bind_server(server) -> None:
     server._profile_execution_policy = _profile_execution_policy
 
 
-def start_hosted_room_service():
+def start_hosted_room_service(*, server=None):
     """Start one process-owned hosted room service idempotently."""
     global _service
-    if _bound_server is None:
+    server = _bound_server if server is None else server
+    if server is None:
         return None
     from gateway.hosted_rooms import default_db_path
     from tui_gateway.hosted_room_service import HostedRoomService
@@ -57,7 +58,7 @@ def start_hosted_room_service():
             _service.stop(timeout=1.0)
             _service = None
         if _service is None:
-            _service = HostedRoomService(_bound_server, db_path=db_path)
+            _service = HostedRoomService(server, db_path=db_path)
         _service.start()
         return _service
 

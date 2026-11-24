@@ -5,8 +5,9 @@ Simulates a slow hermes_cli.gateway import (15-30 s on a fresh Windows install
 with Defender scanning every new .pyc) by patching the two helpers that touch
 the blocking import and measuring response latency.
 
-Covered: the gateway warmup import completes before the lifespan yields
-(#73083/#73291), backend startup is not blocked by hosted-room recovery, shutdown joins the
+Covered: the gateway warmup no longer gates lifespan readiness, the retained
+bootstrap listener covers slow lifespan assembly, backend startup is not blocked
+by hosted-room recovery, shutdown joins the
 state.db reconcile worker, and /api/status runs its slow drain-timeout resolution off
 the event loop so a concurrent fast endpoint (/api/version) still responds.
 """
@@ -35,31 +36,18 @@ def _make_slow_drain(seconds: float):
     return _slow
 
 
-def test_lifespan_warmup_is_synchronous(monkeypatch):
-    """_warm_gateway_module must finish on the event-loop thread before the
-    lifespan yields (#73083/#73291). On Windows + Python 3.11 the heavy import
-    holds the GIL, so moving it to run_in_executor / a background task froze
-    the loop after the socket opened and the Desktop's ready-probe timed out.
-    Running it before the yield means no request is served until it is done."""
+def test_lifespan_does_not_preload_gateway(monkeypatch):
+    """Ready sessions must not depend on importing the inference/provider tree.
+
+    Socket continuity during real lifespan startup is covered separately by the
+    retained bootstrap listener test, including a deliberately blocked lifespan.
+    """
     from fastapi.testclient import TestClient
 
-    warm: dict[str, object] = {}
-
-    def _record_warm():
-        try:
-            asyncio.get_running_loop()
-            warm["on_loop_thread"] = True
-        except RuntimeError:
-            warm["on_loop_thread"] = False
-        warm["done"] = True
-
-    monkeypatch.setattr(web_server_mod, "_warm_gateway_module", _record_warm)
+    warm = []
+    monkeypatch.setattr(web_server_mod, "_warm_gateway_module", lambda: warm.append(True))
     with TestClient(web_server_mod.app, raise_server_exceptions=False):
-        assert warm.get("done") is True, "startup completed before the gateway warmup ran"
-        assert warm.get("on_loop_thread") is True, (
-            "gateway warmup was moved off the lifespan (executor/background) — "
-            "the socket now accepts probes while the GIL-holding import runs"
-        )
+        assert warm == []
 
 
 def test_lifespan_enters_and_exits_as_an_async_context_manager(monkeypatch):
@@ -84,7 +72,8 @@ def test_hosted_room_recovery_cannot_block_or_abort_backend_startup(monkeypatch)
     started = threading.Event()
     release = threading.Event()
 
-    def blocked_failure():
+    def blocked_failure(*, server=None):
+        assert server is not None  # first-use proxy; do not resolve its attributes here
         started.set()
         release.wait(timeout=2.0)
         raise RuntimeError("state.db is locked")

@@ -28,7 +28,7 @@ def _unlink_pty_markers(app: FastAPI) -> None:
 @asynccontextmanager
 async def standalone_lifespan(app: "FastAPI"):
     from hermes_cli.web_server import (
-        _eager_reconcile_own_session_db, _warm_gateway_module,
+        _eager_reconcile_own_session_db,
         _start_desktop_cron_ticker, _dashboard_selftest_loop,
         _auto_archive_ticker_loop, _terminate_desktop_managed_gateway, _release_ssh_runtime_marker,
     )
@@ -58,10 +58,8 @@ async def standalone_lifespan(app: "FastAPI"):
     )
     eager_reconcile_thread.start()
 
-    # Import hermes_cli.gateway *before* the yield: on Windows + 3.11 the
-    # import holds the GIL, so run_in_executor still froze the loop 15-22s and
-    # the Desktop's 10s ready-probe timed out (GH-73083).
-    _warm_gateway_module()
+    # The listener already answers during app assembly. Do not import the
+    # gateway/provider tree merely to prewarm it; real session/cron demand owns it.
 
     # Snapshot the checkout revision so lazy-import paths (model picker) can
     # refuse with "restart required" after `hermes update` replaced the code
@@ -75,10 +73,12 @@ async def standalone_lifespan(app: "FastAPI"):
     # contended state.db migration, so keep it off the pre-yield path: Group
     # Chat must degrade on its own rather than block every Desktop feature.
     from tui_gateway import methods_groups as _hosted_groups
-    import tui_gateway.server
+    from hermes_cli.web_gateway_lazy import (
+        GatewayOnDemand, install_message_host, clear_message_host, install_readopt_waker,
+    )
 
     try:
-        tui_gateway.server.install_tui_message_injector()
+        install_message_host()
     except Exception:
         logger.warning("TUI message injector did not install", exc_info=True)
 
@@ -86,7 +86,7 @@ async def standalone_lifespan(app: "FastAPI"):
 
     def _start_hosted_rooms() -> None:
         try:
-            _hosted_groups.start_hosted_room_service()
+            _hosted_groups.start_hosted_room_service(server=GatewayOnDemand())
         except Exception:
             logger.exception("Hosted Group Chat recovery failed during backend startup")
         finally:
@@ -156,7 +156,7 @@ async def standalone_lifespan(app: "FastAPI"):
         from tools.process_registry_readopt import start_checkpoint_keeper, start_tui_orphan_recovery
 
         if is_desktop_owned_backend():  # a `hermes dashboard` hosts no chats: it must not adopt their jobs
-            tui_gateway.server._install_readopted_exit_waker()
+            install_readopt_waker()
             start_tui_orphan_recovery()
         start_checkpoint_keeper()
     except Exception:
@@ -238,7 +238,7 @@ async def standalone_lifespan(app: "FastAPI"):
         yield
     finally:
         try:
-            tui_gateway.server.clear_tui_message_injector()
+            clear_message_host()
         except Exception:
             logger.debug("TUI message injector clear skipped", exc_info=True)
         hosted_room_start_cancel.set()

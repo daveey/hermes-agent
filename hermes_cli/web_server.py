@@ -1717,6 +1717,7 @@ def _start_server_runtime(
     ssh_lock_path: Optional[Path] = None,
     ssh_ownership_id: Optional[str] = None,
     early_sessions_owner=None,
+    bootstrap_listener=None,
 ):
     """Start the web UI server.
 
@@ -1777,9 +1778,9 @@ def _start_server_runtime(
     # uvicorn's capture_signals() so uvicorn re-raises into them as the
     # "original" handlers — kills outside the serve window are covered too.
     try:
-        from tui_gateway.server import install_exit_flush_signal_handlers
+        from hermes_cli.serve_exit_flush import install
 
-        install_exit_flush_signal_handlers()
+        install()
     except Exception as exc:
         _log.debug("exit-flush signal handlers not installed: %s", exc)
 
@@ -1787,7 +1788,7 @@ def _start_server_runtime(
     # indistinguishable from "backend broken". Probe first so a conflict
     # surfaces as the BACKEND_PORT_IN_USE sentinel + distinct exit code.
     # ``--port 0`` is skipped by the probe.
-    if _port_bind_conflict(host, port):
+    if bootstrap_listener is None and _port_bind_conflict(host, port):
         _report_port_in_use(host, port)
         raise SystemExit(PORT_IN_USE_EXIT_CODE)
 
@@ -1815,7 +1816,10 @@ def _start_server_runtime(
             config.load()
         server.lifespan = config.lifespan_class(config)
         with server.capture_signals():
-            await server.startup()
+            if bootstrap_listener is None:
+                await server.startup()
+            else:
+                await bootstrap_listener.startup(server)
             if server.should_exit:
                 return
             try:
