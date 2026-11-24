@@ -1,0 +1,1334 @@
+{
+  "source": "hub req_ledger, newest 40 reported create envelopes; collected 2026-11-24; private text and route identities redacted; field presence/null/value shapes retained",
+  "samples": [
+    {
+      "sample": 0,
+      "observed_at": 1795518870.828371,
+      "source_sha256": "35ac1e67111691fdf2232515c8ca27f3fedacf127e4c898958176ee10b44178c",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-6fb1116e214f2138",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-000",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 1,
+      "observed_at": 1795518113.0518057,
+      "source_sha256": "31f12355fd065c82c61d9b2a0bcc0050260e7fc7ef421d3d819bf290f744de28",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-ff70d3a82e609c0b",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-001",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 2,
+      "observed_at": 1795517358.1906455,
+      "source_sha256": "05d3a90161e0cb8eed2f7122ffd11bf004fdcf8d2e143aae10445b15c2caee8a",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-e8600d7f12786796",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-002",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 3,
+      "observed_at": 1795516624.9227877,
+      "source_sha256": "b2486c2fcdbcca944c9f4954f4e43fa40d8eaa8f58b268f29afc08f2ed03644c",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-b30a2c66c7b40a80",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-003",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 4,
+      "observed_at": 1795516440.5577264,
+      "source_sha256": "e0ebe7cdc1892fc8e4125cbb7f399282c3927f95f42bb6b076aec052a2b02d8c",
+      "envelope": {
+        "action": "origin-forward",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "body": "Redacted production evidence.",
+            "priority": 100,
+            "requires": [
+              "terminal",
+              "git"
+            ],
+            "session_id": "redacted-8c6cc6ba112238e6",
+            "skills": [
+              "terraform-native-visuals"
+            ],
+            "title": "Production envelope acceptance"
+          },
+          "creator": {
+            "gateway": "origin",
+            "profile": "default",
+            "board": "default",
+            "task_id": "t_0123456789abcdef"
+          },
+          "destination": {
+            "gateway": "owner",
+            "profile": "default",
+            "board": "default"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          },
+          "run_uid": "redacted-run"
+        },
+        "base_version": null,
+        "coll": "sessions",
+        "from": "gw:origin",
+        "id": "corpus-request-004",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 5,
+      "observed_at": 1795515841.2001472,
+      "source_sha256": "1202171771f97b07dbaaed9cc22ac5125a94730f969ca3f856c22c97228caa6c",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-1a28b2d5107a51f4",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-005",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 6,
+      "observed_at": 1795515085.0667562,
+      "source_sha256": "8abd91cce3ef63afa03d1806c460397ca92761b55895f6dd3691881de6ee6a31",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-8b0e1672c2e80812",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-006",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 7,
+      "observed_at": 1795514544.816631,
+      "source_sha256": "308d0b78875829385bdd3f2367c033d90d5614aa329707d69186466cb8f489f1",
+      "envelope": {
+        "action": "origin-forward",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-350150f882860105",
+            "max_runtime_seconds": 3600,
+            "priority": 100,
+            "requires": [
+              "terminal",
+              "file",
+              "git"
+            ],
+            "session_id": "redacted-8c6cc6ba112238e6",
+            "skills": [
+              "terraform-native-visuals"
+            ],
+            "title": "Production envelope acceptance"
+          },
+          "creator": {
+            "gateway": "origin",
+            "profile": "default",
+            "board": "default",
+            "task_id": "t_0123456789abcdef"
+          },
+          "destination": {
+            "gateway": "owner",
+            "profile": "default",
+            "board": "default"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          },
+          "run_uid": "redacted-run"
+        },
+        "base_version": null,
+        "coll": "sessions",
+        "from": "gw:origin",
+        "id": "corpus-request-007",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 8,
+      "observed_at": 1795514342.3695145,
+      "source_sha256": "e38edbbde310cfa6b28ad77c078a13181685dcaf6f82e03d787a0d11a6236d1d",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-44aceae96b3ca21b",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-008",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 9,
+      "observed_at": 1795513593.6734018,
+      "source_sha256": "d5a1a1f570c78b6e09841f07e29afd77e00af4e2842745905879f9b4d68751e1",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-d0da37778bc949d9",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-009",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 10,
+      "observed_at": 1795512811.7433786,
+      "source_sha256": "9091dbdd238c0a053bed9708dbe60f3bdab74441f92e4ee4636d1fd502c81f31",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-eec7a534d72204d5",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-010",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 11,
+      "observed_at": 1795512341.5223598,
+      "source_sha256": "1bfd5991b6e9bc32d598d5d82ba4036dc71c5f583b15bce7d030a43cf98f2403",
+      "envelope": {
+        "action": "origin-forward",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-d3cb6b241075fb46",
+            "max_runtime_seconds": 3600,
+            "requires": [
+              "terminal",
+              "git"
+            ],
+            "session_id": "redacted-8c6cc6ba112238e6",
+            "skills": [
+              "terraform-native-visuals"
+            ],
+            "title": "Production envelope acceptance"
+          },
+          "creator": {
+            "gateway": "origin",
+            "profile": "default",
+            "board": "default",
+            "task_id": "t_0123456789abcdef"
+          },
+          "destination": {
+            "gateway": "owner",
+            "profile": "default",
+            "board": "default"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          },
+          "run_uid": "redacted-run"
+        },
+        "base_version": null,
+        "coll": "sessions",
+        "from": "gw:origin",
+        "id": "corpus-request-011",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 12,
+      "observed_at": 1795512091.2912953,
+      "source_sha256": "b27ff74aa0c0243f1914876bf738b57e294d2a25f8cd21df0ab5be0cfdfa0f13",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-41af7bab749baa36",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-012",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 13,
+      "observed_at": 1795511278.8184857,
+      "source_sha256": "4f130cd4ceeea6b2ee8a3bce8076ec1d320745d17ef66797c657f5c926c4f541",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-9c0ca28b881a7b45",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-013",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 14,
+      "observed_at": 1795510333.1762686,
+      "source_sha256": "31a24dbda6aca010c8a7c01fef8a59e5d8042992909b2d44ef666d3360740a33",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-71272d3a08d72712",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-014",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 15,
+      "observed_at": 1795509961.3145914,
+      "source_sha256": "1dbac2a18ca8b8000db364657257af31957e8fb7f921fc7109eb89f3c1519445",
+      "envelope": {
+        "action": "origin-forward",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "body": "Redacted production evidence.",
+            "max_runtime_seconds": 3600,
+            "requires": [
+              "terminal",
+              "git"
+            ],
+            "session_id": "redacted-8c6cc6ba112238e6",
+            "skills": [
+              "terraform-native-visuals"
+            ],
+            "title": "Production envelope acceptance"
+          },
+          "creator": {
+            "gateway": "origin",
+            "profile": "default",
+            "board": "default",
+            "task_id": "t_0123456789abcdef"
+          },
+          "destination": {
+            "gateway": "owner",
+            "profile": "default",
+            "board": "default"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          },
+          "run_uid": "redacted-run"
+        },
+        "base_version": null,
+        "coll": "sessions",
+        "from": "gw:origin",
+        "id": "corpus-request-015",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 16,
+      "observed_at": 1795509372.4729655,
+      "source_sha256": "e26724ec2a3bd88e308a6a8560141e70812898130ec0a244d2aacafbf915d0b4",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-a47d39111e7b6e45",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-016",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 17,
+      "observed_at": 1795509228.177706,
+      "source_sha256": "570df1fe8420a7d7591b69cabf28b733c6f713f7962b340b112d473f62501dda",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-2e1aad414b3f9365",
+            "placement": "auto",
+            "requires": [
+              "terminal",
+              "file",
+              "git",
+              "ssh:mbp",
+              "hub:read"
+            ],
+            "self_work": {
+              "area": "kanban-sync",
+              "kind": "post-merge",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "session_id": "redacted-6ee26596cb92edc4",
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-017",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 18,
+      "observed_at": 1795508402.7656362,
+      "source_sha256": "13a18b48b436c0bacd12394940cd0ff509eba01469826d3d51e61f36cecc083f",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-0e0ce1f09edb707b",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-018",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 19,
+      "observed_at": 1795507745.3825126,
+      "source_sha256": "937b5212747f6e656af5db21eb03fdc49163724a747a787b54699133068f93f4",
+      "envelope": {
+        "action": "origin-forward",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "body": "Redacted production evidence.",
+            "max_runtime_seconds": 3600,
+            "requires": [
+              "terminal",
+              "git"
+            ],
+            "session_id": "redacted-8c6cc6ba112238e6",
+            "title": "Production envelope acceptance"
+          },
+          "creator": {
+            "gateway": "origin",
+            "profile": "default",
+            "board": "default",
+            "task_id": "t_0123456789abcdef"
+          },
+          "destination": {
+            "gateway": "owner",
+            "profile": "default",
+            "board": "default"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          },
+          "run_uid": "redacted-run"
+        },
+        "base_version": null,
+        "coll": "sessions",
+        "from": "gw:origin",
+        "id": "corpus-request-019",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 20,
+      "observed_at": 1795507540.0507252,
+      "source_sha256": "a6fa48a44c2528ccc59919e91c55f149361315770a658b71cb32e3d97125cd1b",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-448f4103f43b2f9e",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-020",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 21,
+      "observed_at": 1795507501.3729858,
+      "source_sha256": "ec06cf3031eb14321bf796d712271f0f409b838444a873a4b7fbfb8b71e11a76",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-9f17eecf3e067049",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-021",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 22,
+      "observed_at": 1795507427.5540977,
+      "source_sha256": "32f3209952785d6f053cd9594f4d588ab5f4f7c734d4a4e25f17748c7fc5f9d8",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-5064bb443078527d",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-022",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 23,
+      "observed_at": 1795507229.025391,
+      "source_sha256": "c8edfd84aea74d6f4d2c01cbe164544e6b2afb936128ec9f1e0364c1fa19d0a1",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "requires": [
+              "terminal",
+              "file",
+              "git",
+              "kanban",
+              "hub:read",
+              "ssh:mbp"
+            ],
+            "self_work": {
+              "area": "kanban-wake-check",
+              "kind": "post-merge",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "session_id": "redacted-6ee26596cb92edc4",
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-023",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 24,
+      "observed_at": 1795506490.806945,
+      "source_sha256": "f12531fce043b74e34afafbb31a6181fa71ab5a99da7a866b89099bd95c34b35",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-f77a23b49244fd7d",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-024",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 25,
+      "observed_at": 1795505591.3979154,
+      "source_sha256": "80484614cb4036643d65ef22076ced9c81d140f6b93c028690f1dd5744832026",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-fdce77e7b7a34f37",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-025",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 26,
+      "observed_at": 1795504721.6138663,
+      "source_sha256": "84113ee7aa8837edfcc7fdca342c871017184618073cf5fa87bcf2e264acbc4f",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-93583df9d6a93c0b",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-026",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 27,
+      "observed_at": 1795503974.8648834,
+      "source_sha256": "11f4dcef89d1506f29d8dd94038dea57ea9a9e32fea4df2e5caf9b42c3d3a023",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-0228e507e600b84d",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-027",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 28,
+      "observed_at": 1795503351.854669,
+      "source_sha256": "1e6ea936bd43b4b5daf450e17cabbac0e183d94d84eb467401a27cc901310234",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-f62d9870add86a65",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-028",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 29,
+      "observed_at": 1795502511.0834448,
+      "source_sha256": "4e0dbc6844be7396f890e141da6b3ed240578ca579de33b1df5799dc9a5e398d",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-296eafd0652f9f19",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-029",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 30,
+      "observed_at": 1795501684.5669312,
+      "source_sha256": "3a02ac3f733a47ff41ae322788eb87e691811f206d0ef2c5f1c366aa48009958",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-f8fc317110bec881",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-030",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 31,
+      "observed_at": 1795500826.672485,
+      "source_sha256": "94134b54bf653a716587515204d1690d6aae91fcc77d193d2ae1b5ef9286e47d",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-9554b793c7b5118e",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-031",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 32,
+      "observed_at": 1795500031.630213,
+      "source_sha256": "685e1ead31ac34c034735b331625e5d6de3e96ec5676f4f012447db44aae8333",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-08ccc622cc5b0554",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-032",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 33,
+      "observed_at": 1795499243.6004634,
+      "source_sha256": "0c50b3d4ba66a3d3fa34347d552b7a20b82c39bb61112583a31090c11d58c309",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-c95b6847bdbad92a",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-033",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 34,
+      "observed_at": 1795498466.843016,
+      "source_sha256": "b0aa89fb69baeaf77df1ef96d98903b223f9309379841ca65eb07feb1f9de6c5",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-bf5bb8c5a16d9464",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-034",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 35,
+      "observed_at": 1795497694.4399998,
+      "source_sha256": "8470bb0f1eafdb442e748362a2e9c330819256cb3dcacd809d7891ff739a527f",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "distinct_from": [
+              "t_01a206ee94449198"
+            ],
+            "distinct_reason": "Redacted production evidence.",
+            "requires": [
+              "terminal",
+              "git"
+            ],
+            "runs_on": [
+              "pool:worker"
+            ],
+            "self_work": {
+              "area": "kanban",
+              "kind": "guard",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "session_id": "redacted-e927e4c30a2ac340",
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          },
+          "origin": {
+            "gateway": "origin",
+            "profile": "default",
+            "session": "chat-origin"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-035",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 36,
+      "observed_at": 1795497661.4872012,
+      "source_sha256": "dd12b1794f4bb6dd6fed159cfb5fc048e96f243ad8a1e9576a46aa6d5081b5ee",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-c51d1fd90bab8f1c",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-036",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 37,
+      "observed_at": 1795496802.3674324,
+      "source_sha256": "7bb3cc24284d5583bf8c4c5b3d92c7db3ca82bc06209e97293b1b37a32ec8779",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-b30e96683cc6bcbe",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-037",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 38,
+      "observed_at": 1795495999.9231129,
+      "source_sha256": "02438f1bbf97549d783040386e563362a3abe1c2efe2b81594d00b6e140ff959",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-17acd0903cfdbcc9",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-038",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    },
+    {
+      "sample": 39,
+      "observed_at": 1795495250.6749587,
+      "source_sha256": "d9d2a79a6f87706bd281e813f43337b0e967489683047442f824e3bd8afeee08",
+      "envelope": {
+        "action": "selfwork-create",
+        "args": {
+          "create": {
+            "assignee": "default",
+            "board": "default",
+            "body": "Redacted production evidence.",
+            "idempotency_key": "redacted-71d12c3d084c604a",
+            "self_work": {
+              "area": "ci",
+              "kind": "ci-flake",
+              "repository": "hermes-core",
+              "version": 1
+            },
+            "tenant": null,
+            "title": "Production envelope acceptance"
+          }
+        },
+        "base_version": null,
+        "coll": "tasks",
+        "from": "gw:origin",
+        "id": "corpus-request-039",
+        "key": "default/default",
+        "to_gw": "owner"
+      }
+    }
+  ]
+}
