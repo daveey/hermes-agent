@@ -239,9 +239,66 @@ def test_attrs_descriptor_registration_requires_each_identity(tmp_path, case):
         if case == 'valid':
             assert len(descriptors) == 1
             assert descriptors[0].name == 'attrs:_compile_and_eval'
+            instructions = {{i.offset: i for i in ca.dis.get_instructions(
+                descriptors[0].code, show_caches=True)}}
+            compile_sites = [offset for offset, kind in descriptors[0].sites.items()
+                             if kind == 'compile']
+            assert compile_sites
+            assert all(instructions[offset].opname == 'CALL' for offset in compile_sites)
         else:
             assert descriptors == []
         a._tls.busy = False
         report()
     '''))
     assert result['unknowns'] == []
+
+
+@pytest.mark.parametrize('case', ['valid-cached', 'forged-cached', 'unallowed-caller', 'known-identity'])
+def test_attrs_caller_identity_boundary_is_not_masked(tmp_path, case):
+    result = run(tmp_path, SEAM + textwrap.dedent(f'''
+        case = {case!r}
+        if case in ('valid-cached', 'forged-cached'):
+            outer_code = next(descriptor.attrs_codes[name] for name in ca._ATTRS_CACHED)
+            outer = SimpleNamespace(f_code=outer_code, f_back=None)
+            helper = descriptor.attrs_codes['_linecache_and_compile']
+            frame.f_back = SimpleNamespace(
+                f_code=helper.replace() if case == 'forged-cached' else helper,
+                f_back=outer)
+        elif case == 'unallowed-caller':
+            caller.f_code = descriptor.code
+        elif case == 'known-identity':
+            a._known[id(caller_code)] = (caller_code.replace(), 'dependency:attrs-26.1.0')
+        origin = a._attrs_caller(frame, descriptor)
+        if case == 'valid-cached':
+            assert origin == 'dependency:attrs-26.1.0'
+        else:
+            assert origin is None
+        a._tls.busy = False
+        report()
+    '''))
+    assert result['unknowns'] == []
+
+
+@pytest.mark.parametrize('case', ['filename-type', 'script-limit', 'compile-filename'])
+def test_attrs_compile_boundary_rejects_before_exec(tmp_path, case):
+    result = run(tmp_path, SEAM + textwrap.dedent(f'''
+        case = {case!r}
+        if case == 'filename-type':
+            class Filename(str):
+                pass
+            frame.f_locals['filename'] = Filename('<attrs seam>')
+            reason = 'attrs-output-unreadable'
+        elif case == 'script-limit':
+            frame.f_locals['script'] = 'x' * (ca.MAX_SOURCE + 1)
+            output = frame.f_locals['script'].encode()
+            reason = 'attrs-output-unreadable'
+        else:
+            frame.f_locals['filename'] = '<forged>'
+            reason = 'attrs-compile-mismatch'
+        compile_event()
+        assert a._tls.attrs_output is None
+        assert reason in set(a.unknowns()) - BASE
+        a._tls.busy = False
+        report()
+    '''))
+    assert result['unknowns']
