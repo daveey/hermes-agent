@@ -172,7 +172,8 @@ def test_backfill_links_ownerless_open_cards_once(kanban_home, monkeypatch):
             conn.execute("UPDATE tasks SET status='done' WHERE id=?", (finished,))
         monkeypatch.setattr(owner, "enabled", lambda: True)
         dry = owner.backfill(conn, apply=False)
-        assert dry == {"ownerless": 1, "linked": 0, "by_producer": {"worker-claim-watch": 1}, "failed": []}
+        assert dry == {"ownerless": 1, "linked": 0, "by_producer": {"worker-claim-watch": 1}, "failed": [],
+                       "eligible": 1}
         assert _links(conn, old) == []
         applied = owner.backfill(conn, apply=True)
         assert applied["linked"] == 1
@@ -344,7 +345,7 @@ def test_backfill_leaves_a_card_whose_chat_released_it(synced, monkeypatch):
         synced.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,"
                        "released,created_at) VALUES ('u1',?,'hub',NULL,'20261124_120000_gone','created',1,0)", (tid,))
     monkeypatch.setattr(owner, "enabled", lambda: True)
-    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}, "failed": []}
+    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}, "failed": [], "eligible": 0}
 
 
 def test_owner_chats_cli_lists_then_links(kanban_home, monkeypatch, capsys):
@@ -455,7 +456,7 @@ def test_backfill_restores_an_archived_owner_chat_even_while_it_is_cached(synced
         assert not db.get_session(sid)["archived"]
     finally:
         db.close()
-    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}, "failed": []}
+    assert owner.backfill(synced, apply=True) == {"ownerless": 0, "linked": 0, "by_producer": {}, "failed": [], "eligible": 0}
     assert sum(e.kind == owner.EVENT for e in kb.list_events(synced, tid)) == 1
 
 
@@ -531,3 +532,18 @@ def test_a_card_that_stays_ownerless_after_linking_does_not_hold_a_batch_slot(ka
         assert stuck in owner._UNLINKABLE
         assert owner.backfill(conn, apply=True, limit=1)["linked"] == 1  # the next pass moves on
         assert _links(conn, other)
+
+
+def test_unlinkable_cards_neither_keep_the_catch_up_pace_nor_stay_skipped_forever(kanban_home, monkeypatch,
+                                                                                    owner_backfill):
+    monkeypatch.setattr(owner, "_NEXT_BACKFILL", {})
+    monkeypatch.setattr(owner, "BACKFILL_BATCH", 1)
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    with kbc.connect_closing() as conn:
+        stuck = [kb.create_task(conn, title=f"stuck {n}", assignee="default", created_by="self-heal") for n in range(2)]
+        monkeypatch.setattr(owner, "enabled", lambda: True)
+        monkeypatch.setattr(owner, "_UNLINKABLE", set(stuck))
+        result = owner.maybe_backfill(conn, now=0.0)
+        assert result["eligible"] == 0 and result["linked"] == 0
+        assert owner._NEXT_BACKFILL[next(iter(owner._NEXT_BACKFILL))] == owner.BACKFILL_EVERY_S  # hourly, not 10 min
+        assert owner._UNLINKABLE == set()  # retried on the next hourly pass

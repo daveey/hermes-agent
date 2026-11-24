@@ -314,9 +314,11 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
     failed: set[str] = set()
     try:
         found, linked = ownerless(conn, live), []
+        eligible = found
         if apply:
             forced: set[str] = set()
-            for task_id, producer in [c for c in found if c[0] not in _UNLINKABLE][:limit]:
+            eligible = [c for c in found if c[0] not in _UNLINKABLE]
+            for task_id, producer in eligible[:limit]:
                 dead = _needs_owner(conn, task_id, links, live)
                 if dead is None or producer in failed:
                     continue
@@ -340,19 +342,23 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
     by_producer: dict[str, int] = {}
     for _, producer in found:
         by_producer[producer] = by_producer.get(producer, 0) + 1
-    return {"ownerless": len(found), "linked": len(linked), "by_producer": by_producer, "failed": sorted(failed)}
+    return {"ownerless": len(found), "linked": len(linked), "by_producer": by_producer, "failed": sorted(failed),
+            "eligible": len(eligible)}
 
 
 def _relink(conn, task_id: str, producer: str, sid: str, links: bool, live) -> bool:
     """Under the write lock: own the card by ``sid`` if it still needs an owner. True when newly linked or its
     archived chat was just restored."""
+    from hermes_cli.kanban_adoption_authority import gateway as _gateway
+    from hermes_cli.profiles import get_active_profile_name
     dead = _needs_owner(conn, task_id, links, live)
     if dead is None:
         return False
+    here = f"{_gateway(conn)}/{get_active_profile_name()}/"
     for ref in dead:
         if ref != sid:  # a notice to a deleted/archived owner chat is dropped: stop binding the card to it
-            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=? AND (chat_id=? OR chat_id LIKE ?)",
-                         (task_id, ref, "%/" + ref))
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=? AND chat_id IN (?, ?)",
+                         (task_id, ref, here + ref))
     return link(conn, task_id, producer, sid) or sid in dead
 
 
@@ -366,7 +372,9 @@ def maybe_backfill(conn, *, now: float) -> Optional[dict]:
         return None
     _NEXT_BACKFILL[path] = now + BACKFILL_CATCHUP_S  # set first: a pass that raises waits, never reruns every tick
     result = backfill(conn, apply=True, limit=BACKFILL_BATCH)
-    full = result["ownerless"] > BACKFILL_BATCH or bool(result["failed"])
+    full = result["eligible"] > BACKFILL_BATCH or bool(result["failed"])
+    if not full:
+        _UNLINKABLE.clear()  # the hourly pass gives cards that could not be owned another try
     _NEXT_BACKFILL[path] = now + (BACKFILL_CATCHUP_S if full else BACKFILL_EVERY_S)
     if result["linked"]:
         log.info("kanban owner chats: linked %d ownerless cards %s", result["linked"], result["by_producer"])
