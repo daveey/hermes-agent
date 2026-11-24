@@ -83,13 +83,20 @@ class MethodLanes:
                 # A cancel runs this callback on the cancelling thread. ``shutdown(cancel_futures=True)``
                 # cancels while holding the executor's own lock, and ``submit`` takes that lock: handing
                 # the slot over inline would deadlock the shutdown. Hand over from a thread of its own.
-                threading.Thread(  # health: allow HX012 -- hand-off only: each call runs in the context it captured at dispatch
-                    target=self._finished, args=(method,), name="tui-rpc-lane-handoff", daemon=True).start()
+                try:
+                    threading.Thread(  # health: allow HX012 -- hand-off only: each call runs in the context it captured at dispatch
+                        target=self._finished, args=(method,), name="tui-rpc-lane-handoff", daemon=True).start()
+                except RuntimeError:  # no thread to be had (interpreter exit, thread limit): release, start nothing
+                    logger.warning("rpc pool: no hand-off thread for %s; releasing its waiting calls unstarted",
+                                   method, exc_info=True)
+                    self._finished(method, start=False)
             else:
                 self._finished(method)
 
-    def _finished(self, method: str) -> None:
-        """One call of *method* left the pool: hand its slot to the next waiting call, else free it."""
+    def _finished(self, method: str, start: bool = True) -> None:
+        """One call of *method* left the pool: hand its slot to the next waiting call, else free it.
+        ``start=False`` (no thread from which ``submit`` is safe): the waiting calls are released
+        unstarted, each with its done hook, and the slot is freed."""
         interrupt: BaseException | None = None  # a non-Exception from ``submit``: re-raised once the lane is settled
         while True:
             with self._lock:
@@ -107,6 +114,8 @@ class MethodLanes:
                     return
                 submit, fn, on_done = queue.popleft()
             try:
+                if not start:
+                    raise RuntimeError("no thread available to start a waiting call")
                 future = submit(fn)
             except BaseException as exc:  # the pool is shut down: the call never runs, its caller's cleanup still does
                 logger.warning("rpc pool: could not start a waiting %s call", method, exc_info=True)

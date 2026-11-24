@@ -165,6 +165,67 @@ def test_shutdown_that_cancels_queued_calls_does_not_deadlock_with_waiters():
     assert sorted(done) == [0, 1, 2]
 
 
+def test_interrupt_during_a_handoff_still_settles_the_lane_before_it_propagates():
+    """A non-Exception from ``submit`` while handing a slot over: the waiting calls keep their done
+    hooks, the lane ends empty, and the interrupt is re-raised rather than swallowed."""
+    lanes = MethodLanes(1)
+    done, seen = [], []
+
+    class Future:
+        def add_done_callback(self, fn):
+            self.fn = fn
+
+        def cancelled(self):
+            return False
+
+    first = Future()
+    submits = iter([first])
+
+    def submit(fn):
+        try:
+            return next(submits)
+        except StopIteration:
+            raise KeyboardInterrupt from None
+
+    lanes.run(submit, "slow", lambda: None, lambda: done.append(0))
+    lanes.run(submit, "slow", lambda: None, lambda: done.append(1))
+    lanes.run(submit, "slow", lambda: None, lambda: done.append(2))
+    try:
+        first.fn(first)  # call 0 finishes: handing over to 1 and then 2 is interrupted both times
+    except KeyboardInterrupt:
+        seen.append("interrupt")
+    assert done == [0, 1, 2] and seen == ["interrupt"] and lanes.snapshot() == {}
+
+
+def test_cancel_with_no_thread_available_releases_waiting_calls_unstarted(monkeypatch):
+    lanes = MethodLanes(1)
+    release, done, ran = threading.Event(), [], []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        futures = []
+
+        def submit(fn):
+            futures.append(pool.submit(fn))
+            return futures[-1]
+
+        blocker = pool.submit(release.wait, 10)
+        try:
+            lanes.run(submit, "slow", lambda: ran.append(0), lambda: done.append(0))
+            lanes.run(submit, "slow", lambda: ran.append(1), lambda: done.append(1))
+            lanes.run(submit, "slow", lambda: ran.append(2), lambda: done.append(2))
+
+            def no_thread(*args, **kwargs):
+                raise RuntimeError("can't start new thread")
+
+            monkeypatch.setattr(threading.Thread, "start", no_thread)
+            assert futures[0].cancel()
+            monkeypatch.undo()
+            assert done == [0, 1, 2] and len(futures) == 1 and lanes.snapshot() == {}
+        finally:
+            release.set()
+        blocker.result(10)
+    assert ran == []
+
+
 class Transport:
     def __init__(self):
         self.frames = queue.Queue()
