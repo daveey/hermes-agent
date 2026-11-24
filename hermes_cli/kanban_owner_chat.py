@@ -258,17 +258,19 @@ def _owner_refs(conn, task_id: str, links: bool) -> tuple[list[str], bool]:
         from hermes_cli.kanban_db_notify import OBSERVER_SUB_REASONS
         observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
         rows = [(r[0], "/" not in str(r[0] or "")) for r in conn.execute(
-            "SELECT chat_id FROM kanban_notify_subs WHERE task_id=? AND platform='tui' AND COALESCE("
-            f"CASE WHEN json_valid(delivery_metadata) THEN json_extract(delivery_metadata, '$.reason') END "
-            f"IN ({observers}), 0) = 0", (task_id,))]
+            "SELECT chat_id FROM kanban_notify_subs WHERE task_id=? AND platform='tui' AND "
+            "(CASE WHEN json_valid(delivery_metadata) THEN json_extract(delivery_metadata, '$.reason') END) "
+            f"NOT IN ({observers})", (task_id,))]  # NULL (no reason) is no owner, as in _owning_sub
     mine = [str(ref) for ref, local in rows if local and str(ref or "").startswith(PREFIX)]
     return mine, len(mine) < len(rows)
 
 
-def _needs_owner(conn, task_id: str, links: bool, live) -> Optional[list[str]]:
-    """None when the card is owned; else the dead owner chats to retire before it gets a live one."""
+def _needs_owner(conn, task_id: str, links: bool, live, *, check_release: bool = True) -> Optional[list[str]]:
+    """None when the card is owned; else the dead owner chats to retire before it gets a live one.
+    ``check_release=False`` under the write lock: the release test may read state.db, and the scan before the
+    lock already applied it."""
     from hermes_cli import kanban_create_authority as kca
-    if links and _released_by_owner(conn, task_id):
+    if links and check_release and _released_by_owner(conn, task_id):
         return None  # its owner let go on purpose; re-owning it would undo that
     mine, other = _owner_refs(conn, task_id, links)
     if other:
@@ -376,7 +378,7 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
                 with kb.write_txn(conn):
                     if _relink(conn, task_id, producer, sid, links, live):
                         linked.append(task_id)
-                    elif _needs_owner(conn, task_id, links, live) is not None:
+                    elif _needs_owner(conn, task_id, links, live, check_release=False) is not None:
                         _UNLINKABLE.add(task_id)
     finally:
         db.close()
@@ -392,7 +394,7 @@ def _relink(conn, task_id: str, producer: str, sid: str, links: bool, live) -> b
     archived chat was just restored."""
     from hermes_cli.kanban_adoption_authority import gateway as _gateway
     from hermes_cli.profiles import get_active_profile_name
-    dead = _needs_owner(conn, task_id, links, live)
+    dead = _needs_owner(conn, task_id, links, live, check_release=False)
     if dead is None:
         return False
     here = f"{_gateway(conn)}/{get_active_profile_name()}/"

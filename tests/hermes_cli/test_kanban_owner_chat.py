@@ -646,3 +646,15 @@ def test_a_worker_child_of_an_ownerless_creator_waits_for_its_chain_then_gets_an
     assert child in {t for t, _ in owner.ownerless(synced)}
     owner.backfill(synced, apply=True)
     assert kca.has_authority(synced, child, None, durable=True)
+
+
+def test_on_a_links_less_board_a_subscription_without_a_reason_is_not_an_owner(kanban_home, monkeypatch):
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Legacy sub", assignee="default", created_by="self-heal")
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO kanban_notify_subs (task_id,platform,chat_id,thread_id,delivery_mode,"
+                         "delivery_metadata,created_at,last_event_id) VALUES (?,'tui','20261124_legacy','','notify',"
+                         "NULL,0,0)", (tid,))
+        monkeypatch.setattr(owner, "enabled", lambda: True)
+        assert owner.backfill(conn, apply=True)["linked"] == 1
