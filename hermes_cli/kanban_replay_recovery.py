@@ -2,7 +2,8 @@
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-from time import time
+from time import monotonic as time
+from uuid import uuid4
 
 from hermes_cli import kanban_replay_journal as journal
 from hermes_cli.kanban_db_connect import write_txn
@@ -12,9 +13,34 @@ _SCHEMA = '''CREATE TABLE IF NOT EXISTS kanban_replay_transport_fault1 (
     id INTEGER PRIMARY KEY CHECK(id=1), journal_id TEXT NOT NULL,
     generation TEXT NOT NULL, sequence TEXT NOT NULL, op_id TEXT NOT NULL,
     attempts INTEGER NOT NULL, reachable_s REAL NOT NULL, retry_after REAL NOT NULL,
-    paused INTEGER NOT NULL, reason TEXT NOT NULL, recovery TEXT NOT NULL
+    paused INTEGER NOT NULL, reason TEXT NOT NULL, recovery TEXT NOT NULL,
+    retry_clock TEXT NOT NULL DEFAULT ''
 )'''
 _SAMPLE = ContextVar('replay_transport_recovery', default=None)
+_CLOCK = uuid4().hex
+
+
+def _schema(conn):
+    conn.execute(_SCHEMA)
+    if 'retry_clock' not in {row[1] for row in conn.execute('PRAGMA table_info(kanban_replay_transport_fault1)')}:
+        conn.execute("ALTER TABLE kanban_replay_transport_fault1 ADD COLUMN retry_clock TEXT NOT NULL DEFAULT ''")
+
+
+def _deadline(conn, held):
+    if held.get('retry_clock') == _CLOCK:
+        return held['retry_after']
+    # Persisted monotonic values are meaningful only to their clock owner.
+    # Restart/reboot/host transfer rearms one bounded delay, never elapsed age
+    # or attempts. Old wall-clock rows take the same conservative migration.
+    with write_txn(conn):
+        current = fault(conn)
+        if current != held or _bound(held) != _identity(journal.snapshot(conn)):
+            raise client.SyncUnavailable('replay recovery changed while reanchoring clock')
+        _schema(conn)
+        deadline = time() + min(60, 2 ** held['attempts'])
+        conn.execute('UPDATE kanban_replay_transport_fault1 SET retry_after=?,retry_clock=? WHERE id=1',
+                     (deadline, _CLOCK))
+    return deadline
 
 
 def fault(conn):
@@ -43,7 +69,7 @@ def guard(conn, *, mutation=False):
         raise client.SyncUnavailable('replay recovery identity changed; inspect without discarding custody')
     if held['paused']:
         raise client.SyncUnavailable(held['recovery'])
-    if mutation and time() < held['retry_after']:
+    if mutation and time() < _deadline(conn, held):
         raise client.SyncUnavailable('replay recovery backoff; ' + held['recovery'])
 
 
@@ -84,10 +110,10 @@ def _failed(conn, board, error, started):
                     f'{str(error)[:500]}. Inspect serving Board and repair transport; then '
                     f'hermes kanban --board {board} sync replay-resume --expect {identity[3]} '
                     '--reason "owner verified repair". Preserve exact custody; never skip or cancel.')
-        conn.execute(_SCHEMA)
-        conn.execute('INSERT OR REPLACE INTO kanban_replay_transport_fault1 VALUES (1,?,?,?,?,?,?,?,?,?,?)',
+        _schema(conn)
+        conn.execute('INSERT OR REPLACE INTO kanban_replay_transport_fault1 VALUES (1,?,?,?,?,?,?,?,?,?,?,?)',
                      (*identity, attempts, elapsed, time() + min(60, 2 ** attempts), int(paused),
-                      str(error)[:500], recovery))
+                      str(error)[:500], recovery, _CLOCK))
     if paused and not (old and old['paused']):
         logging.getLogger(__name__).error('%s', recovery)
 

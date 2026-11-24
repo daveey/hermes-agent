@@ -35,6 +35,12 @@ in the diagnostic producer test file.
 
 ## Unresolved sender requirements: D stays open
 
+Creator renewal318157 narrows final D to clock/production-HTTP recovery proof,
+malformed-response classes, then independent exact-head review and canonical
+landing. Realistic latency/backlog/lease throughput is owned by integration
+`t_01a2053842e6e0eb` against the real Board, not a sender completion gate.
+Full reconciliation of1213 generated variants is excluded, not claimed complete.
+
 1. **Normal ACK carrier / throughput (partial progress).** The public sender now
    leaves the predecessor ACK for the successor's frozen envelope rather than
    sending an intermediate standalone control. Exact newly consuming ops replies
@@ -99,10 +105,28 @@ in the diagnostic producer test file.
    Existing precommit-retry fixtures advance a controlled clock beyond the new
    deadline rather than disabling admission or sleeping. The seeded model now
    explicitly resumes a paused one-shot fault to continue exploring later history;
-   it no longer assumes infinite automatic retries. Remaining proof reconciliation
-   includes paused multi-board and production-HTTP budget campaigns, monotonic-clock
-   and exact fault-write failure boundaries plus the new meaningful conditions.
-   This local slice is not real Board interoperability or final D acceptance.
+   it no longer assumes infinite automatic retries.
+
+   Clock boundary correction uses monotonic elapsed samples and deadlines, with a
+   persisted random process-clock identity. A foreign process/boot or legacy
+   wall-clock row rearms exactly one bounded delay under the existing writer;
+   neither offline age nor attempts reset. Repeated calls within that clock owner
+   retain the deadline. Paused faults never rearm or perform replay I/O. Wall-clock
+   rollback and forward jumps reproduced actual assertion failures (elapsed0 or300
+   instead of100); monotonic sampling makes both pass. A foreign-clock reload and
+   SQLite reopen reproduced the stale1002-versus12 deadline before reanchoring.
+   Legacy-table migration preserves attempts/age/identity; this is a simulated
+   interpreter-clock replacement, not a measured host reboot.
+
+   Seven production Hub/loopback HTTP cases cover those clocks,8-attempt and300s
+   limits, active healthy strict-stream settlement after a paused earlier stream,
+   wrong-identity resume and later same-intent progress. Fault-metadata pre-COMMIT
+   injection rolls back the eighth update, preserves fault7 and exact custody on
+   reopen, then writable repair durably pauses at8. A retry appends only its new
+   session exposure; old exposure history and frozen identity remain. This test
+   injects at the existing transaction context in disposable fixtures, not through
+   a production hook/authorizer; it does not promise progress while storage remains
+   unwritable. This local slice is not real Board interoperability/final D approval.
 3. **Aggregate fault/storage proof (local boundaries now exercised).** Three new
    test scenarios run in both DELETE and WAL journal modes with real SQLite
    `max_page_count` exhaustion and assert `SQLITE_FULL`, not
@@ -142,7 +166,7 @@ in the diagnostic producer test file.
    at assertions. This is neither deployed receiver correctness nor a proof of all
    possible interleavings.
 
-   **Throughput remains open:** measure backlog/lease-sensitive throughput with
+   **Integration-owned throughput remains open:** measure backlog/lease-sensitive throughput with
    request counts, declared thresholds and realistic latency. Constant-state and
    many-settlement correctness are not throughput or lease-renewal acceptance.
 5. **Active-stream isolation now exercised; remaining condition reconciliation.**
@@ -157,8 +181,10 @@ in the diagnostic producer test file.
    board-local durable-token assertion kills it. Empty feed/receiver fixtures are
    not real Board interoperability. No sender/round/journal function is replaced.
 
-   Malformed peer-response behavior at the supported transport boundary and the
-   remaining meaningful condition inventory still need reconciliation. A
+   Malformed peer-response behavior at the supported transport boundary remains
+   the next sender gate. Residual unreconciled generated classes include defensive
+   identity-race/schema-probe/error-format combinations; full clause enumeration is
+   explicitly out of renewed D scope, not labeled equivalent or killed. A
    generated count of1213 syntactic mutants is neither1213 distinct behavior
    requirements nor a kill claim. Mark true equivalents honestly.
 
