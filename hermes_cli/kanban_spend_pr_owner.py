@@ -61,6 +61,19 @@ def recognised_prs(conn: sqlite3.Connection, task_id: str) -> set[str]:
     return published_prs(conn, task_id) | comment_candidates(conn, task_id)
 
 
+def spared_publisher(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """The open core PR that exempts this card, or None. Read-only.
+
+    The same check ``hold`` applies after its one capped ``open_core_pr`` read: an open PR in
+    :func:`recognised_prs`. ``hold`` keeps that read outside the write lock so a second call cannot
+    spend another uncached-read budget; this helper is for a diagnostic that has not read yet.
+    """
+    pr = open_core_pr(conn, task_id)
+    if pr is not None and pr in recognised_prs(conn, task_id):
+        return pr
+    return None
+
+
 _MAX_CANDIDATES = 20  # most recently named PRs considered per card
 _MAX_READS = 8  # uncached GitHub reads per card; cached (e.g. merged) candidates are free
 

@@ -11,7 +11,10 @@ Read-only: the board connection is put in ``PRAGMA query_only`` for the walk, th
 pacing governor judges the pools as stored (no usage read). A step that cannot be asked outside a real tick (the
 hub claim screen's judge, the Board lease, the board-share quota, the worker-resources census) reads the last
 recorded tick instead (``kanban_governors.card``): ``stop`` when that tick charged the card to it, else ``unknown``.
-A predicate that raises is ``unknown`` with the error, never ``pass``.
+A predicate that raises is ``unknown`` with the error, never ``pass``. A global cap the combined
+budget call would skip after an earlier stop is asked on its own (``_tick_spawn_budget`` with only
+that cap, and ``_memory_pressure_level``). An unmeasured pressure or a missing host census is
+``unknown``, never a pass.
 
 Verdicts: ``pass``, ``stop`` (holds the start), ``throttle`` (slows starts, does not hold this one), ``unknown``.
 """
@@ -233,9 +236,16 @@ def _no_progress(card: Card) -> Answer:
 
 
 def _spend(card: Card) -> Answer:
-    """``kanban_spend_budget.hold``'s reads: a pending decision, then ``over(spend, card_limits)``."""
+    """``kanban_spend_budget.hold``'s reads, including the publication-owner exemption.
+
+    ``over()`` alone is not the decision: an open core PR this card published is spared.
+    That check is :func:`kanban_spend_pr_owner.spared_publisher` (``open_core_pr`` then
+    ``recognised_prs``, the same pair ``hold`` applies). It only reads. A fault there is this
+    step's ``unknown`` (``_ask``), never a manufactured stop.
+    """
     from hermes_cli import kanban_spend_budget as sb
     from hermes_cli import kanban_spend_decision as decision
+    from hermes_cli.kanban_spend_pr_owner import spared_publisher
 
     if _foreign(card):
         return None
@@ -248,7 +258,12 @@ def _spend(card: Card) -> Answer:
     which = sb.over(spent, lim)
     answer = {"reading": {"runs": spent.runs, "cache_read_tokens": spent.tokens["cache_read_tokens"]},
               "threshold": {"runs": lim.runs, "cache_read_tokens": lim.cache_read_tokens}}
-    return {"verdict": PASS, **answer} if which is None else _stop(**answer, detail={"limit": which})
+    if which is None:
+        return {"verdict": PASS, **answer}
+    spared = spared_publisher(card.conn, card.task_id)
+    if spared is not None:
+        return {"verdict": PASS, **answer, "detail": {"limit": which, "spared": spared}}
+    return _stop(**answer, detail={"limit": which})
 
 
 def _provider_walls(card: Card) -> Answer:
@@ -432,34 +447,93 @@ def card_chain(conn: Any, task_id: str, env: Environment, *, after: Optional[str
 # --- board-level steps: ``_dispatch_once_locked`` before any card is looked at -------------------------------------
 
 
+def _isolated_budget(conn: Any, *, max_spawn: Optional[int], max_in_progress: Optional[int],
+                     board: Optional[str]) -> tuple[Any, Optional[BaseException]]:
+    """One cap, so an earlier stop cannot skip the predicate ``_tick_spawn_budget`` would ask for it."""
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    scratch = _scratch()
+    if max_spawn is None and max_in_progress is None:
+        return scratch, None
+    try:
+        kbd._tick_spawn_budget(conn, scratch, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board)
+    except Exception as exc:  # health: allow BLE001 -- one cap's fault is that cap's unknown, never a pass
+        return scratch, exc
+    return scratch, None
+
+
+def _max_spawn_answer(env: Environment, result: Any, running: int, error: Optional[BaseException]) -> dict[str, Any]:
+    if error is not None:
+        return {"verdict": UNKNOWN, "reading": running, "threshold": env.max_spawn,
+                "detail": {"error": f"{type(error).__name__}: {error}"[:300]}}
+    if env.max_spawn is None:
+        return {"verdict": PASS, "reading": running, "threshold": None}
+    text = str(result.at_capacity or "")
+    if text.startswith("max_spawn"):
+        used, limit = governors._capacity(text)
+        return {"verdict": STOP, "reading": used if used is not None else running,
+                "threshold": limit or env.max_spawn, "detail": {"at_capacity": text}}
+    return {"verdict": PASS, "reading": running, "threshold": env.max_spawn}
+
+
+def _host_slots_answer(env: Environment, result: Any, capture: Any, running: int,
+                       error: Optional[BaseException]) -> dict[str, Any]:
+    if error is not None:
+        return {"verdict": UNKNOWN, "threshold": env.max_in_progress,
+                "detail": {"error": f"{type(error).__name__}: {error}"[:300]}}
+    if env.max_in_progress is None:
+        return {"verdict": PASS, "reading": None, "threshold": None}
+    others = capture.host.get("others") if "others" in capture.host else None
+    reading = running + others if isinstance(others, int) else None
+    detail = governors._host_detail(capture, env.board)
+    text = str(result.at_capacity or "")
+    if text and not text.startswith("max_spawn") and not text.startswith("board_share"):
+        used, limit = governors._capacity(text)
+        return {"verdict": STOP, "reading": reading if reading is not None else used,
+                "threshold": limit or env.max_in_progress, "detail": {"at_capacity": text, **detail}}
+    if "others" not in capture.host:
+        return {"verdict": UNKNOWN, "reading": reading, "threshold": env.max_in_progress,
+                "detail": {"reason": "host census not observed"}}
+    return {"verdict": PASS, "reading": reading, "threshold": env.max_in_progress, "detail": detail}
+
+
+def _pressure_answer(level: Any) -> dict[str, Any]:
+    """A measured level. Unset or ``unknown`` is not a pass: the combined call may never have asked."""
+    if isinstance(level, BaseException):
+        return {"verdict": UNKNOWN, "threshold": "critical",
+                "detail": {"error": f"{type(level).__name__}: {level}"[:300]}}
+    if level in (None, "", "unknown"):
+        return {"verdict": UNKNOWN, "reading": level or None, "threshold": "critical",
+                "detail": {"reason": "memory pressure not measured"}}
+    verdict = {"critical": STOP, "elevated": THROTTLE}.get(level, PASS)
+    return {"verdict": verdict, "reading": level, "threshold": "critical"}
+
+
 def global_chain(conn: Any, env: Environment, recorded: Optional[dict] = None) -> list[dict[str, Any]]:
-    """The rules that stop a whole tick, asked as the tick asks them."""
+    """The rules that stop a whole tick, each asked even when an earlier cap would have returned."""
     from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli import kanban_gateway_drain as drain
 
     out = [_ask("gateway_drain", lambda: _stop() if drain.dispatch_paused() else None),
            _ask("core_update_drain", lambda: _core_update(drain.core_update_hold()))]
     started = time.monotonic()
-    scratch = _scratch()
-    with governors.tick(conn, {}) as capture:  # the host census lands on a throwaway capture
-        may_spawn, _budget = kbd._tick_spawn_budget(conn, scratch, max_spawn=env.max_spawn,
-                                                    max_in_progress=env.max_in_progress, board=env.board)
+    with governors.tick(conn, {}) as capture:  # each cap's census lands on one throwaway capture
+        spawn_result, spawn_error = _isolated_budget(
+            conn, max_spawn=env.max_spawn, max_in_progress=None, board=env.board)
+        host_result, host_error = _isolated_budget(
+            conn, max_spawn=None, max_in_progress=env.max_in_progress, board=env.board)
+        try:
+            pressure = kbd._memory_pressure_level()
+        except Exception as exc:  # health: allow BLE001 -- an unread sample is unknown, never ok/pass
+            pressure = exc
     governors._take_capture(conn)
-    stop = None if may_spawn else governors.global_stop(scratch, capture, board=env.board)
-    own = capture.host.get("own", kbd.count_running_tasks(conn))
-    others = capture.host.get("others")
-    readings = {
-        "max_spawn": {"reading": own, "threshold": env.max_spawn},
-        "host_slots": {"reading": own + others if others is not None else None, "threshold": env.max_in_progress,
-                       "detail": governors._host_detail(capture, env.board)},
-        "memory_pressure": {"reading": scratch.memory_pressure or "ok", "threshold": "critical"},
-    }
-    for name in ("max_spawn", "host_slots"):
-        hit = stop is not None and stop["governor"] == name
-        out.append(_entry(name, {**readings[name], **(stop if hit else {}), "verdict": STOP if hit else PASS}, started))
+    running = capture.host.get("own")
+    if not isinstance(running, int):
+        running = kbd.count_running_tasks(conn)
+    out.append(_entry("max_spawn", _max_spawn_answer(env, spawn_result, running, spawn_error), started))
+    out.append(_entry("host_slots", _host_slots_answer(env, host_result, capture, running, host_error), started))
     out.append(_entry("board_share", _recorded(SimpleNamespace(recorded=recorded), "board_share"), started))
-    pressure = {"critical": STOP, "elevated": THROTTLE}.get(scratch.memory_pressure or "", PASS)
-    out.append(_entry("memory_pressure", {**readings["memory_pressure"], "verdict": pressure}, started))
+    out.append(_entry("memory_pressure", _pressure_answer(pressure), started))
     return out
 
 
