@@ -54,7 +54,6 @@ def test_new_profile_home_is_seen_at_once(homes):
 def test_changed_home_or_temp_root_is_seen_at_once(homes, monkeypatch, tmp_path):
     import hermes_constants
 
-    home, internal, _ = homes
     other = tmp_path / "other-home"
     other.mkdir()
     assert not server._is_non_workspace_path(str(other / "x"))
@@ -70,7 +69,6 @@ def test_changed_home_or_temp_root_is_seen_at_once(homes, monkeypatch, tmp_path)
 def test_relinked_root_is_seen_after_the_ttl(homes, monkeypatch, tmp_path):
     import hermes_constants
 
-    home, internal, _ = homes
     first, second = tmp_path / "store-1", tmp_path / "store-2"
     first.mkdir()
     second.mkdir()

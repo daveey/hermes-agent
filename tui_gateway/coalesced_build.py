@@ -18,7 +18,7 @@ _WAIT_POLL_S = 1.0
 
 
 class _State:
-    __slots__ = ("started", "finished", "running", "value", "waiters")
+    __slots__ = ("finished", "running", "started", "value", "waiters")
 
     def __init__(self) -> None:
         self.started = 0  # builds begun
