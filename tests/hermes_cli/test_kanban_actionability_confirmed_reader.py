@@ -14,8 +14,11 @@ from tests.hermes_cli import test_kanban_actionability_transport as support
 live = support.live
 
 
-def confirmed(live):
+def confirmed(live, *, parent=None):
     tid, payload = support.contract(live)
+    if parent is not None:
+        live.execute('INSERT INTO task_links (parent_id,child_id) VALUES (?,?)', (parent, tid))
+        payload['facts']['dependencies'] = [{'id': parent, 'status': 'todo'}]
     source = live.execute("SELECT uid,created_at FROM task_events WHERE task_id=? AND kind='created'", (tid,)).fetchone()
     payload.update(first_observed=source['created_at'], deadline_at=source['created_at'] + 3600,
                    owner={'kind': 'assignee', 'refs': ['default']})
@@ -105,6 +108,48 @@ def test_unconfirmed_damaged_or_stale_contract_does_not_hide_violation(live, cha
         assert row['escalation']['at'] is None
         assert 'escalation_deadline_missing' in row['violations']
         assert row['evidence_state'] == 'unknown'
+
+
+@pytest.mark.parametrize('status', ['todo', 'running', 'done', 'archived', 'triage', 'missing'])
+def test_parent_status_does_not_renew_or_erase_fixed_obligation(live, status):
+    parent = kb.create_task(live, title='existing prerequisite', assignee='default')
+    live.execute("UPDATE tasks SET status='todo' WHERE id=?", (parent,))
+    tid, payload, source, _ = confirmed(live, parent=parent)
+    if status == 'missing':
+        # A foreign parent can be absent from a partial replica; retain the link.
+        live.execute('PRAGMA foreign_keys=OFF')
+        live.execute('DELETE FROM tasks WHERE id=?', (parent,))
+    else:
+        live.execute('UPDATE tasks SET status=? WHERE id=?', (status, parent))
+    before = list(live.iterdump())
+    for row in (describe(live, tid, now=source['created_at']),
+                next(r for r in report(live, now=source['created_at'])['rows'] if r['task_id'] == tid)):
+        assert row['escalation']['at'] == payload['deadline_at']
+        assert row['evidence_state'] == 'unknown'
+        assert 'escalation_deadline_missing' not in row['violations']
+    assert list(live.iterdump()) == before
+
+
+def test_new_parent_stop_remains_visible_with_fixed_obligation(live):
+    parent = kb.create_task(live, title='protected prerequisite', assignee='default')
+    live.execute("UPDATE tasks SET status='todo' WHERE id=?", (parent,))
+    tid, payload, source, _ = confirmed(live, parent=parent)
+    kb._append_event(live, parent, 'spend_budget_triaged', {'cause': 'scope_stopped'})
+    with_contract = describe(live, tid, now=source['created_at'])
+    live.execute("UPDATE kanban_actionability_commands SET delivery_state='pending' WHERE task_id=?", (tid,))
+    without_contract = describe(live, tid, now=source['created_at'])
+    assert with_contract['escalation']['at'] == payload['deadline_at']
+    for key in ('action', 'blocker', 'release', 'dependencies', 'evidence_state'):
+        assert with_contract[key] == without_contract[key]
+    assert any(dep['task_id'] == parent for dep in with_contract['dependencies'])
+
+
+def test_removed_parent_invalidates_fixed_obligation(live):
+    parent = kb.create_task(live, title='old prerequisite', assignee='default')
+    live.execute("UPDATE tasks SET status='todo' WHERE id=?", (parent,))
+    tid, _, source, _ = confirmed(live, parent=parent)
+    live.execute('DELETE FROM task_links WHERE child_id=?', (tid,))
+    assert describe(live, tid, now=source['created_at'])['escalation']['at'] is None
 
 
 def test_comment_and_clock_do_not_renew_confirmed_deadline_or_identity(live):

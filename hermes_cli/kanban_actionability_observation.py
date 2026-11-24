@@ -6,35 +6,16 @@ No replica IDs, local clock, source-subset selection or new release permission.
 """
 from __future__ import annotations
 
-import json
 from urllib.parse import quote
 
 from hermes_cli.kanban_actionability import NONTERMINAL
+from hermes_cli.kanban_actionability_selection import select
 
-KINDS = {'todo': ('created', 'linked', 'dependency_wait'), 'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
-         'review': ('review_requested', 'created'), 'blocked': ('blocked',),
-         'scheduled': ('scheduled', 'continued'),
-         'triage': ('failure_finalized', 'spend_budget_decision_ready', 'created'), 'running': ('claimed',)}
 PRIVATE = {'spend_budget_triaged', 'decision_hold_restricted', 'scope_renewed'}
 
 
 def _invalid():
     return ValueError('complete canonical actionability source unavailable or changed')
-
-
-def _todo_assignment(event, events):
-    """Live assignment parks remain todo with a blocked event; human history does not."""
-    if event.get('kind') != 'blocked':
-        return False
-    try:
-        payload = event.get('payload')
-        payload = payload if isinstance(payload, dict) else json.loads(payload)
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(payload, dict) or payload.get('kind') != 'assignment':
-        return False
-    key = (event['created_at'], event['ord'], event['uid'])
-    return not any(e.get('kind') == 'unblocked' and (e['created_at'], e['ord'], e['uid']) > key for e in events)
 
 
 def _integer(value, minimum=0):
@@ -104,13 +85,10 @@ def observe(hub, board, task_id, *, include_source=False):
     if task['created_on'] != hub.ident.gateway or task['status'] not in NONTERMINAL:
         raise _invalid()
     episode = task['containment_episode']
-    allowed = KINDS[task['status']]
-    candidates = [e for e in data['events'] if e['uid'] == episode] if episode else [
-        e for e in data['events'] if e['kind'] in allowed
-        or task['status'] == 'todo' and _todo_assignment(e, data['events'])]
-    if not candidates:
+    event = select(task['status'], data['events'], episode=episode,
+                   order_key=lambda e: (e['created_at'], e['ord'], e['uid']))
+    if event is None:
         raise _invalid()  # no invented legacy first-observed clock
-    event = max(candidates, key=lambda e: (e['created_at'], e['ord'], e['uid']))
     links = _links(hub, board, head)
     parent_ids = sorted(l['parent_id'] for l in links if l['child_id'] == task_id)
     if len(parent_ids) > 128 or len(set(parent_ids)) != len(parent_ids):

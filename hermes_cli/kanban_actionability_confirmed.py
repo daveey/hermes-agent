@@ -30,23 +30,23 @@ def _matches(reader, task, facts, payload):
             not isinstance(s, dict) or set(s) != {'uid', 'version'} or
             type(s['version']) is not int or s['version'] <= 0 for s in sources):
         return False
-    if [s['uid'] for s in sources] != facts.get('source_refs'):
+    from hermes_cli.kanban_actionability_selection import select
+    selected = select(task['status'], reader.events(task['id']),
+                      episode=task.get('containment_episode') or facts.get('stop_episode'),
+                      order_key=lambda e: (e['created_at'], e['id']))
+    if selected is None or [s['uid'] for s in sources] != [reader.uid(selected)]:
         return False
-    # Include satisfied parents too, matching the canonical contract's full graph.
-    # The read-only adapter already computes the effective restricted status.
-    effective = {d['task_id']: d for d in facts.get('dependencies', [])}
-    parents = []
-    for (pid,) in reader.conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id',
-                                      (task['id'],)):
-        parent = reader.task(pid)
-        if parent is None:
-            return False
-        status = parent['status']
-        dep = effective.get(pid, {})
-        if status in ('done', 'archived') and (dep.get('restricted') or parent.get('containment_episode')):
-            status = 'triage'
-        parents.append({'id': pid, 'status': status})
-    return f.get('dependencies') == parents
+    # The obligation is fixed, not a lease on parent progress. Match the entire
+    # parent set (including satisfied/absent replicas), never parent statuses.
+    # _dependencies still reports missing evidence as UNKNOWN and preserves stops.
+    recorded = f.get('dependencies')
+    if not isinstance(recorded, list) or any(
+            not isinstance(dep, dict) or not isinstance(dep.get('id'), str) for dep in recorded):
+        return False
+    recorded_ids = [dep['id'] for dep in recorded]
+    parents = [pid for (pid,) in reader.conn.execute(
+        'SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (task['id'],))]
+    return len(set(recorded_ids)) == len(recorded_ids) and sorted(recorded_ids) == parents
 
 
 def _confirmed(reader, task, facts):

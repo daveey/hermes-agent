@@ -7,10 +7,12 @@ import time
 
 from hermes_cli.kanban_actionability import owner, project, valid_awaiting
 from hermes_cli.kanban_actionability_evidence import EVIDENCE_ERRORS, effective
+from hermes_cli.kanban_actionability_selection import KINDS as SOURCE_KINDS, select
 
-KINDS = ('created', 'blocked', 'dependency_wait', 'scheduled', 'continued', 'spend_budget_triaged',
+KINDS = tuple(dict.fromkeys((*('created', 'blocked', 'dependency_wait', 'scheduled', 'continued', 'spend_budget_triaged',
          'decision_hold_restricted', 'decision_retained', 'decision_protected_stopped',
-         'spend_budget_decision_ready', 'promoted_manual', 'archived', 'contained')
+         'spend_budget_decision_ready', 'promoted_manual', 'archived', 'contained'),
+         *(kind for kinds in SOURCE_KINDS.values() for kind in kinds))))
 
 
 def record(raw) -> dict:
@@ -241,9 +243,13 @@ def _describe(conn, tid, *, now, reader):
     stop, _restricted, receipt_only = _state(reader, tid, events)
     schedule = next((e for e in events if e['kind'] in ('scheduled', 'continued')), None)
     # Notes/notices do not replace the material source or reset its deadline.
-    source = stop or (schedule if task['status'] == 'scheduled' else next(
-        (e for e in events if e['kind'] not in ('spend_budget_decision_ready', 'decision_retained',
-                                             'decision_protected_stopped')), None))
+    source = stop or select(task['status'], events,
+                            order_key=lambda e: (e['created_at'], e['id']))
+    if not stop and task['status'] == 'triage':
+        # Decision notices are not material clocks. Preserve legacy triage
+        # diagnostics; confirmed ordinary custody selects its source separately.
+        source = next((e for e in events if e['kind'] not in (
+            'spend_budget_decision_ready', 'decision_retained', 'decision_protected_stopped')), None)
     deps, missing = _dependencies(reader, tid)
     episode = (stop['data'].get('episode') or stop['data'].get('episode_uid') or reader.uid(stop)) if stop else None
     episode = episode if isinstance(episode, str) and episode else None
