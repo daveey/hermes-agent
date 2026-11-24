@@ -658,3 +658,16 @@ def test_on_a_links_less_board_a_subscription_without_a_reason_is_not_an_owner(k
                          "NULL,0,0)", (tid,))
         monkeypatch.setattr(owner, "enabled", lambda: True)
         assert owner.backfill(conn, apply=True)["linked"] == 1
+
+
+def test_a_new_owner_chat_is_not_left_amber_with_no_outcome(kanban_home):
+    from hermes_state import SessionDB
+    from hermes_state_outcome import _parse
+    with kbc.connect_closing() as conn:
+        kb.create_task(conn, title="a", assignee="default", created_by="ci-main-watch")
+    db = SessionDB(db_path=kanban_home / "state.db")
+    try:
+        outcome = _parse(db.get_session(owner.session_id("ci-main-watch"))["outcome_json"])
+        assert outcome["kind"] == "done" and outcome["source"] == "declared"
+    finally:
+        db.close()

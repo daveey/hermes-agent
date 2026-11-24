@@ -82,6 +82,11 @@ def brief(producer: str) -> str:
             "provider safety refusal.")
 
 
+def idle_summary(producer: str) -> str:
+    return (f"Standing owner chat for Kanban cards from {producer}. Budget and scope stops on them arrive here "
+            "as notices; nothing pending.")
+
+
 def declared_producer(tool_task_id: Optional[str] = None, *, allow_env: bool = True) -> Optional[str]:
     """The producer a headless caller's runner declared: the cron job running a tool call, else (outside any
     agent turn only) ``HERMES_KANBAN_PRODUCER``, which the cron script runner sets."""
@@ -158,6 +163,11 @@ def ensure(producer: str, *, force: bool = False) -> str:
             row = db.get_session(sid) or {}
             if not row.get("message_count"):
                 db.append_message(sid, "assistant", brief(producer))
+            if not row.get("outcome_json"):
+                # The sidebar paints a chat with no outcome (or the seed, judged no summary) amber "attention"
+                # for good; the standing chat has nothing pending until a notice wakes it, whose turn re-declares.
+                from hermes_state_outcome import declare_outcome
+                declare_outcome(sid, {"kind": "done", "summary": idle_summary(producer)}, db=db)
             if not db.get_session_title(sid):
                 try:
                     db.set_session_title(sid, title(producer))
