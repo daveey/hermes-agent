@@ -7,6 +7,10 @@ const { setSessionArchived, notifyError } = vi.hoisted(() => ({
 
 vi.mock('@/hermes', () => ({ setSessionArchived }))
 vi.mock('@/store/notifications', () => ({ notifyError }))
+vi.mock('./archive-queue-lifetime', () => ({ archiveQueueLifetime: () => ({
+  run: (run: () => Promise<unknown>) => run(), enqueue: vi.fn(),
+  sleep: async () => {}, dispose: vi.fn()
+}) }))
 
 import { commitArchive } from './archive-commit'
 
@@ -65,6 +69,21 @@ it('a definitive refusal restores the row with no Retry', async () => {
   await commitArchive({ copy, retryLabel: 'Retry', hidden, onArchived: vi.fn(), owner: 'work', rehide: hiddenRow, storedSessionId: 'chat' })
   expect(hidden.restore).toHaveBeenCalledOnce()
   expect(notifyError.mock.calls[0][2].action).toBeUndefined()
+})
+
+it('holds a draining PATCH then commits once, keeping the owner and suppressing errors', async () => {
+  const owner = { connectionId: 'hermes-hub', profile: 'work' }
+  const hidden = hiddenRow()
+  const onArchived = vi.fn()
+  setSessionArchived.mockRejectedValueOnce(new Error('503: {"detail":"owner_unavailable: draining: Exclusive maintenance refused"}'))
+    .mockRejectedValueOnce(new Error('socket hang up'))
+    .mockResolvedValueOnce({ ok: true })
+  expect(await commitArchive({ copy, retryLabel: 'Retry', hidden, onArchived, owner, rehide: hiddenRow, storedSessionId: 'drain' })).toBe(true)
+  expect(onArchived).toHaveBeenCalledOnce()
+  expect(hidden.restore).not.toHaveBeenCalled()
+  expect(hidden.end).toHaveBeenCalledOnce()
+  expect(notifyError).not.toHaveBeenCalled()
+  expect(setSessionArchived.mock.calls).toEqual(Array.from({ length: 3 }, () => ['drain', true, owner]))
 })
 
 it('success ends the hide without a toast', async () => {

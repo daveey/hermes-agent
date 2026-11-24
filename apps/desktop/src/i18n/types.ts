@@ -2951,6 +2951,7 @@ export interface Translations extends NoticeTranslations {
     wakingProfile: (profile: string) => string
     placeholderStarting: string
     placeholderReconnecting: string
+    placeholderHubRestarting: string
     placeholderFollowUp: string
     newSessionPlaceholders: readonly string[]
     followUpPlaceholders: readonly string[]

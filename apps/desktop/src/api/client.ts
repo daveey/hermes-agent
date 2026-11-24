@@ -449,7 +449,7 @@ export class HermesGateway extends JsonRpcGatewayClient {
     if (!this.readiness.ready) {
       // The channel's own timeout text, which callers match (`plugins.manage`'s timedOut).
       const seconds = Math.round((timeoutMs ?? DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS) / 1000)
-      await this.readiness.wait(deadline, signal, () => new Error(`request timed out after ${seconds}s: ${method}`))
+      await this.readiness.wait(deadline, signal, () => new Error(method === 'session.resume' ? 'Hermes gateway is not connected: protocol readiness timed out' : `request timed out after ${seconds}s: ${method}`))
       this.requireConnectionGeneration(generation)
     }
 

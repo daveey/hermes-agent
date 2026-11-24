@@ -582,6 +582,7 @@ import {
 } from './secret-storage-policy'
 import { selectPathsDialogProperties } from './select-paths-dialog'
 import { selectRunnableBinary } from './select-runnable-binary'
+import { isMergeableSessionListRequest, parseSessionRequestPath } from './session-owner-list-route'
 import {
   buildInstanceWindowUrl,
   buildSessionWindowUrl,
@@ -15255,17 +15256,13 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
 
   const method = (request.method || 'GET').toUpperCase()
 
-  let parsed
+  const parsed = parseSessionRequestPath(request.path)
 
-  try {
-    parsed = new URL(request.path, 'http://x')
-  } catch {
-    return undefined
-  }
+  if (!parsed) { return undefined }
 
   const { pathname, searchParams } = parsed
 
-  if (method === 'GET' && pathname === '/api/profiles/sessions') {
+  if (isMergeableSessionListRequest(method, pathname, searchParams)) {
     const remoteProfiles = configuredRemoteProfileNames()
 
     const registrySources = await pooledRegistrySessionSources(

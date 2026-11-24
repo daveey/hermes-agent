@@ -1047,6 +1047,7 @@
     "composer.openDirective",
     "composer.pasteImage",
     "composer.placeholderFollowUp",
+    "composer.placeholderHubRestarting",
     "composer.placeholderReconnecting",
     "composer.placeholderStarting",
     "composer.preparingAudio",

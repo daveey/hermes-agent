@@ -4,9 +4,13 @@ import type * as ClientApi from './client'
 
 vi.mock('@/lib/legacy-session-owner-backfill', () => ({ maybeBackfillLegacySessionOwners: vi.fn() }))
 vi.mock('@/store/transcript-tail', () => ({ recordTranscriptTail: vi.fn() }))
+vi.mock('@/app/session/hooks/use-session-actions/archive-queue-lifetime', () => ({ archiveQueueLifetime: () => ({
+  run: (run: () => Promise<unknown>) => run(), enqueue: vi.fn(), sleep: async () => {}, dispose: vi.fn()
+}) }))
 vi.mock('./client', async importOriginal => ({
   ...await importOriginal<typeof ClientApi>(), hermesApi: vi.fn()
 }))
+import { archiveDrainWrite } from '@/app/session/hooks/use-session-actions/archive-drain-write'
 import { sessionWriteRetryAction } from '@/lib/session-write-retry'
 
 import { hermesApi, setApiRequestConnection, setApiRequestProfile } from './client'
@@ -60,6 +64,16 @@ it('a Retry after an owner stall replays the same fenced archive on the same own
   expect(seen.writes[0].connectionId).toBe('owner')
   expect(seen.writes[0].body).toMatchObject({ archived: true, pinned: false, profile: 'work', expected_revision: 4,
     expected_generation: 3, request_id: expect.any(String) })
+})
+
+it('a drain retries the real fenced PATCH with unchanged identity and no new snapshot', async () => {
+  const seen = owner(4, [new Error('503: {"detail":"owner_unavailable: draining: Exclusive maintenance refused"}')])
+  const pinned = pinSessionWriteOwner('work')
+  await archiveDrainWrite('drain-chat', {} as never, () => setSessionArchived('drain-chat', true, pinned))
+  expect(seen.writes).toHaveLength(2)
+  expect(seen.reads()).toBe(1)
+  expect(seen.writes[1]).toEqual(seen.writes[0])
+  expect(seen.writes[0].body).toMatchObject({ archived: true, request_id: expect.any(String), expected_revision: 4 })
 })
 
 it('a selected row rename is fenced on its own gateway', async () => {

@@ -1,5 +1,7 @@
 import { ambientOwnerConnectionId, type ProfileScope } from '@/api/client'
 
+import { resumeAcrossGatewayRestart } from './resume-across-restart'
+
 /**
  * Single-flight guard for `session.resume`, keyed by backend connection + STORED id.
  *
@@ -56,7 +58,7 @@ export function singleFlightSessionResume<T>(
   const ready = existing ? existing.promise.then(() => undefined, () => undefined) : Promise.resolve()
 
   const promise = ready
-    .then(run)
+    .then(() => resumeAcrossGatewayRestart(flightKey, run))
     .finally(() => {
       if (_inFlightResumeByStoredSessionId.get(flightKey) === flight) {
         _inFlightResumeByStoredSessionId.delete(flightKey)

@@ -74,6 +74,8 @@ export interface SessionWriteReconnectOptions {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   log?: (line: string) => void
+  /** The caller may hold a cancellable maintenance intent beyond a transport deadline. */
+  retryable?: (error: unknown) => boolean
 }
 
 function desktopLog(line: string): void {
@@ -119,7 +121,7 @@ export async function withSessionWriteReconnect<T>(
         budgetMs = Math.max(budgetMs, options.ownerRestartBudgetMs ?? SESSION_WRITE_OWNER_RESTART_BUDGET_MS)
       }
 
-      const replayable = restarting || isReconnectableSessionWriteError(error)
+      const replayable = options.retryable ? options.retryable(error) : restarting || isReconnectableSessionWriteError(error)
 
       if (!replayable || now() - started + wait > budgetMs) {
         if (attempt > 1 || replayable) {

@@ -3803,6 +3803,7 @@ export const deOverrides = {
     wakingProfile: profile => `Wecke ${profile}…`,
     placeholderStarting: 'Hermes wird gestartet…',
     placeholderReconnecting: 'Verbindung zu Hermes wird wiederhergestellt…',
+    placeholderHubRestarting: 'Hub wird neu gestartet…',
     placeholderFollowUp: 'Folge senden',
     newSessionPlaceholders: [
       'Was bauen wir?',

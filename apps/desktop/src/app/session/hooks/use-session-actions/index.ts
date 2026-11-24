@@ -82,7 +82,6 @@ import {
   $yoloActive,
   getSessionOwnerHints,
   idsShareLineage,
-  type NewChatWorkspaceTarget,
   resolveComposerSessionKey,
   restoreComposerModelSelection,
   sessionPinId,
@@ -170,6 +169,7 @@ import {
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
 import { commitArchive } from './archive-commit'
+import { captureArchiveOwnerAfterDrain } from './archive-drain-owner'
 import { archivePreflight, captureArchiveOwner, softHideArchivedRow } from './archive-soft-hide'
 import { branchThroughRowId } from './branch-boundary'
 import { branchCreateKey } from './branch-create-key'
@@ -179,6 +179,7 @@ import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this
 import { graftEarlySegmentDeltas, mergeSegmentSnapshotIntoLiveRow } from './current-segment'
 import { captureDisplayHydration } from './display-hydration'
 import { overlayCacheWithoutEarlyClarify, withoutEarlyClarifyProjection } from './early-clarify-projection'
+import { type FreshSessionDraftOptions, normalizeNewChatWorkspaceTarget } from './fresh-draft-options'
 import { goneSessionSwitchInFlight } from './gone-session-switch'
 import {
   dispatchedConnectionId,
@@ -308,20 +309,11 @@ function applyStoredUsage(stored: { input_tokens?: number | null; output_tokens?
   setCurrentUsage(current => ({ ...current, input, output, total: input + output }))
 }
 
-interface FreshSessionDraftOptions {
-  preserveRoute?: boolean
-  replaceRoute?: boolean
-  rotateFreshDraftKey?: boolean
-  workspaceTarget?: NewChatWorkspaceTarget
-}
 
 /** resumeSession's per-attempt options plus the connections an owner-follow
  *  already ruled out ([daveey], see `followedFrom` in resumeSession). */
 type ResumeSessionOptions = ResumeAttemptOptions & { followedFrom?: readonly string[] }
 
-function normalizeNewChatWorkspaceTarget(target: NewChatWorkspaceTarget): NewChatWorkspaceTarget {
-  return typeof target === 'string' ? target.trim() || null : target
-}
 
 export function useSessionActions({
   activeSessionId,
@@ -3437,11 +3429,15 @@ export function useSessionActions({
 
       try {
         archived = captureArchiveOwner(storedSessionId, options?.selectedRow, listed)
-      } catch (err) {
-        trace(`failed:${String(err)}`)
-        notifyError(err, copy.archiveFailed)
+      } catch {
+        try {
+          archived = await captureArchiveOwnerAfterDrain(storedSessionId, options?.selectedRow, listed, copy, trace)
+        } catch (err) {
+          trace(`failed:${String(err)}`)
+          notifyError(err, copy.archiveFailed)
 
-        return
+          return
+        }
       }
 
       // Hide first: the preflight below can take seconds; cancel/failure restores.

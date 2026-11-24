@@ -5,6 +5,7 @@ import { type ArchiveTrace, startArchiveTrace } from '@/lib/archive-trace'
 import { sessionWriteRetryAction } from '@/lib/session-write-retry'
 import { notifyError } from '@/store/notifications'
 
+import { archiveDrainWrite } from './archive-drain-write'
 import type { softHideArchivedRow } from './archive-soft-hide'
 
 type HiddenRow = ReturnType<typeof softHideArchivedRow>
@@ -35,11 +36,9 @@ export async function commitArchive(commit: ArchiveCommit): Promise<boolean> {
   try {
     let sends = 0
 
-    if (commit.trace) {
-      await setSessionArchived(storedSessionId, true, owner, () => commit.trace?.(`patch-sent n=${++sends}`))
-    } else {
-      await setSessionArchived(storedSessionId, true, owner)
-    }
+    await archiveDrainWrite(storedSessionId, copy, () => commit.trace
+      ? setSessionArchived(storedSessionId, true, owner, () => commit.trace?.(`patch-sent n=${++sends}`))
+      : setSessionArchived(storedSessionId, true, owner), commit.trace)
 
     // A write ACK alone is not archived=true evidence. Use the same pinned
     // owner and the real IPC read path. Failed verification never replays a

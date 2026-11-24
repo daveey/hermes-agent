@@ -1,4 +1,5 @@
 import { hermesApiAs } from '@/api/client'
+import { isGatewayDrainError } from '@/api/gateway-drain'
 import { isReconnectableSessionWriteError } from '@/api/session-write-reconnect'
 import type { SessionInfo } from '@/hermes'
 import type { ArchiveTrace } from '@/lib/archive-trace'
@@ -76,7 +77,7 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
     try {
       return await send<T>(path)
     } catch (error) {
-      if (options?.retryTransport && isReconnectableSessionWriteError(error)) {throw error}
+      if (options?.retryTransport && (isGatewayDrainError(error) || isReconnectableSessionWriteError(error))) {throw error}
 
       if (!isTimeout(error)) {throw error}
 
@@ -143,7 +144,7 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
       }, limit)
     })])
   } catch (error) {
-    if (options?.retryTransport && isReconnectableSessionWriteError(error)) {throw error}
+    if (options?.retryTransport && (isGatewayDrainError(error) || isReconnectableSessionWriteError(error))) {throw error}
 
     return unknownBecause(`${stage} failed`, error)
   } finally {

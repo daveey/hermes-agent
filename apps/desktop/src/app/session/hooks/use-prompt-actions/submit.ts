@@ -61,6 +61,7 @@ import {
 } from './prepared-submissions'
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import { captureSubmissionDestination, destinationAfterCreate, sameAuthorityPublishedOwner } from './submission-destination'
+import { submitAcrossGatewayRestart } from './submit-across-restart'
 import {
   backendRefusesSubmissionId,
   noteSubmissionIdAccepted,
@@ -1200,8 +1201,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // resolver re-registers the stored session and retries once; every
         // other session-scoped RPC (attach, /compress, rewind, interrupt) goes
         // through the same helper so one policy covers the whole bug class.
-        let submitErr: unknown = null
         let legacyAccepted = false
+        let restartReplayUncertain = Boolean(retained && retained.legacyAttempted !== false)
         // The identity the backend actually accepted: the live runtime id,
         // replaced below when a stale binding was recovered.
         let acceptedRuntimeSessionId = liveSessionId
@@ -1272,7 +1273,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 const identityEpoch = submissionIdentityEpoch()
 
                 try {
-                  const receipt = await requestGateway<SubmitReceipt>('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                  const receipt = await submitAcrossGatewayRestart({ storedSessionId: targetStoredSessionId,
+                    owner: destination.owner, driftReason: sessionDriftReason,
+                    onUncertain: () => { restartReplayUncertain = true }
+                  }, () => requestGateway<SubmitReceipt>('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS))
                   noteSubmissionIdAccepted(destination.scopeKey)
 
                   return receipt
@@ -1288,7 +1292,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                   // key (version skew) before any handler ran. Both are pre-admission and
                   // safe to retry identityless. Never downgrade on a timeout, malformed
                   // ACK or an ambiguous retry.
-                  if (!isPreAdmissionRefusal(error) || prepared.legacyAttempted) {
+                  if (!isPreAdmissionRefusal(error) || prepared.legacyAttempted || restartReplayUncertain) {
                     throw error
                   }
 
@@ -1462,11 +1466,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             return abortForSessionSwitch(sessionId)
           }
 
-          submitErr = firstErr
-        }
-
-        if (submitErr !== null) {
-          throw submitErr
+          throw firstErr
         }
 
         // The gateway admitted it: a failed journal retirement (ENOSPC/EIO) must not report a

@@ -1,5 +1,6 @@
 import { randomUuid } from '@hermes/shared'
 
+import { isGatewayDrainError } from '@/api/gateway-drain'
 import { isReconnectableSessionWriteError, withSessionWriteReconnect } from '@/api/session-write-reconnect'
 import type { SessionInfo } from '@/hermes'
 import type { Translations } from '@/i18n/types'
@@ -18,6 +19,7 @@ export async function reconnectArchivePreflight(id: string, row: SessionInfo | u
   const session = { ...row, connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined } as SessionInfo
   const queue = archiveQueueLifetime(trace?.attemptId ?? randomUuid(), id, copy)
   let queued = false
+  const retryable = (error: unknown) => isGatewayDrainError(error) || isReconnectableSessionWriteError(error)
 
   try {
     return await withSessionWriteReconnect(async () => {
@@ -25,7 +27,7 @@ export async function reconnectArchivePreflight(id: string, row: SessionInfo | u
         return await queue.run(() => refreshArchiveTasks(id, session, profile,
           { retryTransport: true, forceRefresh: queued, signal: queue.signal, trace }))
       } catch (error) {
-        if (isReconnectableSessionWriteError(error)) {
+        if (retryable(error)) {
           trace?.('preflight=waiting-reconnect')
           queued = true
 
@@ -36,7 +38,7 @@ export async function reconnectArchivePreflight(id: string, row: SessionInfo | u
       }
     // Intent lifetime and individual safety-read deadlines are different:
     // back off indefinitely during transport loss, but bound every full read.
-    }, { label: `archive-preflight ${id}`, budgetMs: Infinity, sleep: queue.sleep })
+    }, { label: `archive-preflight ${id}`, budgetMs: Infinity, sleep: queue.sleep, retryable })
   } finally {
     queue.dispose()
   }
