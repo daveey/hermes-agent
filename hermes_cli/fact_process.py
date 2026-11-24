@@ -40,6 +40,11 @@ class _Adapter:
         self.capturing = self.closed = False
         self.watch_handle = None
 
+    @property
+    def min_interval(self):
+        """The wrapped adapter's pacing for the shared ChangeFeed (0: every wake is a pass)."""
+        return getattr(self.adapter, 'min_interval', 0)
+
     def watch(self, wake):
         self.watch_handle = self.context.run(self.adapter.watch, wake)
         return self

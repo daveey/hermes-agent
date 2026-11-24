@@ -25,6 +25,13 @@ store = sessions.store
 SCOPE = Scope("install", "profile", "board")
 
 
+@pytest.fixture(autouse=True)
+def _fast_clock_pacing(monkeypatch):
+    """Clock-only sources pace their feed passes (5 s in production); a short pace keeps these waits short."""
+    from hermes_cli import fact_content_owner
+    monkeypatch.setattr(fact_content_owner, "CLOCK_ONLY_INTERVAL", 0.2)
+
+
 @dataclass(frozen=True)
 class _Cursor:
     n: int

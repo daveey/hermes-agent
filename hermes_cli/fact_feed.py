@@ -41,6 +41,9 @@ class _Source:
     failures: int = 0
     active: bool = True
     watch: object = None
+    # Optional adapter pacing: a wake schedules no pass sooner than min_interval after the last one started.
+    min_interval: float = 0.0
+    last_start: float | None = None
     publication: object = field(default_factory=threading.RLock)
     # Owner-thread only: exception types already traced in this failure streak.
     traced: set = field(default_factory=set)
@@ -72,7 +75,7 @@ class ChangeFeed:
         self._thread.start()
 
     def register(self, adapter):
-        source = _Source(adapter)
+        source = _Source(adapter, min_interval=max(0.0, float(getattr(adapter, "min_interval", 0) or 0)))
         # Arm first: even a synchronous wake during watch setup is retained.
         source.watch = adapter.watch(lambda: self._wake(source))
         with self._condition:
@@ -92,7 +95,12 @@ class ChangeFeed:
             if source.active and not self._stopping:
                 # Leading edge; more hints cannot postpone it. During capture,
                 # this becomes the trailing capture without losing a late write.
+                # A paced source's edge waits out its interval: a burst of hints
+                # coalesces into one trailing pass (hub 2026-11-24: clock-only
+                # kanban.db bindings re-captured on every write, ~4/s per board).
                 now = time.monotonic()
+                if source.min_interval and source.last_start is not None:
+                    now = max(now, source.last_start + source.min_interval)
                 source.due = now if source.due is None else min(source.due, now)
                 self._condition.notify_all()
 
@@ -139,6 +147,7 @@ class ChangeFeed:
                     self._condition.wait(delay)
                     continue
                 source.due = None
+                source.last_start = time.monotonic()
                 return source
         return None
 

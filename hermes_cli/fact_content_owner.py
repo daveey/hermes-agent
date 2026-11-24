@@ -24,11 +24,19 @@ class ContentBinding:
     project-tree owners bound the main kanban.db (16,884 tasks, ~66 MiB as facts) and state.db (27,727 sessions,
     ~78 MiB) only for their SourceState, but every row was published into the shared 48 MiB process store: each
     publication failed fact_budget_exceeded and the feed rebuilt both sources every 5 s (~70% of a core).
+
+    A clock-only source is also paced (:data:`CLOCK_ONLY_INTERVAL`): its feed pass opened a guarded connection,
+    ran two change reads and re-projected every view depending on the clock, on every write to the file (~4/s on
+    the hub's default board, for each of nine boards), which held the shared fact-change-feed at ~35-40% of a core
+    in the dashboard backend with board facts on (2026-11-24). The views it invalidates are paced the same way.
     """
     source: object
     path: object
     hydrate: object = None
     clock_only: bool = False
+
+
+CLOCK_ONLY_INTERVAL = 5.0  # seconds between feed passes of a clock-only source; board inputs pace at 5 s too
 
 
 def _ids_only(conn, ids):
@@ -76,6 +84,8 @@ class ContentOwner:
                 raise ValueError('clock-only binding takes no hydrate')
             hydrate = _ids_only if binding.clock_only else rows if binding.hydrate is None else binding.hydrate
             adapter = adapter_type(source, binding.path, hydrate)
+            if binding.clock_only:
+                adapter.min_interval = CLOCK_ONLY_INTERVAL
             publisher = SourcePublisher(engines[source.scope], source, kind, clock_only=binding.clock_only)
             self._publishers[adapter] = publisher
             self._by_source[source] = publisher
