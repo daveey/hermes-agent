@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
+import time
 
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
@@ -94,6 +96,7 @@ def _import(args: argparse.Namespace) -> int:
 def _diff(args: argparse.Namespace) -> int:
     slug = _board(args)
     ident = ksc.load_identity()
+    started = time.monotonic()
     # Refresh first, before opening the replica. Only when no sync round holds the board (one replica puller per
     # board per host); a busy round's replica is compared as it stands. A diagnostic: it never rebuilds the replica
     # (a Resync is reported as refresh_error) and never transfers attachments (t_01a1d41c2612ebc0).
@@ -115,6 +118,19 @@ def _diff(args: argparse.Namespace) -> int:
             report.update(clean=False, unavailable=True, refresh_error=refresh_error)
         elif pulled.busy:
             report["refresh_skipped"] = "a sync round holds the board; compared against its replica as it stands"
+        else:
+            from hermes_cli import kanban_history_residue_board as history
+            if history.ledger_path(slug).exists():
+                hub = ksc.Hub(ident)
+                try:
+                    audit = history.audit_diff(live, shadow, hub, slug, pulled=pulled, started=started)
+                    report = {**audit['diff'], 'history_audit_head': audit['head']}
+                    if getattr(args, 'history_evidence', False):
+                        report['history_audit_evidence'] = audit
+                except (ValueError, OSError, sqlite3.Error, ksc.HubError, ksc.Resync, SyncRoundBusy) as exc:
+                    report.update(clean=False, history_audit_error=str(exc))
+                finally:
+                    hub.close()
     finally:
         live.close()
         shadow.close()
@@ -309,7 +325,19 @@ def _dependency_delete(args: argparse.Namespace) -> int:
     return 0 if report.get("eligible") or report.get("action") == "applied" else 1
 
 
+def _history_residue(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_history_residue_board import observe_board
+    try:
+        report = observe_board(_board(args), args.op_id, args.reason)
+    except (ValueError, OSError, sqlite3.Error, ksc.HubError, ksc.Resync, SyncRoundBusy) as exc:
+        _print({'recorded': False, 'reason': str(exc)}, args.json)
+        return 1
+    _print(report, args.json)
+    return 0
+
+
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
+            "history-residue": _history_residue,
             "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links,
             "refill-history": _refill_history, "reserved-key": _reserved_key, "dependency-delete": _dependency_delete,
             "quarantine": _quarantine}
