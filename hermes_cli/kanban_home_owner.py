@@ -1,8 +1,8 @@
-"""Dormant cooperative handoff owner; no CLI/sweep/automatic activation yet.
+"""Explicit cooperative handoff owner; never an automatic migration sweep.
 
 Only actual credential-pinned Hub transport responses enter local finalizers.
 A caller-provided manifest/ACK dictionary is never accepted as a network reply.
-Finish destination pre-STOP eligibility and typed capture gates before rollout.
+The operator CLI retains all source/destination eligibility and custody checks.
 """
 from __future__ import annotations
 

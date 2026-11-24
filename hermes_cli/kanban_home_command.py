@@ -12,7 +12,7 @@ from hermes_cli import kanban_home_generation as epochs
 from hermes_cli.sqlite_util import add_column_if_missing
 
 _TABLES = frozenset({'kanban_failure_commands', 'kanban_actionability_commands',
-                    'kanban_protect_commands', 'containment_delivery'})
+                    'kanban_protect_commands', 'containment_delivery', 'kanban_home_delivery1'})
 
 
 def install(conn, table: str) -> None:
@@ -53,6 +53,24 @@ def capture(conn, wire: dict) -> str | None:
         if row:
             values[task] = row[0]
     return json.dumps(values, sort_keys=True, separators=(',', ':')) if values else None
+
+
+def from_evidence(task: str, row: dict) -> str | None:
+    """Bind a NEW nonjournaled foreign appendage to its authenticated snapshot.
+
+    The caller must obtain this row from the real Hub before minting the op.
+    Existing/replayed commands must never use this to refresh their epoch.
+    """
+    if not isinstance(row, dict) or row.get('id') != task:
+        raise ValueError('home evidence identity mismatch')
+    if row.get('home_transfer_pending') is not None:
+        raise ValueError('home transfer pending')
+    nonce = row.get('home_generation')
+    if nonce is None:
+        return None
+    if not isinstance(nonce, str) or not nonce:
+        raise ValueError('home evidence epoch invalid')
+    return json.dumps({task: nonce}, sort_keys=True, separators=(',', ':'))
 
 
 def outbound(owned: dict, semantic: dict) -> dict:

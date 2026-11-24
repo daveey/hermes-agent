@@ -158,6 +158,13 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
                     or conn.execute("SELECT 1 FROM kanban_sync_parent_envelopes LIMIT 1").fetchone()
                     or conn.execute("SELECT 1 FROM kanban_sync_omissions LIMIT 1").fetchone()):
                 raise ValueError("home preparation requires drained pending custody")
+            from hermes_cli import kanban_home_memo as memo
+            if memo.pending(conn, task_id):
+                raise ValueError("home preparation requires drained administrative intent")
+            if (conn.execute("SELECT 1 FROM sqlite_master WHERE name='containment_delivery'").fetchone()
+                    and conn.execute("SELECT 1 FROM containment_delivery WHERE confirmed=0 AND "
+                        "(json_extract(op_json,'$.task')=? OR json_extract(op_json,'$.actor_task')=?)", (task_id, task_id)).fetchone()):
+                raise ValueError("home preparation requires drained containment intent")
             from hermes_cli.kanban_home_probe import require_source_probe
             require_source_probe(conn, task_id, source)
             conn.execute(f"INSERT INTO {_TABLE}(task_id,source,destination,nonce,expected_version) VALUES (?,?,?,?,?)",

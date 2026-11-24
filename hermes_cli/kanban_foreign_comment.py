@@ -12,6 +12,7 @@ import time
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as client
+from hermes_cli import kanban_home_command as home
 
 
 class CommentUnconfirmed(ValueError):
@@ -42,6 +43,7 @@ def append(conn, task_id, author, body, *, writer_kind, writer_session, origin_g
         row = proof.get('row') if proof.get('state') == 'live' else None
         if not isinstance(row, dict) or row.get('id') != task_id or row.get('deleted_at') is not None:
             raise ValueError('foreign comment target is not live on the Board')
+        epoch = home.from_evidence(task_id, row)
         payload = {'author': author, 'len': len(body.strip()), 'comment_uid': comment_uid}
         if writer_kind:
             payload['writer_kind'] = writer_kind
@@ -56,8 +58,8 @@ def append(conn, task_id, author, body, *, writer_kind, writer_session, origin_g
                   ('task_events', event_uid, {'task_id': task_id, 'run_uid': None, 'kind': 'commented',
                    'payload': json.dumps(payload), 'created_at': now})]
         with kb.write_txn(conn):
-            ops = [{'client_op_id': uid, 'op': 'upsert', 'table': table, 'uid': uid,
-                    'hlc': client._next_hlc(conn, gateway), 'fields': values}
+            ops = [home.outbound({'home_generations': epoch}, {'client_op_id': uid, 'op': 'upsert', 'table': table, 'uid': uid,
+                    'hlc': client._next_hlc(conn, gateway), 'fields': values})
                    for table, uid, values in fields]
         recovery = (f'comment {comment_uid}, writer event {event_uid}. Do not retry; reconcile these IDs '
                     'through Board/replica readback before any replacement.')

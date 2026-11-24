@@ -200,16 +200,9 @@ def _push_event(conn: sqlite3.Connection, board: str, own: str, task_id: str, ev
     """Write one ``operator_call_result`` event on ``task_id`` (another gateway's card) through the Board.
 
     Returns ``(status, detail)``; status is the Board's per-op answer (``applied``/``merged``/``rejected``)."""
-    from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_operator_call as kox
-    from hermes_cli import kanban_sync_client as ksc
-    with kb.write_txn(conn):
-        hlc = ksc._next_hlc(conn, own)
-    op = {"client_op_id": uuid.uuid4().hex, "op": "upsert", "table": "task_events", "uid": event_uid, "hlc": hlc,
-          "fields": {"task_id": task_id, "kind": kox.RESULT_KIND, "payload": json.dumps(payload, sort_keys=True),
-                     "created_at": int(time.time())}}
-    res = (ksc.Hub(ksc.load_identity()).ops(board, [op]).get("results") or [{}])[0]
-    return str(res.get("status") or ""), f"{res.get('reason') or ''}: {res.get('detail') or ''}".strip(": ")
+    from hermes_cli.kanban_operator_label_delivery import push_event
+
+    return push_event(conn, board, own, task_id, event_uid, payload)
 
 
 def _start(fn: Callable[[], None]) -> Optional[threading.Thread]:
