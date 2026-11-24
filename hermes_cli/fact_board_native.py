@@ -66,6 +66,35 @@ def retire(paths) -> None:
     with _retained_lock:
         for key in [key for key in _RETAINED if key[0] in paths]:
             del _RETAINED[key]
+        for path in paths:
+            _COUNTS.pop(path, None)
+
+
+# path -> (st_dev, st_ino, (counts, state)): the last board_counts._query result, so the next catalog capture
+# reads only what moved. Taken out while refreshed (one owner of the mutable state), put back only on success.
+_COUNTS: OrderedDict = OrderedDict()
+_COUNTS_MAX = 64
+
+
+def _counts(api, path):
+    """Status counts of the board file, incrementally; errors propagate and leave nothing retained."""
+    key = str(path)
+    try:
+        stat = os.stat(path)
+        ident = (stat.st_dev, stat.st_ino)
+    except OSError:
+        ident = None  # no identity to vouch for retained state: full read, retain nothing
+    with _retained_lock:
+        hit = _COUNTS.pop(key, None)
+        prev = hit[2] if hit is not None and ident is not None and hit[:2] == ident else None
+        # _query mutates prev's status map; serialize refresh and retire so no older capture can overwrite a newer one.
+        counts, state = api.board_counts._query(path, prev)
+        if ident is not None and state is not None:
+            _COUNTS[key] = (*ident, (counts, state))
+            _COUNTS.move_to_end(key)
+            while len(_COUNTS) > _COUNTS_MAX:
+                _COUNTS.popitem(last=False)
+        return dict(counts)
 
 
 def _board(api, board, selector):
@@ -111,7 +140,7 @@ def capture(api, board, view, selector):
     else:
         boards = kanban_db.list_boards(include_archived=selector['include_archived'])
         value = {'rows': boards, 'current': kanban_db.get_current_board(),
-                 'counts': {b['slug']: api.board_counts._query(kanban_db.kanban_db_path(board=b['slug']))[0] for b in boards},
+                 'counts': {b['slug']: _counts(api, kanban_db.kanban_db_path(board=b['slug'])) for b in boards},
                  'workspace_kinds': {b['slug']: api._default_workspace_kind(b) for b in boards},
                  'project_names': {p['id']: p['name'] for p in rows}}
     return {'value': value, 'observed_at': observed_at, 'observations': {'catalog': {'schema': schema}}}

@@ -85,7 +85,7 @@ UNRESPONSIVE_CONFIRMATIONS = 4
 START_PROBE_GAP_S = 3.0      # between the start-up health probes of the active backend (Roller.start)
 UNRESPONSIVE_REASON = "does not answer /api/health"
 FAILED_ROLL_BACKOFF_S = 300.0
-SUPERSEDED_GRACE_S = 900.0   # a superseded backend not retired by then is retired by the roller through its idle fence
+SUPERSEDED_GRACE_S = 30.0    # connection-drain cap (web_server_skew_exit.DRAIN_CAP_S); then try the idle fence
 SUPERSEDED_HARD_S = 6 * 3600.0  # ... and stopped (SIGTERM, turns checkpoint) once this old, busy or not
 SUPERSEDED_NAME = "superseded.json"
 # Backends rolled away from because they stopped answering: never adopted again, and stopped after
@@ -883,9 +883,10 @@ class Roller:
         commit = self.post(port, "/api/health/retirement", {"action": "commit", "token": permit["token"]}) or {}
         if commit.get("ok") is not True:
             return False
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)
-        return True
+        try:
+            return self.systemctl("stop", "--no-block", backend_unit(port), timeout=15).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False  # keep the original superseded age so the next poll retries
 
     def reap_superseded(self, grace_s: float = SUPERSEDED_GRACE_S, hard_s: float = SUPERSEDED_HARD_S) -> list[int]:
         """Backstop for backends that are neither active nor warming and have not retired themselves (a core
