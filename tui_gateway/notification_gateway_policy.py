@@ -12,7 +12,7 @@ class Policy:
         self.event = event
         self.lock = threading.Lock()
         self.dirty = True
-        self.enabled = True
+        self.enabled = True  # pending admission waits for step() to validate the policy
         self.watch = None
         self.retry_at = float('inf')
 
@@ -40,7 +40,7 @@ class Policy:
             config = load_config_readonly()
             if isinstance(config, FailedConfigRead):
                 raise ValueError('configuration read failed') from config.read_error
-            self.enabled = config.get('display', {}).get('gateway_notification_f', True) is True
+            self.enabled = config.get('display', {}).get('gateway_notification_f', False) is True
             self.retry_at = float('inf')
         except (OSError, ValueError, RuntimeError) as exc:
             # Unknown policy cannot authorize native work. Legacy custody remains.

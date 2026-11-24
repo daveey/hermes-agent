@@ -1,4 +1,6 @@
 """A live f2 rollback is configuration publication, never remote env injection."""
+import pytest
+
 import builtins
 import sqlite3
 import threading
@@ -70,7 +72,7 @@ def test_config_only_hint_does_not_admit_collection(monkeypatch, tmp_path):
 
     reads = []
     monkeypatch.setattr(config, 'get_config_path', lambda: tmp_path / 'config.yaml')
-    monkeypatch.setattr(config, 'load_config_readonly', lambda: reads.append(1) or {})
+    monkeypatch.setattr(config, 'load_config_readonly', lambda: reads.append(1) or {'display': {'gateway_notification_f': True}})
     monkeypatch.setattr(fact_source_watch, 'NativeSourceWatch', Watch)
     monkeypatch.setattr(sources, 'inventory', lambda: ((), ()))
     owner = sources.Sources(threading.Event())
@@ -131,7 +133,7 @@ def test_policy_failure_quiet_retry_and_unsupported_census(monkeypatch, tmp_path
         reads.append(1)
         if fail[0]:
             raise ValueError('config unavailable')
-        return {}
+        return {'display': {'gateway_notification_f': True}}
 
     monkeypatch.setattr(config, 'load_config_readonly', capture)
     policy = Policy(threading.Event())
@@ -192,7 +194,7 @@ def test_policy_watch_loss_revokes_native_until_quiet_retry(monkeypatch, tmp_pat
     from tests.tui_gateway.test_gateway_native_source_lifecycle import Watch
 
     monkeypatch.setattr(config, 'get_config_path', lambda: tmp_path / 'config.yaml')
-    monkeypatch.setattr(config, 'load_config_readonly', dict)
+    monkeypatch.setattr(config, 'load_config_readonly', lambda: {'display': {'gateway_notification_f': True}})
     monkeypatch.setattr(fact_source_watch, 'NativeSourceWatch', Watch)
     policy = Policy(threading.Event())
     try:
@@ -264,3 +266,12 @@ def test_native_live_off_role_transfer_catches_up_before_legacy_timer(monkeypatc
     finally:
         schedule.close()
         scheduler.close()
+
+
+@pytest.fixture(autouse=True)
+def native_policy_opt_in(monkeypatch, request):
+    from hermes_cli import config
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    if request.node.name != 'test_real_canonical_config_write_is_a_native_live_rollback':
+        monkeypatch.setattr(config, 'load_config_readonly',
+                            lambda: {'display': {'gateway_notification_f': True}})

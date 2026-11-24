@@ -248,3 +248,11 @@ def test_native_to_bound_owner_never_reactivates_legacy_on_detach(owner, monkeyp
         if binding is not None:
             binding.close()
         scheduler.close()
+
+
+@pytest.fixture(autouse=True)
+def native_policy_opt_in(monkeypatch):
+    from hermes_cli import config
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    monkeypatch.setattr(config, 'load_config_readonly',
+                        lambda: {'display': {'gateway_notification_f': True}})

@@ -115,3 +115,11 @@ def test_failed_scope_inventory_quiet_recovery_uses_one_shared_retry(monkeypatch
         for gate in gates:
             gate.close()
         scheduler.close()
+
+
+@pytest.fixture(autouse=True)
+def native_policy_opt_in(monkeypatch):
+    from hermes_cli import config
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    monkeypatch.setattr(config, 'load_config_readonly',
+                        lambda: {'display': {'gateway_notification_f': True}})

@@ -920,7 +920,7 @@ DEFAULT_CONFIG = {
         # Warnings stay visible unless opted out; task results, manual commands and logs are unaffected.
         "suppress_warning_notifications": False,
         "loaded_notification_f": False,  # incident containment: legacy until shared source cost is corrected
-        "gateway_notification_f": True,  # native host notifications; live OFF preserves legacy custody
+        "gateway_notification_f": False,  # dormant native host notifications; explicit opt-in only
         # Codex Responses commentary channel: true delivers completed commentary as mid-turn interim
         # updates; false routes it to reasoning (visible only with show_reasoning).
         "show_commentary": True,

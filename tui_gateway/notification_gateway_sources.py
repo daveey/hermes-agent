@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 def enabled():
     # Dedicated task-mandated emergency switch, not general configuration.
-    return os.environ.get('HERMES_FACTS_GATEWAY', '1').strip().lower() not in {'0', 'false', 'no', 'off'}  # health: allow HX002 -- explicit per-consumer emergency rollback
+    return os.environ.get('HERMES_FACTS_GATEWAY', '0').strip().lower() not in {'0', 'false', 'no', 'off'}  # health: allow HX002 -- explicit per-consumer emergency rollback
 
 
 def inventory():

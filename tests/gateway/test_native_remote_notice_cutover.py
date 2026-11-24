@@ -103,3 +103,11 @@ def test_remote_incomplete_preserves_earlier_deadline(env, monkeypatch):
     owner._collect(runner, authority, owner._owned_lives(runner, authority), report)
     assert report.pending
     assert report.next_due(0, 10) == 3.0
+
+
+@pytest.fixture(autouse=True)
+def native_policy_opt_in(monkeypatch):
+    from hermes_cli import config
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    monkeypatch.setattr(config, 'load_config_readonly',
+                        lambda: {'display': {'gateway_notification_f': True}})

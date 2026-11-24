@@ -71,3 +71,11 @@ def test_gateway_native_entry_loop_and_off_keep_single_executor(monkeypatch, rem
         assert not scheduler.gateway_sources.actions
     finally:
         scheduler.close()
+
+
+@pytest.fixture(autouse=True)
+def native_policy_opt_in(monkeypatch):
+    from hermes_cli import config
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    monkeypatch.setattr(config, 'load_config_readonly',
+                        lambda: {'display': {'gateway_notification_f': True}})

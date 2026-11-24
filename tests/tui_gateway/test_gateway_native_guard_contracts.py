@@ -215,3 +215,11 @@ def test_retired_legacy_loop_does_not_spin_on_unset_legacy_deadline(monkeypatch)
     monkeypatch.setattr(unloaded, 'threading', SimpleNamespace(Event=Wake))
     unloaded._loop(stop)
     assert waits == [1.0]
+
+
+@pytest.fixture(autouse=True)
+def native_policy_opt_in(monkeypatch):
+    from hermes_cli import config
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    monkeypatch.setattr(config, 'load_config_readonly',
+                        lambda: {'display': {'gateway_notification_f': True}})

@@ -1,4 +1,6 @@
 """The production unloaded loop activates shared native coverage without a fact binding."""
+import pytest
+
 import threading
 from types import SimpleNamespace
 
@@ -115,3 +117,11 @@ def test_native_quiet_role_handoff_and_retirement(monkeypatch):
     finally:
         schedule.close()
         scheduler.close()
+
+
+@pytest.fixture(autouse=True)
+def native_policy_opt_in(monkeypatch):
+    from hermes_cli import config
+    monkeypatch.setenv('HERMES_FACTS_GATEWAY', '1')
+    monkeypatch.setattr(config, 'load_config_readonly',
+                        lambda: {'display': {'gateway_notification_f': True}})

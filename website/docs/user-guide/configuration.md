@@ -2595,14 +2595,15 @@ This controls both the `text_to_speech` tool and spoken replies in voice mode (`
 
 ## Display Settings
 
-`display.gateway_notification_f` defaults to `true`. It enables native wake admission for the existing
+`display.gateway_notification_f` defaults to `false` (dormant, explicit opt-in only). It enables native wake admission for the existing
 gateway and unloaded notification executors, independently of the loaded-chat switch below. Use
 `hermes config set display.gateway_notification_f false` in the running server's profile home to restore
 legacy cadence without restarting it; set `true` to rearm. A single process-owned native config observer
 publishes the policy to memory; executor iterations do not read config. Local config hints normally apply
 at the next housekeeping iteration; missed hints and nonlocal/managed config changes are repaired by the
 existing 30-second census. This is not a subsecond upstream-freshness guarantee. Config failure selects
-legacy recovery and retries after one second. `HERMES_FACTS_GATEWAY=0` remains an overriding emergency
+legacy recovery and retries after one second. `HERMES_FACTS_GATEWAY` also defaults off; explicit `1` is required to opt in.
+`HERMES_FACTS_GATEWAY=0` remains an overriding emergency
 OFF for that process; changing a systemd drop-in alone affects only a natural successor, not a running
 process. Rollback preserves notification cursors, in-flight custody and refusal deadlines.
 

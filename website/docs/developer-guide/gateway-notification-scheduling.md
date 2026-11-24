@@ -5,7 +5,7 @@ The gateway notifier, gateway remote FIFO owner and unloaded host executor use
 30-second reconciliation clock**. This is an in-process native wake cutover,
 not activation of `InProcessFacts` or the dedicated `fact_host` transport.
 
-`HERMES_FACTS_GATEWAY` defaults on. Setting it to `0`, `false`, `no` or `off`
+`HERMES_FACTS_GATEWAY` defaults off; native admission requires explicit `1`. Setting it to `0`, `false`, `no` or `off`
 withdraws these native subscriptions at the next executor iteration and restores
 legacy admission. It does not change `display.loaded_notification_f`, restart a
 process, start a second delivery executor, reset a notification cursor or release
@@ -13,7 +13,7 @@ an in-flight delivery. Pending action deadlines/refusal floors survive rollback.
 This narrowly scoped emergency switch is not a secrets setting.
 
 For no-restart control, the registered `display.gateway_notification_f` key defaults
-to true and is ANDed with that environment switch. Its one native config lease is
+to false and is ANDed with that environment switch. Its one native config lease is
 separate from data invalidations: an unrelated config write does not wake collectors.
 `hermes config set display.gateway_notification_f false` on the running profile
 withdraws data watches and restores legacy cadence on the next executor iteration.
@@ -24,6 +24,9 @@ Unsupported native platforms and managed/nonlocal config updates use that census
 Unknown policy fails to legacy with a one-second shared retry, not native admission.
 No environment mutation RPC or serve signal is used. A service drop-in is only a
 future-start override; daemon-reload does not alter the current process environment.
+
+This lands dormant: neither gate is enabled by installation. Activation remains deferred
+until the out-of-process producer and live load acceptance are qualified.
 
 ## Sources and readiness
 
