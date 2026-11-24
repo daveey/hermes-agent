@@ -1729,14 +1729,19 @@ class _TxnBoundary:
                 self.finished = False
 
     def cleanup_failed(self) -> None:
-        """Preserve the propagating error, even if rollback entry is interrupted."""
+        """Preserve the propagating error, even if rollback or finish is interrupted."""
         try:
             self.rollback()
         except BaseException:
             if not (self.no_retry or self.done is not None):
                 raise  # keep default-path behavior
             logging.getLogger(__name__).exception("write_txn: cleanup interrupted")
-        self.finish()
+        try:
+            self.finish()
+        except BaseException:
+            if not (self.no_retry or self.done is not None):
+                raise  # keep default-path behavior
+            logging.getLogger(__name__).exception("write_txn: cleanup finish interrupted")
 
     def finish(self) -> None:
         if self.finished:
@@ -1814,6 +1819,8 @@ def write_txn(
     error. Opt-in mode confirms ownership ended before the callback; an interrupted
     or unreadable boundary gets one final rollback attempt and close. If close
     fails, the callback is withheld. The default path is unchanged.
+    In opt-in mode an interrupt in the cleanup finish or the safety net is logged
+    and never replaces the propagating error; a finish that never ran withholds the callback.
     """
     if (no_retry or boundary_done is not None) and getattr(conn, "in_transaction", False):
         raise RuntimeError(
@@ -1824,8 +1831,18 @@ def write_txn(
     try:
         with _write_txn_body(conn, allow_nested, boundary) as c:
             yield c
-    finally:
-        boundary.finish()  # safety net (BaseException / pre-BEGIN failure); idempotent
+    except BaseException:
+        # Safety net (BaseException / pre-BEGIN failure); idempotent. In opt-in mode an
+        # interrupt here is logged and never replaces the propagating error.
+        try:
+            boundary.finish()
+        except BaseException:
+            if not (no_retry or boundary_done is not None):
+                raise  # keep default-path behavior
+            logging.getLogger(__name__).exception("write_txn: safety-net finish interrupted")
+        raise
+    else:
+        boundary.finish()  # idempotent
 
 
 @contextlib.contextmanager

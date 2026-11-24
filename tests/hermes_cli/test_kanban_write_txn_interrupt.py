@@ -69,3 +69,71 @@ def test_original_error_survives_rollback_interrupt(tmp_path, phase, interrupt):
         sys.settrace(None)
         a.close()
         b.close()
+
+
+@pytest.mark.parametrize(
+    "phase,entries,expected_callbacks",
+    [("body", (1,), 1), ("commit", (1,), 1),
+     ("body", (2,), 1), ("commit", (1, 2), 0)],
+    ids=["T5", "T6", "T7", "T8"],
+)
+def test_original_error_survives_finish_interrupt(tmp_path, phase, entries, expected_callbacks):
+    a = sqlite3.connect(tmp_path / "finish.db", isolation_level=None, timeout=0)
+    b = sqlite3.connect(tmp_path / "finish.db", isolation_level=None, timeout=0)
+    a.execute("PRAGMA foreign_keys=ON")
+    a.execute("CREATE TABLE parent(id PRIMARY KEY)")
+    a.execute("CREATE TABLE child(pid REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")
+    original = ValueError("body failure")
+    releases = []
+    signals = []
+    calls = []
+
+    def done():
+        b.execute("BEGIN IMMEDIATE")
+        releases.append(True)
+        b.execute("ROLLBACK")
+
+    def trace(frame, event, arg):
+        if (event in ("call", "line")
+                and frame.f_code is kbc._TxnBoundary.finish.__code__ and frame not in calls):
+            calls.append(frame)
+            if len(calls) in entries:
+                signals.append(len(calls))
+                signal.raise_signal(signal.SIGINT)
+        return trace
+
+    def rearm_trace(frame, event, arg):
+        # CPython clears tracing when a trace raises. Re-arm on subsequent calls
+        # so T8 delivers two real signals, without replacing any cleanup method.
+        if event == "call" and sys.gettrace() is None:
+            sys.settrace(trace)
+            frame.f_trace = trace
+
+    caught = None
+    try:
+        try:
+            sys.setprofile(rearm_trace)
+            sys.settrace(trace)
+            with kbc.write_txn(a, no_retry=True, boundary_done=done):
+                a.execute("INSERT INTO child VALUES (99)")
+                if phase == "body":
+                    raise original
+        except BaseException as exc:
+            caught = exc
+        finally:
+            sys.setprofile(None)
+            sys.settrace(None)
+        assert signals == list(entries)
+        if phase == "body":
+            assert caught is original
+        else:
+            assert isinstance(caught, sqlite3.IntegrityError)
+            assert "FOREIGN KEY" in str(caught)
+        b.execute("BEGIN IMMEDIATE")
+        b.execute("ROLLBACK")
+        assert releases == [True] * expected_callbacks
+    finally:
+        sys.setprofile(None)
+        sys.settrace(None)
+        a.close()
+        b.close()
