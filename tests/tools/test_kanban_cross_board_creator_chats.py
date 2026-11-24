@@ -182,13 +182,21 @@ def test_deferred_worker_child_records_the_creator_chat_for_its_forward(placed, 
     assert placed == []
 
 
-def test_deferred_worker_child_of_an_unresolved_creator_records_no_origin(placed, monkeypatch):
+def test_deferred_worker_child_of_an_unresolved_creator_is_refused(placed, monkeypatch):
+    """No creator chat means no authority: the deferred create is refused and rolled back, with no
+    forwarding state, no forward sent, and no fabricated origin."""
     from hermes_cli import kanban_placement as kp
     from hermes_cli import kanban_placement_forward as kpf
     monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "local", "defer": "hub", "why": "test defer"})
     with kbc.connect_closing() as conn:
         creator = kb.create_task(conn, title="unowned creator", assignee="default", session_id=WORKER)
-    out = _place(creator, monkeypatch)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
+    out = json.loads(tools._handle_create({"title": "routed child", "assignee": "default", "requires": []}))
+    assert out.get("ok") is not True and "task_id" not in out, out
+    assert "scope_authority_missing" in out["error"] or "scope authority" in out["error"]
+    assert placed == []
     with kbc.connect_closing() as conn:
-        st = kpf.state(conn, out["task_id"])
-    assert (st["target"], st["origin_session"]) == ("hub", None)
+        assert [t.id for t in kb.list_tasks(conn)] == [creator]
+        assert not conn.execute("SELECT 1 FROM kanban_notify_subs").fetchall()
+        assert not conn.execute("SELECT 1 FROM task_chat_links").fetchall()
+        assert kpf.state(conn, creator) is None or kpf.state(conn, creator).get("origin_session") is None

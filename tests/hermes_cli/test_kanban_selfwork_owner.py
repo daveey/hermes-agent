@@ -17,8 +17,13 @@ world = courier_support.world
 
 def test_real_courier_cli_create_append_and_replay(world, tmp_path, monkeypatch, capsys):
     (tmp_path / 'config.yaml').write_text(json.dumps({'kanban': {'self_work': {
-        'home': {'gateway': 'owner', 'profile': 'default', 'board': 'default'}}}}), encoding='utf-8')
+        'home': {'gateway': 'owner', 'profile': 'default', 'board': 'default'}},
+        'sync': {'enabled': True}}}), encoding='utf-8')
     world['args']['create'].update(self_work=entry.support.declaration(), requires=[])
+    from hermes_cli.kanban_sync_client import ensure_identity
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        ensure_identity(conn, 'default', 'owner')
     first = courier_support.invoke(world, monkeypatch, capsys)
     assert first.get('created') is True, first
     world['id'] = 'request-owner-002'
@@ -35,6 +40,8 @@ def test_real_courier_cli_create_append_and_replay(world, tmp_path, monkeypatch,
 @pytest.fixture
 def home(local, monkeypatch):
     root = kb.kanban_home().resolve()
+    for session in ('origin-session', 'second-origin-session'):
+        entry.register_chat(root, session)
     config = {'kanban': {'self_work': {'home': {'gateway': 'home', 'profile': 'default', 'board': 'default'}}}}
     monkeypatch.setattr(owner, '_runtime', lambda: (config, 'home', 'default', root))
     monkeypatch.setattr(kt, '_landing_placement', lambda conn, args, origin, intent, marker, runs, **kw: (None, runs))

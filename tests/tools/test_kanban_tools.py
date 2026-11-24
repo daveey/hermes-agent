@@ -41,6 +41,23 @@ def test_kanban_tools_hidden_without_env_var(monkeypatch, tmp_path):
 # Handler happy paths
 # ---------------------------------------------------------------------------
 
+def _link_creating_chat(conn, task_id, chat):
+    """A chat can own scope without subscribing to delivery (an explicit opt-out)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_chat_links import link_uid
+    from hermes_cli.kanban_origin import gateway_names
+    from hermes_cli.profiles import get_active_profile_name
+    from hermes_cli.kanban_db_sync import apply_sync_schema_steps
+    apply_sync_schema_steps(conn)
+    gateway, profile = gateway_names()[0] or "", get_active_profile_name()
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_chat_links "
+            "(uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,created_at) "
+            "VALUES (?,?,?,?,?,'created',0,unixepoch())",
+            (link_uid(task_id, gateway, profile, chat, "created"), task_id, gateway, profile, chat))
+
+
 @pytest.fixture
 def worker_env(monkeypatch, tmp_path):
     """Simulate being a worker: HERMES_HOME isolated, HERMES_KANBAN_TASK set
@@ -57,9 +74,11 @@ def worker_env(monkeypatch, tmp_path):
     from hermes_cli import kanban_db_connect as kbc
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(home, "20261123_120000_worker_owner")
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
+        tid = kb.create_task(conn, title="worker-test", assignee="test-worker", session_id=chat)
         kb.claim_task(conn, tid)
         run_id = kb._current_run_id(conn, tid)
     finally:
@@ -887,7 +906,7 @@ def test_create_schema_declares_max_retries():
 @pytest.mark.parametrize("explicit", [{"workspace_kind": "scratch"}, {"project": ""}])
 @pytest.mark.parametrize("target_scoped", [False, True])
 def test_create_explicit_scratch_ignores_ambient_board_project(
-    worker_env, tmp_path, explicit, target_scoped,
+    worker_env, tmp_path, monkeypatch, explicit, target_scoped,
 ):
     """#106342: an explicit scratch / empty project wins over the project the
     session's current board (and, when scoped, the target board itself) carries.
@@ -898,6 +917,8 @@ def test_create_explicit_scratch_ignores_ambient_board_project(
 
     repo = tmp_path / "repo"
     repo.mkdir()
+    # This registered chat is also the caller when its creator's board differs.
+    monkeypatch.setenv("HERMES_SESSION_ID", "20261123_120000_worker_owner")
     with pdb.connect_closing() as pconn:
         project_id = pdb.create_project(pconn, name="Ambient", primary_path=str(repo))
     peer = tmp_path / ".hermes" / "profiles" / "peer"
@@ -1252,6 +1273,17 @@ def _sub_index(subs):
     return out
 
 
+@pytest.fixture
+def unsubscribed_worker_chat(worker_env):
+    """The creator's chat owns scope but has explicitly opted out of delivery."""
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    with kbc.connect_closing() as conn:
+        creator = kb.get_task(conn, worker_env)
+        assert creator is not None
+        _link_creating_chat(conn, worker_env, creator.session_id)
+
+
+@pytest.mark.usefixtures("unsubscribed_worker_chat")
 def test_create_subscribes_gateway_session(monkeypatch, worker_env):
     """A gateway session (platform + chat_id set) gets auto-subscribed
     to its own kanban_create result, and the response surfaces the
@@ -1285,6 +1317,7 @@ def test_create_subscribes_gateway_session(monkeypatch, worker_env):
     assert s["delivery_mode"] == "notify+wake"
 
 
+@pytest.mark.usefixtures("unsubscribed_worker_chat")
 def test_create_subscribes_tui_session_via_session_key(monkeypatch, worker_env):
     """TUI / desktop sessions don't have a platform/chat_id (single
     local channel), but the parent process exports HERMES_SESSION_KEY.
@@ -1315,6 +1348,7 @@ def test_create_subscribes_tui_session_via_session_key(monkeypatch, worker_env):
     assert subs[0]["delivery_mode"] == "notify"
 
 
+@pytest.mark.usefixtures("unsubscribed_worker_chat")
 def test_create_does_not_subscribe_in_cli_session(monkeypatch, worker_env):
     """CLI / cron / test sessions have no persistent delivery channel.
     _maybe_auto_subscribe returns False and no row is written."""
@@ -1335,6 +1369,7 @@ def test_create_does_not_subscribe_in_cli_session(monkeypatch, worker_env):
     assert _list_subs_for_task(d["task_id"]) == []
 
 
+@pytest.mark.usefixtures("unsubscribed_worker_chat")
 def test_create_tui_subscription_binds_to_live_session_after_compaction_fork(monkeypatch, worker_env, tmp_path):
     """#110068: the inherited HERMES_SESSION_KEY can name a session already superseded
     by a compaction fork. Auto-subscribe must bind to the live continuation tip resolved
@@ -1428,6 +1463,18 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "channel-1")
+
+    # The alternate home has its own registered owning chat and creator. A
+    # delivery opt-out is not an ownership opt-out.
+    from tests.tools.test_kanban_create_overlap import register_chat
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    chat = register_chat(home)
+    kb.init_db()
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title="unsubscribed creator", session_id=chat)
+        _link_creating_chat(conn, creator, chat)
+        kb.claim_task(conn, creator)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
 
     from tools import kanban_tools as kt
     out = kt._handle_create({

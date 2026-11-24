@@ -478,6 +478,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
         from hermes_cli.kanban_admission_class import AdmissionMetadataError
+        from hermes_cli.kanban_create_authority import CreateAuthorityRefused
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -512,6 +513,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
                 validate_workspace=True, validate_skills=True, placement_checked=True, board=board,
+                require_scope_authority=in_worker or _agent_invoked(),  # human terminals keep human authority
                 # [daveey] no --runs-on: queue for the worker pool; hub admission's placement and receipt
                 **cli_create_fields(conn, plan, args, body, ws_kind, ws_path, board, assignee=assignee),
                 insert_guard=after_create.guard,  # re-checks overlap under the write lock [daveey]
@@ -521,7 +523,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
         except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused,
-                AskFilingRefused) as exc:
+                AskFilingRefused, CreateAuthorityRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError, AdmissionMetadataError, SelfWorkError) as exc:
             return _err(f"kanban: {exc}", 2)

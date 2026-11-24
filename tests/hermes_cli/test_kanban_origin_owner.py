@@ -25,6 +25,8 @@ def world(tmp_path, monkeypatch):
     cfg.write_text(json.dumps({'gateway': 'owner'}), encoding='utf-8')
     monkeypatch.setenv('HERMES_MAIL_CONFIG', str(cfg))
     monkeypatch.setattr(kanban_tools, '_profile_has_kanban_toolset', lambda: True)
+    # Courier creation requires genuine renewal authority, which exists only on a synced board.
+    (tmp_path / 'config.yaml').write_text('kanban:\n  sync:\n    enabled: true\n')
     kb.init_db()
     return {'id': 'request-owner-001', 'from': 'gw:origin', 'to_gw': 'owner',
             'coll': 'tasks', 'action': 'create', 'key': 'default/default',
@@ -48,7 +50,7 @@ def test_real_cli_process_replays_persisted_creation(world, tmp_path, config):
     import subprocess
     import sys
 
-    (tmp_path / 'config.yaml').write_text(config, encoding='utf-8')
+    (tmp_path / 'config.yaml').write_text('kanban:\n  sync:\n    enabled: true\n' + config, encoding='utf-8')
     command = [sys.executable, '-m', 'hermes_cli.main', '-p', 'default',
                'kanban', 'origin-create', '--request-file', '-', '--json']
     results = []

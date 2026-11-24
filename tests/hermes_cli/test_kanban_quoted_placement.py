@@ -28,6 +28,8 @@ def test_quoted_names_enroll_on_both_frontdoors(tmp_path, monkeypatch, frontdoor
     monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(home, "20261123_120000_quoted_owner"))
     if frontdoor == "cli":
         from hermes_cli import kanban as cli
         result = cli.run_slash(f"create {shlex.quote(title)} --body {shlex.quote(body)}")

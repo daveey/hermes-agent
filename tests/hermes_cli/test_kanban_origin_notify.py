@@ -61,7 +61,8 @@ def _owner(tmp_path, monkeypatch):
             "origin": {"gateway": "macbook", "profile": "default", "session": CHAT}}
 
 
-def test_courier_create_subscribes_the_bound_origin_not_the_ambient_session(owner):
+def test_courier_create_subscribes_the_bound_origin_not_the_ambient_session(synced_owner):
+    owner = synced_owner
     args = {"title": "Build", "assignee": "default", "session_id": "kanban-placement-macbook"}
     res = json.loads(registry.dispatch("kanban_create", args, origin_intent=owner))
     assert res.get("created") is True, res
@@ -125,6 +126,11 @@ def test_courier_create_writes_the_origin_chats_created_link_once(synced_owner):
 def test_courier_create_writes_no_link_for_a_chat_on_the_owner_or_a_placeholder(synced_owner, origin):
     args = {"title": "Build", "assignee": "default"}
     res = json.loads(str(registry.dispatch("kanban_create", args, origin_intent={**synced_owner, "origin": origin})))
+    if origin['session'].startswith(('kanban-placement-', 'local-')):
+        assert not res.get('created') and 'no renewable scope authority' in str(res), res
+        with kbc.connect_closing() as conn:
+            assert not conn.execute('SELECT 1 FROM tasks').fetchone()
+        return
     assert res.get("created") is True, res
     assert _links(res["task_id"]) == []
     assert "origin_chat_link" not in res  # the origin is told the link still waits for its own reconcile
@@ -151,7 +157,9 @@ def test_courier_create_on_an_owner_whose_sync_is_stopped_does_not_claim_the_lin
 def test_courier_create_on_an_owner_without_board_sync_does_not_claim_the_link(owner):
     res = json.loads(str(registry.dispatch("kanban_create", {"title": "Build", "assignee": "default"},
                                            origin_intent=owner)))
-    assert res.get("created") is True and "origin_chat_link" not in res, res
+    assert not res.get('created') and 'no renewable scope authority' in str(res), res
+    with kbc.connect_closing() as conn:
+        assert not conn.execute('SELECT 1 FROM tasks').fetchone()
 
 
 def test_courier_adoption_tells_the_origin_it_wrote_the_link(synced_owner):
@@ -290,6 +298,7 @@ def test_cli_origin_session_flag_subscribes_that_chat(tmp_path, monkeypatch, cap
     for name in ("HERMES_KANBAN_TASK", "HERMES_ORIGIN_SESSION", "HERMES_KANBAN_DB"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HERMES_SESSION_ID", STALE)
+    (tmp_path / 'config.yaml').write_text('kanban:\n  sync:\n    enabled: true\n')
     state = tmp_path / "hub-state"
     state.mkdir()
     monkeypatch.setenv("HERMES_HUB_STATE", str(state))

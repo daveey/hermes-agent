@@ -10,6 +10,12 @@ def test_creator_origin_survives_without_dependency_parent(tmp_path, monkeypatch
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     kb.init_db()
+    from hermes_state import SessionDB  # the owning chat must be a registered session to be authority
+    sdb = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        sdb.create_session(session_id="durable", source="desktop")
+    finally:
+        sdb.close()
     with kbc.connect_closing() as conn:
         owner = kb.create_task(conn, title="owner", session_id="durable", triage=True)
         kn.add_notify_sub(conn, task_id=owner, platform="telegram", chat_id="chat",
@@ -31,7 +37,11 @@ def test_creator_origin_survives_without_dependency_parent(tmp_path, monkeypatch
             tid = json.loads(capsys.readouterr().out)["id"]
         assert kb.get_task(conn, tid).session_id == "durable"
         subs = kn.list_notify_subs(conn, tid)
-        assert len(subs) == 1 and subs[0]["delivery_mode"] == "wake"
+        wake = [s for s in subs if s["chat_id"] == "chat"]
+        assert len(wake) == 1 and wake[0]["delivery_mode"] == "wake"
+        # The agent-create front door also anchors the registered owning chat as the durable authority sub.
+        extra = [s["chat_id"] for s in subs if s["chat_id"] != "chat"]
+        assert extra == (["durable"] if surface == "cli" else [])
         assert not conn.execute("SELECT 1 FROM task_links WHERE child_id = ?", (tid,)).fetchone()
         # No ambient identity guessing in the storage API.
         plain = kb.create_task(conn, title="plain", session_id="explicit")

@@ -181,9 +181,16 @@ def _create_swarm_uncommitted(
         _require_text(spec.profile, f"workers[{i}].profile")
         _require_text(spec.title, f"workers[{i}].title")
 
+    from hermes_cli.kanban import _agent_invoked
+    from hermes_cli.kanban_cli_body import session_identity
+    import os
+    creator = os.environ.get('HERMES_KANBAN_TASK')
+    _, session = session_identity(bool(creator))
     common = dict(
         created_by=created_by, tenant=tenant,
         workspace_kind=workspace_kind, workspace_path=workspace_path,
+        session_id=session, creator_task_id=creator,
+        require_scope_authority=bool(creator) or _agent_invoked(),
     )
     root = kb.create_task(
         conn,

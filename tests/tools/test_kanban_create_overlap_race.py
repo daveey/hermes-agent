@@ -83,6 +83,8 @@ RUNNER = textwrap.dedent("""
 
 
 def _spawn(tmp_path, sync, role, entry, cid):
+    # Each contender runs as its own durably registered human chat.
+    helpers.register_chat(Path(os.environ["HERMES_HOME"]), f"chat-{entry}-{cid}")
     env = {**os.environ, "HERMES_HOME": os.environ["HERMES_HOME"], "HERMES_HUB_STATE": str(tmp_path / "hub-state"),
            "PYTHONPATH": os.pathsep.join([str(REPO), os.environ.get("PYTHONPATH", "")]),
            "HERMES_SESSION_ID": f"chat-{entry}-{cid}"}

@@ -21,6 +21,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 
 
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
@@ -64,7 +65,12 @@ def test_cli_create_stamps_calling_session(kanban_home, monkeypatch, capsys):
 
 def test_cli_create_ignores_unknown_session(kanban_home, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_SESSION_ID", "not_a_real_session")
-    assert _create("stray env") is None
+    # An unregistered session is not stamped, and an agent create with no other authority is refused (req. D).
+    root = argparse.ArgumentParser(prog="hermes")
+    kc.build_parser(root.add_subparsers())
+    assert kc._cmd_create(root.parse_args(["kanban", "create", "stray env"])) == 2
+    with kbc.connect_closing() as conn:
+        assert not [t for t in kb.list_tasks(conn) if t.title == "stray env"]
 
 
 def test_cli_create_without_session_env_is_unstamped(kanban_home, capsys):
@@ -73,9 +79,16 @@ def test_cli_create_without_session_env_is_unstamped(kanban_home, capsys):
 
 def test_cli_create_in_worker_does_not_stamp_worker_session(kanban_home, monkeypatch, capsys):
     _seed_session(kanban_home, "worker_sess")
+    _seed_session(kanban_home, "owner_chat")  # the registered chat the creator descends from
     monkeypatch.setenv("HERMES_SESSION_ID", "worker_sess")
-    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_doesnotexist")
-    assert _create("worker child") is None
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title="creator", assignee="default", session_id="owner_chat")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (creator,))
+            kb._append_event(conn, creator, 'owner_admitted', {'session_id': 'worker_sess'})
+    monkeypatch.setenv("HERMES_KANBAN_TASK", creator)  # a running admitted creator that descends from a registered owning chat is durable authority
+    # never the worker session; the child inherits the creator's owning chat
+    assert _create("worker child") == "owner_chat"
 
 
 def _create_args(*argv: str) -> str:

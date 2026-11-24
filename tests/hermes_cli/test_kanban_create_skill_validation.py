@@ -52,6 +52,17 @@ def board(tmp_path, monkeypatch):
     return home
 
 
+def _own(home, monkeypatch, sid="20261014_141400_abc123") -> None:
+    """Act as a registered owning chat: a genuine agent create needs real renewable authority."""
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        db.create_session(session_id=sid, source="desktop")
+    finally:
+        db.close()
+    monkeypatch.setenv("HERMES_SESSION_ID", sid)
+
+
 def _count() -> int:
     with kbc.connect_closing() as conn:
         return len(kb.list_tasks(conn))
@@ -86,13 +97,15 @@ def test_tool_names_close_matches(board):
     assert "real-skill" in out["error"], out
 
 
-def test_tool_accepts_a_skill_the_assignee_has(board):
+def test_tool_accepts_a_skill_the_assignee_has(board, monkeypatch):
+    _own(board, monkeypatch)
     out = _tool_create(assignee="default", skills=["real-skill"])
     assert out.get("ok"), out
     assert _count() == 1
 
 
-def test_tool_checks_the_assignee_profile_not_the_caller(board):
+def test_tool_checks_the_assignee_profile_not_the_caller(board, monkeypatch):
+    _own(board, monkeypatch)
     assert _tool_create(assignee="default", skills=["other-only"]).get("code") == "unknown_skill"
     out = _tool_create(assignee="other", skills=["other-only"])
     assert out.get("ok"), out

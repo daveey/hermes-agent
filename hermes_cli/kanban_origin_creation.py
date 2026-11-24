@@ -145,6 +145,10 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
     # before the option existed still matches on retry. [daveey]
     options.pop("require_declaration", None)
     options.pop("placement_checked", None)  # internal decision, not part of the immutable envelope
+    # Courier ingress always enforces scope authority itself (below, after the origin is subscribed/linked);
+    # the flag is never an envelope field and a caller cannot waive it. create_task must not check it early:
+    # a courier card anchors its authority only after create, inside this txn. [daveey]
+    options.pop("require_scope_authority", None)
     # Options added after intents were first stored: omit them while at their default (None) so an
     # intent stored before the option existed still matches on retry; a real value stays in the
     # envelope and a differing one remains a conflict.
@@ -193,6 +197,10 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
                               "origin-bind-" + secrets.token_hex(16)))
         _subscribe_origin(conn, task_id, intent["origin"])
         _link_origin(conn, task_id, intent["origin"], intent["owner"]["gateway"])
+        # Requirement D, courier ingress: only after the valid origin is subscribed/linked may renewable scope be
+        # anchored. Refusal raises inside write_txn, rolling back card, intent and subscription.
+        from hermes_cli.kanban_create_authority import require
+        require(conn, task_id, options.get("creator_task_id"))
         return task_id
 
 

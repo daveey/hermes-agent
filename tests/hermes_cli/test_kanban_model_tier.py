@@ -32,6 +32,8 @@ def board(tmp_path, monkeypatch):
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
     _write_cfg(home)
+    from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
+    monkeypatch.setenv('HERMES_SESSION_ID', register_chat(home, '20261123_120000_model'))
     return home
 
 

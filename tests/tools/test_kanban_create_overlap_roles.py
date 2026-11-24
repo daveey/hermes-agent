@@ -44,6 +44,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(h))
     assert str(kb.kanban_db_path()).startswith(str(tmp_path))
     return h
 

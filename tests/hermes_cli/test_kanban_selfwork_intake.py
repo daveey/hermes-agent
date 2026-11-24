@@ -42,7 +42,9 @@ def test_legacy_key_cannot_adopt_product(board):
 
 
 def test_origin_adoption_and_replay(board):
-    first = admit(board, origin_intent=origin('origin-0001'))
+    from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
+    chat = register_chat(kb.kanban_home(), '20261123_120000_intake')
+    first = admit(board, session_id=chat, origin_intent=origin('origin-0001'))
     second = admit(board, 'request-0002', origin_intent=origin('origin-0002', 's_second'))
     third = admit(board, 'request-0003', origin_intent=origin('origin-0003', 's_second'))
     assert first['task_id'] == second['task_id'] == third['task_id']

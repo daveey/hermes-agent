@@ -264,10 +264,13 @@ def test_receipt_custody_mismatch_abandons_without_record(capture, mismatch):
 
 def test_origin_retry_excludes_internal_observation(capture):
     from tests.hermes_cli.test_kanban_origin_creation import intent
+    from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
 
     conn, _session = capture
-    child = kb.create_task(conn, title="origin", origin_intent=intent())
-    assert kb.create_task(conn, title="origin", origin_intent=intent(), creation_receipt={"internal": True}) == child
+    chat = register_chat(kb.kanban_home(), '20261123_120000_fairness')
+    child = kb.create_task(conn, title="origin", origin_intent=intent(), session_id=chat)
+    assert kb.create_task(conn, title="origin", origin_intent=intent(), session_id=chat,
+                          creation_receipt={"internal": True}) == child
     raw = conn.execute("SELECT intent_json FROM origin_creation_intents").fetchone()[0]
     assert "creation_receipt" not in raw
 

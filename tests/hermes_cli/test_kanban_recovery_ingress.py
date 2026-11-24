@@ -27,6 +27,9 @@ def ingress(conn, monkeypatch):
     monkeypatch.setattr(placement, "config", dict)
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
     monkeypatch.setattr(tools, "_persisted_identity", lambda: "default")
+    from hermes_constants import get_hermes_home
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(get_hermes_home(), "20261123_120000_ingress_owner"))
     return conn
 
 

@@ -1194,6 +1194,7 @@ def create_task(
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
     admission_class: str = "normal", admission_frees: Optional[str] = None,
     self_work: Optional[dict] = None, creation_receipt: Optional[dict] = None,
+    require_scope_authority: bool = False,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1283,12 +1284,8 @@ def create_task(
     if existing := native_admission.early_existing(conn, idempotency_key, created_by):
         return existing
 
-    if validate_workspace and workspace_kind == "worktree" and not project_id:
-        from hermes_cli.kanban_db_workspace import (
-            WorktreeWorkspaceConfigError, worktree_workspace_problem,
-        )
-        if problem := worktree_workspace_problem(workspace_path, board=board):
-            raise WorktreeWorkspaceConfigError(problem)
+    from hermes_cli.kanban_db_creation import validate_worktree
+    validate_worktree(validate_workspace, workspace_kind, project_id, workspace_path, board)
     now = int(time.time())
 
     # Only persistent kinds inherit the board ``default_workdir``: a scratch
@@ -1362,6 +1359,9 @@ def create_task(
                     creation_receipt=creation_receipt, board=board)
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin, native_origin)
+                if require_scope_authority:  # agent/CLI ingress: refuse (roll back) an authority-less card
+                    from hermes_cli.kanban_create_authority import require
+                    require(conn, task_id, creator_task_id)
                 native_admission.require_receipt(conn, task_id)
             return task_id
         except sqlite3.IntegrityError:

@@ -319,41 +319,41 @@ def test_cli_block_agent_owned_allowed_with_wake_check(kanban_home):
 
 
 # ---------------------------------------------------------------------------
-# --json stays machine-readable when create warns about an unlinked card
+# Unknown agent sessions cannot create ownerless cards, including --json calls.
 # ---------------------------------------------------------------------------
 
 
 def _create_unlinked_from_agent(monkeypatch, *flags):
-    # An agent shell whose session can't be stamped: an unknown HERMES_SESSION_ID marks the
-    # call agent-invoked, but no chat links the card, so create warns.
+    # An unknown session marks an agent shell but supplies no durable owner.
     monkeypatch.setenv("HERMES_SESSION_ID", "no-such-session")
     return kc.run_slash('create "agent card" --assignee default ' + " ".join(flags))
 
 
-def test_create_json_via_slash_is_pure_json_with_unlinked_warning_field(kanban_home, monkeypatch):
+def test_create_json_via_slash_refuses_unowned_agent_card(kanban_home, monkeypatch):
     out = _create_unlinked_from_agent(monkeypatch, "--json")
-    payload = json.loads(out)  # nothing appended after the object
-    assert payload["id"].startswith("t_")
-    assert "is not linked to any chat" in payload["warning"]
-    assert payload["id"] in payload["warning"]
+    assert 'scope_authority_missing' in out
+    with kbc.connect_closing() as conn:
+        assert not kb.list_tasks(conn)
 
 
-def test_create_json_cli_keeps_stdout_pure_and_warns_on_stderr(kanban_home, monkeypatch, capsys):
+def test_create_json_cli_keeps_stdout_pure_and_refuses_on_stderr(kanban_home, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_SESSION_ID", "no-such-session")
     parser = argparse.ArgumentParser()
     kc.build_parser(parser.add_subparsers(dest="_top"))
     args = parser.parse_args(["kanban", "create", "agent card", "--assignee", "default", "--json"])
-    kc.kanban_command(args)
+    assert kc.kanban_command(args) == 2
     captured = capsys.readouterr()
-    payload = json.loads(captured.out)
-    assert "is not linked to any chat" in payload["warning"]
-    assert "is not linked to any chat" in captured.err
+    assert not captured.out
+    assert 'scope_authority_missing' in captured.err
+    with kbc.connect_closing() as conn:
+        assert not kb.list_tasks(conn)
 
 
-def test_create_text_mode_still_shows_unlinked_warning(kanban_home, monkeypatch):
+def test_create_text_mode_refuses_unowned_agent_card(kanban_home, monkeypatch):
     out = _create_unlinked_from_agent(monkeypatch)
-    assert out.startswith("Created t_")
-    assert "is not linked to any chat" in out
+    assert 'scope_authority_missing' in out
+    with kbc.connect_closing() as conn:
+        assert not kb.list_tasks(conn)
 
 
 def test_create_json_without_warning_has_no_warning_field(kanban_home, monkeypatch):

@@ -82,6 +82,8 @@ def github(tmp_path, monkeypatch):
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
+    monkeypatch.setenv('HERMES_SESSION_ID', register_chat(tmp_path / 'home', '20261123_120000_pr'))
     kb.init_db()
     try:
         yield state

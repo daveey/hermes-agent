@@ -38,6 +38,8 @@ def test_completed_decomposition_survives_retriage(tmp_path, monkeypatch):
 def test_parent_tenant_is_inherited_at_creation_boundary(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
+    monkeypatch.setenv('HERMES_SESSION_ID', register_chat(tmp_path / 'hermes', '20261123_120000_graph'))
     monkeypatch.delenv("HERMES_TENANT", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from tools.kanban_tools import _handle_create

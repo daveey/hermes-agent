@@ -27,6 +27,9 @@ def test_saved_opt_in_roundtrip_reaches_schema_and_board(surface, tmp_path, monk
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    from hermes_constants import get_hermes_home
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(get_hermes_home()))
     from hermes_cli.config import load_config, save_config
     from hermes_cli.tools_config import _apply_toolset_change, _get_platform_tools
     from tools.registry import registry

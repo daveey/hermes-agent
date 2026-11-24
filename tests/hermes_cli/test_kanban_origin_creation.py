@@ -16,6 +16,8 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    # Courier creation requires genuine renewal authority, which exists only on a synced board.
+    (tmp_path / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n")
     kb.init_db()
     return tmp_path
 

@@ -22,7 +22,20 @@ def local(board, monkeypatch):
     for key in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK", "HERMES_ORIGIN_SESSION",
                 "HERMES_SESSION_KEY", "HERMES_SESSION_ID"):
         monkeypatch.delenv(key, raising=False)
+    register_chat(kb.kanban_home(), '20261123_120000_selfwork')
+    monkeypatch.setenv('HERMES_SESSION_ID', '20261123_120000_selfwork')
     return board
+
+
+def register_chat(home, session):
+    """Persist an actual interactive owner in the creating profile's store."""
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=home / 'state.db')
+    try:
+        db.create_session(session_id=session, source='desktop')
+    finally:
+        db.close()
+    return session
 
 
 def create(entry, value):

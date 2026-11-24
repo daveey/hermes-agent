@@ -30,6 +30,10 @@ def test_effective_creation_audit_preserves_enrollment(kanban_home, tmp_path, mo
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
     monkeypatch.setattr(kt, "_persisted_identity", lambda: "specialist" if case == "implicit-assignee" else "default")
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_constants import get_hermes_home
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(get_hermes_home(), "20261123_120000_audit_owner")
+    monkeypatch.setenv("HERMES_SESSION_ID", chat)
     args = {"title": "Analyze public data", "requires": []}
     project_id = None
     if case in {"inherited-project", "empty-project"}:
@@ -38,7 +42,7 @@ def test_effective_creation_audit_preserves_enrollment(kanban_home, tmp_path, mo
         with projects_db.connect_closing() as conn:
             project_id = projects_db.create_project(conn, name="Audit", primary_path=str(repo))
         with kbc.connect() as conn:
-            parent = kb.create_task(conn, title="Project owner", assignee="default", project_id=project_id)
+            parent = kb.create_task(conn, title="Project owner", assignee="default", project_id=project_id, session_id=chat)
         monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
         if case == "empty-project":
             args["project"] = ""

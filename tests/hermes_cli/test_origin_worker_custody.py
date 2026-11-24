@@ -30,7 +30,8 @@ def worker(tmp_path, monkeypatch):
     with kbc.connect_closing() as conn:
         sync.set_mode(conn, 'primary')
         with interactive_capture(home, fixtures.CHAT) as captured:
-            parent = kb.create_task(conn, title='root', assignee='default', native_origin=captured)
+            parent = kb.create_task(conn, title='root', assignee='default', session_id=fixtures.CHAT,
+                                    native_origin=captured)
         assert native._receipt(conn, parent) is not None
         task = kb.claim_task(conn, parent, claimer='fixture-lock', ttl_seconds=3600)
         assert task is not None

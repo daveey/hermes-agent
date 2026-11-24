@@ -21,10 +21,12 @@ def test_worker_create_keeps_durable_origin(tmp_path, monkeypatch, linked, expli
                           user_id="user", notifier_profile="default", delivery_mode="notify",
                           delivery_metadata={"scope_id": "guild", "parent_chat_id": "forum"})
         expected = kn.list_notify_subs(conn, owner)[0]
-    if explicit:
-        state = SessionDB(db_path=tmp_path / "state.db")
-        state.create_session(explicit, source="cli")
-        state.close()
+    # The create guard needs a registered durable chat: seed the owner's chat (and any explicit one) in state.db.
+    state = SessionDB(db_path=tmp_path / "state.db")
+    for registered in ("durable", explicit):
+        if registered:
+            state.create_session(registered, source="cli")
+    state.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", owner)
     monkeypatch.setenv("HERMES_SESSION_ID", "ephemeral")
     monkeypatch.setattr(async_delegation, "_current_origin_session_id", lambda: "api-origin")
@@ -40,9 +42,12 @@ def test_worker_create_keeps_durable_origin(tmp_path, monkeypatch, linked, expli
         child = kb.get_task(conn, result["task_id"])
         assert child.session_id == (explicit or "durable")
         subs = kn.list_notify_subs(conn, child.id)
-        assert len(subs) == 1
+        inherited = [s for s in subs if s["chat_id"] == expected["chat_id"]]
+        assert len(inherited) == 1
         for key in ("platform", "chat_id", "user_id", "delivery_mode", "delivery_metadata", "notifier_profile"):
-            assert subs[0][key] == expected[key]
+            assert inherited[0][key] == expected[key]
+        # The registered chat (explicit, else the owner's durable one) adds its own owning anchor beside the passive policy.
+        assert sorted(s["chat_id"] for s in subs if s is not inherited[0]) == [explicit or "durable"]
         assert bool(conn.execute("SELECT 1 FROM task_links WHERE child_id = ?", (child.id,)).fetchone()) == linked
 
 
@@ -53,16 +58,23 @@ def test_tool_subscription_captures_conversation_anchors(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from gateway.session_context import scoped_current_session_id
     kb.init_db()
+    state = SessionDB(db_path=tmp_path / "state.db")
+    state.create_session("anchor-session", source="discord")  # registered chat: the create guard's authority
+    state.close()
     tokens = set_session_vars(platform="discord", chat_id="thread", chat_type="thread",
                              scope_id="guild", parent_chat_id="forum", profile="default")
     try:
-        result = json.loads(kt._handle_create(dict(title="direct", assignee="default")))
+        with scoped_current_session_id("anchor-session"):
+            result = json.loads(kt._handle_create(dict(title="direct", assignee="default")))
     finally:
         clear_session_vars(tokens)
     assert result["ok"], result
     with kbc.connect_closing() as conn:
-        metadata = kn.list_notify_subs(conn, result["task_id"])[0]["delivery_metadata"]
+        subs = [s for s in kn.list_notify_subs(conn, result["task_id"]) if s["chat_id"] == "thread"]
+        assert len(subs) == 1
+        metadata = subs[0]["delivery_metadata"]
         assert metadata["scope_id"] == "guild"
         assert metadata["parent_chat_id"] == "forum"
 
@@ -92,8 +104,17 @@ def test_tool_create_only_stamps_persisted_ambient_session(tmp_path, monkeypatch
     with scoped_current_session_id(session_id):
         result = json.loads(kt._handle_create({"title": "child", "assignee": "default"}))
     with kbc.connect_closing() as conn:
+        if not persisted:
+            # An unregistered ambient id is neither stamped nor authority: refused, nothing written.
+            assert result.get("ok") is not True and "task_id" not in result, result
+            assert "scope_authority_missing" in result["error"] or "scope authority" in result["error"]
+            assert kb.list_tasks(conn) == []
+            assert not conn.execute("SELECT 1 FROM kanban_notify_subs").fetchall()
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone() \
+                or not conn.execute("SELECT 1 FROM task_chat_links").fetchall()
+            return
         task = kb.get_task(conn, result["task_id"])
-    assert task.session_id == (session_id if persisted else None)
+    assert task.session_id == session_id
 
 
 def test_tool_create_stamps_request_scoped_session_over_process_env(tmp_path, monkeypatch):

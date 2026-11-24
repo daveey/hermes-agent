@@ -72,6 +72,9 @@ def test_a_served_profiles_tick_authors_board_records_as_that_profile(board_env,
     for name in ("alpha", "beta", "alpha"):
         token = set_hermes_home_override(root / "profiles" / name)
         try:
+            from tests.tools.test_kanban_create_overlap import register_chat
+            chat = register_chat(root / "profiles" / name, f"20261123_120000_{name}_owner")
+            monkeypatch.setenv("HERMES_SESSION_ID", chat)
             out = json.loads(kt._handle_comment({"task_id": tid, "body": f"from {name}"}))
             assert out["ok"], out
             assert _last_comment_author(tid) == name

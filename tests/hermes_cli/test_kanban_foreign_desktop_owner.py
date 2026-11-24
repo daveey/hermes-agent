@@ -21,7 +21,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as notify
 from hermes_cli.kanban_session_provenance import proven_foreign_chats
-from tests.tools.test_kanban_worker_created_chats import WORKER, make_home
+from tests.tools.test_kanban_worker_created_chats import CHAT, WORKER, make_home
 
 MAC = "local-" + "9c" * 32
 REF = f"macbook/default/{MAC}"
@@ -46,7 +46,15 @@ def _intent(request_id, origin=ORIGIN, task_id=None):
 def _bound(conn, how, origin=ORIGIN):
     """A card the courier bound to ``origin`` (creation or adoption of an exact existing card)."""
     if how == "create":
-        return kb.create_task(conn, title="mac card", origin_intent=_intent("req-create-0001", origin))
+        # A foreign local-<hash> origin is not renewable authority by itself (nothing proves it yet), so the
+        # courier create is anchored by an authentic SessionDB desktop chat (CHAT, registered by make_home).
+        # That anchor is then removed: these tests probe what the resolver proves for the foreign ref alone.
+        tid = kb.create_task(conn, title="mac card", session_id=CHAT, origin_intent=_intent("req-create-0001", origin))
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_chat_links WHERE task_id=? AND chat_session=?", (tid, CHAT))
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=? AND chat_id=?", (tid, CHAT))
+            conn.execute("UPDATE tasks SET session_id=NULL WHERE id=?", (tid,))
+        return tid
     from hermes_cli.kanban_origin_creation import adopt_with_origin
     tid = kb.create_task(conn, title="mac card")
     return adopt_with_origin(conn, _intent("req-adopt-00001", origin, tid), board="default")

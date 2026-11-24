@@ -45,6 +45,8 @@ def board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     assert db.is_relative_to(home.resolve()), f"board resolved outside the test's home: {db}"
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv('HERMES_SESSION_ID', register_chat(home))
     yield tmp_path
     kwc._shutdown_for_tests()
 
@@ -513,6 +515,8 @@ def test_tool_create_files_in_the_sweeps_env_without_the_creators_ids(board, mon
         _running(conn, monkeypatch)                      # a worker creating a card: its own task/run ids are set
         db = str(kbc._main_db_file(conn))
     monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", "creator-claim")
+    from tests.tools.test_kanban_create_overlap import register_chat
+    register_chat(board / '.hermes', 'creator-session')
     monkeypatch.setenv("HERMES_SESSION_ID", "creator-session")
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     out = json.loads(kt._handle_create({"title": "Pair the watch", "initial_status": "blocked", "requires": [],
@@ -525,6 +529,8 @@ def test_tool_create_files_in_the_sweeps_env_without_the_creators_ids(board, mon
 def test_cli_create_files_in_the_sweeps_env_without_the_creators_ids(board, monkeypatch, capsys):
     with kbc.connect_closing() as conn:
         db = str(kbc._main_db_file(conn))
+    from tests.tools.test_kanban_create_overlap import register_chat
+    register_chat(board / '.hermes', 's')
     for key, value in (("HERMES_KANBAN_RUN_ID", "7"), ("HERMES_KANBAN_CLAIM_LOCK", "c"),
                        ("HERMES_SESSION_ID", "s")):
         monkeypatch.setenv(key, value)

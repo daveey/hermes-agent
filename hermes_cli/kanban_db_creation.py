@@ -2,6 +2,16 @@
 import json
 
 
+def validate_worktree(validate_workspace, workspace_kind, project_id, workspace_path, board):
+    """Worktree declaration preflight, before allocating a task ID."""
+    if validate_workspace and workspace_kind == "worktree" and not project_id:
+        from hermes_cli.kanban_db_workspace import (
+            WorktreeWorkspaceConfigError, worktree_workspace_problem,
+        )
+        if problem := worktree_workspace_problem(workspace_path, board=board):
+            raise WorktreeWorkspaceConfigError(problem)
+
+
 def existing_creation_key(conn, key):
     """Legacy best-effort lookup; the caller chooses the transaction boundary."""
     return conn.execute(

@@ -19,9 +19,11 @@ def test_real_foreign_receiver_create_append_replay(world, tmp_path, monkeypatch
         lane_policy = lanes.Policy({'hermes': lanes.Lane('hermes', gated=True, self_work=True)},
                                    'hermes', 10)
         monkeypatch.setattr(lanes, 'safe_policy', lambda: lane_policy)
-    (tmp_path / 'config.yaml').write_text(json.dumps({'kanban': {'self_work': {
+    (tmp_path / 'config.yaml').write_text(json.dumps({'kanban': {'sync': {'enabled': True}, 'self_work': {
         'home': {'gateway': 'owner', 'profile': 'default', 'board': 'default'}}}}))
     with kbc.connect_closing() as conn:
+        from hermes_cli.kanban_db_sync import set_identity
+        set_identity(conn, 'board-owner', 'owner')
         collision = kb.create_task(conn, title='Unrelated', session_id='wrong-chat')
     creator = {'gateway': 'origin', 'profile': 'work', 'board': 'default',
                'task_id': collision, 'run_uid': 'original-run'}

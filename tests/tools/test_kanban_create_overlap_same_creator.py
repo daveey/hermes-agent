@@ -221,8 +221,10 @@ def worker(tmp_path, monkeypatch):
     monkeypatch.setattr(kt, "_is_dispatcher_owned_worker", lambda: True)
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(h)
     with kbc.connect_closing() as conn:
-        creator = kb.create_task(conn, title="Review PR #2110 at exact head", assignee="default")
+        creator = kb.create_task(conn, title="Review PR #2110 at exact head", assignee="default", session_id=chat)
         assert kb.claim_task(conn, creator) is not None
     monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
     return creator

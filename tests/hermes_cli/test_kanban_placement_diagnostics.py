@@ -16,6 +16,8 @@ def local_board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
     for name in ("HERMES_KANBAN_TASK", "HERMES_SESSION_ID", "HERMES_SESSION_KEY"):
         monkeypatch.delenv(name, raising=False)
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(tmp_path, "20261123_120000_diag_owner"))
     cfg = {"worker_pools": {"hub": ["worker-1"]}, "extra_home_markers": ["special-device"]}
     monkeypatch.setattr(placement, "config", lambda: cfg)
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")

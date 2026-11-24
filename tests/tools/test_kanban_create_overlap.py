@@ -22,6 +22,17 @@ DUP_BODY = ("David explicitly approved: 'approve stage b'. Execute frozen Stage 
             "Metta-AI/unconventional-collab. Checked this turn: current PLAN.md read via gh.")
 
 
+def register_chat(home, session="20261123_120000_overlap_caller"):
+    """Persist the human caller, not merely a plausible-looking session ID."""
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        db.create_session(session, source="desktop")
+    finally:
+        db.close()
+    return session
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     h = tmp_path / ".hermes"
@@ -35,6 +46,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(h))
     return h
 
 

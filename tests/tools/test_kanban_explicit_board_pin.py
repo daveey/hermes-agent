@@ -26,8 +26,11 @@ def test_explicit_board_pin(monkeypatch, tmp_path, own_board):
         paths[own_board].parent.symlink_to(backing, target_is_directory=True)
     for slug in paths:
         kb.create_board(slug)
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(tmp_path, "20261123_120000_worker_owner")
+    monkeypatch.setenv("HERMES_SESSION_ID", chat)
     with closing(kbc.connect(board=own_board)) as conn:
-        tid = kb.create_task(conn, title="worker", assignee="test-worker")
+        tid = kb.create_task(conn, title="worker", assignee="test-worker", session_id=chat)
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_DB", str(paths[own_board]))
     # A stale current-board hint must not override the database pin.

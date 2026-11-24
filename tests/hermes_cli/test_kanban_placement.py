@@ -411,6 +411,7 @@ def mac(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sdb = SessionDB(db_path=home / "state.db")
     sdb.create_session("20261027_183000_abc123", source="desktop")
     sdb.close()
+    monkeypatch.setenv("HERMES_SESSION_ID", "20261027_183000_abc123")  # the registered owning chat
     calls: list[list[str]] = []
     result = {"rc": 0, "help": "usage: hermes-hub create-task [--id ID]"}  # pre-1.8.0 client by default
 
@@ -620,8 +621,9 @@ def test_remote_task_id_reads_a_plain_create_output(mac):
     assert kp.remote_task_id("placement:macbook:x1") == "t_01a180ef6421a3f0"
 
 
-def test_unpersisted_session_creates_an_unbound_hub_card(mac):
+def test_unpersisted_session_creates_an_unbound_hub_card(mac, monkeypatch):
     from tools import kanban_tools as kt
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)  # the ambient chat would otherwise be the origin
     out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "session_id": "nope"}))
     argv = mac["calls"][0]
     assert out["placed"]["origin_session"] is None
@@ -771,7 +773,7 @@ def test_origin_bound_portable_tool_card_enrolls(mac, monkeypatch, worker, pin):
         monkeypatch.setattr(kt, "_is_dispatcher_owned_worker", lambda: True)
     monkeypatch.setattr(kp, "config", lambda: {"worker_pools": {"macbook": ["worker-1"]}})
     out = json.loads(kt._handle_create({"title": "Analyze public data", "requires": [],
-                                        "origin_session": "hub:abc123", "placement": pin}))
+                                        "origin_session": "macbook:20261027_183000_abc123", "placement": pin}))
     assert out.get("ok"), out
     with kbc.connect_closing() as conn:
         assert kb.get_task(conn, out["task_id"]).placement_policy == "worker-first-v1"
@@ -799,7 +801,7 @@ def test_current_nondefault_board_does_not_enroll(mac, monkeypatch, surface):
     else:
         args = {"title": "Analyze public data", "requires": []}
         if surface == "origin-tool":
-            args["origin_session"] = "hub:abc123"
+            args["origin_session"] = "macbook:20261027_183000_abc123"
         out = json.loads(kt._handle_create(args))
         assert out.get("ok"), out
     with kbc.connect_closing(board="other") as conn:

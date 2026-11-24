@@ -46,6 +46,13 @@ def test_heavy_route_remote_only_assignee(gws, monkeypatch):
     from tools import kanban_tools as kt
     hub, _ = gws
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_state import SessionDB  # act as a registered owning chat: genuine agent create authority
+    sdb = SessionDB(db_path=hub.home / "state.db")
+    try:
+        sdb.create_session(session_id="20261014_141400_abc123", source="desktop")
+    finally:
+        sdb.close()
+    monkeypatch.setenv("HERMES_SESSION_ID", "20261014_141400_abc123")
     monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
     monkeypatch.setattr(kp, "config", lambda: {"heavy_route": {HUB: WORKER}, "assignees": [PROFILE]})
     _publish(monkeypatch, {WORKER: {PROFILE: set(NEEDS)}})

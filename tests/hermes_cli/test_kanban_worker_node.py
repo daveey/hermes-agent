@@ -39,6 +39,9 @@ class Gateway:
     def __init__(self, root, name, svc, monkeypatch, *, pickup):
         self.home, self.name, self.svc, self.mp = root / name / ".hermes", name, svc, monkeypatch
         self.home.mkdir(parents=True)
+        # Durable create authority needs a genuinely registered owning chat in this gateway's own state.db.
+        from tests.tools.test_kanban_create_overlap import register_chat
+        self.chat = register_chat(self.home, f"20261123_120000_{name.replace('-', '_')}_owner")
         self.enter()
         from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
         (self.home / "config.yaml").write_text(
@@ -50,6 +53,7 @@ class Gateway:
 
     def enter(self):
         self.mp.setenv("HERMES_HOME", str(self.home))
+        self.mp.setenv("HERMES_SESSION_ID", self.chat)
         sync.set_lease_client(ksc.HubLeaseClient(self.svc.hub(self.name)))
         wn.set_registry_fetch(lambda: {"me": self.name, "machines": seen_now(MACHINES.values())})
         return self.conn if hasattr(self, "conn") else None

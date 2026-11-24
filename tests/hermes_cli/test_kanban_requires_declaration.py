@@ -72,6 +72,8 @@ def env(tmp_path, monkeypatch):
         _write_skill(home, skill, text)
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
+    register_chat(home, '20261123_120000_declaration')
     return home
 
 
@@ -82,6 +84,7 @@ def _count() -> int:
 
 def _tool_create(**args) -> dict:
     from tools import kanban_tools as kt
+    args.setdefault('session_id', '20261123_120000_declaration')
     return json.loads(kt._handle_create(args))
 
 
@@ -233,7 +236,8 @@ def test_tool_explicit_empty_and_gate_off(env):
 
 def test_worker_created_child_is_gated(env, monkeypatch):
     with kbc.connect_closing() as conn:
-        parent = kb.create_task(conn, title="Orchestrator", assignee="default", requires=["kanban"])
+        parent = kb.create_task(conn, title="Orchestrator", assignee="default", requires=["kanban"],
+                                session_id='20261123_120000_declaration')
         kb.claim_task(conn, parent)
         run_id = kb._current_run_id(conn, parent)
     monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
@@ -272,11 +276,13 @@ def test_courier_envelope_does_not_carry_the_gate(env, monkeypatch):
               "origin": {"gateway": "origin", "profile": "work", "session": "s_old"}}
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="Courier", assignee="alpha", origin_intent=intent,
+                             session_id='20261123_120000_declaration',
                              require_declaration=True)
         stored = json.loads(conn.execute("SELECT intent_json FROM origin_creation_intents").fetchone()[0])
         assert "require_declaration" not in stored["options"] and stored["options"]["requires"] is None
         # A retry of the same envelope (as an older sender would store it) still resolves to the card.
-        assert kb.create_task(conn, title="Courier", assignee="alpha", origin_intent=intent) == tid
+        assert kb.create_task(conn, title="Courier", assignee="alpha", origin_intent=intent,
+                              session_id='20261123_120000_declaration') == tid
         assert kb.get_task(conn, tid).requires == []
 
 
@@ -291,6 +297,7 @@ def _cli(argv: list[str], capsys) -> tuple[int, str]:
 
 
 def test_cli_agent_create_parity(env, monkeypatch, capsys):
+    monkeypatch.setenv('HERMES_SESSION_ID', '20261123_120000_declaration')
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")  # an agent's terminal/execute_code shell
     rc, out = _cli(["Fix the hub repo", "--assignee", "alpha"], capsys)
     assert rc == 2 and "requires_declaration_missing" in out
@@ -315,7 +322,8 @@ def test_cli_interactive_human_keeps_legacy(env, capsys):
 def test_cli_from_a_worker_shell_is_gated(env, monkeypatch, capsys):
     """The in_worker branch (HERMES_KANBAN_TASK set, no chat session markers)."""
     with kbc.connect_closing() as conn:
-        parent = kb.create_task(conn, title="Orchestrator", assignee="default", requires=["kanban"])
+        parent = kb.create_task(conn, title="Orchestrator", assignee="default", requires=["kanban"],
+                                session_id='20261123_120000_declaration')
     monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
     from hermes_cli import kanban as kmod
     assert not kmod._agent_invoked()
@@ -406,7 +414,8 @@ def test_real_cli_process_uses_disposable_db_and_refuses(env, tmp_path):
     child_env = {k: v for k, v in os.environ.items()
                  if not k.startswith("HERMES_") and k not in ("PYTHONPATH",)}
     child_env.update(HERMES_HOME=str(env), HERMES_KANBAN_DB=str(db), HERMES_SESSION_SOURCE="cli",
-                     HOME=str(tmp_path), PYTHONPATH=str(REPO))
+                     HERMES_SESSION_ID='20261123_120000_declaration',
+                     HOME=str(tmp_path / 'process-home'), PYTHONPATH=str(REPO))
     probe = subprocess.run(
         [sys.executable, "-c", "import os; from hermes_cli import kanban_db as k; "
          "print(os.environ['HERMES_HOME']); print(k.kanban_db_path())"],

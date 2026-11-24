@@ -38,7 +38,12 @@ def test_real_entry_queues_without_local_preflight(sender, monkeypatch, surface)
     assert argv[2:6] == ['owner', 'tasks', 'work/incidents', 'selfwork-create']
     assert body['create']['self_work'] == entry.support.declaration()
     assert body['create']['board'] == 'incidents'
-    assert 'origin' not in body
+    if surface == 'cli':
+        assert body['origin'] == {'gateway': 'origin', 'profile': 'default',
+                                  'session': '20261123_120000_selfwork'}
+        assert body['create']['session_id'] == body['origin']['session']
+    else:
+        assert 'origin' not in body
 
 
 def test_full_payload_and_destination_bound_retry(sender):

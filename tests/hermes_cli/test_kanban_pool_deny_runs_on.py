@@ -50,6 +50,8 @@ def hub(tmp_path, monkeypatch, hub_judge):
     for var in ("HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK", "HERMES_KANBAN_RUN_ID"):
         monkeypatch.delenv(var, raising=False)
     home = support.kanban_home(tmp_path, monkeypatch)
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(home, "20261123_120000_deny_owner"))
     (home / "config.yaml").write_text(CONFIG)
     kb.init_db()
     conn = kbc.connect(home / "kanban.db")

@@ -78,6 +78,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(kcr, "hub_runner", fake_hub)
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv('HERMES_SESSION_ID', register_chat(home))
     yield {"home": home, "hub": hub, "calls": calls}
     hub.close()
 

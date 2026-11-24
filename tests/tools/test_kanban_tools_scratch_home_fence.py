@@ -137,7 +137,10 @@ def test_env_fenced_subprocess_refused_when_home_is_fenced_but_board_is_not(monk
 def test_scratch_home_scope_covers_local_writes_only(monkeypatch, request, layout):
     """On a scratch home (outside the root, or in its scratch dir): comment and an explicitly local create
     work; a create with any other placement, archive (may relay home) and origin adoption stay refused."""
-    real_root, _scratch, tid = request.getfixturevalue(layout)
+    real_root, scratch, tid = request.getfixturevalue(layout)
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(scratch, "20261123_120000_scratch_owner")
+    monkeypatch.setenv("HERMES_SESSION_ID", chat)
     monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(real_root))
     monkeypatch.delenv("HERMES_KANBAN_TASK")  # act as an orchestrator on the scratch board
     from tools import kanban_tools as kt

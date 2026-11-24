@@ -117,40 +117,87 @@ def test_explicit_origin_keeps_parent_ack_subs(home, monkeypatch, capsys, entry,
 
 
 @pytest.mark.parametrize("entry", ["tool", "cli"])
-@pytest.mark.parametrize("with_creator", [True, False])
-def test_headless_explicit_origin_is_unresolved_not_resolved(home, monkeypatch, capsys, entry, with_creator):
-    """A worker receipt named as origin owns nothing: the card must stay discoverable as unresolved."""
+def test_headless_explicit_origin_without_authority_is_refused(home, monkeypatch, capsys, entry):
+    """A worker receipt named as origin owns nothing and no creator task exists: the agent create is refused
+    (nothing written) instead of only recording ``creator_chats_unresolved``."""
     from hermes_cli import kanban_origin
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here", "away"}))
+    monkeypatch.setenv("HERMES_SESSION_ID", WORKER)
+    origin = f"@session:default@away/{WORKER}"
+    if entry == "tool":
+        out = tools._handle_create({"title": "child", "assignee": "default", "requires": [],
+                                    "origin_session": origin, "placement": "local"})
+        assert "scope_authority_missing" in out or "scope authority" in out
+    else:
+        parser = argparse.ArgumentParser()
+        cli.build_parser(parser.add_subparsers())
+        args = parser.parse_args(["kanban", "create", "child", "--assignee", "default", "--origin-session", origin])
+        assert cli._cmd_create(args) == 2
+        assert "scope_authority_missing" in capsys.readouterr().err
+    with kbc.connect_closing() as conn:
+        assert "child" not in [t.title for t in kb.list_tasks(conn)]
+
+
+def refused_create(entry, capsys, origin=None):
+    """Run an agent create that the ownerless-creation guard must refuse; return what the caller saw."""
+    if entry == "tool":
+        out = tools._handle_create({"title": "child", "assignee": "default", "requires": [],
+                                    "origin_session": origin, "placement": "local"})
+        assert json.loads(out).get("ok") is not True, out
+        return out
+    parser = argparse.ArgumentParser()
+    cli.build_parser(parser.add_subparsers())
+    args = parser.parse_args(["kanban", "create", "child", "--assignee", "default", "--json"]
+                             + (["--origin-session", origin] if origin else []))
+    assert cli._cmd_create(args) == 2
+    captured = capsys.readouterr()
+    return captured.out + captured.err
+
+
+def assert_nothing_created(creator):
+    """Refusal rolled back: no child, no subs/links/gap events, no fabricated origin; creator untouched."""
+    with kbc.connect_closing() as conn:
+        assert [t.id for t in kb.list_tasks(conn)] == [creator]
+        assert not conn.execute("SELECT 1 FROM kanban_notify_subs").fetchall()
+        assert not conn.execute("SELECT 1 FROM task_chat_links").fetchall()
+        kinds = [e.kind for e in kb.list_events(conn, creator)]
+        assert "creator_chats_resolved" not in kinds and "creator_chats_unresolved" not in kinds
+
+
+def seed_ownerless_creator(monkeypatch):
     with kbc.connect_closing() as conn:
         creator = kb.create_task(conn, title="unowned creator", assignee="default", session_id=WORKER)
-    if with_creator:
-        monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (creator,))
+            kb._append_event(conn, creator, 'owner_admitted', {'session_id': WORKER})
+    monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
     monkeypatch.setenv("HERMES_SESSION_ID", WORKER)
-    child = create(entry, monkeypatch, capsys, origin=f"@session:default@away/{WORKER}")
-    with kbc.connect_closing() as conn:
-        kinds = [e.kind for e in kb.list_events(conn, child)]
-        assert "creator_chats_resolved" not in kinds
-        assert kinds.count("creator_chats_unresolved") == 1
-        assert not notify.list_notify_subs(conn, child)
+    monkeypatch.setenv("HERMES_SESSION_KEY", WORKER)
+    return creator
+
+
+@pytest.mark.parametrize("entry", ["tool", "cli"])
+@pytest.mark.parametrize("with_creator", [True])
+def test_headless_explicit_origin_is_unresolved_not_resolved(home, monkeypatch, capsys, entry, with_creator):
+    """A worker receipt named as origin owns nothing, and a durable ownerless creator task alone is not
+    authority: the create is refused and rolled back, never recorded as resolved or as a headless chat."""
+    from hermes_cli import kanban_origin
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here", "away"}))
+    creator = seed_ownerless_creator(monkeypatch)
+    out = refused_create(entry, capsys, origin=f"@session:default@away/{WORKER}")
+    assert "scope_authority_missing" in out or "scope authority" in out
+    assert_nothing_created(creator)
 
 
 @pytest.mark.parametrize("entry", ["tool", "cli"])
 def test_unresolved_worker_records_gap_without_a_chat(home, monkeypatch, capsys, entry):
-    with kbc.connect_closing() as conn:
-        creator = kb.create_task(conn, title="unowned creator", assignee="default", session_id=WORKER)
-    monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
-    monkeypatch.setenv("HERMES_SESSION_ID", WORKER)
-    monkeypatch.setenv("HERMES_SESSION_KEY", WORKER)
-    child = create(entry, monkeypatch, capsys)
+    """An ownerless worker's create (no origin at all) is refused; no gap event, link or sub is fabricated."""
+    creator = seed_ownerless_creator(monkeypatch)
+    out = refused_create(entry, capsys)
+    assert "scope_authority_missing" in out or "scope authority" in out
     with kbc.connect_closing() as conn:
         links.reconcile(conn, "default", "here", ledger=False)
-        assert not conn.execute("SELECT 1 FROM task_chat_links WHERE task_id=?", (child,)).fetchall()
-        assert not notify.list_notify_subs(conn, child)
-        gaps = [e for e in kb.list_events(conn, child) if e.kind == "creator_chats_unresolved"]
-        assert len(gaps) == 1
-        assert gaps[0].payload["task_id"] == child
-        assert gaps[0].payload["creator_task_id"] == creator
+    assert_nothing_created(creator)
 
 
 @pytest.mark.parametrize("entry", ["tool", "cli"])

@@ -27,7 +27,9 @@ def test_capture_keeps_original_tool_intent(home, monkeypatch, argument, intent,
                                            'directory': str(home / 'capture')}}}
     session = runtime.activate(config, home=home, board='default', source_gateway='test', board_uid='board')
     monkeypatch.setenv('HERMES_KANBAN_TASK', creator)
-    monkeypatch.setenv('HERMES_SESSION_ID', helpers.WORKER)
+    # A missing creator on this board still has a genuine creating chat. The
+    # absent creator remains in the capture; its priority must stay unknown.
+    monkeypatch.setenv('HERMES_SESSION_ID', helpers.WORKER if creator_present else helpers.CHAT)
     try:
         args = {'title': 'child', 'assignee': 'default', 'requires': [], 'placement': 'local'}
         if argument != 'omitted':

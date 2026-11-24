@@ -31,9 +31,11 @@ def worker_env(monkeypatch, tmp_path):
     from hermes_cli import kanban_db_connect as kbc
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(home, "20261123_120000_worker_owner")
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
+        tid = kb.create_task(conn, title="worker-test", assignee="test-worker", session_id=chat)
         kb.claim_task(conn, tid)
         run_id = kb._current_run_id(conn, tid)
     finally:

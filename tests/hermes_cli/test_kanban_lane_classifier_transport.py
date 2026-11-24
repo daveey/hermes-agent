@@ -86,7 +86,10 @@ def test_origin_preflights_once_before_ledger_transaction(conn, semantic, monkey
         return "research"
 
     monkeypatch.setattr(lanes, "_fallback_lane", classify)
-    tid = kb.create_task(conn, title="H3 recovery", assignee="default", origin_intent=intent())
+    from hermes_constants import get_hermes_home
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(get_hermes_home(), "20261123_120000_lane_owner")  # a real owning chat, not a bare ID
+    tid = kb.create_task(conn, title="H3 recovery", assignee="default", origin_intent=intent(), session_id=chat)
     assert kb.get_task(conn, tid).tenant == "research"
     assert classifier.cached({}) is None
     assert calls == ["H3 recovery"]

@@ -8,7 +8,14 @@ from tests.hermes_cli import test_kanban_selfwork_nochat as support
 from tests.hermes_cli import test_kanban_selfwork_guards as guards
 
 world = support.world
-request_envelope = support.request_envelope
+nochat_envelope = support.request_envelope
+
+
+@pytest.fixture
+def request_envelope(nochat_envelope):
+    nochat_envelope['args']['origin'] = {'gateway': 'origin', 'profile': 'work', 'session': 'original'}
+    nochat_envelope['args']['create']['session_id'] = 'creator'
+    return nochat_envelope
 
 
 @pytest.mark.parametrize('surface', ['cli', 'tool'])

@@ -26,7 +26,8 @@ def test_public_tool_preserves_ambient_tenant(sender, local, monkeypatch, explic
     for tenant in ('tenant-a', 'tenant-b'):
         monkeypatch.setenv('HERMES_TENANT', tenant)
         # Ordinary product creation establishes the existing public-tool contract.
-        product = json.loads(kt._handle_create({'title': 'Product ' + tenant, 'requires': [], 'placement': 'local'}))
+        product = json.loads(kt._handle_create({'title': 'Product ' + tenant, 'requires': [], 'placement': 'local',
+                                               'session_id': '20261123_120000_selfwork'}))
         assert kb.get_task(local, product['task_id']).tenant == tenant
         receipts.append(json.loads(kt._handle_create({'title': 'Finding ' + tenant, 'requires': [],
                           **({'tenant': tenant} if explicit else {}),

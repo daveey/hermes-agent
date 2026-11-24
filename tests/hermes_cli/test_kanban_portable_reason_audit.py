@@ -104,6 +104,9 @@ def test_tool_created_event_records_portable_reason(kanban_home, monkeypatch, re
     from tools import kanban_tools as kt
 
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_constants import get_hermes_home
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(get_hermes_home(), "20261123_120000_portable_owner"))
     result = json.loads(kt._handle_create({"title": "tool audit card", "assignee": "default",
                                            "requires": requires}))
     assert result.get("ok"), result

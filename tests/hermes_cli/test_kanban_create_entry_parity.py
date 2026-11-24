@@ -24,7 +24,6 @@ from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_session_activity as ksa
-
 SID = "20261016_185414_c283c2"
 _SESSION_ENV = ("HERMES_SESSION_KEY", "HERMES_SESSION_ID", "HERMES_SESSION_SOURCE",
                 "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_RPC_SOCKET",
@@ -137,13 +136,27 @@ def test_card_shows_in_the_creating_chats_task_list(chat, monkeypatch, capsys, p
     assert "not linked to any chat" not in capsys.readouterr().err
 
 
-def test_agent_cli_create_without_a_known_chat_warns(chat, monkeypatch, capsys):
-    # e.g. execute_code on another host / another profile: agent env, but no known session.
-    task_id = _run_cli_in({"HERMES_RPC_SOCKET": "sock", "HERMES_SESSION_ID": "not_a_real_session"},
-                          "orphan", monkeypatch)
-    err = capsys.readouterr().err
-    assert f"{task_id} is not linked to any chat" in err
-    assert f"notify-subscribe {task_id} --platform tui --chat-id" in err
+def test_agent_cli_create_without_a_known_chat_is_refused(chat, monkeypatch, capsys):
+    # e.g. execute_code on another host / another profile: agent env, but no known session. The card would have no
+    # scope authority, so it is refused instead of created orphaned with a "not linked to any chat" warning (req. D).
+    for var in _SESSION_ENV:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HERMES_RPC_SOCKET", "sock")
+    monkeypatch.setenv("HERMES_SESSION_ID", "not_a_real_session")
+    tokens = [var.set(sc._UNSET) for var in sc._VAR_MAP.values()]
+    engaged = sc._session_context_engaged
+    sc._session_context_engaged = False
+    try:
+        root = argparse.ArgumentParser(prog="hermes")
+        kc.build_parser(root.add_subparsers())
+        assert kc._cmd_create(root.parse_args(["kanban", "create", "orphan"])) == 2
+    finally:
+        sc._session_context_engaged = engaged
+        for var, tok in zip(sc._VAR_MAP.values(), tokens):
+            var.reset(tok)
+    assert "scope_authority_missing" in capsys.readouterr().err
+    with kbc.connect_closing() as conn:
+        assert not [t for t in kb.list_tasks(conn) if t.title == "orphan"]
 
 
 def test_plain_user_shell_create_does_not_warn(chat, monkeypatch, capsys):
@@ -152,7 +165,9 @@ def test_plain_user_shell_create_does_not_warn(chat, monkeypatch, capsys):
 
 
 def test_suggested_notify_subscribe_links_the_orphan(chat, monkeypatch, capsys):
-    task_id = _run_cli_in({"HERMES_RPC_SOCKET": "sock"}, "orphan to fix", monkeypatch)
+    # An orphan can still exist (internal/legacy creation); the CLI no longer makes one for an agent (req. D).
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="orphan to fix", assignee="default")
     root = argparse.ArgumentParser(prog="hermes")
     kc.build_parser(root.add_subparsers())
     args = root.parse_args(["kanban", "notify-subscribe", task_id, "--platform", "tui", "--chat-id", SID])
@@ -174,7 +189,7 @@ def restricted_creator(chat, monkeypatch):
 
 
 @pytest.mark.parametrize("surface", ["registry", "cli"])
-def test_create_requires_and_default_creator_parity(restricted_creator, surface):
+def test_create_requires_and_default_creator_parity(restricted_creator, surface, monkeypatch):
     if surface == "registry":
         from tools.registry import registry
         schema = registry.get_schema("kanban_create")
@@ -187,6 +202,7 @@ def test_create_requires_and_default_creator_parity(restricted_creator, surface)
         bad = json.loads(registry.dispatch("kanban_create", {"title": "Denied", "requires": ["terminal"]}))
         assert bad["code"] == "assignee_capability_mismatch", bad
     else:
+        monkeypatch.setenv("HERMES_SESSION_ID", SID)  # a registered chat: an agent create needs scope authority
         root = argparse.ArgumentParser()
         kc.build_parser(root.add_subparsers())
         assert kc._cmd_create(root.parse_args(["kanban", "create", "Allowed"])) == 0

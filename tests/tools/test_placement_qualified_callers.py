@@ -87,7 +87,7 @@ def test_foreign_origin_without_deferral_still_creates_local_card(home, monkeypa
 
 
 @pytest.mark.parametrize("owner", ["local", "none"])
-def test_supported_deferred_create_still_records_placeholder(home, monkeypatch, owner):
+def test_deferred_create_requires_a_durable_owner_before_placeholder(home, monkeypatch, owner):
     tid = creator(monkeypatch)
     with kbc.connect_closing() as conn:
         conn.execute("DELETE FROM task_chat_links WHERE task_id=?", (tid,))
@@ -96,6 +96,12 @@ def test_supported_deferred_create_still_records_placeholder(home, monkeypatch, 
             helpers._link(conn, tid, "here", "default", helpers.CHAT)
     monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "local", "defer": "hub", "why": "parents"})
     out = json.loads(tools._handle_create({"title": "supported deferred child", "requires": []}))
+    if owner == 'none':
+        assert 'no renewable scope authority' in out['error'], out
+        with kbc.connect_closing() as conn:
+            assert not conn.execute("SELECT 1 FROM tasks WHERE title='supported deferred child'").fetchone()
+            assert kpf.state(conn, tid) is None
+        return
     assert out["ok"] is True, out
     with kbc.connect_closing() as conn:
         st = kpf.state(conn, out["task_id"])

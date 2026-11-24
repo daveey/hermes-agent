@@ -436,4 +436,12 @@ def _insert_decomposed_child(
                                   "requires": required, "priority": priority},
     )
     inherit_creator_origin(conn, new_id, root_id, created_at=now)
+    from hermes_cli.kanban import _agent_invoked
+    if _agent_invoked():
+        from hermes_cli.kanban_cli_body import session_identity
+        from hermes_cli.kanban_create_authority import require
+        import os
+        _, session = session_identity(bool(os.environ.get('HERMES_KANBAN_TASK')))
+        conn.execute('UPDATE tasks SET session_id=COALESCE(session_id,?) WHERE id=?', (session, new_id))
+        require(conn, new_id, None)  # a triaged decomposition root is not an admitted creator run
     return new_id

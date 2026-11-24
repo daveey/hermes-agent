@@ -34,6 +34,8 @@ def test_no_pool_profile_audits_shared_default_board(tmp_path, monkeypatch, fron
     assert "worker_pools" not in cfg
     assert cfg["extra_home_markers"] == ["special-device"]
     kb.init_db()
+    from tests.tools.test_kanban_create_overlap import register_chat
+    monkeypatch.setenv("HERMES_SESSION_ID", register_chat(profile, "20261123_120000_audit_owner"))
     args = {"title": "Analyze public data", "assignee": assignee, "body": body, "requires": []}
     if frontdoor == "db":
         with kbc.connect() as conn:

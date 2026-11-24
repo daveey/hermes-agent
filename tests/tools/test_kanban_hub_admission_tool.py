@@ -44,6 +44,9 @@ def on_gateway(kanban_home, monkeypatch, hub_judge):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_WORKER_TASK", raising=False)
     monkeypatch.setattr(kt, "_persisted_identity", lambda: "default")
+    from tests.tools.test_kanban_create_overlap import register_chat
+    chat = register_chat(kanban_home, "20261123_120000_hub_admission_owner")
+    monkeypatch.setenv("HERMES_SESSION_ID", chat)
 
     def use(gateway):
         monkeypatch.setattr(placement.reg, "self_gateway", lambda: gateway)
@@ -136,7 +139,7 @@ def test_tool_runs_on_shapes_naming_hub_are_judged(synced, on_gateway, monkeypat
 
 
 @pytest.mark.parametrize("admit", [True, False])
-def test_tool_courier_create_landing_on_hub_is_judged(on_gateway, admit):
+def test_tool_courier_create_landing_on_hub_is_judged(synced, on_gateway, admit):
     """A routed create (macbook→hub auto route) is judged on the hub before its txn; a deny
     re-enrolls it in the pool with requires hub:write (spec owner 11-12)."""
     judge = on_gateway("hub")
@@ -159,7 +162,7 @@ def test_tool_courier_create_landing_on_hub_is_judged(on_gateway, admit):
 
 
 @pytest.mark.parametrize("first", [False, True])
-def test_tool_courier_replay_reuses_the_first_landing(on_gateway, first):
+def test_tool_courier_replay_reuses_the_first_landing(synced, on_gateway, first):
     """Review t_01a1ced25af29218: a re-applied request whose verdict flipped (an unavailable deny is
     not cached) rebuilt a different envelope and raised origin_creation_conflict."""
     judge = on_gateway("hub")

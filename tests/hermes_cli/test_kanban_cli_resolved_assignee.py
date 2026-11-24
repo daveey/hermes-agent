@@ -26,6 +26,9 @@ def test_cli_placement_uses_resolved_assignee(kanban_home, monkeypatch, pooled, 
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.setattr(cli, "_agent_invoked", lambda: agent)
+    if agent:
+        from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
+        monkeypatch.setenv('HERMES_SESSION_ID', register_chat(kanban_home, '20261123_120000_assignee'))
     monkeypatch.setattr(cli, "_profile_author", lambda: "specialist" if agent else "default")
     monkeypatch.setattr(kb, "_default_ready_assignee", lambda: "specialist")
     extra = " --assignee default" if explicit else ""

@@ -81,6 +81,8 @@ def test_agent_create_defaults_to_creator_and_checks_requires(board, monkeypatch
     monkeypatch.setattr(cli, '_profile_author', lambda: 'restricted')
     monkeypatch.setattr(cli, '_agent_invoked', lambda: True)
     monkeypatch.setattr(cli, '_check_dispatcher_presence', lambda: (True, ''))
+    from tests.hermes_cli.test_kanban_selfwork_entry import register_chat
+    monkeypatch.setenv('HERMES_SESSION_ID', register_chat(kb.kanban_home(), '20261123_120000_capabilities'))
     if surface == 'tool':
         out = json.loads(tools._handle_create({'title': 'Defaulted'}))
         assert out.get('task_id'), out
