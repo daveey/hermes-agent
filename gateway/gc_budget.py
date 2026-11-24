@@ -77,7 +77,7 @@ def apply_gateway_gc_budget(environ=None) -> tuple:
 
 
 def snapshot() -> dict:
-    """``{threshold, generations: {n: {runs, cpu_s, wall_s, max_wall_s, collected}}}`` since :func:`apply`."""
+    """``{threshold, generations: {n: {runs, cpu_s, wall_s, max_wall_s, collected}}}`` since :func:`apply_gateway_gc_budget`."""
     return {
         "threshold": list(gc.get_threshold()),
         "timed": _on_gc in gc.callbacks,

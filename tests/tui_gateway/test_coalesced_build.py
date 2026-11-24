@@ -103,6 +103,8 @@ def test_failed_build_reaches_only_its_caller_and_waiters_build_for_themselves()
             if c._states["k"].waiters == 2:
                 break
         threading.Event().wait(0.01)
+    else:
+        pytest.fail("follower never queued")
     release.set()
     leader.join(10)
     follower.join(10)

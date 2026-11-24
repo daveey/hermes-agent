@@ -55,13 +55,33 @@ def test_apply_installs_one_timer_and_times_collections(restore_gc):
     assert full["cpu_s"] >= 0
 
 
-def test_timer_survives_a_collection_started_while_the_accounting_lock_is_held(restore_gc):
+def test_timer_takes_no_accounting_lock(restore_gc):
+    """Another thread holds the accounting lock for the whole collection: a timer that took it would hang."""
+    import threading
+
     from hermes_cli import loop_accounting
 
     gc_budget.apply_gateway_gc_budget({})
-    with loop_accounting._lock:  # a collection can begin inside any allocation, this one included
-        gc.collect()
-    assert gc_budget.snapshot()["generations"]["2"]["runs"] >= 1
+    gc_budget._totals.clear()
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with loop_accounting._lock:
+            held.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert held.wait(10)
+    collector = threading.Thread(target=gc.collect)
+    collector.start()
+    collector.join(10)
+    finished = not collector.is_alive()
+    release.set()
+    holder.join(10)
+    collector.join(10)
+    assert finished
+    assert gc_budget.snapshot()["generations"]["2"]["runs"] == 1
 
 
 def test_accounting_snapshot_reports_gc(restore_gc):

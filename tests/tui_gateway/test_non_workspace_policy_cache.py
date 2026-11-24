@@ -1,6 +1,7 @@
 """The never-a-workspace roots are resolved once per input set, not once per path. [daveey]"""
 from __future__ import annotations
 
+import os
 import tempfile
 
 import pytest
@@ -48,6 +49,9 @@ def test_new_profile_home_is_seen_at_once(homes):
     profiles.mkdir()
     assert not server._is_non_workspace_path(str(outside / "cache"))
     (profiles / "linked").symlink_to(outside, target_is_directory=True)
+    # Kernels with coarse timestamps can give both writes one mtime; production is bounded by the TTL.
+    stamp = profiles.stat().st_mtime_ns + 1_000_000
+    os.utime(profiles, ns=(stamp, stamp))
     assert server._is_non_workspace_path(str(outside / "cache"))
 
 
@@ -85,8 +89,6 @@ def test_relinked_root_is_seen_after_the_ttl(homes, monkeypatch, tmp_path):
 
 
 def _count_realpath(monkeypatch):
-    import os
-
     calls = []
     real = os.path.realpath
     monkeypatch.setattr(server.os.path, "realpath", lambda p, *a, **k: calls.append(str(p)) or real(p, *a, **k))
@@ -108,8 +110,6 @@ def test_canonical_path_is_resolved_once_per_ttl(homes, monkeypatch):
 
 
 def test_canonical_path_sees_a_relinked_alias_after_the_ttl(homes, monkeypatch):
-    import os
-
     home, _, _ = homes
     one, two, alias = home / "one", home / "two", home / "alias"
     one.mkdir()
@@ -131,3 +131,20 @@ def test_canonical_memo_is_bounded(homes, monkeypatch):
     for i in range(35):
         server._canonical_workspace_path(f"/nonexistent-hhp/{i}")
     assert len(server._canonical_memo) <= 10
+
+
+def test_policy_roots_do_not_inherit_a_stale_canonical_answer(homes, monkeypatch, tmp_path):
+    """A root also asked about as a path must not make the policy two TTLs stale."""
+    import hermes_constants
+
+    first, second = tmp_path / "store-1", tmp_path / "store-2"
+    first.mkdir()
+    second.mkdir()
+    link = tmp_path / "hermes-link"
+    link.symlink_to(first, target_is_directory=True)
+    monkeypatch.setattr(server, "_canonical_memo", {})
+    assert server._canonical_workspace_path(str(link)) == os.path.normcase(os.path.realpath(first))
+    link.unlink()
+    link.symlink_to(second, target_is_directory=True)
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: link)  # new key: the policy is rebuilt now
+    assert server._non_workspace_policy()[1].count(os.path.normcase(os.path.realpath(second))) == 1

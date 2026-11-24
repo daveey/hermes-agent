@@ -141,10 +141,16 @@ def _non_workspace_dirs() -> set[str]:
 
 # ``realpath`` is one ``lstat`` per path component, and each releases the GIL. A tree build resolves
 # every session cwd several times; with overlapping builds that was 65% of a Desktop backend's GIL
-# handoffs (a third of its CPU, spent in the kernel). A re-pointed symlink is seen after the TTL.
+# handoffs (a third of its CPU, spent in the kernel). The key is the path string alone: a re-pointed
+# symlink anywhere in its chain, or a path that appears later, is seen after the TTL.
 _CANONICAL_TTL_S = 30.0
 _CANONICAL_MAX = 20000
 _canonical_memo: dict[str, tuple[float, str]] = {}
+
+
+def _resolve_workspace_path(path: str) -> str:
+    """The uncached resolution: for answers that are stored or that seed another cache."""
+    return os.path.normcase(os.path.realpath(path)) if path else ""
 
 
 def _canonical_workspace_path(path: str) -> str:
@@ -194,7 +200,7 @@ def _non_workspace_policy() -> tuple[frozenset, tuple]:
              # no-tmp: ok — classify OS temp roots, not scratch-file creation.
              "/tmp", "/private/tmp", "/var/folders", key[4])
     dirs = frozenset(_non_workspace_dirs())
-    prefixes = tuple(sorted({_canonical_workspace_path(p) for p in roots if p}))
+    prefixes = tuple(sorted({_resolve_workspace_path(p) for p in roots if p}))  # one TTL, not two
     _non_workspace_memo = (key, now + _NON_WORKSPACE_TTL_S, dirs, prefixes)
     return dirs, prefixes
 
@@ -341,7 +347,7 @@ def _discover_repos_payload(
         cwd = str(row.get("cwd") or "")
         if _is_non_workspace_path(cwd):
             continue
-        root = _canonical_workspace_path(git_probe.common_repo_root(cwd))
+        root = _resolve_workspace_path(git_probe.common_repo_root(cwd))  # backfilled to the store below
         if not root:
             continue
         cwd_to_root[cwd] = root
