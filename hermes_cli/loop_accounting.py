@@ -624,7 +624,17 @@ def _snapshot_locked() -> dict[str, Any]:
         "open_accounting_complete": _open_intervals.complete(threads),
         "residual": _residual(threads, process_cpu, accounted_total, procfs),
         "loops": counters(),
+        "gc": _gc_snapshot(),
     }
+
+
+def _gc_snapshot() -> Optional[dict[str, Any]]:
+    """Collection counts and stop-the-world time (``gateway.gc_budget``), None when unavailable."""
+    try:
+        from gateway.gc_budget import snapshot as gc_snapshot
+        return gc_snapshot()
+    except Exception:
+        return None
 
 
 def _residual(threads: list[dict[str, Any]], process_cpu: float, accounted_total: float,

@@ -1692,9 +1692,11 @@ def _run_serve(serve, config, host: str, port: int) -> None:
 
 def start_server(*args, **kwargs):
     """Run the dashboard/serve backend; no lazy install may prompt on an inherited TTY (#125607)."""
+    from gateway.gc_budget import apply_gateway_gc_budget
     from gateway.gil_budget import apply_gateway_switch_interval
     from pm.extras import suppress_interactive_install_prompts
     apply_gateway_switch_interval()
+    apply_gateway_gc_budget()  # a full collection stops every thread for its length (gc_budget.py)
     with suppress_interactive_install_prompts():
         return _start_server_runtime(*args, **kwargs)
 

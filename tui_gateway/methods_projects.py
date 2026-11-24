@@ -139,9 +139,27 @@ def _non_workspace_dirs() -> set[str]:
     return {os.path.normcase(os.path.realpath(path)) for path in candidates if path}
 
 
+# ``realpath`` is one ``lstat`` per path component, and each releases the GIL. A tree build resolves
+# every session cwd several times; with overlapping builds that was 65% of a Desktop backend's GIL
+# handoffs (a third of its CPU, spent in the kernel). A re-pointed symlink is seen after the TTL.
+_CANONICAL_TTL_S = 30.0
+_CANONICAL_MAX = 20000
+_canonical_memo: dict[str, tuple[float, str]] = {}
+
+
 def _canonical_workspace_path(path: str) -> str:
     """Resolve local aliases before policy checks and project/repo/lane keying."""
-    return os.path.normcase(os.path.realpath(path)) if path else ""
+    if not path:
+        return ""
+    now = time.monotonic()
+    hit = _canonical_memo.get(path)
+    if hit is not None and now < hit[0]:
+        return hit[1]
+    real = os.path.normcase(os.path.realpath(path))
+    if len(_canonical_memo) >= _CANONICAL_MAX:
+        _canonical_memo.clear()
+    _canonical_memo[path] = (now + _CANONICAL_TTL_S, real)
+    return real
 
 
 # The policy's resolved roots, kept while every input they are derived from is unchanged. One tree

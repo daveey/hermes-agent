@@ -84,3 +84,52 @@ def test_relinked_root_is_seen_after_the_ttl(homes, monkeypatch, tmp_path):
     monkeypatch.setattr(server.time, "monotonic", lambda: now + server._NON_WORKSPACE_TTL_S + 1)
     assert server._is_non_workspace_path(str(second / "x"))
     assert not server._is_non_workspace_path(str(first / "x"))
+
+
+def _count_realpath(monkeypatch):
+    import os
+
+    calls = []
+    real = os.path.realpath
+    monkeypatch.setattr(server.os.path, "realpath", lambda p, *a, **k: calls.append(str(p)) or real(p, *a, **k))
+    return calls
+
+
+def test_canonical_path_is_resolved_once_per_ttl(homes, monkeypatch):
+    home, _, _ = homes
+    target = home / "repo"
+    target.mkdir()
+    monkeypatch.setattr(server, "_canonical_memo", {})
+    calls = _count_realpath(monkeypatch)
+    first = server._canonical_workspace_path(str(target))
+    resolved = len(calls)
+    assert resolved >= 1
+    assert [server._canonical_workspace_path(str(target)) for _ in range(50)] == [first] * 50
+    assert len(calls) == resolved  # the repeats made no filesystem call at all
+    assert server._canonical_workspace_path("") == ""
+
+
+def test_canonical_path_sees_a_relinked_alias_after_the_ttl(homes, monkeypatch):
+    import os
+
+    home, _, _ = homes
+    one, two, alias = home / "one", home / "two", home / "alias"
+    one.mkdir()
+    two.mkdir()
+    alias.symlink_to(one, target_is_directory=True)
+    monkeypatch.setattr(server, "_canonical_memo", {})
+    assert server._canonical_workspace_path(str(alias)) == os.path.normcase(os.path.realpath(one))
+    alias.unlink()
+    alias.symlink_to(two, target_is_directory=True)
+    assert server._canonical_workspace_path(str(alias)) == os.path.normcase(os.path.realpath(one))  # inside the TTL
+    now = server.time.monotonic()
+    monkeypatch.setattr(server.time, "monotonic", lambda: now + server._CANONICAL_TTL_S + 1)
+    assert server._canonical_workspace_path(str(alias)) == os.path.normcase(os.path.realpath(two))
+
+
+def test_canonical_memo_is_bounded(homes, monkeypatch):
+    monkeypatch.setattr(server, "_canonical_memo", {})
+    monkeypatch.setattr(server, "_CANONICAL_MAX", 10)
+    for i in range(35):
+        server._canonical_workspace_path(f"/nonexistent-hhp/{i}")
+    assert len(server._canonical_memo) <= 10

@@ -903,6 +903,8 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
     # GIL handoffs to the API loop wait out the switch interval behind CPU-bound threads (gil_budget.py).
     from gateway.gil_budget import apply_gateway_switch_interval
     apply_gateway_switch_interval()
+    from gateway.gc_budget import apply_gateway_gc_budget
+    apply_gateway_gc_budget()  # a full collection stops every thread for its length (gc_budget.py)
 
     # Snapshot the revision while sys.modules matches disk so a later `git pull` is detected safely.
     from gateway.code_skew import install_boot_pinned_imports, record_boot_fingerprint
