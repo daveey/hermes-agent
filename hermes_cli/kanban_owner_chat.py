@@ -40,6 +40,7 @@ RECHECK_S = 600.0  # a cached owner chat is re-validated (archived? deleted?) at
 BACKFILL_EVERY_S = 3600.0
 BACKFILL_CATCHUP_S = 600.0
 BACKFILL_BATCH = 100
+CREATOR_GRACE_S = 6 * 3600.0
 _ENSURED: dict[tuple[str, str], tuple[str, float]] = {}
 _LOCK = threading.Lock()
 _NEXT_BACKFILL: dict[str, float] = {}
@@ -214,6 +215,13 @@ def settle(conn, task_id: str, creator_task_id: Optional[str], *, created_by: Op
     kca._anchor_registered_session(conn, task_id)
     if kca.has_authority(conn, task_id, creator_task_id, durable=True):
         return
+    if creator_task_id:
+        # A worker's card is owned through its creator chain, whose chat may resolve after create (from another
+        # gateway's replica). An owner chat here would sit beside that real chat and, being local and verified,
+        # be preferred over it; the hourly backfill covers a chain that never resolves.
+        if strict:
+            kca.require(conn, task_id, creator_task_id)
+        return
     name = (producer or "").strip() or (None if strict else (created_by or "").strip() or "unattributed")
     if not name:
         kca.require(conn, task_id, creator_task_id)  # raises: no chat, no creator, no declared producer
@@ -259,11 +267,27 @@ def _needs_owner(conn, task_id: str, links: bool, live) -> Optional[list[str]]:
                               (task_id,)).fetchone():
         return None  # its owner let go on purpose; re-owning it would undo that
     mine, other = _owner_refs(conn, task_id, links)
-    if mine and not other and not any(live(ref) for ref in mine):
+    if other:
+        return None  # a real creating chat (possibly another gateway's) owns it: never put an owner chat beside it
+    if mine and not any(live(ref) for ref in mine):
         return mine  # owned only by owner chats the user deleted or archived: delivery would go nowhere
     if kca.has_authority(conn, task_id, None, durable=True):
         return None
+    if _creator_chain_pending(conn, task_id):
+        return None
     return []
+
+
+def _creator_chain_pending(conn, task_id: str) -> bool:
+    """A worker's card younger than ``CREATOR_GRACE_S`` may still get its creator's chat by link resolution."""
+    import time
+
+    from hermes_cli.kanban_archive_scope import _creator_task_id
+    if not _creator_task_id(conn, task_id):
+        return False
+    created = conn.execute("SELECT created_at FROM tasks WHERE id=?", (task_id,)).fetchone()[0] or 0
+    created = created / 1000 if created > 1e11 else created
+    return time.time() - created < CREATOR_GRACE_S
 
 
 def _liveness():

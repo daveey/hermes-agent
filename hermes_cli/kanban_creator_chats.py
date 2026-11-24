@@ -116,7 +116,8 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str, *, verdicts: L
             proofs[task_id] = proven_foreign_chats(conn, (task_id,), local_gateway=me)
         return f"{row['chat_gateway']}/{row['chat_profile']}/{row['chat_session']}" in proofs[task_id]
 
-    frontier, seen = [creator_task_id], set()
+    from hermes_cli.kanban_owner_chat import PREFIX
+    frontier, seen, fallback = [creator_task_id], set(), []
     for _depth in range(MAX_DEPTH):
         owners, following = {}, []
         for task_id in frontier:
@@ -138,12 +139,16 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str, *, verdicts: L
                 following.append(payload["creator_task_id"])
             following.extend(r[0] for r in conn.execute(
                 "SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id", (task_id,)))
-        if owners:
-            return list(owners.values())
+        # A producer's standing owner chat (kanban_owner_chat) is the last resort: the walk goes on for a real
+        # chat further up, and only the nearest owner chats are returned when there is none.
+        real = [v for k, v in owners.items() if not str(k[2] or "").startswith(PREFIX)]
+        if real:
+            return real
+        fallback = fallback or list(owners.values())
         frontier = list(dict.fromkeys(t for t in following if t not in seen))
         if not frontier:
             break
-    return []
+    return fallback
 
 
 def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
@@ -268,11 +273,14 @@ def inherit_chats(conn: sqlite3.Connection, task_id: str, creator_task_id: str,
     from hermes_cli.kanban_db import _append_event
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
         return
+    from hermes_cli.kanban_owner_chat import PREFIX
     owners, source = resolve_chats(conn, creator_task_id, verdicts=verdicts), None
-    if not owners:
-        owners = (replica_reader.resolve(creator_task_id, verdicts=verdicts) if replica_reader is not None
-                  else _replica_chats(conn, creator_task_id))
-        source = "replica" if owners else None
+    if all(str(o["chat_session"] or "").startswith(PREFIX) for o in owners):
+        # None, or only a producer's owner chat: a real chat on the replica (another gateway's) wins over it.
+        replica = (replica_reader.resolve(creator_task_id, verdicts=verdicts) if replica_reader is not None
+                   else _replica_chats(conn, creator_task_id))
+        if replica and (not owners or not all(str(o["chat_session"] or "").startswith(PREFIX) for o in replica)):
+            owners, source = replica, "replica"
     if not owners:
         if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_unresolved'",
                             (task_id,)).fetchone():

@@ -578,6 +578,26 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
     monkeypatch.setattr(_kbd_mod, "_system_memory_sample", dict, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _owner_chats_off(request, monkeypatch):
+    """Cards are created ownerless, as before standing owner chats (``hermes_cli.kanban_owner_chat``), unless a
+    test requests the ``owner_chats`` fixture. Suites across kanban, notify and the TUI gateway pin exact links,
+    subscriptions, routes and hand-built state.db schemas for chat-less fixture cards; owner-chat behaviour is
+    tested where it is opted in (tests/hermes_cli/test_kanban_owner_chat.py). [daveey]"""
+    if "owner_chats" in request.fixturenames:
+        return
+    try:
+        from hermes_cli import kanban_owner_chat as _owner
+    except Exception:
+        return
+    monkeypatch.setattr(_owner, "enabled", lambda: False)
+
+
+@pytest.fixture
+def owner_chats():
+    """Standing owner chats on (the production default): an ownerless card gets its producer's owner chat."""
+
+
 _GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
                       "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 # Entries a test must never change in a live checkout's shared config: identity (later commits get

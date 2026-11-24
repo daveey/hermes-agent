@@ -17,7 +17,7 @@ kanban_home = helpers.kanban_home
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cache(monkeypatch):
+def _fresh_cache(monkeypatch, owner_chats):
     monkeypatch.setattr(owner, "_ENSURED", {})
 
 
@@ -547,3 +547,44 @@ def test_unlinkable_cards_neither_keep_the_catch_up_pace_nor_stay_skipped_foreve
         assert result["eligible"] == 0 and result["linked"] == 0
         assert owner._NEXT_BACKFILL[next(iter(owner._NEXT_BACKFILL))] == owner.BACKFILL_EVERY_S  # hourly, not 10 min
         assert owner._UNLINKABLE == set()  # retried on the next hourly pass
+
+
+def test_a_worker_child_is_owned_through_its_creator_chain_not_an_owner_chat(synced, monkeypatch):
+    creator = kb.create_task(synced, title="creator", assignee="default", created_by="ci-main-watch")
+    child = kb.create_task(synced, title="child", assignee="default", created_by="default", creator_task_id=creator)
+    sid = owner.session_id("default")
+    assert not any(r[0] == sid for r in synced.execute(
+        "SELECT chat_session FROM task_chat_links WHERE task_id=?", (child,)))
+    assert owner.backfill(synced, apply=False)["by_producer"].get("default") is None  # within the creator grace
+
+
+def test_a_card_owned_by_another_gateways_real_chat_never_gets_an_owner_chat(synced, monkeypatch):
+    monkeypatch.setattr(owner, "enabled", lambda: False)
+    tid = kb.create_task(synced, title="Foreign owner", assignee="default", created_by="self-heal")
+    with kb.write_txn(synced):
+        synced.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,"
+                       "released,created_at) VALUES ('u3',?,'macbook',NULL,'20261124_120000_human','created',0,0)",
+                       (tid,))
+    monkeypatch.setattr(owner, "enabled", lambda: True)
+    assert owner.backfill(synced, apply=True)["linked"] == 0
+    assert [r[0] for r in synced.execute("SELECT chat_session FROM task_chat_links WHERE task_id=?", (tid,))] == \
+        ["20261124_120000_human"]
+
+
+def test_inheritance_prefers_a_real_chat_further_up_over_a_nearer_owner_chat(synced):
+    from hermes_cli import kanban_creator_chats as creators
+    ancestor = kb.create_task(synced, title="ancestor", assignee="default", created_by="ci-main-watch")
+    with kb.write_txn(synced):
+        synced.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,"
+                       "released,created_at) VALUES ('u4',?,'away','default','20261124_120000_human','created',0,0)",
+                       (ancestor,))
+    creator = kb.create_task(synced, title="creator", assignee="default", created_by="ci-main-watch",
+                             parents=[ancestor])
+    chats = [o["chat_session"] for o in creators.resolve_chats(synced, creator)]
+    assert chats == ["20261124_120000_human"]
+
+
+def test_inheritance_falls_back_to_the_nearest_owner_chat(synced):
+    from hermes_cli import kanban_creator_chats as creators
+    creator = kb.create_task(synced, title="creator", assignee="default", created_by="ci-main-watch")
+    assert [o["chat_session"] for o in creators.resolve_chats(synced, creator)] == [owner.session_id("ci-main-watch")]
