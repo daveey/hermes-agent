@@ -791,7 +791,10 @@ hermes kanban spend-budget <id> --clear --reason "back to normal"
 `--runs` / `--cache-read-tokens` take 0 for no limit; a field not given keeps
 the board's value; `--exempt` sets both to 0. Every change needs `--reason` and
 is recorded as a `spend_budget_set` event (who, why, the limits) plus a card
-comment; the newest one wins. A card over its own limit is triaged with
+comment; the newest one wins. Outside a pending spend stop, a limit counts the
+runs and tokens already spent in the current window, so one at or below that
+spend is refused (it would triage the card at the next tick): to grant 3 more
+runs to a card that has spent 7, pass `--runs 10`. A card over its own limit is triaged with
 `override: true` on the `spend_budget_triaged` event. Exemptions are explicit
 per card, never inferred from a title, and worker and `delegate_task` shells
 are fenced from the verb like every other board write, so a card cannot

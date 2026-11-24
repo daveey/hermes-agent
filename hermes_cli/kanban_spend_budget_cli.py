@@ -9,7 +9,8 @@ This acknowledgment is checked under the writer lock, survives promotion, and is
 keep the first decision unless an explicit reconciliation is warranted. Historical spend values are retained.
 An ordinary pending spend stop uses a fresh window starting at promote. Until then
 the printed spend is historical, not deducted from that fresh allowance. Other
-limits include recorded spend in the current window; restricted history never resets.
+limits include recorded spend in the current window, so one at or below that spend is refused (it would
+stop the card at once); restricted history never resets.
 """
 from __future__ import annotations
 
@@ -31,6 +32,25 @@ def _actor() -> str:
     return current_profile_name("user") or "user"
 
 
+def _spent_already(conn, tid: str, runs, cache) -> str:
+    """Why a new limit would stop the card at once, or ''.
+
+    In the current window a limit counts the spend already recorded, so ``--runs 3`` on a card with 7 runs
+    sends it to triage at the next dispatch tick instead of granting 3 more (t_01a205c88aff2581, 2026-11-24).
+    A pending ordinary stop opens a fresh window at promote, so nothing is counted there yet."""
+    if ksb.limit_window(conn, tid) != 'current':
+        return ''
+    spent = ksb.spend(conn, tid)
+    used = {'runs': spent.runs, 'cache-read-tokens': spent.tokens['cache_read_tokens']}
+    for flag, limit in (('runs', runs), ('cache-read-tokens', cache)):
+        if limit and used[flag] >= limit:
+            return (f"kanban spend-budget: {tid} already spent {used[flag]} {flag} in this window, so "
+                    f"--{flag} {limit} would send it to triage at the next dispatch tick. The limit counts "
+                    f"spend already recorded: to allow {limit} more, pass --{flag} {used[flag] + limit}. "
+                    f"To stop the card, block or archive it instead.")
+    return ''
+
+
 def command(args: argparse.Namespace) -> int:
     tid = args.task_id
     runs, cache = args.runs, args.cache_read_tokens
@@ -45,6 +65,8 @@ def command(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (tid,)).fetchone() is None:
             return _err(f"kanban spend-budget: unknown task {tid}")
+        if changing and (refusal := _spent_already(conn, tid, runs, cache)):
+            return _err(refusal, 2)
         if changing:
             from hermes_cli.kanban_release_comments import UNREAD_EXIT, UnreadComments
             try:
