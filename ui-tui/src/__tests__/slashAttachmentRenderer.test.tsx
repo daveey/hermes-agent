@@ -299,9 +299,13 @@ it('`/queue` with an image journals its attachment in the first durable write', 
     await vi.waitFor(() => expect(h.composer.state.input).toContain('[[ Image 1 ]]'))
     patchUiState({ busy: true })
     await h.submit('/queue caption [[ Image 1 ]]')
+    // clearIn is React state; queueRef is updated synchronously. One setImmediate
+    // after submit races the re-render under a loaded CI runner (same class as F36).
+    await vi.waitFor(() => {
+      expect(h.composer.state.input).toBe('')
+      expect(h.composer.refs.queueRef.current).toHaveLength(1)
+    })
     const queued = h.composer.refs.queueRef.current
-    expect(h.composer.state.input !== '' && queued.length > 0).toBe(false)
-    expect(queued).toHaveLength(1)
     const journal = join(h.home, 'tui-pending-inputs')
     const entries = readdirSync(journal, { recursive: true }).map(String).filter(name => name.endsWith('.json'))
     expect(entries.map(name => JSON.parse(readFileSync(join(journal, name), 'utf8')).attachments)).toEqual([
