@@ -106,7 +106,8 @@ def why(conn: Any, task_id: str, *, live: bool = False) -> dict[str, Any]:
                                           "detail", "source", "age_s")}
     first["verdict"] = "stop"
     return {"task_id": task_id, "board": recorded.get("board"), "source": "snapshot", "status": recorded.get("status"),
-            "first_stop": first, "overlaps": recorded.get("overlaps"), "chain": [first], "recorded": recorded,
+            "first_stop": first, "overlaps": recorded.get("overlaps"),
+            "overlaps_unknown": recorded.get("overlaps_unknown"), "chain": [first], "recorded": recorded,
             "elapsed_s": round(time.monotonic() - started, 3)}
 
 
@@ -134,6 +135,10 @@ def _print_why(answer: dict[str, Any]) -> None:
         print("  also held by: not evaluated yet (run with --live)")
     for other in overlaps or ():
         print(f"  also held by: {_name({**other, 'label': other.get('label') or _label(other)})} {_measure(other)}".rstrip())
+    for other in answer.get("overlaps_unknown") or ():
+        detail = other.get("detail") or {}
+        note = detail.get("error") or detail.get("reason") or "unknown"
+        print(f"  also unknown: {_name({**other, 'label': other.get('label') or _label(other)})} ({note})")
     if answer["source"] == "dry_run":
         for step in answer.get("chain") or ():
             print(f"    {step['verdict']:<8} {_name(step):<34} {_measure(step):<14} {_value(step.get('detail'))}".rstrip())
