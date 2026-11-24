@@ -35,6 +35,8 @@ def test_failed_refresh_revokes_prior_prepared_output(tmp_path):
         assert actual == (False, None, 503)
         assert relay.acknowledged(other)
         assert relay.read(other) == b'{"healthy":true}'
+        # Drain the extra refresh submitted by projection_response before recovery.
+        assert wait_until(lambda: relay.pending_count == 0, timeout=10)
         # The failure revokes only this key, not the relay or another publication.
         (tmp_path / 'fail').unlink()
         assert relay.submit({'body': body, 'accepted': 3}) == key
