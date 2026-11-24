@@ -73,6 +73,24 @@ def homes_of(replica: sqlite3.Connection, ids: list[str]) -> dict[str, str]:
     return homes
 
 
+@contextmanager
+def _open_card_replica(conn: sqlite3.Connection) -> Iterator[Optional[sqlite3.Connection]]:
+    """Exact-card ``show`` fallback: the read-only replica of a shadow board, or of an enrolled primary board
+    (whose live file lacks other gateways' cards). Off/unsynced boards get None. ``list`` is unaffected."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_foreign_card as foreign
+    from hermes_cli.kanban_db_connect import _main_db_file
+    try:
+        state = sync.sync_state(conn)
+    except sqlite3.Error:
+        state = None
+    if not state or state.get("mode") not in (MODE, "primary"):
+        yield None
+        return
+    with foreign.open_replica(_main_db_file(conn)) as replica:
+        yield replica
+
+
 def open_card(live: sqlite3.Connection, scope: Any, task_id: str) -> tuple[Any, sqlite3.Connection, Optional[str]]:
     """``(task, connection, remote home)`` for ``hermes kanban show``: the live row, else a shadow board's replica
     row read through a read-only connection kept open in the ``ExitStack`` ``scope`` (home None for a live row).
@@ -81,7 +99,7 @@ def open_card(live: sqlite3.Connection, scope: Any, task_id: str) -> tuple[Any, 
     task = kb.get_task(live, task_id)
     if task:
         return task, live, None
-    replica = scope.enter_context(open_shadow_replica(live))
+    replica = scope.enter_context(_open_card_replica(live))
     try:
         task = kb.get_task(replica, task_id) if replica is not None else None
     except sqlite3.Error as exc:

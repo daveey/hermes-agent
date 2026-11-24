@@ -1,6 +1,7 @@
 """A shadow-mode board lists and shows the replica's cards read-only; the replica is never written."""
 from contextlib import closing
 import json
+import sqlite3
 
 import pytest
 
@@ -94,10 +95,48 @@ def test_missing_card_still_not_found(board):
 
 
 @pytest.mark.parametrize("mode", ["primary", "off"])
-def test_other_modes_do_not_merge(board, mode):
+def test_other_modes_do_not_merge_list(board, mode):
     with closing(kbc.connect()) as live, live:
         live.execute("UPDATE kanban_sync_state SET mode = ?", (mode,))
     assert {r["id"] for r in _list_json()} == {board["live_id"]}
+
+
+def test_off_mode_show_does_not_read_replica(board):
+    with closing(kbc.connect()) as live, live:
+        live.execute("UPDATE kanban_sync_state SET mode = 'off'")
+    assert "no such task" in kanban_cli.run_slash(f"show {board['ready_id']}")
+
+
+def test_primary_show_resolves_replica_only_card_read_only(board):
+    with closing(kbc.connect()) as live, live:
+        live.execute("UPDATE kanban_sync_state SET mode = 'primary'")
+    shown = json.loads(kanban_cli.run_slash(f"show {board['ready_id']} --json"))
+    t = shown["task"]
+    assert (t["title"], t["remote"], t["read_only"], t["home_gateway"]) == ("Mini ready", True, True, "mini")
+    own = json.loads(kanban_cli.run_slash(f"show {board['live_id']} --json"))["task"]
+    assert own["title"] == "Hub card" and "remote" not in own  # live wins
+    assert "no such task" in kanban_cli.run_slash("show t_nope")
+    assert {r["id"] for r in _list_json()} == {board["live_id"]}  # list not broadened
+
+
+def test_primary_open_card_uses_read_only_connection(board):
+    from contextlib import ExitStack
+    with closing(kbc.connect()) as live, live:
+        live.execute("UPDATE kanban_sync_state SET mode = 'primary'")
+        with ExitStack() as scope:
+            task, conn, home = shadow_view.open_card(live, scope, board["ready_id"])
+            assert task is not None and home == "mini" and conn is not live
+            with pytest.raises(sqlite3.OperationalError, match="readonly|read-only|read only"):
+                conn.execute("UPDATE tasks SET title = 'x'")
+
+
+def test_primary_show_without_sync_or_replica_is_missing(board, monkeypatch):
+    with closing(kbc.connect()) as live, live:
+        live.execute("UPDATE kanban_sync_state SET mode = 'primary'")
+    monkeypatch.setattr(sync, "sync_config", lambda: {"enabled": False})
+    assert "no such task" in kanban_cli.run_slash(f"show {board['ready_id']}")
+    board["shadow"].unlink()
+    monkeypatch.setattr(sync, "sync_config", lambda: {"enabled": True, "boards": ["default"]})
     assert "no such task" in kanban_cli.run_slash(f"show {board['ready_id']}")
 
 

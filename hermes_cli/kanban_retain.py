@@ -51,6 +51,17 @@ def _primary(conn, hub, board, actor, data):
     if state['gateway_id'] != hub.ident.gateway or state['board_id'] != board:
         raise ValueError('retain enrolled board/gateway mismatch')
     transport.capability(hub, board)
+    try:
+        return _primary_retain(conn, hub, board, actor, data)
+    except ValueError:
+        from hermes_cli import kanban_retain_fallback
+        result = kanban_retain_fallback.recover(conn, hub, board, actor, data)
+        if result is not None:
+            return result
+        raise
+
+
+def _primary_retain(conn, hub, board, actor, data):
     with kb.write_txn(conn):
         if transport.command(conn, actor.run_uid) is None:
             actors.current_actor(conn)

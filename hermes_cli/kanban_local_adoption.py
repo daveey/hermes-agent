@@ -59,6 +59,7 @@ def adopt(conn, task_id: str) -> dict:
                     conflicts.append(row['chat_session'])
         if conflicts:
             raise OriginError('origin_adoption_conflict', 'another chat already owns this card; local adoption never transfers ownership')
+        _confer_created_ownership(conn, task_id, sid, me, profile)
         # Preserve routing anchors and notification cursor when upgrading a shepherd row.
         row = conn.execute("SELECT delivery_metadata FROM kanban_notify_subs WHERE task_id=? AND platform='tui' "
                            "AND chat_id=? AND thread_id=''", (task_id, sid)).fetchone()
@@ -78,6 +79,35 @@ def adopt(conn, task_id: str) -> dict:
         if not row or json.loads(row[0] or '{}').get('reason') != 'origin':
             kb._append_event(conn, task_id, 'local_origin_adopted', {'session_id': sid})
     return {'ok': True, 'adopted': True, 'task_id': task_id, 'session_id': sid, 'ownership': 'decision'}
+
+
+def _confer_created_ownership(conn, task_id: str, sid: str, me: str, profile: str) -> None:
+    """Durable, sync-compatible ownership, the same shape an explicit courier origin writes
+    (``kanban_creator_chats``): an unreleased ``created`` link plus a ``creator_chats_resolved`` event, which is what
+    keeps :func:`kanban_chat_links._local_links` wanting the link, so reconcile preserves it. ``tasks.session_id`` is
+    not touched. Runs only after the conflict checks, in their transaction. A chat that released this card (here or
+    upstream) is never silently re-owned; the write is idempotent."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_chat_links import link_uid
+    from hermes_cli.kanban_adoption_authority import gateway as _gateway, released_upstream as _released_upstream
+
+    gateway = me or _gateway(conn)
+    if not gateway or not conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+        return  # a board that never synced has no links: the origin subscription written below is its authority
+    if _released_upstream(conn, task_id, sid) or conn.execute(
+            "SELECT 1 FROM task_chat_links WHERE task_id=? AND chat_session=? AND released=1", (task_id, sid)).fetchone():
+        raise OriginError('origin_adoption_conflict', 'this chat released the card; local adoption never re-owns it implicitly')
+    for link in conn.execute("SELECT chat_gateway,chat_profile FROM task_chat_links WHERE task_id=? AND chat_session=? "
+                             "AND kind='created' AND released=0", (task_id, sid)):
+        if link[0] == gateway and (link[1] or 'default') == profile:
+            return  # this chat already owns it (any spelling of the default profile): nothing to add
+    conn.execute(
+        "INSERT OR IGNORE INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,created_at) "
+        "VALUES (?,?,?,?,?,'created',0,unixepoch())",
+        (link_uid(task_id, gateway, profile, sid, 'created'), task_id, gateway, profile, sid))
+    if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_resolved'", (task_id,)).fetchone():
+        kb._append_event(conn, task_id, 'creator_chats_resolved',
+                         {'explicit_origin': f'@session:{profile}@{gateway}/{sid}', 'local_adoption': True})
 
 
 def command(args) -> int:

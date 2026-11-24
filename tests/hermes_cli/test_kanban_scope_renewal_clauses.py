@@ -169,11 +169,15 @@ def test_subscription_for_someone_else_cannot_authorize_this_chat(board, monkeyp
     assert cli._owning_sub(board, tid, local.CHAT) is None
 
 
-def test_parser_rejects_nonnumeric_mandate_before_dispatch(board, monkeypatch):
+def test_unknown_nonnumeric_mandate_is_refused_without_renewal(board, monkeypatch, capsys):
     tid, _, episode = local.stopped(board, monkeypatch)
-    with pytest.raises(SystemExit) as caught:
-        local.argv(tid, '--episode', episode, '--mandate-comment', 'not-a-number', '--reason', 'ok')
-    assert caught.value.code == 2
+    local.link(board, tid)
+    local.ancestry(monkeypatch, {'HERMES_SESSION_ID': local.CHAT}, {})
+    monkeypatch.setenv('HERMES_SESSION_ID', local.CHAT)
+    assert local.argv(tid, '--episode', episode, '--mandate-comment', 'not-a-number', '--reason', 'ok') == 1
+    assert 'mandate_missing' in capsys.readouterr().out
+    assert decision.execution_restricted(board, tid)
+    assert not board.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='scope_renewed'", (tid,)).fetchone()
 
 
 def test_safety_refusal_retains_its_specific_message(board, monkeypatch):

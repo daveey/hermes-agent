@@ -661,8 +661,9 @@ _SPECS = [
     _cmd("renew-scope", [
         _TASK_ID,
         _arg("--episode", required=True, help="Uid of the scope stop (spend_budget_triaged event) being renewed"),
-        _arg("--mandate-comment", required=True, type=int,
-             help="Id of your comment on the card, written after the stop, that states the renewed scope"),
+        _arg("--mandate-comment", required=True,
+             help="Uid (portable across replicas) or local numeric id of your comment on the card, written after "
+                  "the stop, that states the renewed scope"),
         _arg("--reason", required=True, help="Why the scope is renewed (audit trail)"),
         _json_flag(),
     ], help="Renew a scope-stopped card's scope (human operator, owning chat or creator task; never a safety "

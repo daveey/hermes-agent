@@ -28,7 +28,7 @@ STOP, RESTRICT = "spend_budget_triaged", "decision_hold_restricted"
 MAX_MANDATE = 8000  # the operator courier's comment bound: one limit on every path
 MAX_REASON = 2000
 ROUTE = ("record the renewed scope as a comment on the card, then "
-         "`hermes kanban renew-scope {task} --episode <stop uid> --mandate-comment <comment id> --reason <text>` "
+         "`hermes kanban renew-scope {task} --episode <stop uid> --mandate-comment <comment uid or local id> --reason <text>` "
          "(a human operator, the card's owning chat or its creator task), then a separate "
          "`hermes kanban promote {task} <what changed>`")
 
@@ -192,7 +192,17 @@ def _writer_refusal(conn: sqlite3.Connection, actor: Actor, event: dict) -> Opti
     return None
 
 
-def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: int, reason: str,
+def _mandate_comment(conn: sqlite3.Connection, task_id: str, ref: str | int) -> Optional[dict]:
+    """Resolve caller input, allowing local IDs without relaxing frozen renewal UID readers."""
+    ref = str(ref)
+    comment = _comment(conn, task_id, ref)
+    if comment is None and ref.isascii() and ref.isdecimal():
+        row = conn.execute("SELECT * FROM task_comments WHERE task_id=? AND id=?", (task_id, ref)).fetchone()
+        comment = dict(row) if row is not None else None
+    return comment
+
+
+def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: str | int, reason: str,
             actor: Actor) -> dict:
     """The ``scope_renewed`` payload, or :class:`RenewalRefused`. Call inside the write transaction that appends it."""
     from hermes_cli import kanban_spend_decision as ksd
@@ -217,7 +227,7 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id:
     evidence = [e for e in scope_evidence(conn, task_id, episode) if key(e) not in done]
     if not evidence:
         raise RenewalRefused("not_scope_stopped", f"stop {episode} on {task_id} carries no unrenewed scope restriction")
-    comment = conn.execute("SELECT * FROM task_comments WHERE task_id=? AND id=?", (task_id, int(comment_id))).fetchone()
+    comment = _mandate_comment(conn, task_id, comment_id)
     body = (comment["body"] or "").strip() if comment is not None else ""
     if not body:
         raise RenewalRefused("mandate_missing", f"comment {comment_id} is not a non-empty comment on {task_id}")
@@ -243,7 +253,7 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id:
             "reason": reason}
 
 
-def renew_local(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: int, reason: str,
+def renew_local(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: str | int, reason: str,
                 actor: Actor) -> dict:
     """Validate and append in one write transaction on a board with no canonical Board. Status is untouched."""
     from hermes_cli import kanban_db as kb
