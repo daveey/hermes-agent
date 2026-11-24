@@ -40,7 +40,7 @@ def _install(conn: sqlite3.Connection) -> None:
             else:
                 ids = [f"{ref}.task_id" for ref in refs]
             tests = [f"task_id IN ({','.join(ids)})"]
-            if action == "INSERT" and table in related:
+            if action == "INSERT":
                 # REPLACE's implicit deletion need not fire DELETE triggers.
                 # Every unique identity matters, not only conventional id/uid.
                 # A private custody row may be keyed by an episode or compound
@@ -66,7 +66,9 @@ def _install(conn: sqlite3.Connection) -> None:
                         parts.append(f'{name}{coll}=NEW.{name}{coll}')
                     conflicts.append('(' + ' AND '.join(parts) + ')')
                 if conflicts:
-                    tests.append(f"task_id IN (SELECT task_id FROM {quoted} WHERE {' OR '.join(conflicts)})")
+                    old_ids = ("id",) if table == "tasks" else ("parent_id", "child_id") if table == "task_links" else ("task_id",)
+                    for old_id in old_ids:
+                        tests.append(f"task_id IN (SELECT {old_id} FROM {quoted} WHERE {' OR '.join(conflicts)})")
             cond = " OR ".join(tests)
             trigger = '"home_prepared1_' + table.replace('"', '""') + '_' + action.lower() + '"'
             conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger}

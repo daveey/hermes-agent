@@ -170,6 +170,24 @@ def test_uncertain_preparation_cannot_be_reset_or_replaced(board, sql):
             board.execute(sql, (tid,))
 
 
+def test_tasks_unique_identity_replace_cannot_delete_a_prepared_old_card(board):
+    tid = seed(board)
+    with kbc.write_txn(board):
+        # Current core's idempotency index is nonunique. Model a real UNIQUE
+        # identity explicitly: a nonconflicting REPLACE would only INSERT.
+        board.execute("CREATE UNIQUE INDEX transfer_fixture_task_identity ON tasks(idempotency_key)")
+        board.execute("UPDATE tasks SET idempotency_key='prepared-unique-key' WHERE id=?", (tid,))
+        board.execute("DELETE FROM kanban_sync_outbox")
+        prepare(board, tid)
+    path = board.execute("PRAGMA database_list").fetchone()[2]
+    # Raw extant SQLite clients do not execute the Python replace guard.
+    with sqlite3.connect(path) as other:
+        with pytest.raises(sqlite3.IntegrityError, match="home transfer prepared"):
+            other.execute("INSERT OR REPLACE INTO tasks(id,title,status,created_at,idempotency_key) "
+                          "VALUES('different-task','wrong identity','todo',1,'prepared-unique-key')")
+    assert board.execute("SELECT id FROM tasks WHERE idempotency_key='prepared-unique-key'").fetchone()[0] == tid
+
+
 def test_private_custody_primary_key_replacement_checks_the_old_task(board):
     tid = seed(board)
     other = kb.create_task(board, title="unprepared")

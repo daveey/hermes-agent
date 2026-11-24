@@ -487,6 +487,8 @@ def apply_sync_schema_steps(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, table, column, ddl)
     from hermes_cli.kanban_sync_capture_storage import install as install_capture_storage
     install_capture_storage(conn)
+    from hermes_cli.kanban_home_generation import install as install_home_generation
+    install_home_generation(conn)
     for table in _UID_TABLES:
         conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
     # task_runs.sync_version joins the board's run-bookkeeping covering index.
@@ -618,14 +620,16 @@ def _row_uid_sql(table: str, ref: str) -> str:
     return f"{ref}.uid"
 
 
-def _outbox_insert(table: str, op: str, row_uid: str, fields_sql: str, base_version: str = "NULL") -> str:
+def _outbox_insert(table: str, op: str, row_uid: str, fields_sql: str, base_version: str = "NULL", *, ref: str = "NEW") -> str:
+    from hermes_cli.kanban_home_generation import capture_sql
     return (
-        "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
-        f"VALUES ({_UUID7_SQL}, '{table}', {row_uid}, '{op}', {fields_sql}, {base_version}, '', {_NOW_MS_SQL});"
+        "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at, home_generations) "
+        f"VALUES ({_UUID7_SQL}, '{table}', {row_uid}, '{op}', {fields_sql}, {base_version}, '', {_NOW_MS_SQL}, {capture_sql(table, ref)});"
     )
 
 
 def _insert_trigger(table: str, columns: list[str]) -> str:
+    from hermes_cli.kanban_home_generation import capture_sql
     name = f"kanban_sync_{table}_ins"
     if table in _UID_TABLES:
         uid = _UUID7_SQL
@@ -636,8 +640,8 @@ def _insert_trigger(table: str, columns: list[str]) -> str:
         fields = "json_object(" + ", ".join(f"'{_wire_name(table, c)}', json({_wire_value(table, c, 's')})" for c in columns) + ")"
         body = (
             f"UPDATE {table} SET uid = {uid} WHERE id = NEW.id AND uid IS NULL; {prelude}"
-            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
-            f"SELECT {_UUID7_SQL}, '{table}', s.uid, 'upsert', {fields}, NULL, '', {_NOW_MS_SQL} "
+            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at, home_generations) "
+            f"SELECT {_UUID7_SQL}, '{table}', s.uid, 'upsert', {fields}, NULL, '', {_NOW_MS_SQL}, {capture_sql(table, 's')} "
             f"FROM {table} AS s WHERE s.id = NEW.id;"
         )
     else:
@@ -677,7 +681,7 @@ def _delete_trigger(table: str) -> str:
         when += " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)"
     uid = _row_uid_sql(table, "OLD")
     body = (
-        _outbox_insert(table, "delete", uid, "'{}'")
+        _outbox_insert(table, "delete", uid, "'{}'", ref="OLD")
         + " INSERT OR REPLACE INTO kanban_sync_tombstones (table_name, row_uid, deleted_at) "
         f"VALUES ('{table}', {uid}, {_NOW_MS_SQL});"
     )

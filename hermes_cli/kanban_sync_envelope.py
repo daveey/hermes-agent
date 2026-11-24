@@ -49,7 +49,8 @@ def outbound(conn: sqlite3.Connection, row: dict, build: Callable[[], dict], *, 
             return wire
         # Explicit lifecycle/schema repair can replace an op's identity in place.
         # Its former envelope belongs to the retired id, never the replacement.
-    wire = build()
+    from hermes_cli.kanban_home_generation import add_captured
+    wire = add_captured(row, build())
     if not supported:
         return gate_reassessment(row, wire, reassessment)  # old Worker: retain legacy per-attempt rebuild/strip
     from hermes_cli.kanban_sync_status_origin import add_origin, freezeable
