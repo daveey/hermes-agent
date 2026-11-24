@@ -99,16 +99,17 @@ business-row refill and parent ambiguity controls. Tests run through
 `_build` now writes `kanban_replay_recovery_loss1` in the same transaction as
 salvage, before the rebuilt image can be installed. This independent singleton
 records recovery and the protocol loss report even if the sync anchor or sender
-singleton was unreadable. It is also written for a not-yet-synced database, so
-later sync installation cannot turn recovered unknown history into a clean legacy
-image. It has no independent index/refill route and is not a per-operation ledger.
+singleton was unreadable. For a never-enrolled database (no sender table, no journal
+anchor) it is written only when a replay table reported loss; legacy sync-table
+damage is healed by legacy resync and does not hold the board. It has no independent index/refill route and is not a per-operation ledger.
 Readable prior rebuild reports are retained; unreadable prior history stays loss.
 
 Public sender admission checks the marker, the restore flag and any existing
 journal binding **before** selecting legacy or performing sender network I/O.
 Missing/recreated anchors with surviving journal custody become durably
-restore-required. Every rebuilt database is held, even if no protocol loss was
-index-countable or the anchor survived intact. Clearing the ordinary flag alone
+restore-required. Every rebuilt database that was enrolled (sender table or journal
+anchor present) is held, even if no protocol loss was index-countable or the anchor
+survived intact. Clearing the ordinary flag alone
 cannot clear the independent rebuild hold. `RestoreRequired` is isolated as a
 per-board round error, so an affected board does not crash sync for other boards.
 The gate installs no journal, certifies no original capture and enables no mode.
