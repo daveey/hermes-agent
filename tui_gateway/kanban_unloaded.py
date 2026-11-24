@@ -416,7 +416,10 @@ def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt,
         _clear_stall(key)  # delivered (by us or a live poller): a later stall starts its own clock
         return None
     oldest = min(float(getattr(e, "created_at", 0) or 0) for e in events)
-    if oldest > now - grace_s:
+    # Decision holds must become unread on the first consumer pass. Keep the
+    # normal live-poller grace for completion traffic and all custody checks below.
+    urgent = any(getattr(e, 'kind', '') == 'spend_budget_decision_ready' for e in events)
+    if oldest > now - grace_s and not urgent:
         return None  # a live poller still has time to take it
     done = None
     from gateway.kanban_wake_sibling import tui_defer, tui_formatter
@@ -511,7 +514,8 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
             logger.info("kanban ask for %s/%s to chat %s deferred (%s); retrying next pass",
                         slug, ident["task_id"], tip, verdict)
         return None
-    if verdict == "skipped:slots" and _slots_may_wait(claimed, now):
+    urgent = any(getattr(e, 'kind', '') == 'spend_budget_decision_ready' for e in claimed)
+    if verdict == "skipped:slots" and not urgent and _slots_may_wait(claimed, now):
         # Every wake slot is busy: hand the range back so the next pass wakes the chat, instead of a passive row
         # that no turn reads (design t_01a1d45d75851804 R4). An OVERDUE_S-old notice gets its row as before.
         with contextlib.suppress(Exception):

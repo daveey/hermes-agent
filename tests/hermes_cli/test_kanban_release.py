@@ -73,6 +73,17 @@ def test_scope_stop_released_by_a_human(board, monkeypatch):
     assert release.MARK in kb.build_worker_context(board, tid)  # the next run reads the goal-level mandate
 
 
+def _legacy_decision(conn, tid):
+    """Replay existing administrative wrappers; publication must never create one."""
+    from tests.hermes_cli.test_kanban_spend_route_repair import _historical_wrapper
+    card = _historical_wrapper(conn, tid)
+    body = decision.notice({'task_id': tid, 'for_worker': True})
+    body += f"\n`hermes kanban promote {tid} --reason '<what changed>'`, or archive it"
+    with kb.write_txn(conn):
+        conn.execute('UPDATE tasks SET body=? WHERE id=?', (body, card))
+    return card
+
+
 def test_ordinary_spend_stop_released(board):
     tid = spend_stopped(board)
     out = run(board, tid, note='Desktop Unblock, operation op-1')
@@ -87,8 +98,7 @@ def test_ordinary_spend_stop_released(board):
 
 def test_decision_card_id_resolves_to_its_root_and_is_archived(board):
     tid = spend_stopped(board)
-    decision.ensure_producer(board, tid)
-    card = board.execute("SELECT id FROM tasks WHERE created_by='kanban-spend-budget'").fetchone()[0]
+    card = _legacy_decision(board, tid)
     assert release.target(board, card) == tid and release.held(board, card) == tid
     filed = board.execute('SELECT body FROM tasks WHERE id=?', (card,)).fetchone()[0]
     # Its worker is fenced from the verb: the body says who can release, never "run release <root>" to the worker.
@@ -234,7 +244,9 @@ def test_stop_notices_name_the_one_step_route_and_a_goal_level_mandate(board, mo
     plain = spend_stopped(board)
     one_step = release.ONE_STEP.format(task=tid)
     assert f'`hermes kanban release {tid}`' in one_step and 'goal-level mandate' in one_step
-    assert one_step in decision.notice({'cause': 'scope_stopped', 'task_id': tid})
+    authority = {'chats': [{'gateway': 'own', 'profile': 'default', 'session': 'creator'}]}
+    assert one_step in decision.notice({'cause': 'scope_stopped', 'task_id': tid, 'authority': authority})
+    assert 'No recorded renewable agent authority' in decision.notice({'cause': 'scope_stopped', 'task_id': tid})
     assert one_step in decision.execution_refusal(board, tid)
     assert one_step in decision.unblock_refusal(board, tid)
     assert release.ONE_STEP.format(task=plain) in decision.notice({'reason': 'Spend budget', 'task_id': plain})
@@ -245,8 +257,8 @@ def test_stop_notices_name_the_one_step_route_and_a_goal_level_mandate(board, mo
 def test_brief_on_a_decision_card_says_unblock_releases_the_stopped_card(board):
     from hermes_cli import kanban_stranded_brief as brief
     tid = spend_stopped(board)
-    decision.ensure_producer(board, tid)
-    card = dict(board.execute("SELECT * FROM tasks WHERE created_by='kanban-spend-budget'").fetchone())
+    cid = _legacy_decision(board, tid)
+    card = dict(board.execute("SELECT * FROM tasks WHERE id=?", (cid,)).fetchone())
     request = brief.request(board, card, None, 3 * 3600, 'events: spend_budget_triaged runs=15')
     assert (f'Unblock = release it to finish with 10 more runs under a goal-level scope '
             f'(`hermes kanban release {tid}`); safety holds still apply') in request['action']
@@ -530,8 +542,7 @@ def test_a_precondition_is_asked_before_writing_and_inside_the_deciding_transact
 
 def test_only_the_released_stops_decision_cards_are_archived(board):
     tid = spend_stopped(board)
-    decision.ensure_producer(board, tid)
-    mine = board.execute("SELECT id FROM tasks WHERE created_by='kanban-spend-budget'").fetchone()[0]
+    mine = _legacy_decision(board, tid)
     earlier = kb.create_task(board, title='Spend budget decision: earlier stop', assignee='default',
                              created_by='kanban-spend-budget')
     elsewhere = kb.create_task(board, title='Spend budget decision: another card', assignee='default',

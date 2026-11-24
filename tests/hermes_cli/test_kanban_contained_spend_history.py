@@ -44,7 +44,7 @@ def test_contained_strand_escalation(board, title):
 
 
 @pytest.mark.parametrize("title", TITLES)
-def test_spend_stop_supervisor(kanban_home, monkeypatch, title):
+def test_spend_stop_keeps_history_without_manufacturing_a_supervisor(kanban_home, monkeypatch, title):
     from hermes_cli import kanban_origin
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("own-gw", {"own-gw"}))
     with kbc.connect_closing() as conn:
@@ -53,11 +53,7 @@ def test_spend_stop_supervisor(kanban_home, monkeypatch, title):
             _retitle(conn, tid, title)
         assert budget.hold(conn, tid) == "triage"
         (event,) = helpers._events(conn, tid, decision.NOTICE)
-        assert event.payload["producer"]["kind"] == "supervisor"
-        assert kb.get_task(conn, event.payload["producer"]["task_id"]) is not None
-        child = kb.get_task(conn, event.payload['producer']['task_id'])
-        from tests.hermes_cli.test_kanban_history_contract import decoded
-        assert title is None or title in decoded(child.body)
-        assert child.model_override is None and child.provider_override is None
+        assert event.payload["producer"]["kind"] == "unavailable"
+        assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
         assert decision.pending(conn, tid)
         assert title is None or kb.get_task(conn, tid).title == title

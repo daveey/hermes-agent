@@ -22,12 +22,13 @@ stopped = hold_helpers.stopped
 OWN = "own-gw"
 
 
-def _links(conn, tid, *rows):
+def _links(conn, tid, *rows, kind='created'):
     with kb.write_txn(conn):
         conn.execute("CREATE TABLE IF NOT EXISTS task_chat_links (task_id TEXT, chat_gateway TEXT, "
-                     "chat_profile TEXT, chat_session TEXT, released INTEGER, created_at INTEGER)")
+                     "chat_profile TEXT, chat_session TEXT, released INTEGER, created_at INTEGER, "
+                     "kind TEXT DEFAULT 'created')")
         for gw, profile, session in rows:
-            conn.execute("INSERT INTO task_chat_links VALUES (?, ?, ?, ?, 0, 0)", (tid, gw, profile, session))
+            conn.execute("INSERT INTO task_chat_links VALUES (?, ?, ?, ?, 0, 0, ?)", (tid, gw, profile, session, kind))
 
 
 def _subs(conn, tid):
@@ -41,16 +42,16 @@ def own_gateway(monkeypatch):
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: (OWN, {OWN, "remote"}))
 
 
-def test_headless_chat_link_is_not_bound_and_a_supervisor_decides(kanban_home, own_gateway):
-    """A worker transcript's chat link is no owner: binding it would send the decision to a machine session."""
+def test_headless_chat_link_is_not_bound_or_given_a_guard(kanban_home, own_gateway):
+    """An observer hash is not owning provenance; genuine foreign created hashes may be Desktop chats."""
     with kbc.connect_closing() as conn:
         tid = stopped(conn)
-        _links(conn, tid, ("remote", "default", "local-" + "b" * 64))
+        _links(conn, tid, ("remote", "default", "local-" + "b" * 64), kind='observer')
         assert budget.hold(conn, tid) == "triage"
         (event,) = helpers._events(conn, tid, decision.NOTICE)
         producer = event.payload["producer"]
-        assert producer["kind"] == "supervisor"
-        assert kb.get_task(conn, producer["task_id"]).assignee == "default"
+        assert producer['kind'] == 'unavailable'
+        assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
         assert _subs(conn, tid) == []
 
 
@@ -137,9 +138,9 @@ def _state_session(home, sid, *, ended_ago=None, **flags):
 
 
 @pytest.mark.parametrize("dead", ["ended-idle", "archived", "missing"])
-def test_dead_local_chat_is_no_route_and_a_supervisor_decides(kanban_home, own_gateway, dead):
-    """A chat of this gateway that is ended and idle past kanban.stranded_owner_idle_seconds, archived, or absent
-    from a readable state.db is not bound or counted: the decision goes to a supervisor card (kanban_stranded_park)."""
+def test_idle_local_owner_is_not_replaced_by_guard_card(kanban_home, own_gateway, dead):
+    """A stored authentic created link remains authority despite local liveness changes.
+    Delivery may need recovery, but a supervisor card would not acquire its authority."""
     with kbc.connect_closing() as conn:
         tid = stopped(conn)
         if dead == "missing":
@@ -154,8 +155,9 @@ def test_dead_local_chat_is_no_route_and_a_supervisor_decides(kanban_home, own_g
         assert budget.hold(conn, tid) == "triage"
         (event,) = helpers._events(conn, tid, decision.NOTICE)
         producer = event.payload["producer"]
-        assert producer["kind"] == "supervisor"
-        assert kb.get_task(conn, producer["task_id"]).status not in ("done", "archived")
+        assert producer['kind'] == 'chats'
+        assert _subs(conn, tid) == [('tui', 'human-chat')]
+        assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("ended_ago", [None, 3600], ids=["open", "ended-recently"])

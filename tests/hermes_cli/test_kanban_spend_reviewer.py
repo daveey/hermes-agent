@@ -54,14 +54,14 @@ def _grant(runs=5, quote=PROGRESS[:60]):
     return {"decision": "grant", "runs": runs, "progress_quote": quote, "reason": "PR landed; sample is next."}
 
 
-def test_a_stop_is_queued_for_review_instead_of_waking_a_chat_or_opening_a_decision_card(kanban_home, spend_reviewer):
+def test_a_stop_is_queued_for_review_and_visible_without_a_decision_card(kanban_home, spend_reviewer):
     with kbc.connect_closing() as conn:
         tid, episode = _stopped(conn)
         assert reviewer.state(conn, tid, episode) == reviewer.QUEUED
-        assert decision.NOTICE not in _kinds(conn, tid)
+        assert _kinds(conn, tid).count(decision.NOTICE) == 1
         assert conn.execute("SELECT COUNT(*) FROM tasks WHERE created_by = 'kanban-spend-budget'").fetchone()[0] == 0
-        decision.safe_ensure_producer(conn, tid)  # the route sweep leaves a queued review alone
-        assert decision.NOTICE not in _kinds(conn, tid)
+        decision.safe_ensure_producer(conn, tid)  # queued review never suppresses/doubles owner visibility
+        assert _kinds(conn, tid).count(decision.NOTICE) == 1
 
 
 def test_a_grant_with_quoted_progress_promotes_into_a_fresh_window_of_exactly_those_runs(
@@ -135,6 +135,8 @@ def test_an_undecided_routed_stop_is_reviewed_and_its_decision_card_closed(kanba
     monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (False, 2))
     with kbc.connect_closing() as conn:
         tid, episode = _stopped(conn)
+        from tests.hermes_cli.test_kanban_spend_route_repair import _historical_wrapper
+        _historical_wrapper(conn, tid)  # compatibility with an already-created legacy decider
         route = decision.episode_route(conn, tid, episode)
         assert route["kind"] == "supervisor"
         monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (True, 2))
@@ -190,6 +192,8 @@ def _routed_with_reviewer_off(conn, monkeypatch):
 def test_a_stop_a_closed_decision_card_disposed_of_is_never_reviewed(kanban_home, spend_reviewer, monkeypatch):
     with kbc.connect_closing() as conn:
         tid, episode = _routed_with_reviewer_off(conn, monkeypatch)
+        from tests.hermes_cli.test_kanban_spend_route_repair import _historical_wrapper
+        _historical_wrapper(conn, tid)  # replay history, never create a production guard
         card = decision.episode_route(conn, tid, episode)["task_id"]
         kb.archive_task(conn, card)
         assert decision.episode_route(conn, tid, episode)["kind"] == "dismissed"

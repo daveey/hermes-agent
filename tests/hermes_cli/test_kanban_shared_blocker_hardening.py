@@ -31,7 +31,7 @@ def test_unexpected_check_failure_leaves_reclaim_lanes_alive(kanban_home, monkey
 
     def timed(name, handler, *args, **kwargs):
         # Exercise real reclaim ordering, isolating unrelated process maintenance.
-        if name == 'dispatch.sweep_shared_blockers':
+        if name in ('dispatch.sweep_shared_blockers', 'dispatch.decision_upkeep'):
             return handler(*args, **kwargs)
         if name == 'dispatch.tick_upkeep':
             calls.append('upkeep')

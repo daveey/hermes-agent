@@ -24,6 +24,14 @@ from tests.hermes_cli import test_kanban_spend_budget_hold as hold_helpers
 kanban_home = helpers.kanban_home
 stopped = hold_helpers.stopped
 
+
+def _legacy_wrapper(conn, tid):
+    """Explicit historical fixture: production no longer creates supervisor cards."""
+    from tests.hermes_cli.test_kanban_spend_route_repair import _historical_wrapper
+    sup = _historical_wrapper(conn, tid)
+    decision.ensure_producer(conn, tid)
+    return sup
+
 OWN = "own-gw"
 HOUR = 3600
 DESK = f"{OWN}/default/desk-chat"
@@ -157,7 +165,7 @@ def test_ask_has_summary_choices_consequences_recommendation(kanban_home, own_ga
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET body=? WHERE id=?", ("Fix the frozen sidebar in the Mac app.\nImplementation detail", source))
         assert budget.hold(conn, source) == "triage"
-        sup = _events(conn, source, decision.NOTICE)[-1]["producer"]["task_id"]
+        sup = _legacy_wrapper(conn, source)
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (sup,))
             kb._append_event(conn, sup, "decision_retained", {"disposition": {"summary": detail}})
@@ -180,7 +188,7 @@ def test_dismissed_spend_episode_is_not_reasked_on_source(kanban_home, own_gatew
     with kbc.connect_closing() as conn:
         source = stopped(conn)
         assert budget.hold(conn, source) == "triage"
-        sup = _events(conn, source, decision.NOTICE)[-1]["producer"]["task_id"]
+        sup = _legacy_wrapper(conn, source)
         assert kb.archive_task(conn, sup)
         # Even before producer reconciliation, archive is already a disposition.
         assert _sweep(conn, now=_later(3), cfg={}) == []
@@ -242,8 +250,7 @@ def test_open_decision_card_owns_until_done(kanban_home, own_gateway):
     with kbc.connect_closing() as conn:
         tid = stopped(conn)
         assert budget.hold(conn, tid) == "triage"
-        (notice,) = _events(conn, tid, decision.NOTICE)
-        sup = notice["producer"]["task_id"]
+        sup = _legacy_wrapper(conn, tid)
         assert stranded.open_decision_card(conn, tid) == sup
         assert _sweep(conn, now=_later(3), cfg={}) == []
         with kb.write_txn(conn):
@@ -257,12 +264,11 @@ def _reparked_supervisor(conn):
     a new supervisor opened for the same episode, which itself parks with no owner."""
     tid = stopped(conn)
     assert budget.hold(conn, tid) == "triage"
-    (notice,) = _events(conn, tid, decision.NOTICE)
+    first = _legacy_wrapper(conn, tid)
     with kb.write_txn(conn):
-        conn.execute("DELETE FROM tasks WHERE id=?", (notice["producer"]["task_id"],))
+        conn.execute("DELETE FROM tasks WHERE id=?", (first,))
     assert _sweep(conn, now=_later(3), cfg={}) == [tid]
-    decision.ensure_producer(conn, tid)
-    sup = _events(conn, tid, decision.NOTICE)[-1]["producer"]["task_id"]
+    sup = _legacy_wrapper(conn, tid)
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='triage', block_kind='transient' WHERE id=?", (sup,))
         kb._append_event(conn, sup, "agent_block_escalated", {"reason": "decision retained"})
@@ -813,8 +819,7 @@ def _decision_card_with_ask(conn):
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (root,))
         kb._append_event(conn, root, decision.EVENT, {"reason": "Spend budget: 15 runs"})
-    decision.ensure_producer(conn, root)
-    card = conn.execute("SELECT id FROM tasks WHERE created_by='kanban-spend-budget' ORDER BY rowid DESC").fetchone()[0]
+    card = _legacy_wrapper(conn, root)  # historical release compatibility, not new supervisor generation
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='blocked', block_kind='needs_input' WHERE id=?", (card,))
         row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (card,)).fetchone())
@@ -956,7 +961,7 @@ def test_a_forged_stamp_on_a_card_whose_decision_card_is_open_gets_no_refile(kan
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (root,))
             kb._append_event(conn, root, decision.EVENT, {"reason": "Spend budget: 15 runs"})
-        decision.ensure_producer(conn, root)  # an agent route owns the decision: an open decision card
+        _legacy_wrapper(conn, root)  # historical open decision card, not newly generated recovery work
         forged = _forge(conn, root, episode=_true_stamp(conn, root))
         for hours in (3, 3.2):
             assert root not in _sweep(conn, now=_later(hours), cfg={})

@@ -109,7 +109,8 @@ def test_long_tail_card_goes_to_triage_with_its_spend(kanban_home):
         # Triage is a hold: the next tick spawns nothing and writes nothing.
         assert kbd.dispatch_once(conn, spawn_fn=spawns).no_progress_held == [] and tid not in spawns.ids
         producer = _events(conn, tid, "spend_budget_decision_ready")[0].payload["producer"]
-        assert spawns.ids == [producer["task_id"]]  # only the decision owner may run
+        assert producer == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
+        assert spawns.ids == []  # no manufactured decision/guard card
         assert len(_events(conn, tid, ksb.EVENT)) == 1
 
 
@@ -197,7 +198,7 @@ def test_promote_from_triage_starts_a_new_window(kanban_home):
         spawns = Spawns()
         kbd.dispatch_once(conn, spawn_fn=spawns)
         assert tid in spawns.ids
-        assert set(spawns.ids) <= {tid, _events(conn, tid, "spend_budget_decision_ready")[0].payload["producer"]["task_id"]}
+        assert spawns.ids == [tid]  # only explicitly promoted original work runs
 
 
 def test_live_claim_is_never_taken_off_the_lane(kanban_home):

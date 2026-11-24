@@ -35,9 +35,12 @@ def test_stale_sweep_cannot_release_spend_stop(kanban_home):
 
 
 @pytest.mark.parametrize("origin", [False, True])
-def test_owned_stop_has_one_chat_notice_and_no_supervisor(kanban_home, origin):
+def test_owned_stop_has_one_chat_notice_and_no_supervisor(kanban_home, monkeypatch, origin):
     from gateway import kanban_watchers_notifier as watcher
     from tui_gateway.session_notifications import _format_kanban_event_text
+    from tests.hermes_cli import test_kanban_spend_decision_routing as routing_helpers
+    from hermes_cli import kanban_origin
+    monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: (routing_helpers.OWN, {routing_helpers.OWN}))
 
     with kbc.connect_closing() as conn:
         tid = stopped(conn)
@@ -46,6 +49,9 @@ def test_owned_stop_has_one_chat_notice_and_no_supervisor(kanban_home, origin):
                 conn.execute("UPDATE tasks SET session_id='human-chat' WHERE id=?", (tid,))
         else:
             notify.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="human-chat")
+        # Delivery subscriptions alone are not renewal authority. Seed the genuine
+        # creating-chat evidence both legacy routes must preserve.
+        routing_helpers._links(conn, tid, (routing_helpers.OWN, 'default', 'human-chat'))
         assert budget.hold(conn, tid) == "triage"
         budget.hold(conn, tid)
         (event,) = helpers._events(conn, tid, decision.NOTICE)
@@ -62,7 +68,7 @@ def test_owned_stop_has_one_chat_notice_and_no_supervisor(kanban_home, origin):
 
 
 @pytest.mark.parametrize("observer", [None, "touch", "shepherd"])
-def test_unowned_stop_has_one_supervisor(kanban_home, observer):
+def test_unowned_stop_has_one_notice_and_no_guard(kanban_home, observer):
     with kbc.connect_closing() as conn:
         tid = stopped(conn)
         if observer:
@@ -72,12 +78,9 @@ def test_unowned_stop_has_one_supervisor(kanban_home, observer):
         budget.hold(conn, tid)
         (event,) = helpers._events(conn, tid, decision.NOTICE)
         producer = event.payload["producer"]
-        assert producer["kind"] == "supervisor"
-        supervisor = kb.get_task(conn, producer["task_id"])
-        assert supervisor.assignee == "default"
-        assert tid in supervisor.body and "15 runs" in supervisor.body
-        assert "promote" in supervisor.body and "archive" in supervisor.body
-        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
+        assert producer == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
+        assert '15 runs' in event.payload['reason']
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id=?", (tid,)).fetchone()[0] == int(bool(observer))
 
 
@@ -260,7 +263,7 @@ def test_producer_failure_keeps_hold_and_sweep_retries_once(kanban_home, monkeyp
         for _ in range(2):
             assert tid not in sweep.sweep_stale_triage(conn, now=int(time.time()) + 7200)
         assert len(helpers._events(conn, tid, decision.NOTICE)) == 1
-        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
 
 
 def test_repair_does_not_create_owner_after_decision(kanban_home):
@@ -281,7 +284,7 @@ def test_link_only_owner_gets_notice_unless_released(kanban_home, released):
                          (tid, int(released)))
         budget.hold(conn, tid)
         (event,) = helpers._events(conn, tid, decision.NOTICE)
-        assert event.payload["producer"]["kind"] == ("supervisor" if released else "chats")
+        assert event.payload["producer"]["kind"] == ("unavailable" if released else "chats")
         if not released:
             _, events = notify.unseen_events_for_sub(conn, task_id=tid, platform="hub",
                                                      chat_id="remote/named/human-chat", kinds=(decision.NOTICE,))
@@ -312,7 +315,7 @@ def test_headless_origin_does_not_own_stop(kanban_home):
             conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("local-" + "a" * 64, tid))
         budget.hold(conn, tid)
         (event,) = helpers._events(conn, tid, decision.NOTICE)
-        assert event.payload["producer"]["kind"] == "supervisor"
+        assert event.payload["producer"]["kind"] == "unavailable"
 
 
 def test_archived_stop_needs_no_producer(kanban_home):

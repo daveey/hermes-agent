@@ -321,11 +321,21 @@ def test_h_notice_and_unblock_text_name_the_route_only_for_scope_stops(board, mo
     tid, _, _ = stopped(board, monkeypatch)
     text = decision.unblock_refusal(board, tid)
     assert f'hermes kanban renew-scope {tid} --episode' in text and f'hermes kanban promote {tid}' in text
-    notice = decision.notice({'cause': 'scope_stopped', 'task_id': tid})
+    from hermes_cli.kanban_hold_audience import describe
+    from hermes_cli import kanban_origin
+    monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ('own', {'own'}))
+    from hermes_state import SessionDB
+    from hermes_cli.config import get_hermes_home
+    with SessionDB(get_hermes_home() / 'state.db') as sessions:
+        sessions.create_session(CHAT, source='desktop')
+    link(board, tid, gateway='own')
+    authority = describe(board, tid)
+    assert authority['chats'] == [{'gateway': 'own', 'profile': 'default', 'session': CHAT}]
+    notice = decision.notice({'cause': 'scope_stopped', 'task_id': tid, 'authority': authority})
     assert f'hermes kanban renew-scope {tid} --episode' in notice and 'owning chat' in notice
     from types import SimpleNamespace
     from tui_gateway.session_notifications import _kb_spend_budget
-    assert f'renew-scope {tid} --episode' in _kb_spend_budget(SimpleNamespace(id=tid), {'cause': 'scope_stopped'}, '')
+    assert f'renew-scope {tid} --episode' in _kb_spend_budget(SimpleNamespace(id=tid), {'cause': 'scope_stopped', 'authority': authority}, '')
     safety = decision.notice({'cause': 'safety_refusal', 'task_id': tid})
     assert 'renew-scope' not in safety
     kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'safety_refusal'})
@@ -797,10 +807,11 @@ def test_ancestry_environs_reads_every_ancestor_and_refuses_what_it_cannot_finis
 def test_h_gateway_notice_names_the_card_in_the_renewal_route():
     from types import SimpleNamespace
     from gateway.kanban_watchers_notifier import _fmt_spend_budget
-    text, body, _ = _fmt_spend_budget(SimpleNamespace(payload={'cause': 'scope_stopped'}),
+    text, body, _ = _fmt_spend_budget(SimpleNamespace(payload={'cause': 'scope_stopped', 'authority': {
+        'chats': [{'gateway': 'own', 'profile': 'default', 'session': 'creator'}]}}),
                                       SimpleNamespace(head='Kanban t_1', task_id='t_00000000deadbeef'))
     assert 'renew-scope t_00000000deadbeef --episode' in text and 'renew-scope t_00000000deadbeef --episode' in body
-    assert '<task>' in decision.notice({'cause': 'scope_stopped'})
+    assert 'No recorded renewable agent authority' in decision.notice({'cause': 'scope_stopped'})
 
 
 def test_j_the_command_line_prints_the_next_step_in_text_mode(board, monkeypatch, capsys):

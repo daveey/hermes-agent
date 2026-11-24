@@ -1,10 +1,8 @@
-"""Only an ordinary budget stop gets a decision card; a stop with a cause is left to the stranded park. [daveey]
+"""Holds notify authentic owners without manufacturing supervisor/guard cards. [daveey]
 
-A "Spend budget decision" card's worker decides spend. It cannot restore a capability, renew a scope or clear a
-provider refusal, so for a ``capability_unavailable``, ``scope_stopped`` or ``safety_refusal`` stop it could only
-retain the card, which is another stop and no decision (32 of them on 2026-11-23). With no live owning chat such
-a stop now records the producer ``{"kind": "unavailable"}``. From there: a chat of the card that is live again
-takes the decision, else the stranded-park sweep asks a human, unless an open parent explains the wait.
+Ordinary spend stops may also queue the existing immediate reviewer; owner visibility
+is independent of that queue. Capability, scope and safety restrictions retain their
+distinct grant gates. Missing authority stays unavailable, never observer authority.
 """
 from __future__ import annotations
 
@@ -33,11 +31,6 @@ desk_gateway = park_tests.own_gateway
 CAUSES = ["capability_unavailable", "scope_stopped", "safety_refusal"]
 RETAIN = dict(summary="Cannot finish from here", next_step="Owner supplies the missing prerequisite",
               release_condition="Prerequisite exists", evidence=["fixture"])
-
-
-@pytest.fixture(autouse=True)
-def _fresh_recheck_pacing():
-    decision._RECHECKED.clear()
 
 
 def _sweep(conn, hours):
@@ -72,8 +65,8 @@ def test_retain_with_no_live_chat_is_unavailable_and_files_no_card(board, monkey
     """The worker's own ``kanban_retain`` is the entry path: its stop carries the cause and no card is made."""
     tid, result = _retain(board, monkeypatch, reason)
     (event,) = _notices(board, tid)
-    assert event.payload["producer"] == {"kind": "unavailable"}
-    assert result["next_action"]["owner"] == {"kind": "unavailable"}
+    assert event.payload["producer"] == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
+    assert result["next_action"]["owner"] == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
     # The receipt does not claim a pending escalation to a route nobody is on.
     escalation = result["next_action"]["escalation"]
     assert (escalation["route"], escalation["state"]) == (None, "unavailable")
@@ -92,12 +85,12 @@ def test_retain_receipt_still_names_a_live_decision_owner(board, monkeypatch):
         kb._append_event(board, tid, decision.EVENT, {"reason": "budget stop"})
     decision.ensure_producer(board, tid)
     route = _route(board, tid)
-    assert route["kind"] == "supervisor"
+    assert route['kind'] == 'unavailable'
     from hermes_cli import kanban_retain as retain
     with scoped_current_session_id(session):
         result = retain.retain(board, board="default", reason="decision_pending", **RETAIN)
     escalation = result["next_action"]["escalation"]
-    assert (escalation["route"], escalation["state"]) == (route, "pending")
+    assert escalation['state'] == 'unavailable'  # no manufactured decision owner
 
 
 def test_retained_card_with_an_open_parent_is_asked_about_only_after_the_parent_closes(board, monkeypatch):
@@ -107,7 +100,7 @@ def test_retained_card_with_an_open_parent_is_asked_about_only_after_the_parent_
     parent = kb.create_task(board, title="Restores the capability", assignee="default")
     with kb.write_txn(board):
         board.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent, tid))
-    assert _route(board, tid) == {"kind": "unavailable"} and _cards(board) == []
+    assert _route(board, tid) == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'} and _cards(board) == []
     assert _sweep(board, 3) == [] and not _asked(board, tid)
     assert _sweep(board, 30) == [] and not _asked(board, tid)
     with kb.write_txn(board):
@@ -121,7 +114,7 @@ def test_stop_with_a_cause_and_no_live_chat_is_unavailable_and_files_no_card(kan
     with kbc.connect_closing() as conn:
         tid = _stop(conn, cause)
         decision.ensure_producer(conn, tid)
-        assert _route(conn, tid) == {"kind": "unavailable"}
+        assert _route(conn, tid) == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
         assert _cards(conn) == []
         # The route is terminal for the episode: later sweeps neither re-notify nor file a card.
         decision.ensure_producer(conn, tid)
@@ -167,37 +160,34 @@ def test_the_desk_chat_the_sweep_binds_is_an_observer_not_a_returned_owner(kanba
             pytest.fail("an observer chat must not make the route recheck take the write lock")
         monkeypatch.setattr(kb, "write_txn", forbidden)
         for _ in range(4):
-            decision._RECHECKED.clear()
-            assert decision._producer_repair(conn, tid) is None
+            assert not decision._notice_repair(conn, tid)
             decision.repair_triage_routes(conn, skip=set())
             decision.ensure_producer(conn, tid)
-        assert [n.payload["producer"] for n in _notices(conn, tid)] == [{"kind": "unavailable"}]
+        assert [n.payload["producer"] for n in _notices(conn, tid)] == [{'kind': 'unavailable', 'error': 'scope_authority_unavailable'}]
 
 
 @pytest.mark.parametrize("cause", CAUSES)
-def test_a_chat_that_is_live_again_takes_the_ownerless_stop_once(kanban_home, own_gateway, cause):
-    """Dead at the stop, live later: stranded-park counts the live link as an owner and stays quiet, so the
-    route repair must send that chat the notice."""
+def test_authentic_owner_is_not_replaced_because_it_is_idle(kanban_home, own_gateway, cause):
+    """Liveness is not ownership release; archived/reopened chats get one stable notice."""
     with kbc.connect_closing() as conn:
         tid = _stop(conn, cause)
         routing._state_session(kanban_home, "human-chat", archived=1)
         routing._links(conn, tid, (routing.OWN, "default", "human-chat"))
         decision.ensure_producer(conn, tid)
-        assert _route(conn, tid) == {"kind": "unavailable"} and routing._subs(conn, tid) == []
-        decision.repair_triage_routes(conn, skip=set())  # still dead: nothing new
+        assert _route(conn, tid) == {'kind': 'chats'}
+        assert routing._subs(conn, tid) == [('tui', 'human-chat')]
+        decision.repair_triage_routes(conn, skip=set())
         assert len(_notices(conn, tid)) == 1
         routing._state_session(kanban_home, "human-chat", archived=0)
-        decision.repair_triage_routes(conn, skip=set())  # paced: this card was checked a moment ago
-        assert len(_notices(conn, tid)) == 1
-        decision._RECHECKED.clear()
         decision.repair_triage_routes(conn, skip=set())
-        assert [n.payload["producer"] for n in _notices(conn, tid)] == [{"kind": "unavailable"}, {"kind": "chats"}]
+        assert len(_notices(conn, tid)) == 1
+        decision.repair_triage_routes(conn, skip=set())
+        assert [n.payload['producer'] for n in _notices(conn, tid)] == [{'kind': 'chats'}]
         assert routing._subs(conn, tid) == [("tui", "human-chat")]
         for _ in range(2):
-            decision._RECHECKED.clear()
             decision.repair_triage_routes(conn, skip=set())
             decision.ensure_producer(conn, tid)
-        assert len(_notices(conn, tid)) == 2 and _cards(conn) == []
+        assert len(_notices(conn, tid)) == 1 and _cards(conn) == []
 
 
 def test_capability_stop_is_not_sent_to_the_spend_reviewer(kanban_home, spend_reviewer):
@@ -209,9 +199,9 @@ def test_capability_stop_is_not_sent_to_the_spend_reviewer(kanban_home, spend_re
             decision.ensure_producer(conn, card)
         episode = reviewer.episode_of(decision.pending_episode(conn, tid))
         assert reviewer.state(conn, tid, episode) is None
-        assert _route(conn, tid) == {"kind": "unavailable"}
+        assert _route(conn, tid) == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
         assert reviewer.state(conn, plain, reviewer.episode_of(decision.pending_episode(conn, plain))) == reviewer.QUEUED
-        assert _notices(conn, plain) == [] and _cards(conn) == []
+        assert len(_notices(conn, plain)) == 1 and _cards(conn) == []
 
 
 def test_restriction_recorded_apart_from_the_stop_files_no_card(kanban_home):
@@ -223,23 +213,19 @@ def test_restriction_recorded_apart_from_the_stop_files_no_card(kanban_home):
             kb._append_event(conn, tid, "decision_hold_restricted",
                              {"cause": "scope_stopped", "episode": episode.get("uid") or str(episode["id"])})
         decision.ensure_producer(conn, tid)
-        assert _route(conn, tid) == {"kind": "unavailable"}
+        assert _route(conn, tid) == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
         assert _cards(conn) == []
 
 
-def test_plain_budget_stop_with_no_live_chat_still_gets_a_decision_card(kanban_home):
+def test_plain_budget_stop_with_no_owner_never_manufactures_a_guard(kanban_home):
     with kbc.connect_closing() as conn:
         tid = hold_helpers.stopped(conn)
         assert budget.hold(conn, tid) == "triage"
         (event,) = _notices(conn, tid)
         producer = event.payload["producer"]
-        assert producer["kind"] == "supervisor" and _cards(conn) == [producer["task_id"]]
-        card = kb.get_task(conn, producer["task_id"])
-        assert card.status not in ("done", "archived")
-        assert f"hermes kanban promote {tid} --reason" in card.body and "or archive it" in card.body
-        assert "split or re-scope" in card.body
-        assert "retain this decision card" not in card.body and "non-executing owner" not in card.body
-        assert "authority unavailable" not in card.body
+        assert producer == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
+        assert _cards(conn) == [] and kb.get_task(conn, tid).status == 'triage'
+        assert decision.pending(conn, tid)
 
 
 @pytest.mark.parametrize("cause", [None, *CAUSES])

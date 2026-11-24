@@ -25,19 +25,19 @@ RECEIPTS = (
 
 
 @pytest.mark.parametrize("title,tenant", RECEIPTS)
-def test_spend_producer_preserves_tenant_and_queues(hub, title, tenant):
+def test_spend_producer_preserves_tenant_without_a_guard_card(hub, title, tenant):
     helpers._registry()
     root = kb.create_task(hub.conn, title=title, assignee="default", tenant=tenant)
     with kb.write_txn(hub.conn):
         result = decision.producer(hub.conn, root, "Spend budget reached")
-    assert result["kind"] == "supervisor"
-    tid = result["task_id"]
-    task = kb.get_task(hub.conn, tid)
+    assert result == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
+    task = kb.get_task(hub.conn, root)
     assert task.tenant == tenant
-    assert "Do not run the original work here" in task.body
-    assert helpers._runs_on(hub.conn, tid) == [helpers.POOL]
+    assert task.title == title
+    assert hub.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
+    assert helpers._runs_on(hub.conn, root) == [helpers.POOL]
     payload = hub.conn.execute(
-        "SELECT payload FROM task_events WHERE task_id=? AND kind='created'", (tid,)).fetchone()[0]
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='created'", (root,)).fetchone()[0]
     assert json.loads(payload)["portable_reason"] != "uncarried option"
 
 

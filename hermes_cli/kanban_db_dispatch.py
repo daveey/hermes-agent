@@ -1979,14 +1979,8 @@ def _run_reclaim_phase(
     from hermes_cli.kanban_continuation import wake_due_continuations
     result.woken_continuations = _la.timed("dispatch.wake_due_continuations", wake_due_continuations, conn)
     result.promoted = _la.timed("dispatch.recompute_ready", _kb.recompute_ready, conn, failure_limit=failure_limit)
-    from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
-    _la.timed("dispatch.sweep_shared_blockers", sweep_shared_blockers, conn, result)
-    from hermes_cli.kanban_provider_walls import tick_upkeep
-    _la.timed("dispatch.tick_upkeep", tick_upkeep, conn, board=board, dry_run=dry_run)
-    try:
-        result.quota_block_released = _la.timed("dispatch.release_recovered_quota_blocks", _kbq.release_recovered_quota_blocks, conn)
-    except Exception:
-        _kb._log.warning("kanban: releasing recovered quota-wall blocks failed", exc_info=True)
+    from hermes_cli.kanban_decision_maintenance import run as decision_upkeep
+    _la.timed("dispatch.decision_upkeep", decision_upkeep, conn, result, board=board, dry_run=dry_run)
 
 
 def _tick_spawn_budget(

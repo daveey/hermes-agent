@@ -7,7 +7,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_spend_decision as decision
 from hermes_cli.kanban_triage_sweep import sweep_stale_triage
-from tests.hermes_cli.test_kanban_spend_route_repair import _carded_stop, _route, _stop
+from tests.hermes_cli.test_kanban_spend_route_repair import _historical_wrapper, _route, _stop
 from tests.hermes_cli import test_kanban_spend_budget as helpers
 
 kanban_home = helpers.kanban_home
@@ -22,8 +22,9 @@ def _wrappers(conn, tid):
 @pytest.mark.parametrize("cause", [None, "scope_stopped", "safety_refusal"])
 def test_archived_wrapper_not_refiled_same_episode(kanban_home, status, cause):
     with kbc.connect_closing() as conn:
-        tid = _carded_stop(conn, cause)
-        sup = _route(conn, tid)["task_id"]
+        tid = _stop(conn, cause)
+        sup = _historical_wrapper(conn, tid)
+        decision.ensure_producer(conn, tid)
         if status == "archived":
             assert kb.archive_task(conn, sup)
         else:
@@ -42,8 +43,8 @@ def test_archived_wrapper_not_refiled_same_episode(kanban_home, status, cause):
 def test_dismissal_receipt_survives_wrapper_removal(kanban_home):
     with kbc.connect_closing() as conn:
         tid = _stop(conn)
+        sup = _historical_wrapper(conn, tid)
         decision.ensure_producer(conn, tid)
-        sup = _route(conn, tid)["task_id"]
         assert kb.archive_task(conn, sup)
         decision.ensure_producer(conn, tid)
         with kb.write_txn(conn):
@@ -58,8 +59,8 @@ def test_dismissal_receipt_survives_wrapper_removal(kanban_home):
 def test_new_episode_refiles_after_archive(kanban_home):
     with kbc.connect_closing() as conn:
         tid = _stop(conn)
+        first = _historical_wrapper(conn, tid)
         decision.ensure_producer(conn, tid)
-        first = _route(conn, tid)["task_id"]
         assert kb.archive_task(conn, first)
         decision.ensure_producer(conn, tid)
         assert _route(conn, tid)["kind"] == "dismissed"
@@ -67,9 +68,11 @@ def test_new_episode_refiles_after_archive(kanban_home):
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
             kb._append_event(conn, tid, decision.EVENT, {"reason": "second budget stop"})
+        second = _historical_wrapper(conn, tid)
         decision.ensure_producer(conn, tid)
         assert _route(conn, tid)["kind"] == "supervisor"
-        assert _route(conn, tid)["task_id"] != first
+        assert _route(conn, tid)["task_id"] == second
+        assert second != first
         assert len(_wrappers(conn, tid)) == 2
 
 
@@ -79,9 +82,10 @@ def test_key_stable_across_comments(kanban_home):
         episode = decision.pending_episode(conn, tid)
         key = f"spend-budget-decision:{tid}:{episode.get('uid') or str(episode['id'])}"
         kb.add_comment(conn, tid, "desk", "Context added before publication")
+        sup = _historical_wrapper(conn, tid)
         decision.ensure_producer(conn, tid)
         assert _wrappers(conn, tid)[0]["idempotency_key"] == key
-        sup = _route(conn, tid)["task_id"]
+        assert _route(conn, tid)["task_id"] == sup
         # Lost notice, including an old event-id key, must reuse the administrative identity.
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET idempotency_key=? WHERE id=?", (f"spend-budget-decision:{tid}:legacy", sup))

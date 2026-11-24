@@ -40,9 +40,10 @@ def adopt(tid, capsys):
 
 def test_shepherd_spend_stop_then_local_adoption(world, capsys):
     conn, tid, _ = world
-    before = spend.producer(conn, tid, 'budget stopped')
-    assert before['kind'] == 'supervisor'
     count = conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+    before = spend.producer(conn, tid, 'budget stopped')
+    assert before == {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
+    assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == count  # no synthetic guard
     task = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
     result = adopt(tid, capsys)
     assert result.get('adopted') is True, result

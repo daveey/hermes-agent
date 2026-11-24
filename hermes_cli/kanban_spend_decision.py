@@ -3,62 +3,62 @@ from __future__ import annotations
 
 from hermes_cli import kanban_db as kb
 
-
 EVENT = "spend_budget_triaged"
 NOTICE = "spend_budget_decision_ready"
 
 
 def ensure_producer(conn, task_id: str) -> None:
     """Repair pre-notice stops too; one durable producer receipt per spend-stop episode."""
+    from hermes_cli.kanban_hold_notices import publish
     # Most sweeps are no-ops. Do not queue for the global SQLite writer just
     # to discover a live route: this runs before ready-card admission while the
     # dispatcher holds its tick lock. Every actual repair is re-read below.
-    if _producer_repair(conn, task_id) is None:
+    if not _notice_repair(conn, task_id):
         return
     with kb.write_txn(conn, allow_nested=True):
-        repair = _producer_repair(conn, task_id, paced=False)
-        if repair is None:
+        if not _notice_repair(conn, task_id):
             return
-        episode, payload, route, live = repair
+        # Ordinary spend review stays eligible, but it is not a substitute for
+        # immediate owner visibility. A queued judge grants no execution here.
         from hermes_cli import kanban_spend_reviewer as reviewer
-        if not live and reviewer.queue(conn, task_id, episode):
-            return  # an immediate review decides first; it routes the stop here only if it escalates
-        if not live:
-            previous, route = route, producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
-            if route == previous:
-                return  # an ownerless stop re-checked for a returned chat (_chat_returned) and still ownerless
-        kb._append_event(conn, task_id, NOTICE, {**payload, "episode": episode, "producer": route})
+        stop = pending_episode(conn, task_id)
+        if stop is not None:
+            reviewer.queue(conn, task_id, stop.get('uid') or str(stop['id']))
+        publish(conn, task_id, with_producer=True)
 
 
-def _producer_repair(conn, task_id, *, paced=True):
+def _notice_repair(conn, task_id: str) -> bool:
     """Read-only need check; never authorizes a repair outside its transaction."""
-    import json
-    stop = pending_episode(conn, task_id)
-    if stop is None:
-        return None
-    episode = stop.get("uid") or str(stop["id"])
-    from hermes_cli import kanban_spend_reviewer as reviewer
-    if reviewer.holds(conn, task_id, episode):
-        return None
-    previous = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=? "
-                            "AND json_extract(payload,'$.episode')=? ORDER BY id DESC LIMIT 1",
-                            (task_id, NOTICE, episode)).fetchone()
-    payload = json.loads(stop["payload"] or "{}")
-    from hermes_cli.kanban_refusal_receipt import restricted
-    safety = restricted(conn, task_id)
-    scope = execution_restricted(conn, task_id) and not safety
-    prior = json.loads(previous[0]) if previous else None
-    cause = 'safety_refusal' if safety else 'scope_stopped' if scope else None
-    prior_route = prior.get('producer') if isinstance(prior, dict) else None
-    route = episode_route(conn, task_id, episode) or prior_route
-    live = _live_route(conn, route)
-    if live and route == {'kind': 'unavailable'} and _chat_returned(conn, task_id, paced=paced):
-        live = False  # no owner could be reached at the stop; a chat that is live now takes the decision
-    if live and route == prior_route and (cause is None or prior.get('cause') == cause):
-        return None
-    if cause:
-        payload['cause'] = cause
-    return episode, payload, route, live
+    from hermes_cli.kanban_hold_effective import current, previous
+    from hermes_cli.kanban_hold_notices import destinations
+    hold = current(conn, task_id)
+    if hold is None:
+        return False
+    payload = hold[1]
+    prior = previous(conn, task_id, payload)
+    prior_prod = kb._json_dict(prior['payload']).get('producer') if prior else None
+    episode = payload.get('episode')
+    historical = episode_route(conn, task_id, episode) if isinstance(episode, str) else None
+    if historical is not None:
+        if historical != prior_prod:
+            return True
+    elif prior is None:
+        return True
+    if any(not conn.execute(
+            'SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND platform=? AND chat_id=?',
+            (task_id, platform, chat)).fetchone() for platform, chat in destinations(conn, task_id)):
+        return True
+    from hermes_cli.kanban_archive_scope import _creator_task_id
+    from hermes_cli.kanban_wake_check import foreign_ids
+    owner = _creator_task_id(conn, task_id)
+    if not owner or owner in foreign_ids(conn) or not conn.execute(
+            'SELECT 1 FROM tasks WHERE id=?', (owner,)).fetchone():
+        return False
+    return not conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND kind='hold_creator_notified' "
+        "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.identity') END=? "
+        "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_task_id') END=?",
+        (owner, payload['revision'], task_id)).fetchone()
 
 
 
@@ -254,11 +254,17 @@ def _one_step(task_id, *, for_worker=False) -> str:
 def notice(payload: dict) -> str:
     if payload.get('cause') == 'scope_stopped':
         from hermes_cli.kanban_scope_renewal import ROUTE
+        from hermes_cli.kanban_hold_audience import chats, guidance
+        authority = payload.get('authority')
+        prefix = guidance(authority) + ' '
+        if not chats(authority) and not (isinstance(authority, dict) and authority.get('creator_active') is True):
+            return prefix + 'Promotion, comments, timers and review do not release this scope stop.'
         return ('Scope stopped without execution authority. No generic promotion, comment, timer or review releases it. '
-                'Only an explicit scope renewal does: ' + ROUTE.format(task=payload.get('task_id') or '<task>') + '. '
+                + prefix + 'Only an explicit scope renewal does: ' + ROUTE.format(task=payload.get('task_id') or '<task>') + '. '
                 + _one_step(payload.get('task_id')) + '.')
     if payload.get('cause') == 'safety_refusal':
         retried = payload.get('refused_providers')
+        retried = retried if isinstance(retried, (list, tuple)) else []
         head = ('Provider safety refusal retained' if not retried else
                 'Provider safety refusal retained after the work was retried unchanged on other eligible providers '
                 f'until every one refused ({", ".join(str(p) for p in retried)})')
@@ -273,7 +279,7 @@ def notice(payload: dict) -> str:
 
 
 def producer(conn, task_id: str, note: str) -> dict:
-    """Inside the stop transaction: one chat-notice route OR one supervisor, never both."""
+    """Inside the stop transaction: bind authentic owners without creating guard cards."""
     from hermes_cli.profiles import get_active_profile_name
     import json
     role = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='administrative_decision' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
@@ -290,130 +296,21 @@ def producer(conn, task_id: str, note: str) -> dict:
             "(SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?))",
             (task_id, platform, chat_id, task_id))
     from hermes_cli.kanban_origin import gateway_names
-    from hermes_cli.kanban_stranded_park import Liveness, local_chat_dead, settings
-
-    task = kb.get_task(conn, task_id)
-    assert task is not None
-    own = gateway_names()[0]
-    active = get_active_profile_name()
-    with Liveness(idle=settings()[1]) as liveness:
-        return _route(conn, task_id, task, own, active, bind, note,
-                      lambda gw, profile, session: local_chat_dead(gw, profile, session, own=own, liveness=liveness))
+    return _route(conn, task_id, gateway_names()[0], get_active_profile_name(), bind)
 
 
-_RECHECK_SECONDS = 300  # kanban_stranded_park.DEFAULT_SWEEP_INTERVAL_SECONDS: the same state.db reads, as rarely
-_RECHECKED: dict[tuple[str, str], float] = {}
-
-
-def _chat_returned(conn, task_id: str, *, paced: bool) -> bool:
-    """Read-only: would ``producer`` route this ownerless stop to a chat now? Only an owning chat counts: an
-    observer (the desk chat the stranded-park sweep binds as ``shepherd``, a ``touch``) is never the route, and
-    saying yes for one would take the write lock every recheck to find the same ``unavailable``. ``paced`` (the
-    dispatcher's unlocked pre-check) asks at most once per ``_RECHECK_SECONDS`` per card: each answer may open a
-    state.db."""
-    import time
-    from hermes_cli.kanban_db_connect import _main_db_file
-    from hermes_cli.kanban_origin import gateway_names
-    from hermes_cli.kanban_stranded_park import Liveness, local_chat_dead, settings
-    from hermes_cli.profiles import get_active_profile_name
-    if paced:
-        key, now = (_main_db_file(conn) or f"conn:{id(conn)}", task_id), time.monotonic()
-        last = _RECHECKED.get(key)
-        if last is not None and now - last < _RECHECK_SECONDS:
-            return False
-        if len(_RECHECKED) > 4096:
-            _RECHECKED.clear()
-        _RECHECKED[key] = now
-    task = kb.get_task(conn, task_id)
-    if task is None:
-        return False
-    own, bound = gateway_names()[0], []
-    with Liveness(idle=settings()[1]) as liveness:
-        # ``bind`` only records the live chats ``producer`` would subscribe; True is a live owning subscription.
-        if _chat_route(conn, task_id, task, own, get_active_profile_name(), lambda *chat: bound.append(chat),
-                       lambda gw, profile, session: local_chat_dead(gw, profile, session, own=own,
-                                                                    liveness=liveness)):
-            return True
-    # ``producer`` binds with INSERT OR IGNORE: only a chat with no subscription yet becomes an owning one. An
-    # existing row was judged above, and an observer's row (OBSERVER_SUB_REASONS) stays an observer's.
-    return any(conn.execute("SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND platform=? AND chat_id=? "
-                            "AND thread_id=''", (task_id, platform, chat_id)).fetchone() is None
-               for platform, chat_id in bound)
-
-
-def _chat_route(conn, task_id, task, own, active, bind, dead) -> bool:
-    """Bind the card's live chats; True when one owns the decision. ``dead``: a chat of this gateway that is
-    archived/hidden/missing, or ended and idle, is no route for the decision: the notice would sit unread
-    (kanban_stranded_park). One ``Liveness`` per call: each state.db is opened at most once."""
-    from hermes_cli.kanban_creator_chats import _chat_links
-    from hermes_cli.kanban_db_notify import is_headless_session
-
-    # Bind legacy origin sessions before appending the notice so its cursor cannot skip this event.
-    if task.session_id and not is_headless_session(task.session_id) and not dead(own, active, task.session_id):
-        bind("tui", task.session_id)
-    links = (_chat_links(conn, task_id) if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone() else [])
-    for link in links:
-        session = link["chat_session"]
-        gw, profile = link["chat_gateway"], link["chat_profile"] or "default"
-        chat_id = f"{gw}/{profile}/{session}"
-        if not is_headless_session(chat_id) and not dead(gw, link["chat_profile"], session):
-            local = gw == own and profile == active
-            bind("tui" if local else "hub", session if local else chat_id)
-    from hermes_cli.kanban_db_notify import _owning_sub_clause
-    from hermes_cli.kanban_origin import OriginError, parse_origin
-    for sub in conn.execute("SELECT s.platform, s.chat_id, s.notifier_profile FROM kanban_notify_subs s "
-                            f"JOIN tasks p ON p.id=s.task_id WHERE s.task_id=? AND {_owning_sub_clause()}",
-                            (task_id,)).fetchall():
-        platform, chat_id, notifier = sub[0], sub[1], sub[2]
-        if platform == "tui" and dead(own, notifier, chat_id):
-            continue
-        if platform == "hub":
-            try:
-                origin = parse_origin(chat_id)
-            except OriginError:
-                origin = None
-            if origin is not None and dead(origin.gateway, origin.profile, origin.session):
-                continue
-        return True
-    return False
-
-
-def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
-    """``producer`` body after setup: the card's live chats (``_chat_route``), else the stop's decision card."""
-    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
-    from hermes_cli.kanban_triage_sweep import _supervisor_profile
-    if _chat_route(conn, task_id, task, own, active, bind, dead):
-        return {"kind": "chats"}
-    stop = pending_episode(conn, task_id)
-    episode = (stop.get('uid') or str(stop['id'])) if stop else None
-    existing = episode_route(conn, task_id, episode) if episode else None
-    if existing:
-        return existing
-    from hermes_cli.kanban_refusal_receipt import restricted
-    safety = restricted(conn, task_id)
-    stopped = execution_restricted(conn, task_id)
-    import json as _json
-    # A stop with a cause (capability_unavailable, scope_stopped, safety_refusal) gets no decision card. The card's
-    # worker decides spend; it cannot restore a capability, renew a scope or clear a refusal, so it could only
-    # retain the card: a second stop and no decision. With no live chat nobody is routed, and the stranded-park
-    # sweep asks a human once the park is old enough (kanban_stranded_park), unless an open parent or a recorded
-    # wait explains it. Only an ordinary budget stop reaches the decision card below.
-    if safety or stopped or (stop and _json.loads(stop['payload'] or '{}').get('cause')):
-        return {'kind': 'unavailable'}
-    guidance = notice({'reason': note, 'task_id': task_id, 'for_worker': True})
-    action = (f"\n\nRecord the decision on {task_id}; use `hermes kanban promote {task_id} --reason '<what changed>'` "
-              'only after re-scoping or justifying further spend, or archive it. Do not run the original work here.')
-    sup = kb.create_task(
-        conn, title=forwarded_title(f"Spend budget decision: {task.title}"[:200], f"Spend budget decision: {task_id}"),
-        body=f"Card {task_id} has stopped. No chat owns its decision.\n\n"
-             + "Source title and stop reason (historical evidence):\n" + forwarded_text(task.title) + "\n"
-             + forwarded_text(note) + "\n\n" + guidance + action
-             + "\n\nApply the disposition on the source before completing this decision card; a recommendation or "
-             "completion alone does not change its hold. Never renew spend or bypass safety/scope gates implicitly.",
-        assignee=_supervisor_profile(), created_by="kanban-spend-budget", workspace_kind="scratch",
-        idempotency_key=f"spend-budget-decision:{task_id}:{episode}", tenant=task.tenant)
-    stop = pending_episode(conn, task_id)
-    kb._append_event(conn, sup, 'administrative_decision', {'role': 'administrative_decision',
-                     'root_task': task_id, 'root_episode': (stop.get('uid') or str(stop['id'])) if stop else None})
-    return {"kind": "supervisor", "task_id": sup}
+def _route(conn, task_id, own, active, bind) -> dict:
+    """Route only to genuine renewable authority, independent of chat idleness."""
+    from hermes_cli.kanban_hold_audience import describe
+    authority = describe(conn, task_id)
+    # Idleness is not a release of authentic ownership. Do not manufacture a
+    # supervisor card: it cannot repair missing historical authority either.
+    for chat in authority['chats']:
+        gateway, profile, session = chat['gateway'], chat['profile'], chat['session']
+        local = gateway == own and profile == active
+        bind('tui' if local else 'hub', session if local else f'{gateway}/{profile}/{session}')
+    if authority['chats']:
+        return {'kind': 'chats'}
+    if authority['creator_task_id']:
+        return {'kind': 'creator', 'task_id': authority['creator_task_id']}
+    return {'kind': 'unavailable', 'error': 'scope_authority_unavailable'}
