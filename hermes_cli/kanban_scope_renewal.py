@@ -4,8 +4,9 @@ A worker's ``kanban_retain(reason='scope_stopped')`` restricts its card: no prom
 releases it (``kanban_spend_decision``). ``scope_renewed`` is the one release of that restriction, and only of it:
 
 * it names one stop episode (the ``spend_budget_triaged`` uid) and one mandate comment, written after the stop by
-  the same authority that renews: a human operator, the card's owning chat (an unreleased ``created`` chat link;
-  ``shepherd``/``touch`` observers never qualify) or the card's creator task. Runs of the stopped card never renew;
+  the same authority that renews. There are four: a human operator, the card's owning chat (an unreleased
+  ``created`` chat link; ``shepherd``/``touch`` observers never qualify), the card's creator task, or a delegate (a
+  chat session a human granted renewal rights, ``kanban_scope_delegate``). Runs of the stopped card never renew;
 * it freezes the exact scope evidence it covers (``covered_restriction_uids``). Execution readers ignore covered
   evidence only; evidence added later, a new stop, and every safety restriction stay restrictive;
 * it does not promote, claim or touch spend: the card stays in triage under its pending decision until a
@@ -29,7 +30,7 @@ MAX_MANDATE = 8000  # the operator courier's comment bound: one limit on every p
 MAX_REASON = 2000
 ROUTE = ("record the renewed scope as a comment on the card, then "
          "`hermes kanban renew-scope {task} --episode <stop uid> --mandate-comment <comment uid or local id> --reason <text>` "
-         "(a human operator, the card's owning chat or its creator task), then a separate "
+         "(a human operator, the card's owning chat, its creator task or a delegate chat), then a separate "
          "`hermes kanban promote {task} <what changed>`")
 
 
@@ -41,7 +42,8 @@ class RenewalRefused(ValueError):
 
 @dataclass(frozen=True)
 class Actor:
-    """Who renews, as the comment classifier sees them. ``authority``: human | chat | creator_task."""
+    """Who renews, as the comment classifier sees them. ``authority``: human | chat | creator_task | delegate
+    (``ref``: the grant uid)."""
     kind: str
     session: Optional[str]
     authority: str
@@ -188,7 +190,8 @@ def _writer_refusal(conn: sqlite3.Connection, actor: Actor, event: dict) -> Opti
             return None
         return f"the mandate comment was not written by creator task {actor.ref}"
     if p.get("writer_task") or not actor.session or p.get("writer_session") != actor.session:
-        return "the mandate comment was not written by this owning chat"
+        return ("the mandate comment was not written by this delegate session" if actor.authority == "delegate"
+                else "the mandate comment was not written by this owning chat")
     return None
 
 

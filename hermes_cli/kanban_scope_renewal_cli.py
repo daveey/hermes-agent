@@ -4,6 +4,9 @@ The caller is classified exactly as ``hermes kanban comment`` classifies a comme
 (``kanban_comment_writer.cli_comment_writer``); no flag names a role or session. For a comment the session only
 lowers authority; here it selects it, so the session and the Kanban task are not taken from this process's
 environment alone, which its parent chose (``HERMES_SESSION_ID=<owning chat> env -u HERMES_KANBAN_TASK hermes``).
+The four authorities are a human operator, the owning chat, the running creator task and a delegate: a chat
+session that owns nothing on the card but holds a live human grant (``hermes kanban delegate grant``,
+``kanban_scope_delegate``). The delegate rule is asked last, so it loosens none of the older refusals.
 They are what the WHOLE process ancestry was started with (:func:`caller_identity`): a task marker on any
 ancestor counts even when the caller dropped it, and an ancestry naming two sessions has no identity. This is
 process provenance, not authentication: a same-user process that leaves its ancestry (double-fork, a command
@@ -73,8 +76,11 @@ def caller_identity(environs: Sequence[Mapping[str, str]]) -> tuple[set, set]:
 
 
 def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, environs: Sequence[Mapping[str, str]],
-                  gateway: str, profile: str, canonical_owner=None) -> Actor:
-    """The renewing authority, or :class:`RenewalRefused`. The stopped card's own runs are refused first."""
+                  gateway: str, profile: str, canonical_owner=None, delegate=None) -> Actor:
+    """The renewing authority, or :class:`RenewalRefused`. The stopped card's own runs are refused first.
+
+    ``delegate(session)`` -> uid of a live human grant for this chat session, or None; asked only for a chat
+    session that is not the owning chat, after every other rule (own runs, task markers, ambiguous identity)."""
     from hermes_cli.kanban_archive_scope import _creator_task_id
     kind, session, evidence = writer
     if kind == "human":
@@ -99,8 +105,12 @@ def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, envi
         return Actor("agent", session, "creator_task", own, gateway, profile)
     if (owning_link(conn, task_id, gateway=gateway, profile=profile, session=session) is None
             and (canonical_owner is None or not canonical_owner(session))):
+        if grant := (delegate(session) if delegate is not None else None):
+            return Actor("agent", session, "delegate", str(grant), gateway, profile)
         raise RenewalRefused("not_scope_authority", f"this session is not {task_id}'s owning chat (an unreleased "
-                             "created chat link); shepherd/touch subscriptions and unrelated agents cannot renew")
+                             "created chat link); shepherd/touch subscriptions and unrelated agents cannot renew. "
+                             "A human operator can grant this chat renewal rights: `hermes kanban delegate grant "
+                             f"--session {session} --reason <why>`")
     return Actor("agent", session, "chat", f"@session:{profile}@{gateway}/{session}", gateway, profile)
 
 
@@ -145,6 +155,9 @@ def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict
         capability = hub.decision_retain_capability(board)
         if not isinstance(capability, dict) or capability.get("scope_renewal") != 1:
             raise RenewalRefused("board_unsupported", "the Board does not support scope renewal v1 yet; "
+                                 "nothing was changed. Retry after the Board deployment")
+        if payload["authority_kind"] == "delegate" and capability.get("scope_delegate") != 1:
+            raise RenewalRefused("board_unsupported", "the Board does not support delegated scope renewal yet; "
                                  "nothing was changed. Retry after the Board deployment")
         if mode == "primary":
             client.push(conn, hub, board, hub.ident.gateway, primary=True)  # the mandate comment must be canonical
@@ -197,6 +210,7 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
           env: Optional[Mapping[str, str]] = None,
           ancestry: Optional[Sequence[Mapping[str, str]]] = None) -> dict:
     """``writer``/``env``/``ancestry`` are test seams; the command passes none and each is read from the process."""
+    from hermes_cli import kanban_scope_delegate as delegates
     from hermes_cli.kanban_comment_writer import Inconclusive, ancestry_environs, cli_comment_writer
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.profiles import get_active_profile_name
@@ -213,7 +227,9 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
         actor = resolve_actor(evidence, task_id, writer=writer, environs=[*(ancestry or ()), env],
                               gateway=gateway, profile=profile,
                               canonical_owner=lambda session: _canonical_owner(
-                                  conn, board, task_id, gateway, profile, session))
+                                  conn, board, task_id, gateway, profile, session),
+                              delegate=lambda session: delegates.live_grant(
+                                  conn, board, gateway=gateway, profile=profile, session=session))
         return _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor)
 
 

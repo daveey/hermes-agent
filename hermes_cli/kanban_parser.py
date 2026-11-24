@@ -668,8 +668,27 @@ _SPECS = [
                   "the stop, that states the renewed scope"),
         _arg("--reason", required=True, help="Why the scope is renewed (audit trail)"),
         _json_flag(),
-    ], help="Renew a scope-stopped card's scope (human operator, owning chat or creator task; never a safety "
-            "stop). Does not promote: run `hermes kanban promote` afterwards"),
+    ], help="Renew a scope-stopped card's scope (human operator, owning chat, creator task or a delegate chat; "
+            "never a safety stop). Does not promote: run `hermes kanban promote` afterwards"),
+    _cmd("delegate", children=("delegate_action", [
+        _cmd("grant", [
+            _arg("--session", required=True, help="Chat session id, or '*' for every chat session of the gateway and profile"),
+            _arg("--gateway", default=None, help="The chat's gateway (default: this gateway)"),
+            _arg("--profile", default=None, help="The chat's profile (default: the active profile)"),
+            _arg("--hours", type=float, default=168.0, help="How long the grant lasts (default: 168)"),
+            _arg("--reason", required=True, help="Why (audit trail)"),
+            _json_flag(),
+        ], help="Let a chat session renew scope stops on cards it does not own"),
+        _cmd("revoke", [
+            _arg("--session", required=True, help="The granted chat session id, or '*' for the every-session grant"),
+            _arg("--gateway", default=None, help="The chat's gateway (default: this gateway)"),
+            _arg("--profile", default=None, help="The chat's profile (default: the active profile)"),
+            _arg("--reason", required=True, help="Why (audit trail)"),
+            _json_flag(),
+        ], help="End the live grant of exactly that gateway, profile and session"),
+        _cmd("list", [_json_flag()], help="Live, expired and revoked grants"),
+    ]), help="Human operator only: grant a chat session (a triage or desk chat) the right to renew-scope cards "
+             "it does not own. The delegate still writes its own mandate; safety stops stay closed"),
     _cmd("spend-budget", [
         _TASK_ID,
         _arg("--seen", dest="seen_comment_id", type=int, help="Newest decision comment read; refuse replacing an unread spend-stop budget decision."),

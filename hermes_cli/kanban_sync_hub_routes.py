@@ -27,6 +27,12 @@ class HubRoutesMixin:
 
         return self._call("GET", f"/v2/boards/{quote(board, safe='')}/decision-retain/capability")
 
+    def scope_delegates(self, board: str) -> dict:
+        """Delegated scope-renewal grants (``kanban_scope_delegate``); ask only after ``scope_delegate: 1``."""
+        from urllib.parse import quote
+
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/scope-delegates")
+
     def containment_capability(self, board: str) -> dict:
         from urllib.parse import quote
 

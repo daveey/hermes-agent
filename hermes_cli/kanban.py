@@ -1872,6 +1872,7 @@ _HANDLERS = {
     **dict.fromkeys(("contain", "resume-contained"), lambda a: importlib.import_module("hermes_cli.kanban_containment_cli").command(a)),
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "renew-scope": lambda a: importlib.import_module("hermes_cli.kanban_scope_renewal_cli").command(a),
+    "delegate": lambda a: importlib.import_module("hermes_cli.kanban_scope_delegate").command(a),
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote, "resume": _cmd_resume, "quota-release": _cmd_quota_release,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch, "source-release": _cmd_source_release,

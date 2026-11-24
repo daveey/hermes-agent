@@ -1575,6 +1575,9 @@ hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body 
 hermes kanban promote <id>...                          # move todo/blocked/triage tasks to ready (recovery)
 hermes kanban renew-scope <id> --episode <stop uid> --mandate-comment <comment id> --reason <text>
                                                        # renew a scope-stopped card's scope (then promote it)
+hermes kanban delegate grant --session <session id|'*'> [--gateway G] [--profile P] [--hours H] --reason <text>
+hermes kanban delegate revoke --session <session id|'*'> [--gateway G] [--profile P] --reason <text>
+hermes kanban delegate list [--json]                   # human operator: let a chat renew cards it does not own
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
 hermes kanban link <parent_id> <child_id>
@@ -1617,6 +1620,19 @@ hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-colu
 hermes kanban gc [--event-retention-days N] [--worktree-retention-days N] # workspaces + old events + old logs
         [--log-retention-days N]                       #   (negative N is rejected; 0 disables that sweep)
 ```
+
+`renew-scope` accepts four authorities: a human operator, the card's owning chat,
+its running creator task, and a **delegate**. A delegate is a chat session a human
+granted renewal rights with `hermes kanban delegate grant` (one session, or `'*'`
+for every chat session of a gateway and profile; 168 hours unless `--hours` says
+otherwise), so a triage or desk chat told to "unblock these cards" can renew cards
+it does not own instead of relaying to each owning chat. Only a human terminal can
+grant or revoke (an agent caller is refused `not_human`); `delegate list` shows
+live, expired and revoked grants. The delegate still writes its own mandate comment
+after the stop, a run of the stopped card and any caller inside a Kanban task are
+refused as before, and a safety stop has no renewal. On a synced board the grant is
+stored by the Board, which must advertise `scope_delegate`; otherwise the commands
+answer `board_unsupported`.
 
 A card created with `--review-required` (tool: `review_required=true`) cannot be
 completed by its implementer, even with `--force`: the implementer calls
