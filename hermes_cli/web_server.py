@@ -1588,7 +1588,9 @@ def _on_server_started(
     else:
         from hermes_cli.url_utils import format_url_host
 
-        print(f"  Hermes Web UI → http://{format_url_host(host)}:{actual_port}")
+        # Keep diagnostics off the machine-sentinel channel even before the
+        # lazy gateway import redirects stdout. Do not rely on that side effect.
+        print(f"  Hermes Web UI → http://{format_url_host(host)}:{actual_port}", file=sys.stderr)
     _maybe_open_browser(host, actual_port, open_browser, initial_profile)
 
     if start_mcp_discovery_after_bind:
