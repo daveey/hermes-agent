@@ -22,6 +22,7 @@ import {
 import { decodeDeltaBody, readEncodingHeaders } from './delta-reads'
 import { displayTranscriptHeaders, GzipExpansionError, isDisplayTranscriptRead } from './display-transcript'
 import { DEFAULT_FETCH_TIMEOUT_MS, resolveTimeoutMs } from './hardening'
+import { requestStages } from './request-stages'
 
 // Oversized gzip pages retry as identity, bounded by actual received bytes rather than Content-Length.
 export const TRANSCRIPT_IDENTITY_MAX_BYTES = 64 * 1024 * 1024
@@ -47,7 +48,8 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
     async (requestState: any) => {
       // [daveey] Total per-attempt deadline from here: covers grant minting, Agent queue wait, connect and response.
       const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-      const deadline = startRequestDeadline(timeoutMs)
+      const stages = requestStages(url, options.method || 'GET')
+      const deadline = startRequestDeadline(timeoutMs, Date.now, stages?.deadline)
 
       // Mint inside each retry: a grant authorizes exactly one HTTP request.
       const nativeHeaders = options.gatewayDescriptor
@@ -106,7 +108,8 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
                   // the gateway's OAuth gate verifies it via the provider stack with
                   // no cookie involved.
                   ...(options.bearer ? { Authorization: `Bearer ${options.bearer}` } : {}),
-                  ...(body ? { 'Content-Length': String(body.length) } : {})
+                  ...(body ? { 'Content-Length': String(body.length) } : {}),
+                  ...(stages ? { 'X-Hermes-Req-Id': stages.id } : {})
                 }
               },
               res => {
@@ -187,7 +190,7 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
                 })
               }
             ),
-          { body, onError: reject, requestState }
+          { body, onError: reject, requestState, observeRequest: stages?.attach }
         )
       })
     },
@@ -205,7 +208,8 @@ export function fetchPublicJsonWith(deps: JsonFetchDeps, url: string, options: a
     (requestState: any) =>
       new Promise((resolve, reject) => {
         const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-        const deadline = startRequestDeadline(timeoutMs)
+        const stages = requestStages(url, options.method || 'GET')
+        const deadline = startRequestDeadline(timeoutMs, Date.now, stages?.deadline)
         const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body))
         let parsed
 
@@ -239,7 +243,8 @@ export function fetchPublicJsonWith(deps: JsonFetchDeps, url: string, options: a
                   ...deps.remoteHeaders(url),
                   ...(options.headers || {}),
                   'Content-Type': 'application/json',
-                  ...(body ? { 'Content-Length': String(body.length) } : {})
+                  ...(body ? { 'Content-Length': String(body.length) } : {}),
+                  ...(stages ? { 'X-Hermes-Req-Id': stages.id } : {})
                 }
               },
               res => {
@@ -283,7 +288,7 @@ export function fetchPublicJsonWith(deps: JsonFetchDeps, url: string, options: a
                 })
               }
             ),
-          { body, onError: reject, requestState }
+          { body, onError: reject, requestState, observeRequest: stages?.attach }
         )
       }),
     { method: options.method || 'GET' }

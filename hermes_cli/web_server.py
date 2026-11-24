@@ -214,6 +214,11 @@ from hermes_cli.web_board_busy import install_board_busy_handler
 
 install_board_busy_handler(app)
 
+from hermes_cli.web_request_stages import RequestStageHandler, RequestStageIngress
+
+# First registered = innermost: observe dispatch after the auth/body gates.
+app.add_middleware(RequestStageHandler)
+
 from hermes_cli.dashboard_auth.body_limit import AuthBodyLimitMiddleware
 
 # Register first (innermost): auth gates run before this, JSON parsing after it.
@@ -792,6 +797,8 @@ class _LocalOriginCORSMiddleware(CORSMiddleware):
 # Without this, an OPTIONS preflight from a cross-origin SPA hits the auth
 # middlewares before CORS can answer, producing 401 instead of 204 + headers.
 app.add_middleware(_LocalOriginCORSMiddleware, allow_methods=["*"], allow_headers=["*"])
+# Last registered = outermost, including rejected requests and slow gates.
+app.add_middleware(RequestStageIngress)
 
 
 # Authenticated-route self-test: one in-process request per minute against a

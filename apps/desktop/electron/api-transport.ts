@@ -200,7 +200,7 @@ function requestDeadlineBudgetMs(timeoutMs: number, bodyBytes = 0): number {
  * so a large upload (kanban attachments, up to 25 MB) on a slow link is not
  * cut at the JSON budget. The idle timer still catches a stalled upload.
  */
-function startRequestDeadline(timeoutMs: number, now: () => number = Date.now) {
+function startRequestDeadline(timeoutMs: number, now: () => number = Date.now, onDeadline?: () => void) {
   const startedAt = now()
 
   return {
@@ -208,6 +208,7 @@ function startRequestDeadline(timeoutMs: number, now: () => number = Date.now) {
       const budgetMs = requestDeadlineBudgetMs(timeoutMs, bodyBytes)
 
       const expire = (afterMs: number) => {
+        onDeadline?.()
         const error = requestTimeoutError(afterMs)
         onTimeout(error)
         req.destroy(error)
@@ -240,10 +241,12 @@ function sendWithRequestDeadline(
   {
     body,
     onError,
-    requestState
-  }: { body?: Buffer; onError: (error: Error) => void; requestState?: { bodySent?: boolean } }
+    requestState,
+    observeRequest
+  }: { body?: Buffer; onError: (error: Error) => void; requestState?: { bodySent?: boolean }; observeRequest?: (req: http.ClientRequest) => void }
 ): http.ClientRequest {
   const req = open()
+  observeRequest?.(req)
 
   req.on('error', onError)
   deadline.arm(req, onError, body?.length)

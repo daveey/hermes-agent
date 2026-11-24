@@ -569,6 +569,7 @@ import { missingRendererAssets, presentRendererIndexes } from './renderer-bundle
 import { applyLaunchSwitches, readDesktopLaunchConfig } from './renderer-heap-flags'
 import { loadRendererLoadErrorPage } from './renderer-load-error-page'
 import { attachRendererConsoleCapture, formatRendererBoundaryReport } from './renderer-log'
+import { withApiRequestStages } from './request-stages'
 import { fetchRosterSourceData } from './roster-source-fetch'
 import { rosterSourceStatus } from './roster-source-status'
 import { registerSaveDialogIpc } from './save-text-file'
@@ -15713,14 +15714,12 @@ async function teardownConnectionScopedProfileBackend(connectionId, profile) {
 }
 
 async function handleHermesApiRequest(request) {
-  // Registry-pinned request (request.connectionId): the renderer is working
-  // against a REGISTERED gateway connection, so the data — cron jobs and their
-  // run sessions included — lives in THAT host's state.db, not any local
-  // profile's. Resolve the backend through the registry (same pool the job
-  // list and WS traffic use) instead of the legacy profile route; a shared
-  // remote/cloud host serves every profile via ?profile=, so scope the path.
-  // An absent/empty id falls through to the byte-identical v1 route below.
-  // Explicit `local` stays registry-pinned so it cannot inherit a v1 remote.
+  return withApiRequestStages(request, () => handleHermesApiRequestUntraced(request))
+}
+
+async function handleHermesApiRequestUntraced(request) {
+  // Registry-pinned reads use that gateway's state and shared REST/WS pool, not local profile state.
+  // An absent id keeps the legacy profile route; explicit `local` cannot inherit a legacy remote.
   const registryConnectionId = apiRequestRegistryConnectionId(request)
 
   if (registryConnectionId) {
