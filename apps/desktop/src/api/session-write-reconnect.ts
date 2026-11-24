@@ -17,10 +17,17 @@ import { isDefinitiveSessionMutationRefusal } from '../../../shared/src/session-
  * renderer never reached the owner, or lost its reply) is retried here with backoff for a bounded
  * window, and only a write that still fails after it reaches the caller (archive then restores the
  * row and offers Retry). A backend verdict is never retried here: a definitive refusal (conflict,
- * not found, permission, client upgrade) ends the write, and a 503 owner_unavailable already rode
- * out the owner's stall server-side before answering, so it goes to the user's Retry.
+ * not found, permission, client upgrade) ends the write, and a 503 owner_unavailable control_timeout
+ * already rode out the owner's stall server-side before answering, so it goes to the user's Retry.
+ *
+ * The exception is a 503 saying the owner is restarting (`owner_unavailable: starting|draining`):
+ * the backend waits each phase out for at most ~24 s inside the 30 s request deadline, but a whole
+ * hub restart is a 30 s drain plus a ~25 s start (hub, 2026-11-24 05:23Z: an archive 10 s into the
+ * drain failed with "Archive failed ... draining"). Nothing was written, so it is replayed with
+ * the same identity for up to `SESSION_WRITE_OWNER_RESTART_BUDGET_MS`.
  */
 export const SESSION_WRITE_RECONNECT_BUDGET_MS = 60_000
+export const SESSION_WRITE_OWNER_RESTART_BUDGET_MS = 150_000
 const FIRST_DELAY_MS = 1_000
 const MAX_DELAY_MS = 10_000
 
@@ -29,6 +36,15 @@ export class NonReplayableSessionWriteError extends Error {}
 
 const RECONNECTABLE =
   /socket hang up|\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|ETIMEDOUT)\b|Remote backend "[^"]*" is down|Timed out connecting to Hermes backend|Passive read: no warm backend/i
+
+const OWNER_RESTARTING = /\bowner_unavailable: (?:starting|draining): /
+
+/** A backend answer that the owning gateway is mid-restart: nothing was written, only time is needed. */
+export function isOwnerRestartingSessionWriteError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+
+  return !(error instanceof NonReplayableSessionWriteError) && OWNER_RESTARTING.test(message)
+}
 
 /** True for a failure that says nothing about the write itself: the route to its owner was down. */
 export function isReconnectableSessionWriteError(error: unknown): boolean {
@@ -53,6 +69,8 @@ export interface SessionWriteReconnectOptions {
   /** Short label for the log line, e.g. `PATCH 20261112_055658_bb1bdd`. */
   label: string
   budgetMs?: number
+  /** The window once the owner answered that it is restarting (starting/draining). */
+  ownerRestartBudgetMs?: number
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   log?: (line: string) => void
@@ -71,7 +89,8 @@ export async function withSessionWriteReconnect<T>(
   run: (remainingMs: number) => Promise<T>,
   options: SessionWriteReconnectOptions
 ): Promise<T> {
-  const { label, budgetMs = SESSION_WRITE_RECONNECT_BUDGET_MS, now = Date.now, log = desktopLog } = options
+  const { label, now = Date.now, log = desktopLog } = options
+  let budgetMs = options.budgetMs ?? SESSION_WRITE_RECONNECT_BUDGET_MS
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
   const started = now()
   let delay = FIRST_DELAY_MS
@@ -94,9 +113,16 @@ export async function withSessionWriteReconnect<T>(
       lastError = error
       const wait = Math.max(delay, gateRetryHintMs(error))
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 160)
+      const restarting = isOwnerRestartingSessionWriteError(error)
 
-      if (!isReconnectableSessionWriteError(error) || now() - started + wait > budgetMs) {
-        if (attempt > 1 || isReconnectableSessionWriteError(error)) {
+      if (restarting) {
+        budgetMs = Math.max(budgetMs, options.ownerRestartBudgetMs ?? SESSION_WRITE_OWNER_RESTART_BUDGET_MS)
+      }
+
+      const replayable = restarting || isReconnectableSessionWriteError(error)
+
+      if (!replayable || now() - started + wait > budgetMs) {
+        if (attempt > 1 || replayable) {
           log(`[session-write] ${label} failed on attempt ${attempt} after ${now() - started} ms: ${reason}`)
         }
 
@@ -104,7 +130,7 @@ export async function withSessionWriteReconnect<T>(
       }
 
       log(
-        `[session-write] ${label} attempt ${attempt} hit a reconnect (${reason}); replaying the same intent in ${wait} ms`
+        `[session-write] ${label} attempt ${attempt} hit a ${restarting ? 'gateway restart' : 'reconnect'} (${reason}); replaying the same intent in ${wait} ms`
       )
       await sleep(wait)
       delay = Math.min(delay * 2, MAX_DELAY_MS)

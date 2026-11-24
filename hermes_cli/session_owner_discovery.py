@@ -17,6 +17,13 @@ gateway" although the gateway only had to finish starting (hub, Nov 13: archives
 after a restart). ``starting`` is re-read on its own longer budget, which also covers a missed
 identify deadline while the starting gateway's loop is busy.
 
+``draining`` without an endpoint is the other half of the same restart: the outgoing gateway
+still holds the lock while it drains (hub, Nov 24: an archive 10 s into a 30 s drain answered
+"owner_unavailable: draining: ... Drain and stop the gateway, then retry" at once). It is waited
+out on the same budget: the drain ends in ``absent`` (the offline path), ``starting`` or
+``ready``. A drain still running at the deadline answers ``DRAINING_DETAIL``. An update's
+``update_paused`` fence is not this: it stays final on its first read.
+
 Every other verdict is final on its first read: ``absent`` keeps the offline path, and refusals
 about authorization, protocol, permissions or profile identity are never retried. Discovery never
 starts a gateway, and the mutation itself is never retried here: the caller sends it at most
@@ -66,6 +73,25 @@ STARTING_DETAIL = ("owner_unavailable: starting: the gateway that owns this prof
                    "nothing was changed, retry")
 
 
+# The same for a gateway still draining (a restart or stop in progress) when the budget ran out.
+DRAINING_DETAIL = ("owner_unavailable: draining: the gateway that owns this profile is restarting; "
+                   "nothing was changed, retry")
+
+
+def is_draining(discovery) -> bool:
+    """An outgoing gateway that still holds the profile while it drains: no endpoint to forward to.
+
+    Only a plain drain (a stop or restart, no reason) or its idle exit: an ``update_paused`` fence
+    can last minutes and keeps its own lock remedy, final on its first read."""
+    return (getattr(discovery, "endpoint", None) is None and getattr(discovery, "state", None) == "draining"
+            and getattr(discovery, "reason_code", None) in (None, "idle_exit"))
+
+
+def _settling(discovery) -> bool:
+    """A restart in progress (draining out or starting up): only needs time."""
+    return is_starting(discovery) or is_draining(discovery)
+
+
 def is_starting(discovery) -> bool:
     """A gateway that holds the profile but has not published READY: no endpoint yet."""
     return getattr(discovery, "endpoint", None) is None and getattr(discovery, "state", None) == "starting"
@@ -83,6 +109,8 @@ def owner_unavailable_detail(discovery, lock_detail) -> str:
         return CONTROL_TIMEOUT_DETAIL
     if is_starting(discovery):
         return STARTING_DETAIL
+    if is_draining(discovery):
+        return DRAINING_DETAIL
     reason = discovery.reason_code or discovery.state
     return f"owner_unavailable: {reason}: {lock_detail}"
 
@@ -139,8 +167,8 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
     stretch the write past its budget; an abandoned read ends on its own socket timeout and is
     treated as another ``control_timeout``.
 
-    Until a read says ``starting`` the budget is ``OWNER_DISCOVERY_BUDGET_S`` and at most
-    ``OWNER_DISCOVERY_ATTEMPTS`` reads. The first ``starting`` moves the deadline to
+    Until a read says ``starting`` or ``draining`` the budget is ``OWNER_DISCOVERY_BUDGET_S`` and at most
+    ``OWNER_DISCOVERY_ATTEMPTS`` reads. The first of those moves the deadline to
     ``OWNER_STARTING_BUDGET_S`` after the first read began and lifts the read cap: from then on
     both transient verdicts are re-read until another verdict or that deadline.
 
@@ -150,7 +178,7 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
     deadline = began + OWNER_DISCOVERY_BUDGET_S
     discovery, starting, attempt, last = None, False, 0, None
     while starting or attempt < OWNER_DISCOVERY_ATTEMPTS:
-        pause = OWNER_STARTING_POLL_S if is_starting(discovery) else OWNER_DISCOVERY_BACKOFF_S
+        pause = OWNER_STARTING_POLL_S if _settling(discovery) else OWNER_DISCOVERY_BACKOFF_S
         remaining = deadline - clock()
         if attempt and remaining < pause + _MIN_ATTEMPT_S:
             break
@@ -165,7 +193,7 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
             discovery = await asyncio.wait_for(asyncio.shield(read.verdict), timeout=remaining)
         except TimeoutError:
             discovery = _timed_out()
-        if is_starting(discovery):
+        if _settling(discovery):
             if not starting:
                 starting, deadline = True, began + OWNER_STARTING_BUDGET_S
         elif not is_transient(discovery):

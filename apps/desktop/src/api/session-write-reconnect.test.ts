@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { isReconnectableSessionWriteError, withSessionWriteReconnect } from './session-write-reconnect'
+import {
+  isOwnerRestartingSessionWriteError,
+  isReconnectableSessionWriteError,
+  NonReplayableSessionWriteError,
+  withSessionWriteReconnect
+} from './session-write-reconnect'
 
 // The failures the MacBook logged for hub session PATCHes on 2026-11-12 (desktop.log, conn=hermes-hub).
 const HUB_FAILURES = [
@@ -131,5 +136,76 @@ describe('withSessionWriteReconnect', () => {
     // 5 s per attempt plus 1, 2, 4 s of backoff: the fourth failure (at 27 s) has no room for an 8 s wait.
     expect(run).toHaveBeenCalledTimes(4)
     expect(log.mock.calls.at(-1)?.[0]).toMatch(/failed on attempt 4/)
+  })
+})
+
+// Hub, 2026-11-24 05:23:45Z: an archive 10 s into a planned gateway restart (30 s drain, then start).
+const DRAINING = '503: {"detail":"owner_unavailable: draining: the gateway that owns this profile is restarting; nothing was changed, retry"}'
+const DRAINING_OLD = '503: {"detail":"owner_unavailable: draining: Exclusive maintenance refused: Gateway runtime already owns profile /home/ubuntu/.hermes. Drain and stop the gateway, then retry."}'
+const STARTING = '503: {"detail":"owner_unavailable: starting: the gateway that owns this profile is starting; nothing was changed, retry"}'
+
+describe('a gateway restart answered by the owner', () => {
+  it.each([DRAINING, DRAINING_OLD, STARTING])('is replayed: %s', message => {
+    expect(isOwnerRestartingSessionWriteError(new Error(message))).toBe(true)
+  })
+
+  it.each([DEFINITIVE[0], '503: {"detail":"owner_unavailable: update_paused: Exclusive maintenance refused"}', '503: {"detail":"owner_unreachable"}'])(
+    'leaves every other owner answer to the user: %s', message => {
+      expect(isOwnerRestartingSessionWriteError(new Error(message))).toBe(false)
+    })
+
+  it('never replays a legacy write without identity', () => {
+    expect(isOwnerRestartingSessionWriteError(new NonReplayableSessionWriteError(DRAINING))).toBe(false)
+  })
+
+  it('rides out a whole drain + start past the transport window and lands the write', async () => {
+    const c = clock()
+    const log = vi.fn()
+    const drain = new Error(DRAINING)
+    const start = new Error(STARTING)
+    let calls = 0
+
+    // Each answer arrives after the backend's own ~24 s wait; the owner is ready on the fourth send.
+    const run = vi.fn(async () => {
+      calls += 1
+      c.advance(24_000)
+
+      if (calls === 1 || calls === 2) {
+        throw drain
+      }
+
+      if (calls === 3) {
+        throw start
+      }
+
+      return { ok: true }
+    })
+
+    await expect(withSessionWriteReconnect(run, { label: 'PATCH s', log, now: c.now, sleep: c.sleep }))
+      .resolves.toEqual({ ok: true })
+    expect(run).toHaveBeenCalledTimes(4)
+    expect(c.now()).toBeGreaterThan(60_000)
+    expect(log.mock.calls.some(([line]) => /hit a gateway restart/.test(line))).toBe(true)
+    expect(log.mock.calls.at(-1)?.[0]).toMatch(/landed on attempt 4/)
+  })
+
+  it('gives up once the restart window is spent', async () => {
+    const c = clock()
+    const drain = new Error(DRAINING)
+
+    const sends: number[] = []
+
+    const run = vi.fn(async () => {
+      sends.push(c.now())
+      c.advance(24_000)
+      throw drain
+    })
+
+    await expect(withSessionWriteReconnect(run, {
+      label: 'PATCH s', ownerRestartBudgetMs: 100_000, log: vi.fn(), now: c.now, sleep: c.sleep
+    })).rejects.toBe(drain)
+    // No replay starts once the window is spent; the last answer may land just after it.
+    expect(sends.length).toBeGreaterThan(2)
+    expect(Math.max(...sends)).toBeLessThanOrEqual(100_000)
   })
 })
