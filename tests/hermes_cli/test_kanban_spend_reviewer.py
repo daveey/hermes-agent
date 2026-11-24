@@ -12,6 +12,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_spend_budget as ksb
 from hermes_cli import kanban_spend_decision as decision
 from hermes_cli import kanban_spend_reviewer as reviewer
+from hermes_cli.kanban_release_comments import UnreadComments
 from tests.hermes_cli import test_kanban_spend_budget as helpers
 
 kanban_home = helpers.kanban_home
@@ -77,7 +78,18 @@ def test_a_grant_with_quoted_progress_promotes_into_a_fresh_window_of_exactly_th
         assert granted["writer_kind"] == "agent" and "cache_read_writer_kind" not in granted
         assert ksb.spend(conn, tid).runs == 0 and not decision.pending(conn, tid)
         assert ksb.hold(conn, tid, lim=helpers.LIMITS) is None
-        assert "Spend reviewer granted 5" in kb.list_comments(conn, tid)[-1].body
+        comment = kb.list_comments(conn, tid)[-1]
+        assert "Spend reviewer granted 5" in comment.body
+        reference = granted['decision_comment']
+        assert reference['comment_id'] == comment.id
+        assert reference['author'] == reviewer.AUTHOR
+        row = conn.execute('SELECT * FROM task_comments WHERE id=?', (comment.id,)).fetchone()
+        if 'uid' in row.keys() and row['uid']:
+            assert reference['comment_uid'] == row['uid']
+        with pytest.raises(UnreadComments) as refused:
+            ksb.set_override(conn, tid, runs=6, by='default', reason='reconcile')
+        assert refused.value.comments[0]['id'] == comment.id
+        ksb.set_override(conn, tid, runs=6, by='default', reason='reconcile', seen=comment.id)
 
 
 @pytest.mark.parametrize("verdict", [

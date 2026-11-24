@@ -456,17 +456,22 @@ def grant(conn: sqlite3.Connection, task_id: str, episode: str, runs: int, reaso
         if conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'triage'",
                         (task_id,)).rowcount != 1:
             raise RuntimeError(f"{task_id} left triage inside the spend review transaction")
+        cid = kb.add_comment(conn, task_id, AUTHOR,
+                             f"Spend reviewer granted {runs} more run(s) in a fresh window (stop {episode}): {reason}\n"
+                             f"Progress it cited: \"{_clip(quote, 400)}\"", system=True)
+        note = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
+        reference = {"comment_id": cid, "author": AUTHOR}
+        if 'uid' in note.keys() and note['uid']:
+            reference['comment_uid'] = note['uid']
         kb._append_event(conn, task_id, ksb.OVERRIDE_EVENT, {
             "runs": runs, "cache_read_tokens": ksb._limit_value(prior.get("cache_read_tokens")),
-            "by": AUTHOR, "reason": reason, "episode": episode, **ksb.carried(prior)})
+            "by": AUTHOR, "reason": reason, "episode": episode, "decision_comment": reference,
+            **ksb.carried(prior)})
         kb._append_event(conn, task_id, "promoted_manual", {
             "actor": AUTHOR, "reason": reason, "from_status": "triage",
             WINDOW_KEY: {"runs": runs, "episode": episode, "decision": "spend_review"}})
         kb._append_event(conn, task_id, GRANTED, {"episode": episode, "runs": runs, "reason": reason,
                                                   "progress_quote": _clip(quote, 400)})
-        kb.add_comment(conn, task_id, AUTHOR,
-                       f"Spend reviewer granted {runs} more run(s) in a fresh window (stop {episode}): {reason}\n"
-                       f"Progress it cited: \"{_clip(quote, 400)}\"", system=True)
     _close_decision_card(conn, task_id, episode, runs)
     return None
 

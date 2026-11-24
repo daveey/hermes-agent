@@ -124,8 +124,9 @@ def test_missing_evidence_cannot_be_acknowledged(kanban_home, missing):
             else:
                 conn.execute("UPDATE task_events SET payload=json_remove(payload,'$.decision_comment') "
                              "WHERE task_id=? AND kind=?", (tid, budget.OVERRIDE_EVENT))
-        with pytest.raises(UnreadComments, match='unavailable'):
+        with pytest.raises(UnreadComments, match='unavailable') as refused:
             _write(conn, tid, 17, seen=10**9)
+        assert '--seen' not in refused.value.rerun
         assert len(helpers._events(conn, tid, budget.OVERRIDE_EVENT)) == 1
 
 
@@ -140,6 +141,52 @@ def test_legacy_event_before_comment_and_aged_hold(kanban_home):
             _write(conn, tid, 17, board='other-board')
         assert f'--board other-board spend-budget {tid} --seen {cid}' in refused.value.rerun
         _write(conn, tid, 2, seen=cid)
+
+
+@pytest.mark.parametrize('synced', [False, True], ids=['local', 'hub-synced'])
+def test_legacy_reviewer_decision_accepts_comment_tool_watermark(kanban_home, monkeypatch, synced):
+    from hermes_cli import kanban as cli
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    from tests.hermes_cli import kanban_sync_support as support
+    from tools import kanban_tools as kt
+
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    if synced:
+        support.write_sync_config(kanban_home, True)
+    with kbc.connect_closing() as conn:
+        if synced:
+            sync.install_or_remove(conn, str(kanban_home / 'kanban.db'))
+            client.ensure_identity(conn, 'default', 'fixture')
+        tid, stop = _card(conn)
+        episode = stop.uid or str(stop.id)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, budget.OVERRIDE_EVENT,
+                             {'runs': 2, 'by': 'kanban-spend-reviewer', 'episode': episode})
+            decision_id = kb.add_comment(conn, tid, 'kanban-spend-reviewer',
+                                         f'Spend reviewer granted 2 more run(s) in a fresh window (stop {episode}): bounded',
+                                         system=True)
+    out = json.loads(kt._handle_comment({'task_id': tid, 'body': 'Creator approves bounded Phase B'}))
+    assert out['ok'], out
+    seen = out['comment_id']
+    command = f'spend-budget {tid} --runs 6 --reason bounded'
+    refused = cli.run_slash(command)
+    assert f'--seen {decision_id}' in refused
+    assert 'unavailable' not in refused
+    assert 'spend budget' in cli.run_slash(f'{command} --seen {seen}')
+
+
+@pytest.mark.parametrize('producer', ['kanban-spend-reviewer', 'default'])
+def test_legacy_decision_does_not_borrow_another_producers_comment(kanban_home, producer):
+    with kbc.connect_closing() as conn:
+        tid, _ = _card(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, budget.OVERRIDE_EVENT, {'runs': 2, 'by': producer})
+            wrong_author = 'kanban-spend-budget' if producer == 'kanban-spend-reviewer' else 'kanban-spend-reviewer'
+            cid = kb.add_comment(conn, tid, wrong_author, 'Unrelated decision', system=True)
+        with pytest.raises(UnreadComments, match='unavailable'):
+            _write(conn, tid, seen=cid)
+        assert len(helpers._events(conn, tid, budget.OVERRIDE_EVENT)) == 1
 
 
 def test_portable_comment_reference_ignores_foreign_integer(kanban_home):

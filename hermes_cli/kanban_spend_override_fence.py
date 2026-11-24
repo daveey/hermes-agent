@@ -33,9 +33,14 @@ def check(conn, task_id, *, seen=None, board=None):
     if not changed:
         return episode
     last = changed[-1]
-    reference = json.loads(last['payload'] or '{}').get('decision_comment')
+    decision = json.loads(last['payload'] or '{}')
+    reference = decision.get('decision_comment')
+    # Older automatic grants used the reviewer's author, not the manual budget
+    # writer. Only that recorded producer may select the reviewer fallback.
+    author = ('kanban-spend-reviewer' if decision.get('by') == 'kanban-spend-reviewer'
+              else 'kanban-spend-budget')
     notes = [e for e in events if e['kind'] == 'commented' and _event_order(e) > _event_order(last)
-             and json.loads(e['payload'] or '{}').get('author') == 'kanban-spend-budget']
+             and json.loads(e['payload'] or '{}').get('author') == author]
     rows = conn.execute("SELECT * FROM task_comments WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
     note = last if isinstance(reference, dict) else (notes[0] if notes else last)
     payload = reference if isinstance(reference, dict) else json.loads(note['payload'] or '{}')
@@ -51,7 +56,9 @@ def check(conn, task_id, *, seen=None, board=None):
         command = ['hermes', 'kanban']
         if board:
             command += ['--board', board]
-        newest = max((r['id'] for r in unread if r['id'] is not None), default=seen or 0)
-        command += ['spend-budget', task_id, '--seen', str(newest)]
+        command += ['spend-budget', task_id]
+        if resolved:
+            newest = max(r['id'] for r in resolved)
+            command += ['--seen', str(newest)]
         raise comments.UnreadComments(unread, shlex.join(command))
     return episode
