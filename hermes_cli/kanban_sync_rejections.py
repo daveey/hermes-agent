@@ -57,8 +57,10 @@ def _inputs(conn, rejected):
     parent_ops = [tuple(r) for r in conn.execute(
         "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=?", (task,))] if task else []
     from hermes_cli.kanban_sync_rejected_event import snapshot
+    from hermes_cli import kanban_rejected_containment_event as containment_event
     return {"row": dict(row) if row else None, "fields": fields, "task": task,
             "fenced_event": snapshot(conn, rejected, task),
+            "containment_event": containment_event.snapshot(conn, rejected, task),
             "parent": dict(parent) if parent else None, "parent_ops": parent_ops,
             "pending": pending, "tombstones": tombs, "run": dict(run_row) if run_row else None,
             "receipt": reserved_key.receipt_for_op(conn, rejected["op_id"])}
@@ -97,6 +99,9 @@ def _classify(op, before, evidence, parent_evidence, run_evidence=None):
         return "moot", "live-claim fenced phantom event/run remains tombstoned with its rejection audit; never stored by Board"
     if before["pending"] or before["tombstones"]:
         return "unresolved", "pending local work or local tombstone"
+    from hermes_cli import kanban_rejected_containment_event as containment_event
+    if containment_event.moot(op, before, evidence, parent_evidence):
+        return containment_event.CLASSIFICATION, containment_event.PROOF
     gate = reserved_key.receipt_resolution(op, before, evidence, parent_evidence)
     if gate and gate[0] != "conservative":  # a receipt names this op: it retires through the receipt or not at all
         return gate
@@ -174,7 +179,8 @@ def resolve_rejections(conn: sqlite3.Connection, hub, board: str) -> list[dict]:
             evidence = _evidence(hub, board, op["table_name"], op["row_uid"])
             parent = _evidence(hub, board, "tasks", before["task"]) if (
                 before["task"] and op["table_name"] != "tasks"
-                and (op["table_name"] == "task_chat_links" or before["receipt"])) else None
+                and (op["table_name"] == "task_chat_links" or before["receipt"]
+                     or before["containment_event"] is not None)) else None
             run_uid = _release_run(op)
             run = _evidence(hub, board, "task_runs", run_uid) if run_uid else None
         except (HubError, SyncUnavailable, OSError, AttributeError, ValueError) as exc:
@@ -193,6 +199,11 @@ def resolve_rejections(conn: sqlite3.Connection, hub, board: str) -> list[dict]:
             current = conn.execute("SELECT * FROM kanban_sync_outbox WHERE op_id=?", (op["op_id"],)).fetchone()
             if current is None or dict(current) != op or _inputs(conn, op) != before:
                 report.update(classification="unresolved", proof="local state changed during evidence read")
+                continue
+            from hermes_cli import kanban_rejected_containment_event as containment_event
+            if (classification == containment_event.CLASSIFICATION
+                    and not containment_event.archive(conn, op, before, evidence, parent)):
+                report.update(classification="unresolved", proof="an immutable receipt already names this op")
                 continue
             conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id=? AND state='rejected'", (op["op_id"],))
             report["action"] = "retired"
