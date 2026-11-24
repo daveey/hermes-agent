@@ -128,6 +128,9 @@ def skip_wake(conn: sqlite3.Connection, task_id: str, wake_kind: str, **extra: A
     The local row can still read ``scheduled`` (a stale copy: the completion reached the events but not the row,
     or the row was restored from an older copy), so the event log decides, not the row. Records one
     ``stale_wake_ignored`` per producer and terminal event, so a due clock does not write one every tick."""
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        return True
     hold = terminal_hold(conn, task_id)
     if hold is None:
         return False

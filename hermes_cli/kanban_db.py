@@ -37,7 +37,7 @@ from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_dup_detector as _dup_detector, kanban_placement_forward as _placement_fwd  # no cycle
-from hermes_cli import kanban_run_end_lease as _run_end_lease  # stdlib-only at import: no cycle
+from hermes_cli import kanban_run_end_lease as _run_end_lease, kanban_home_transfer as _home_transfer  # no cycle
 from hermes_cli import kanban_containment_connections as _containment, kanban_spend_claim as _spend_claim, kanban_spend_allowance as _spend_allowance
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
@@ -1924,7 +1924,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             # The home gateway owns readiness and missing-parent maintenance.
             # A retained worker copy may still claim ready work, but must not
             # publish a second promotion or expire the owner's missing streak.
-            if task_id in copies or _containment.held(conn, task_id):
+            if task_id in copies or _home_transfer.frozen(conn, task_id) or _containment.held(conn, task_id):
                 continue
             # A spend stop leaves only on a recorded decision (kanban_spend_decision.pending). The triage clause
             # above would read an older ``gave_up`` as the stop: promote here, re-triage in the hold, every tick.
@@ -1994,13 +1994,13 @@ def claim_task(
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     # [daveey] Spend decisions are home-owned, but every executor must honour their hold before taking a lease.
     spend_check = _spend_claim.claim_check(conn, task_id)
-    if _containment.held(conn, task_id) or spend_check() or admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):
+    if _home_transfer.frozen(conn, task_id) or _containment.held(conn, task_id) or spend_check() or admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):
         return None
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()) or _spend_allowance.claim_refused(conn, task_id, gate):  # [daveey] same txn as the CAS
+        if not admitted or _home_transfer.frozen(conn, task_id) or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()) or _spend_allowance.claim_refused(conn, task_id, gate):  # [daveey] same txn as the CAS
             return None
         # Never ready -> running with an undone parent; recompute_ready re-promotes when parents finish.
         if not _parents_satisfied(conn, task_id):
@@ -2034,13 +2034,13 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     spend_check = _spend_claim.claim_check(conn, task_id)
-    if _containment.held(conn, task_id) or spend_check() or admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):  # [daveey] before the Board-service lease (see claim_task)
+    if _home_transfer.frozen(conn, task_id) or _containment.held(conn, task_id) or spend_check() or admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):  # [daveey] before the Board-service lease (see claim_task)
         return None
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()) or _spend_allowance.claim_refused(conn, task_id, gate):  # [daveey] same txn as the CAS
+        if not admitted or _home_transfer.frozen(conn, task_id) or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()) or _spend_allowance.claim_refused(conn, task_id, gate):  # [daveey] same txn as the CAS
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(

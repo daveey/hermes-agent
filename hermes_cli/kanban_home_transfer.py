@@ -161,6 +161,41 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
     return {"phase": "prepared_local", **record}
 
 
+def frozen(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Read-only candidate exclusion; marker presence is not release authority.
+
+    A malformed/orphan marker stays frozen. Only a scoped finalized receipt plus
+    the installed local home/version/epoch makes the former source executable
+    again under its ordinary future lease. SQL mutation fences remain separate.
+    """
+    import json
+
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (_TABLE,)).fetchone():
+        return False
+    row = conn.execute(f"SELECT task_id,source,destination,nonce,expected_version FROM {_TABLE} WHERE task_id=?", (task_id,)).fetchone()
+    if not row:
+        return False
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_home_finalized1'").fetchone():
+        return True
+    final = conn.execute("SELECT nonce,receipt FROM kanban_home_finalized1 WHERE task_id=?", (task_id,)).fetchone()
+    if not final:
+        return True
+    try:
+        receipt = json.loads(final[1])
+        keys = ("task", "source", "destination", "nonce", "expected_version")
+        if (not isinstance(receipt, dict) or tuple(row) != tuple(receipt.get(k) for k in keys)
+                or receipt.get("phase") != "materialized" or final[0] != row[3]
+                or type(row[4]) is not int or row[4] < 1 or not _NONCE.fullmatch(row[3])
+                or not isinstance(receipt.get("rows"), list) or not receipt["rows"]):
+            return True
+        current = conn.execute("SELECT created_on,sync_version FROM tasks WHERE id=?", (task_id,)).fetchone()
+        epoch = conn.execute("SELECT nonce FROM kanban_home_generations1 WHERE task_id=?", (task_id,)).fetchone()
+        return not (current and current[0] == row[2] and type(current[1]) is int
+                    and current[1] >= row[4] + 1 and epoch and epoch[0] == row[3])
+    except (ValueError, TypeError, sqlite3.Error):
+        return True
+
+
 def finalize_source(conn: sqlite3.Connection, record: dict) -> dict:
     """Stop local ownership after the authenticated destination materialization ACK."""
     from hermes_cli.kanban_home_source_stop import finalize_source as finish

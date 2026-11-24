@@ -77,7 +77,10 @@ def bind(conn: sqlite3.Connection, armed: bool) -> None:
         counts: dict[str, int] = {}
         for _op, task in rows:
             counts[task] = counts.get(task, 0) + 1
+        from hermes_cli.kanban_home_transfer import frozen
         for op, task in rows:
+            if frozen(conn, task):
+                continue  # source preparation is a durable mutation fence
             change = conn.execute("SELECT status, n FROM temp.kanban_status_changes WHERE task_id=?", (task,)).fetchone()
             if not change:
                 continue  # repair/requeue did not capture a new status intent
