@@ -338,7 +338,7 @@ def _list_sessions_payload(
             stamp_automated(sessions, Path(db.db_path).parent)
             if not full:
                 _strip_session_list_rows(sessions)
-            annotate_kanban_activity(sessions)
+            annotate_kanban_activity(sessions, display=True)
             annotate_goal_activity(sessions)
             annotate_cron_activity(sessions)
             annotate_background_activity(sessions)

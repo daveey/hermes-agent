@@ -411,7 +411,8 @@ def project(conn, memo: RankMemo, ids_rows: list, select_head: str, prompt_join:
            f"FROM json_each(?)) "
            f"{head}{last_active_sql} AS last_active, _pg.eff AS _effective_last_active "
            f"FROM _pg JOIN sessions s ON s.id = _pg.page_id {prompt_join} ORDER BY _pg.ord")
-    rows = conn.execute(sql, (page,)).fetchall()
+    from hermes_state_page_pack import read_page
+    rows = read_page(conn, sql, (page,))
     if use_cache and rows:
         fresh = {}
         for row in rows:

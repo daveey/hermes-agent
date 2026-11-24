@@ -1,13 +1,15 @@
 """Read-only persisted child activity, on the existing session annotation cadence.
 
-One SELECT per profile store per three seconds, no lifecycle/liveness claims from absence.
+One indexed SELECT per requested profile/parent set per three seconds; no liveness claims from absence.
 Unended children older than the six-hour discovery window and persist-disabled children are
 not covered; stale rows inside the window remain explicit unknown observations.
 """
 from __future__ import annotations
 from hermes_cli.kanban_annotation_facts import consumer as _fact_consumer
 
+import json
 import logging
+from collections import OrderedDict
 import sqlite3
 import threading
 import time
@@ -18,7 +20,7 @@ from hermes_cli.turn_process_execution_observations import SUBAGENT_SOURCES, rep
 
 _log = logging.getLogger(__name__)
 _lock = threading.Lock()
-_cache = {}
+_cache = OrderedDict()
 _WINDOW = 6 * 3600
 
 
@@ -32,11 +34,13 @@ def _profile_paths():
     return [(profile_for_state_path(path), path) for path in paths]
 
 
-def _children(path, now):
+def _children(path, now, parents):
     mono = time.monotonic()
+    key = (path, tuple(sorted(parents)))
     with _lock:
-        cached = _cache.get(path)
+        cached = _cache.get(key)
         if cached is not None and mono < cached[0]:
+            _cache.move_to_end(key)
             return cached[1]
         # URI mode=ro never creates a store or invokes migrations. A read failure is
         # unknown, not a successful empty inventory; do not fall back to mode=rw.
@@ -44,14 +48,17 @@ def _children(path, now):
             conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.2)
             try:
                 rows = conn.execute(
-                    "SELECT id, parent_session_id, last_activity_at, started_at FROM sessions "
-                    "WHERE source='subagent' AND parent_session_id IS NOT NULL AND ended_at IS NULL "
-                    "AND started_at >= ?", (now - _WINDOW,)).fetchall()
+                    "SELECT id, parent_session_id, last_activity_at, started_at FROM sessions INDEXED BY idx_sessions_parent "
+                    "WHERE source='subagent' AND parent_session_id IN (SELECT value FROM json_each(?)) "
+                    "AND ended_at IS NULL AND started_at >= ?", (json.dumps(key[1]), now - _WINDOW)).fetchall()
             finally:
                 conn.close()
         except (sqlite3.Error, OSError, ValueError):
             rows = None
-        _cache[path] = (mono + 3, rows)
+        _cache[key] = (mono + 3, rows)
+        _cache.move_to_end(key)
+        while len(_cache) > 128:
+            _cache.popitem(last=False)
         return rows
 
 
@@ -67,9 +74,16 @@ def annotate_subagent_activity(rows):
     except ADAPTER_ERRORS:
         _log.debug("subagent scope unavailable", exc_info=True)
         gateway, paths = None, []
+    parents_by_profile = {}
+    for row in rows:
+        parents = parents_by_profile.setdefault(row.get('profile') or 'default', set())
+        parents.update(parent for parent in (row.get('id'), row.get('_lineage_root_id'),
+                                             *(row.get('_lineage_ids') or ())) if isinstance(parent, str))
     by_profile = {}
     for profile, path in paths:
-        children = _children(path, now)
+        if profile not in parents_by_profile:
+            continue
+        children = _children(path, now, parents_by_profile[profile])
         by_profile[profile] = (children or [], "subagent_store_unavailable" if children is None else None)
     return project_subagent_activity(rows, by_profile=by_profile, gateway=gateway, now=now)
 

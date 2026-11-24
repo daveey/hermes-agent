@@ -50,6 +50,7 @@ def _seed(db, count, *, source="cli", prefix="s", messages=1):
 class _Cursor:
     def __init__(self, cursor, sql, log):
         self._cursor, self._sql, self._log = cursor, sql, log
+        self.description = cursor.description
 
     def fetchall(self):
         rows = self._cursor.fetchall()
