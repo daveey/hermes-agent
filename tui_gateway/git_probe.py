@@ -58,6 +58,17 @@ class _RootCache:
             self._neg.clear()
             self._inflight.clear()
 
+    def settled(self, key: str, cwd: str = "") -> str | None:
+        """The answer :meth:`resolve` would return without probing (``""`` = a negative that still
+        holds), or ``None`` when it would have to probe or wait."""
+        with self._lock:
+            if hit := self._roots.get(key):
+                return hit
+            neg = self._neg.get(key)
+        if neg is not None and neg[0] > time.monotonic() and neg[1] == _dir_stamp(cwd):
+            return ""
+        return None
+
     def resolve(self, key: str, probe, cwd: str = "") -> str:
         while True:
             with self._lock:
@@ -148,10 +159,20 @@ def resolve(cwd: str) -> dict | None:
     return {"repo_root": common_repo_root(cwd) or worktree_root, "worktree_root": worktree_root}
 
 
+def _settled(cwd: str) -> bool:
+    """True when :func:`resolve` would answer ``cwd`` from the cache alone."""
+    root = _cache.settled(cwd, cwd)
+    if root is None:
+        return False
+    return root == "" or _cache.settled(f"common:{cwd}", cwd) is not None
+
+
 def warm_roots(cwds: Iterable[str], max_workers: int = _WARM_WORKERS) -> None:
     """Pre-resolve many cwds' roots in parallel (bounded) so a cold first paint
     doesn't serialize one git spawn per session cwd; results land in the cache."""
-    pending = sorted({(cwd or "").strip() for cwd in cwds} - {""})
+    # A cwd whose answers are already cached needs no warm-up. A sidebar poll re-offers every session
+    # cwd; fanning thousands of cache hits through a fresh pool was most of an idle tree build.
+    pending = sorted(cwd for cwd in {(cwd or "").strip() for cwd in cwds} - {""} if not _settled(cwd))
     if len(pending) == 1:
         resolve(pending[0])
     elif pending:

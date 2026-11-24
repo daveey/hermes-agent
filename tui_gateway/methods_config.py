@@ -151,14 +151,22 @@ def _(rid, params: dict) -> dict:
     fact_result = projects_fact_routes.read("tree", selector, decoded=True)
     if fact_result is not None:
         return _ok(rid, fact_result)
-    with projects_fact_routes.legacy(params.get("profile")), _profile_db(params) as db:
-        if db is None:
-            return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
-        tree, active_id = _stamped_project_tree(
-            db, params, preview_limit=int(params.get("preview_limit") or 3), hydrate=False,
-            session_limit=int(params.get("session_limit") or 2000), include_discovered=True)
-        return _ok(rid, {"projects": tree["projects"], "active_id": active_id,
-                         "scoped_session_ids": tree["scoped_session_ids"]})
+    def build() -> dict:
+        with projects_fact_routes.legacy(params.get("profile")), _profile_db(params) as db:
+            if db is None:
+                return {"projects": [], "active_id": None, "scoped_session_ids": []}
+            tree, active_id = _stamped_project_tree(
+                db, params, preview_limit=selector["preview_limit"], hydrate=False,
+                session_limit=selector["session_limit"], include_discovered=True)
+            return {"projects": tree["projects"], "active_id": active_id,
+                    "scoped_session_ids": tree["scoped_session_ids"]}
+
+    # Identical overlapping requests share one build begun after each of them asked (never a stale one).
+    from hermes_constants import get_hermes_home
+    from tui_gateway.coalesced_build import project_tree
+    key = (str(get_hermes_home()), _response_profile_name(params.get("profile")),
+           selector["preview_limit"], selector["session_limit"])
+    return _ok(rid, dict(project_tree.run(key, build)))
 
 
 @_projects_handler("projects.project_sessions")

@@ -144,22 +144,51 @@ def _canonical_workspace_path(path: str) -> str:
     return os.path.normcase(os.path.realpath(path)) if path else ""
 
 
-def _is_non_workspace_path(path: str) -> bool:
-    """One auto-discovery policy; explicit user-created projects bypass this filter."""
+# The policy's resolved roots, kept while every input they are derived from is unchanged. One tree
+# build asks about thousands of paths; resolving ~20 roots (and globbing the profiles dir) for each
+# was most of a build's realpath calls. The TTL bounds what the key cannot see: a root whose symlink
+# target is re-pointed in place.
+_NON_WORKSPACE_TTL_S = 30.0
+_non_workspace_memo: tuple | None = None  # (key, monotonic expiry, exact dirs, prefix roots)
+
+
+def _non_workspace_policy() -> tuple[frozenset, tuple]:
+    """``(exact dirs, internal/temp roots)``, both canonical."""
+    global _non_workspace_memo
     import tempfile
     from pathlib import Path
     from hermes_constants import get_hermes_home, _get_platform_default_hermes_home
-    real = _canonical_workspace_path(path)
-    if not real or real in _non_workspace_dirs():
-        return True
-    # Resolve sibling profile homes too: a profile can be symlinked outside the base home.
     default_home = _get_platform_default_hermes_home()
-    profile_homes = tuple(str(p) for p in (Path(default_home) / "profiles").glob("*"))
-    roots = (str(get_hermes_home()), str(default_home), *profile_homes,
-             # no-tmp: ok — classify OS temp roots, not scratch-file creation.
-             tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/folders", os.getenv("TMPDIR", ""))
-    return any(real == root or real.startswith(root.rstrip(os.sep) + os.sep)
-               for root in {_canonical_workspace_path(p) for p in roots if p})
+    profiles = Path(default_home) / "profiles"
+    try:
+        profiles_stamp = os.stat(profiles).st_mtime_ns  # moves when a profile is added, removed or relinked
+    except OSError:
+        profiles_stamp = None
+    # no-tmp: ok — classify OS temp roots, not scratch-file creation.
+    key = (str(get_hermes_home()), str(default_home), os.path.expanduser("~"), tempfile.gettempdir(),
+           os.getenv("TMPDIR", ""), profiles_stamp)
+    memo = _non_workspace_memo
+    now = time.monotonic()
+    if memo is not None and memo[0] == key and now < memo[1]:
+        return memo[2], memo[3]
+    # Resolve sibling profile homes too: a profile can be symlinked outside the base home.
+    profile_homes = tuple(str(p) for p in profiles.glob("*"))
+    roots = (key[0], key[1], *profile_homes, key[3], "/tmp", "/private/tmp", "/var/folders", key[4])
+    dirs = frozenset(_non_workspace_dirs())
+    prefixes = tuple(sorted({_canonical_workspace_path(p) for p in roots if p}))
+    _non_workspace_memo = (key, now + _NON_WORKSPACE_TTL_S, dirs, prefixes)
+    return dirs, prefixes
+
+
+def _is_non_workspace_path(path: str) -> bool:
+    """One auto-discovery policy; explicit user-created projects bypass this filter."""
+    real = _canonical_workspace_path(path)
+    if not real:
+        return True
+    dirs, roots = _non_workspace_policy()
+    if real in dirs:
+        return True
+    return any(real == root or real.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
 
 
 def _is_repo_junk(root: str) -> bool:
