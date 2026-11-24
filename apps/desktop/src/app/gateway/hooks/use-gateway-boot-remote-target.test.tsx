@@ -1,6 +1,7 @@
 import { act, render } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
+import { primaryReconnectConnection } from '@/lib/primary-reconnect-connection'
 import { requestGatewayForAgent } from '@/store/gateway'
 
 import { FakeWebSocket } from '../../../test/fake-gateway-socket'
@@ -61,6 +62,20 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   tearDownBootHarness()
+})
+
+it('keeps explicitly named legacy reconnects outside primary inheritance', async () => {
+  desktop.getConnection.mockClear()
+  await primaryReconnectConnection(window.hermesDesktop, {
+    ...localPrimaryConn,
+    profile: 'coding',
+    inheritsPrimary: false,
+    isFullscreen: false,
+    nativeOverlayWidth: 0,
+    logs: [],
+    windowButtonPosition: null
+  })
+  expect(desktop.getConnection.mock.calls).toEqual([['coding']])
 })
 
 it('keeps send on the same remote target after a primary disconnect', async () => {

@@ -102,6 +102,14 @@ describe('production main/preload primary reconnect routing', () => {
     expect(h.registry).not.toHaveBeenCalled()
   })
 
+  it('does not interpret a truthy non-boolean flag as primary inheritance on a profile-less request', async () => {
+    const h = harness()
+    const connection = await h.api.getConnection(undefined, { inheritsPrimary: 'true' })
+    expect(connection.connectionId).toBe('foreground')
+    expect(h.registry).toHaveBeenCalledWith('foreground', 'coding')
+    expect(h.start).not.toHaveBeenCalled()
+  })
+
   it('uses the inherited primary label for local ticket routing and stale descriptor recovery', async () => {
     const h = harness(true)
     expect(await h.api.getGatewayWsUrl('default', { inheritsPrimary: true })).toBe('remote-primary')
