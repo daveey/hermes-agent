@@ -50,10 +50,43 @@ def test_busy_board_counts_pass_waits_once(busy_board, monkeypatch):
     blocker.execute("BEGIN EXCLUSIVE")
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         activity._all_counts(include_snapshot=True)
-    # Fingerprint key, board-memo key, then the real read: only the read may wait.
+    # Failed projection probe, board-memo key, then the real read. The probe answers a
+    # locked board itself: falling back to another open used to make this 4 ([0, 0, 0, 0.5]).
     assert len(budgets) == 3
     assert [b for b in budgets if b > 0] == [0.5]
     assert budgets[-1] == 0.5
+
+
+def test_busy_projection_probe_is_unknown_and_does_not_reopen(busy_board, monkeypatch):
+    """A locked board is unknown from the projection open. A second open hides nothing and
+    spends another busy budget (the CI failure on PR #4272, shard 8)."""
+    board, blocker = busy_board
+    budgets = _spy_budgets(monkeypatch)
+    blocker.execute("BEGIN EXCLUSIVE")
+    first = activity._projection_content_key(board)
+    second = activity._projection_content_key(board)
+    assert first != second
+    assert first[0] == second[0] == "stat"
+    assert budgets == [0, 0]
+
+
+def test_uncovered_file_reuses_the_projection_open(tmp_path, monkeypatch):
+    """A readable file with no projection column is the notify key, from that one open."""
+    activity._reset_cache_for_tests()
+    board = tmp_path / "old.db"
+    conn = sqlite3.connect(board)
+    conn.execute("CREATE TABLE marker(value)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(activity, "_board_db_paths", lambda: [board])
+    monkeypatch.setattr(activity, "_replica_paths", list)
+    budgets = _spy_budgets(monkeypatch)
+    projected = activity._projection_content_key(board)
+    assert budgets == [0]
+    assert projected == activity._board_content_key(board)
+    assert projected[0] != "projection"
+    assert budgets == [0, 0]
+    activity._reset_cache_for_tests()
 
 
 def test_content_key_on_busy_board_falls_back_without_waiting(busy_board, monkeypatch):

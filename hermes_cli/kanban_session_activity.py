@@ -819,8 +819,8 @@ def _replica_paths() -> list[Path]:
 
 
 def _projection_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
-    """Links/annotation key: ignores task_events inserts those caches do not read. Falls back to the notify
-    counter when the file has no projection column, so an older board never hides a write."""
+    """Links/annotation key: ignores task_events inserts those caches do not read. An older or busy file is
+    answered by that one open; the fallback here is only a probe-lock miss, which did not open the file."""
     key = _revision.projection_content_key(path, tables, lambda p: cached_ro(p, busy_budget=0))
     if key is not None:
         return key

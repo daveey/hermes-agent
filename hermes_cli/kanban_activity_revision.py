@@ -388,22 +388,37 @@ def read_projection_key(conn: sqlite3.Connection, tables: Iterable[str]) -> tupl
 
 
 def projection_content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple | None:
-    """The links/annotation key, or None when this file has no projection counter (caller uses ``content_key``)."""
+    """Links/annotation key from one open, or None only when the probe lock was not acquired.
+
+    None is the only case the caller retries via ``content_key``. A file with no projection
+    counter is answered as the notify key on this same connection. A busy or unreadable file
+    returns an unequal stat key. Opening again would spend a second busy budget on a board
+    that is already locked.
+    """
     lock = probe_lock(path)
     if not lock.acquire(timeout=0.05):
         return None
     try:
-        db = file_stat(path)[0]
+        tables = tuple(tables)
+        stat = file_stat(path)
+        db = stat[0]
         if db is None:
             return None
         try:
             with open_ro(path) as conn:
                 row = read_projection_key(conn, tables)
+                if row is not None:
+                    return ("projection", db[0], db[1], *row)
+                # Same open as ``_content_key``: an older file must not hide a write, and must
+                # not be opened again to find that out.
+                version = conn.execute("PRAGMA data_version").fetchone()[0]
+                revision = _covered_read(conn, path, db, tables)
+                fallback = ("stat", stat, conn, version)
         except sqlite3.Error:
-            return None
-        if row is None:
-            return None
-        return ("projection", db[0], db[1], *row)
+            return ("stat", stat, object())  # unknown, never proof of unchanged content
+        if revision is None:
+            return fallback
+        return ("revision", db[0], db[1], *revision)
     finally:
         lock.release()
 
