@@ -142,7 +142,8 @@ def window_text(window: str) -> str:
 
 def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = None,
                  cache_read_tokens: Optional[int] = None, by: str, reason: str,
-                 seen: Optional[int] = None, board: Optional[str] = None) -> dict:
+                 seen: Optional[int] = None, board: Optional[str] = None,
+                 writer_kind: Optional[str] = None) -> dict:
     """Give ``task_id`` its own limits (0 = no limit; None = the board's), recorded as a ``spend_budget_set``
     event and a comment naming ``by`` and ``reason``. Both None clears the override. Replacing a spend-stop
     decision requires ``seen`` to acknowledge its comment, checked atomically even after promotion.
@@ -156,6 +157,10 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
     if not by or not reason:
         raise ValueError("a spend budget override needs who set it (by) and why (reason)")
     payload = {"runs": runs, "cache_read_tokens": cache_read_tokens, "by": by, "reason": reason}
+    if writer_kind in ("human", "agent"):
+        # Who set it, as the comment classifier sees the caller: an agent authority does not raise a limit it
+        # cannot attribute to an agent (kanban_release._budget_plan). Older events have no writer.
+        payload["writer_kind"] = writer_kind
     with kb.write_txn(conn):
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
             raise ValueError(f"unknown task {task_id}")

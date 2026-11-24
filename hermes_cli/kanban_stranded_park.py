@@ -448,14 +448,18 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
             if kind in NONHUMAN_KINDS:
                 kind = "needs_input"
                 conn.execute("UPDATE tasks SET block_kind = ? WHERE id = ?", (kind, tid))
-            store_request(conn, tid, _request(conn, fresh, entry, age, "No unreleased chat link to a live chat and no "
-                                              "open spend-decision supervisor card", kind))
+            filed = _request(conn, fresh, entry, age, "No unreleased chat link to a live chat and no "
+                             "open spend-decision supervisor card", kind)
+            store_request(conn, tid, filed)
         if desk is not None:
             _subscribe_desk(conn, tid, desk)
             _link_desk(conn, tid, desk, now)
         kb._append_event(conn, tid, EVENT, {
             "episode_start": entry["created_at"] if entry else int(fresh.get("created_at") or 0),
-            "reason": _reason(entry), "desk_chat": desk_chat, "request": not contained})
+            "reason": _reason(entry), "desk_chat": desk_chat, "request": not contained,
+            # The release offer this sweep stamped on the ask, recorded here too: the ask is a synced column any
+            # gateway can write, this event's origin is attested (kanban_release._home_filed).
+            **({"release_target": filed["release_target"]} if not contained and filed.get("release_target") else {})})
     return True
 
 

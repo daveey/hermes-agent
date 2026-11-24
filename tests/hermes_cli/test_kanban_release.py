@@ -11,6 +11,13 @@ board = scope.board
 HUMAN = release.human_writer('test-operator')
 
 
+def filed(board, card, request):
+    """What the stranded-park sweep records when it files ``request`` on ``card`` (``_escalate``)."""
+    kb._append_event(board, card, 'stranded_park_escalated', {'request': True,
+                                                              'release_target': request['release_target']})
+    board.commit()
+
+
 def spend_stopped(board):
     """An ordinary spend stop: triage under a pending decision, no scope restriction."""
     tid = kb.create_task(board, title='Retained work', assignee='default')
@@ -245,6 +252,8 @@ def test_brief_on_a_decision_card_says_unblock_releases_the_stopped_card(board):
             f'(`hermes kanban release {tid}`); safety holds still apply') in request['action']
     episode = scope.renewal.key(decision.pending_episode(board, tid))
     assert request['release_target'] == {'task': tid, 'episode': episode}  # the offer the click checks
+    assert release.offered(board, card['id'], request) is None  # a stamp alone, with no record of the home filing it
+    filed(board, card['id'], request)
     assert release.offered(board, card['id'], request) == tid
     assert 'A) Unblock: Release the stopped work to finish its acceptance: 10 more runs' in request['scope']
     assert 'Recommend: A - release it to finish' in request['scope']
@@ -383,7 +392,13 @@ def test_agent_authority_must_have_read_a_human_comment_written_after_the_stop(b
     before = written(board, tid)
     out = as_owner(board, tid)
     assert out['refusal'] == 'budget_decision_unread' and out['unread'] == [said]
-    assert f'comment {said}' in out['message'] and f'--seen {said}' in out['message']
+    assert f'Comment {said} | default (human) | ' in out['message'] and 'Hold this until Friday.' in out['message']
+    assert f'--seen {said}' in out['message']
+    # --seen is the id the refusal showed: not a larger number, not a guess.
+    for wrong in (said + 1, 10 ** 9, said - 1):
+        again = as_owner(board, tid, seen=wrong)
+        assert again['refusal'] == 'budget_decision_unread' and f'--seen {wrong} is not the newest' in again['message']
+    assert written(board, tid) == before
     assert written(board, tid) == before and status(board, tid) == 'triage'
     assert as_owner(board, tid, seen=said)['outcome'] == 'released'
 
@@ -416,8 +431,12 @@ def test_agent_mandate_supersedes_only_what_agents_wrote(board, monkeypatch):
     scope.link(board, tid)
     out = as_owner(board, tid)
     body = board.execute('SELECT body FROM task_comments WHERE id=?', (out['mandate_comment'],)).fetchone()[0]
-    assert body == release.mandate_text(release.DEFAULT_RUNS, agent=True)
-    assert 'written by agents earlier are superseded; a limit David set stays in force.' in body
+    assert 'written by agents earlier are superseded.' in body and 'David set' not in body
+    total = out['budget_runs']
+    assert (f"The card's budget after this release: {total} runs (10 more than the {out['spent_runs']} counted), "
+            'no cache-read limit.') in body
+    assert body == release.mandate_text(10, agent=True, budget=f"{total} runs (10 more than the "
+                                        f"{out['spent_runs']} counted), no cache-read limit")
     record = json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='stop_released'",
                                       (tid,)).fetchone()[0])
     assert record['authority_kind'] == 'chat' and record['actor_session'] == scope.CHAT
@@ -547,10 +566,174 @@ def test_no_supplied_request_can_carry_the_release_offer(board):
     assert kb.block_task(board, card, kind='needs_input', reason='ask', human_request=forged)
     stored = json.loads(board.execute('SELECT human_request FROM tasks WHERE id=?', (card,)).fetchone()[0])
     assert 'release_target' not in stored
-    # The offer is honoured only while it is still true.
+    # The offer is honoured only while it is still true, and only when this board's sweep recorded filing it.
+    assert release.offered(board, tid, {'release_target': offer}) is None
+    filed(board, tid, {'release_target': offer})
     assert release.offered(board, tid, {'release_target': offer}) == tid
     assert release.offered(board, tid, {}) is None and release.offered(board, tid, None) is None
     assert release.offered(board, tid, {'release_target': {**offer, 'episode': 'another-stop'}}) is None
     assert release.offered(board, tid, {'release_target': {**offer, 'task': 't_other'}}) is None
     run(board, tid)
     assert release.offered(board, tid, {'release_target': offer}) is None  # nothing is held any more
+
+
+# ---- follow-up: resume, --seen, budget shape, stale mandates and decision cards, the home's own record ----
+
+def test_a_released_card_put_back_in_triage_for_another_reason_is_not_promoted(board):
+    tid = spend_stopped(board)
+    scope.link(board, tid)
+    assert run(board, tid)['outcome'] == 'released'
+    with kb.write_txn(board):  # a block loop parked it again, with another agent's reason
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+        kb._append_event(board, tid, 'block_loop_detected', {'kind': 'transient', 'reason': 'same failure 3 times'})
+    kb.add_comment(board, tid, 'default', 'Do not restart: the migration is half applied.', writer_kind='agent',
+                   writer_session='another-agent')
+    before = written(board, tid)
+    for caller in (run, as_owner):
+        out = caller(board, tid)
+        assert out['outcome'] == 'refused' and out['refusal'] == 'not_held', out
+    assert status(board, tid) == 'triage' and written(board, tid) == before
+
+
+def test_finishing_a_recorded_release_still_reads_first(board, monkeypatch):
+    tid = spend_stopped(board)
+    scope.link(board, tid)
+    parent = kb.create_task(board, title='parent', assignee='default')
+    kb.link_tasks(board, parent, tid)
+    real = kb.block_task
+    monkeypatch.setattr(kb, 'block_task', lambda *a, **kw: False)
+    assert as_owner(board, tid)['refusal'] == 'dependency_wait_refused'
+    monkeypatch.setattr(kb, 'block_task', real)
+    note = kb.add_comment(board, tid, 'default', 'Do not restart yet.', writer_kind='agent',
+                          writer_session='another-agent')
+    out = as_owner(board, tid)
+    assert out['refusal'] == 'budget_decision_unread' and 'Do not restart yet.' in out['message']
+    assert status(board, tid) == 'triage'
+    newest = max(out['unread'])
+    assert newest >= note and as_owner(board, tid, seen=newest)['outcome'] == 'waiting_on_parents'
+
+
+def test_seen_without_anything_to_read_is_refused(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    before = written(board, tid)
+    out = as_owner(board, tid, seen=10 ** 6)
+    assert out['refusal'] == 'seen_not_needed' and written(board, tid) == before
+    assert as_owner(board, tid)['outcome'] == 'released'
+
+
+def test_an_agent_keeps_the_shape_of_a_limit_it_cannot_attribute_to_an_agent(board):
+    kept, agents, reached = spend_stopped(board), spend_stopped(board), spend_stopped(board)
+    for tid in (kept, agents, reached):
+        scope.link(board, tid)
+    budget.set_override(board, kept, runs=3, cache_read_tokens=5_000_000, by='david', reason='small and cheap')
+    budget.set_override(board, agents, runs=3, cache_read_tokens=5_000_000, by='bot', reason='x', writer_kind='agent')
+    assert json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='spend_budget_set'",
+                                    (agents,)).fetchone()[0])['writer_kind'] == 'agent'
+
+    def release_as_owner(tid):
+        shown = as_owner(board, tid)
+        assert shown['refusal'] == 'budget_decision_unread'
+        return as_owner(board, tid, seen=max(shown['unread']))
+
+    out = release_as_owner(kept)
+    assert out['outcome'] == 'released' and out['budget_runs'] == out['spent_runs'] + 10
+    assert budget.card_limits(board, kept, budget.limits()) == budget.Limits(out['budget_runs'], 5_000_000)
+    body = board.execute('SELECT body FROM task_comments WHERE id=?', (out['mandate_comment'],)).fetchone()[0]
+    assert 'cache-read limit kept at 5000000.' in body and 'David set' not in body
+    newest = json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='spend_budget_set' "
+                                      "ORDER BY id DESC LIMIT 1", (kept,)).fetchone()[0])
+    assert newest['writer_kind'] == 'agent' and newest['cache_read_tokens'] == 5_000_000
+    # A limit an agent set is an agent's to replace; a human caller lifts the cache-read limit as before.
+    out = release_as_owner(agents)
+    assert budget.card_limits(board, agents, budget.limits()) == budget.Limits(out['budget_runs'], 0)
+    human = spend_stopped(board)
+    budget.set_override(board, human, runs=3, cache_read_tokens=5_000_000, by='david', reason='small')
+    assert run(board, human)['outcome'] == 'released'
+    assert budget.card_limits(board, human, budget.limits()).cache_read_tokens == 0
+
+
+def test_an_agent_is_refused_when_the_kept_limit_is_already_reached(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    budget.set_override(board, tid, runs=50, cache_read_tokens=1000, by='david', reason='cheap only')
+    spent = budget.spend(board, tid)
+    monkeypatch.setattr(budget, 'spend', lambda conn, task, **kw: spent._replace(
+        tokens={**spent.tokens, 'cache_read_tokens': 5000}))
+    shown = as_owner(board, tid)
+    before = written(board, tid)
+    out = as_owner(board, tid, seen=max(shown['unread']))
+    assert out['refusal'] == 'budget_limit_in_force' and '5000 of 1000' in out['message']
+    assert written(board, tid) == before and status(board, tid) == 'triage'
+    assert run(board, tid)['outcome'] == 'released'  # a human raises it
+
+
+def test_a_mandate_older_than_new_scope_evidence_is_not_reused(board, monkeypatch):
+    from hermes_cli import kanban_scope_renewal_cli as renewal_cli
+    tid, _, episode = scope.stopped(board, monkeypatch)
+    real = renewal_cli.renew
+
+    def down(*a, **kw):
+        raise scope.RenewalRefused('board_unavailable', 'the Board could not be reached')
+    monkeypatch.setattr(renewal_cli, 'renew', down)
+    first = run(board, tid)
+    assert first['refusal'] == 'board_unavailable' and mandates(board, tid) == 1
+    monkeypatch.setattr(renewal_cli, 'renew', real)
+    kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'scope_stopped', 'episode': episode})
+    board.commit()  # scope evidence newer than that mandate: reusing it would be refused mandate_stale for ever
+    out = run(board, tid)
+    assert out['outcome'] == 'released', out
+    assert out['mandate_reused'] is False and out['mandate_comment'] != first['mandate_comment']
+    assert mandates(board, tid) == 2
+
+
+def test_command_line_refuses_a_stale_decision_card(board, monkeypatch, capsys):
+    monkeypatch.setattr('hermes_cli.kanban_comment_writer.cli_comment_writer', lambda **kw: HUMAN)
+    tid = spend_stopped(board)
+    stale = kb.create_task(board, title='Spend budget decision: stale', assignee='default',
+                           created_by='kanban-spend-budget')
+    kb._append_event(board, stale, 'administrative_decision', {'root_task': tid, 'root_episode': 'stop-1'})
+    board.commit()
+    current = scope.renewal.key(decision.pending_episode(board, tid))
+    before = written(board, tid)
+    assert argv(stale, '--json') == 1
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out['refusal'] == 'stale_decision_card' and tid in out['message'] and current in out['message']
+    assert 'stop-1' in out['message'] and written(board, tid) == before and status(board, tid) == 'triage'
+    assert argv(tid) == 0 and status(board, tid) == 'ready'
+
+
+def test_unreadable_ancestry_is_identity_unavailable(board, monkeypatch):
+    from hermes_cli import kanban_comment_writer as writer
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+
+    def unreadable(*a, **kw):
+        raise writer.Inconclusive('pid 4242: environment unreadable')
+    monkeypatch.setattr(writer, 'ancestry_environs', unreadable)
+    before = written(board, tid)
+    out = release.release(board, tid, writer=scope.AGENT, env=OWNER)  # no ancestry handed in: it is read, and fails
+    assert out['refusal'] == 'identity_unavailable' and 'pid 4242' in out['message']
+    assert written(board, tid) == before and status(board, tid) == 'triage'
+
+
+def test_an_offer_another_gateway_pushed_is_not_this_boards_offer(board):
+    """tasks.human_request and task_events are synced rows any gateway can write on the Board; only an
+    escalation event this board wrote (no origin, or its own) makes a stamped ask an offer."""
+    from hermes_cli.kanban_origin import gateway_names
+    tid = spend_stopped(board)
+    ask = {'release_target': release.offer(board, tid)}
+    if 'origin_gateway' not in {r[1] for r in board.execute('PRAGMA table_info(task_events)')}:
+        board.execute('ALTER TABLE task_events ADD COLUMN origin_gateway TEXT')
+    filed(board, tid, ask)
+    event = board.execute("SELECT MAX(id) FROM task_events WHERE task_id=? AND kind='stranded_park_escalated'",
+                          (tid,)).fetchone()[0]
+    assert release.offered(board, tid, ask) == tid
+    for origin, ours in (('worker-9', False), (gateway_names()[0], True), (None, True)):
+        board.execute('UPDATE task_events SET origin_gateway=? WHERE id=?', (origin, event))
+        board.commit()
+        assert (release.offered(board, tid, ask) == tid) is ours, origin
+    # A later escalation of the same card without the offer (say it became safety-restricted) withdraws it.
+    kb._append_event(board, tid, 'stranded_park_escalated', {'request': True})
+    board.commit()
+    assert release.offered(board, tid, ask) is None

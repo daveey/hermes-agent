@@ -78,8 +78,10 @@ def command(args: argparse.Namespace) -> int:
         if changing:
             from hermes_cli.kanban_release_comments import UNREAD_EXIT, UnreadComments
             try:
+                from hermes_cli.kanban_comment_writer import cli_comment_writer
                 ksb.set_override(conn, tid, runs=runs, cache_read_tokens=cache, by=_actor(), reason=args.reason,
-                                 seen=getattr(args, 'seen_comment_id', None), board=getattr(args, 'board', None))
+                                 seen=getattr(args, 'seen_comment_id', None), board=getattr(args, 'board', None),
+                                 writer_kind=cli_comment_writer()[0])
             except UnreadComments as exc:
                 return _err(str(exc), UNREAD_EXIT)
         lim = ksb.card_limits(conn, tid, ksb.limits())

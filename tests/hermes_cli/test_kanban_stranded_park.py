@@ -131,6 +131,9 @@ def test_spend_stop_on_dead_chat_gets_request_and_desk(kanban_home, own_gateway)
         assert "Recommend: A - release it to finish" in request["scope"]
         from hermes_cli import kanban_release
         assert request["release_target"] == kanban_release.offer(conn, tid) and request["release_target"]["task"] == tid
+        (escalated,) = _events(conn, tid, stranded.EVENT)  # the home's own record of the offer it filed
+        assert escalated["release_target"] == request["release_target"]
+        assert kanban_release.offered(conn, tid, request) == tid
         assert "without a bounded proposal" not in request["scope"]
         assert request["why_human"].startswith("Tried:") and "Only you can:" in request["why_human"]
         assert "spend_budget_triaged" in request["evidence"] and "runs=" in request["evidence"]
@@ -815,7 +818,9 @@ def _decision_card_with_ask(conn):
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='blocked', block_kind='needs_input' WHERE id=?", (card,))
         row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (card,)).fetchone())
-        store_request(conn, card, brief.request(conn, row, None, 3 * HOUR, "events: spend_budget_triaged runs=15"))
+        ask = brief.request(conn, row, None, 3 * HOUR, "events: spend_budget_triaged runs=15")
+        store_request(conn, card, ask)  # with the sweep's own record of it, as _escalate writes both
+        kb._append_event(conn, card, stranded.EVENT, {"request": True, "release_target": ask["release_target"]})
     return root, card
 
 
@@ -842,3 +847,18 @@ def test_remote_unblock_on_a_stale_decision_card_does_not_release_a_later_stop(k
         _answer(conn, card, "unblock")  # today's plain unblock of the decision card itself
         assert kb.get_task(conn, card).status != "blocked"
         assert kb.get_task(conn, root).status == "triage" and _no_release(conn, root)
+
+
+def test_remote_unblock_on_a_stamp_the_sweep_did_not_record_is_a_plain_unblock(kanban_home, own_gateway):
+    """The ask column alone is not proof: a stamped ask with no escalation record of this board releases nothing."""
+    from hermes_cli import kanban_card_answer as ca
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        with kb.write_txn(conn):  # as if the row had arrived from another gateway without the home's event
+            conn.execute("UPDATE task_events SET payload=json_remove(payload,'$.release_target') "
+                         "WHERE task_id=? AND kind=?", (tid, stranded.EVENT))
+        assert json.loads(_row(conn, tid)[2])["release_target"]["task"] == tid
+        with pytest.raises(ca.AnswerRefused, match="ask_changed_or_held|spend_decision_pending"):
+            _answer(conn, tid, "unblock")
+        assert _row(conn, tid)[0] == "triage" and _no_release(conn, tid)
