@@ -33,22 +33,30 @@ def _actor() -> str:
 
 
 def _spent_already(conn, tid: str, runs, cache) -> str:
-    """Why a new limit would stop the card at once, or ''.
+    """Why the limits this change leaves would stop the card at once, or ''.
 
     In the current window a limit counts the spend already recorded, so ``--runs 3`` on a card with 7 runs
-    sends it to triage at the next dispatch tick instead of granting 3 more (t_01a205c88aff2581, 2026-11-24).
-    A pending ordinary stop opens a fresh window at promote, so nothing is counted there yet."""
+    trips the budget at once instead of granting 3 more (t_01a205c88aff2581, 2026-11-24). A field not given
+    falls back to the board's limit (the override is replaced whole), so it is checked too. A pending
+    ordinary stop opens a fresh window at promote, so nothing is counted there yet; a restricted one keeps
+    its history, so it is checked like the current window."""
     if ksb.limit_window(conn, tid) != 'current':
         return ''
     spent = ksb.spend(conn, tid)
-    used = {'runs': spent.runs, 'cache-read-tokens': spent.tokens['cache_read_tokens']}
-    for flag, limit in (('runs', runs), ('cache-read-tokens', cache)):
-        if limit and used[flag] >= limit:
-            return (f"kanban spend-budget: {tid} already spent {used[flag]} {flag} in this window, so "
-                    f"--{flag} {limit} would send it to triage at the next dispatch tick. The limit counts "
-                    f"spend already recorded: to allow {limit} more, pass --{flag} {used[flag] + limit}. "
-                    f"To stop the card, block or archive it instead.")
-    return ''
+    board = ksb.limits()
+    rows = (('runs', runs, board.runs, spent.runs),
+            ('cache-read-tokens', cache, board.cache_read_tokens, spent.tokens['cache_read_tokens']))
+    tripped = []
+    for flag, given, board_limit, used in rows:
+        limit = board_limit if given is None else given
+        if limit and used >= limit:
+            source = f'--{flag} {limit}' if given is not None else f"the board's {flag} limit {limit}"
+            tripped.append(f"{used} {flag} already spent in this window reach {source}; to allow {limit} more, "
+                           f"pass --{flag} {used + limit}")
+    if not tripped:
+        return ''
+    return (f"kanban spend-budget: {tid}: " + '; '.join(tripped) + ". A limit counts spend already recorded, "
+            "so this would trip the budget at once. To stop the card, block or archive it instead.")
 
 
 def command(args: argparse.Namespace) -> int:
