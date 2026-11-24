@@ -71,7 +71,8 @@ def test_remote_wait_reaches_sidebar_eta(tmp_path, monkeypatch, kind):
         if kind == "clock":
             assert external["eta"]["expected_s"] == 9999999999 - 1793100000
             assert external["external"]["adapter"] == "clock"
-            assert external["external"]["state"] == "external_running"
+            # t_01a20c1b37830eaf: replica timers are waiting, not running.
+            assert external["external"]["state"] == "scheduled"
             assert not row.get("kanban_external_unknown")
         else:
             assert external["eta"]["expected_s"] is None

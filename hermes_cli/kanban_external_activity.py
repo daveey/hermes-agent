@@ -25,10 +25,9 @@ _memo: dict[str, tuple[float, dict]] = {}
 
 
 def clock_state(wait: dict[str, Any]) -> dict[str, Any]:
-    """The card state of a declared clock wait: light blue like a CI / deploy park (a running job, healthy), with
-    no poll times: nothing polls a timer, so it is never missed, unknown or down. [daveey]"""
-    return {"state": "external_running", "health": "ok", "job": "running", "reason": "", "wake": False,
-            "external": {"service": "timer", "adapter": "clock", "job": "running", "health": "ok",
+    """A timer is a healthy waiting dependency, never a running job. No poll can be missed."""
+    return {"state": "scheduled", "health": "ok", "job": "unknown", "reason": "", "wake": False,
+            "external": {"service": "timer", "adapter": "clock", "job": "unknown", "health": "ok",
                          "reason": str(wait.get("estimate_source") or ""), "url": None, "observed_at": None,
                          "next_due_at": None}}
 
@@ -262,7 +261,7 @@ def replica_markers(card: dict[str, Any]) -> set[tuple[str, str, bool]]:
                      "health": "unknown", "job": "unknown", "reason": "owner watch unavailable",
                      "url": (card.get("awaiting") or {}).get("ref") or None,
                      "observed_at": None, "next_due_at": None})
-        external = dict(external, state="external_running" if clock else "external_unknown")
+        external = dict(external, state="scheduled" if clock else "external_unknown")
         payload = {"task_id": key, "title": str(card.get("title") or ""), "external": external,
                    "eta": {k: wait.get(k) for k in ETA_KEYS}}
         markers.add((key, "external_eta:" + json.dumps(payload, sort_keys=True), False))

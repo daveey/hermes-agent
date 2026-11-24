@@ -214,7 +214,8 @@ def test_pr_read_5xx_is_down(monkeypatch):
 # --- legacy shell probes ---------------------------------------------------------------------------------------
 
 def test_shell_return_codes_map_to_polls():
-    assert shell.poll(1, "")["job"] == "running"
+    # t_01a20c1b37830eaf: not-yet is not evidence of a running job.
+    assert shell.poll(1, "")["job"] == "unknown"
     assert shell.poll(1, "")["service"] == "ok"
     done = shell.poll(0, "")
     assert (done["job"], done["terminal"]) == ("unknown", True)
@@ -240,8 +241,9 @@ def test_hermes_watch_line_overrides_the_return_code_meaning():
 
 
 def test_malformed_or_hostile_watch_lines_are_ignored():
-    assert shell.poll(1, "HERMES_WATCH {not json}")["job"] == "running"
-    assert shell.poll(1, 'HERMES_WATCH {"job": "exploded", "service": "fine"}')["job"] == "running"
+    # t_01a20c1b37830eaf: invalid evidence cannot establish progress either.
+    assert shell.poll(1, "HERMES_WATCH {not json}")["job"] == "unknown"
+    assert shell.poll(1, 'HERMES_WATCH {"job": "exploded", "service": "fine"}')["job"] == "unknown"
     assert shell.parse_watch("HERMES_WATCH []") is None
     # the last valid line wins
     out = 'HERMES_WATCH {"job": "running"}\nHERMES_WATCH {"job": "succeeded"}'

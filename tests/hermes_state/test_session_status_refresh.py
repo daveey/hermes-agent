@@ -101,7 +101,7 @@ def refresh(db, trigger="turn_end", **kw):
 
 @pytest.mark.parametrize("kind", ["ci", "deploy", "card", "clock"])
 @pytest.mark.parametrize("remote", [True, False])
-def test_replica_ci_deploy_wait_publishes_external_stripe(db, monkeypatch, kind, remote):
+def test_replica_declared_wait_publishes_waiting_stripe(db, monkeypatch, kind, remote):
     turn(db)
     card = {"id": "t_ci", "key": "edge/default/default/t_ci", "session": "chat", "status": "scheduled",
             "gateway": "edge", "board": "default", "profile": "default", "remote": remote,
@@ -110,13 +110,37 @@ def test_replica_ci_deploy_wait_publishes_external_stripe(db, monkeypatch, kind,
     monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: [card])
     status = refresh(db, "card_change")
     assert status["kind"] == "waiting"
-    assert status["presentation"]["stripe"] == ("external" if remote and kind in ("ci", "deploy", "clock") else "waiting")
+    # t_01a20c1b37830eaf: a declared wait alone never establishes progress.
+    assert status["presentation"]["stripe"] == "waiting"
     expected_state = "scheduled"
-    if remote and kind in ("ci", "deploy", "clock"):
-        expected_state = "external_running" if kind == "clock" else "external_unknown"
     assert status["on"][0]["state"] == expected_state
     published = so.get_outcome("chat", db=db)
     assert published is not None and published["status"] == status
+
+
+@pytest.mark.parametrize("kind", ["deploy", "clock", "ci"])
+@pytest.mark.parametrize("job", ["unknown", "running"])
+def test_park_progress_requires_job_evidence_and_keeps_eta(db, monkeypatch, kind, job):
+    """t_01a20c1b37830eaf: waiting is not running; real CI/probe progress survives."""
+    turn(db)
+    card = {"id": "t_park", "status": "scheduled", "wait": {
+        "wait_kind": kind, "wait_state": "external_running" if job == "running" else "external_unknown",
+        "external": {"job": job, "health": "ok", "adapter": "github_run" if kind == "ci" else "shell"},
+        "until": 9_999_999_999, "waited_since": 100.0, "expected_s": 600.0,
+        "estimate_source": "deployment window"}}
+    monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: [card])
+    status = refresh(db, "card_change")
+    running = job == "running" and kind != "clock"
+    assert status["presentation"]["stripe"] == ("external" if running else "waiting")
+    item = status["on"][0]
+    assert item["state"] == ("external_running" if running else "scheduled")
+    # ETA belongs to the explanatory outcome, not the reducer's minimal work identity.
+    item = so._card_items(["chat"])[1][0]
+    assert item["eta"] == 9_999_999_999
+    assert item["wait_kind"] == kind
+    assert item["waited_since"] == 100.0
+    assert item["expected_s"] == 600.0
+    assert item["estimate_source"] == "deployment window"
 
 
 @pytest.mark.parametrize("status", ["running", "todo", "done", "blocked"])

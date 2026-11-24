@@ -108,7 +108,8 @@ def test_shell_probe_on_an_unsynced_board_writes_on_change_only(kanban_home):
         for i in range(5):
             _shell_apply(conn, tid, 1, "", t + i * 900)
         assert len(events(conn, tid, kew.WATCH_EVENT)) == 1
-        assert kew.card_state(conn, tid, now=t + 4 * 900 + 60)["state"] == "external_running"  # last_at is fresh
+        # t_01a20c1b37830eaf: fresh last_at does not establish job progress.
+        assert kew.card_state(conn, tid, now=t + 4 * 900 + 60)["state"] == "external_unknown"
 
 
 # --- 2: staleness applies to failing records too -------------------------------------------------------------

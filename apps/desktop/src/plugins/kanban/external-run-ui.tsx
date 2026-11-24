@@ -35,7 +35,14 @@ export function ExternalRunBadge({
 
   const hover = formatExternalHover(task.external as ExternalInfo | null | undefined, now, { taskId: task.id, visual })
   const down = visual === 'down'
-  const label = down ? t.sidebar.row.kanbanExternalDown : t.sidebar.row.kanbanExternalRunning
+  const running = visual === 'running' && task.external?.job === 'running'
+
+  const label = down
+    ? t.sidebar.row.kanbanExternalDown
+    : running
+      ? t.sidebar.row.kanbanExternalRunning
+      : t.sidebar.row.outcomeWaiting
+
   const tone = down ? EXTERNAL_DOWN_RED : SKY_400
 
   return (

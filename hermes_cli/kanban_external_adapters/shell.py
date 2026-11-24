@@ -64,8 +64,7 @@ def poll(rc: Any, out: str) -> dict:
                 "url": None, "retry_after": None, "terminal": False, "outcome": None}
     base = {"job": "unknown", "service": "ok", "detail": "", "url": None, "retry_after": None, "terminal": False,
             "outcome": None}
-    if rc == 1:
-        base["job"] = "running"
+    # Exit 1 means only "not yet"; progress requires an explicit HERMES_WATCH job.
     if rc == 3:
         base["detail"] = "probe could not tell (exit 3)"
     watch = _clean(parse_watch(out) or {})

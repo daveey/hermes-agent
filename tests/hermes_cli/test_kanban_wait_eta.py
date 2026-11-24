@@ -166,7 +166,8 @@ def test_session_external_adds_clock_cards_and_eta_to_every_card():
     out = kea.session_external(conn, [("s1", "t_clock"), ("s1", "t_ci")], now=NOW)
     cards = {c["task_id"]: c for c in out["s1"]["cards"]}
     clock = cards["t_clock"]
-    assert clock["external"]["adapter"] == "clock" and clock["external"]["job"] == "running"
+    # t_01a20c1b37830eaf: timers preserve ETA without inventing a running job.
+    assert clock["external"]["adapter"] == "clock" and clock["external"]["job"] == "unknown"
     assert clock["external"]["next_due_at"] is None  # nothing polls a timer: never unknown or down
     assert clock["eta"]["expected_s"] == 4 * 3600 and clock["eta"]["waited_since"] == PARK
     assert out["s1"]["counts"][0] >= 1 and out["s1"]["counts"][2] == 0
@@ -191,10 +192,11 @@ def test_clock_wait_paints_the_canonical_light_blue_stripe(monkeypatch):
     decisions, waits = so._read_card_items(["s1"])
     assert decisions == []
     (item,) = waits
-    assert item["state"] == "external_running"
+    # t_01a20c1b37830eaf: clock-only parks show Waiting, not Running.
+    assert item["state"] == "scheduled"
     assert (item["wait_kind"], item["expected_s"], item["waited_since"]) == ("clock", 4 * 3600, PARK)
     verdict = _verdict({"work": waits, "turn": {"generation": 1, "state": "completed"}}, {"state": "complete"}, 1, [])
-    assert verdict["presentation"]["stripe"] == "external"
+    assert verdict["presentation"]["stripe"] == "waiting"  # t_01a20c1b37830eaf
     plain = _verdict({"work": [{"id": "t", "kind": "card", "state": "scheduled"}],
                       "turn": {"generation": 1, "state": "completed"}}, {"state": "complete"}, 1, [])
     assert plain["presentation"]["stripe"] == "waiting"

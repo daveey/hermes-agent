@@ -275,7 +275,8 @@ def test_case10_legacy_return_codes_and_hermes_watch_lines(kanban_home):
         a = park(conn, kind="external", ref="a slurm job", wake_check="probe.sh")
         assert _shell_apply(conn, a, 1, "") is None
         got = kew.card_state(conn, a)
-        assert (got["state"], got["external"]["adapter"], got["external"]["job"]) == ("external_running", "shell", "running")
+        # t_01a20c1b37830eaf: a bare probe says not-yet, not running.
+        assert (got["state"], got["external"]["adapter"], got["external"]["job"]) == ("external_unknown", "shell", "unknown")
         b = park(conn, 1, kind="external", ref="a slurm job", wake_check="probe.sh")
         _shell_apply(conn, b, 1, 'HERMES_WATCH {"job": "running", "service": "down", "detail": "502"}')
         assert kew.card_state(conn, b)["state"] == "external_unknown"
