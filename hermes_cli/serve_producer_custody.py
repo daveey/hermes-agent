@@ -34,6 +34,25 @@ class FamilyCustody:
             raise ValueError('unknown producer family')
         return cls(_acquire_runtime(runtime, family))
 
+    @classmethod
+    def acquire_execution(cls, runtime: Path, family: str) -> FamilyCustody:
+        """Prove previous execution retired, independently of broker custody.
+
+        Only the producer opens this description. Descendants inherit it across
+        fork/exec, so a broker's waitpid cannot admit overlapping replacement
+        work. Keep the stable inode and never unlock a shared description.
+        """
+        if family not in _FAMILIES:
+            raise ValueError('unknown producer family')
+        fd = _acquire_runtime(runtime, f'{family}-execution')
+        owner = cls(fd)
+        try:
+            os.set_inheritable(fd, True)
+        except BaseException:
+            owner.close()
+            raise
+        return owner
+
     def close(self) -> None:
         """Close only this process's descriptor, preserving inherited custody."""
         if self.fd is not None:

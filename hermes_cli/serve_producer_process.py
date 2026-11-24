@@ -155,8 +155,9 @@ def broker(channel, config):
                         response = data.receive()
                         break
                     except (EOFError, BrokenPipeError, ConnectionResetError):
-                        # EOF is not death: actual waitpid must confirm exit
-                        # before another child can inherit producer custody.
+                        # waitpid reaps only the leader. The new exec must also
+                        # acquire panel-execution.lock before provider import;
+                        # surviving descendants make it refuse rather than run.
                         child.wait()
                         data.close()
                         if attempt == 2 or stop.wait(1 << attempt):
@@ -218,7 +219,19 @@ def main():
     if role == 'broker':
         broker(channel, config)
     elif role == 'producer':
-        producer(channel, config)
+        from hermes_cli.serve_producer_custody import CustodyConflict, FamilyCustody
+
+        try:
+            execution = FamilyCustody.acquire_execution(Path(config['runtime']), 'panel')
+        except CustodyConflict:
+            # Direct leader exit is not family retirement. Refuse before even
+            # importing provider code; the old descendant keeps both fences.
+            channel.close()
+            return
+        try:
+            producer(channel, config)
+        finally:
+            execution.close()
     else:
         raise ProtocolError('unknown fixture role')
 

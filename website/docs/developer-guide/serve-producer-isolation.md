@@ -13,6 +13,24 @@ ticket: persisted `guarded=True` is rejected. The Linux fixture broker enrolls a
 before importing a provider. Its child inherits the same open file description;
 closing the broker descriptor never unlocks a surviving child.
 
+Restart has an additional, independently opened `panel-execution.lock`. Each
+actual producer must acquire it nonblocking **before any provider import**. The
+broker never holds that description. The producer deliberately leaves it
+inheritable across fork/exec; descendants retaining it prevent the replacement
+from importing or running a provider even after the direct leader was reaped.
+Conflict conservatively ends that relay with unavailable projections (HTTP 503),
+not a kill, forced unlock, timeout-based takeover or resumed request. After actual
+drain, a fresh relay can acquire both stable fences. Ordinary direct-child crash
+without a surviving execution holder still restarts within the existing budget.
+
+These are cooperative inherited-descriptor fences, not arbitrary descendant
+containment: providers must retain the execution fence while doing work and
+explicitly pass it to helpers that otherwise close descriptors. A subprocess
+using `close_fds=True`, deliberate descriptor closure, or replacement of lock
+inodes is not covered. This dormant fixture does not certify such providers or
+production process containment. The panel fence and execution fence are never
+unlinked or explicitly unlocked.
+
 `BrokerEnrollment` can classify only its own exact enrolled process as a
 participant. It rechecks boot/birth/exec observation, installation and source
 boundary generation, canonical runtime and live kernel flock on its descriptor.
