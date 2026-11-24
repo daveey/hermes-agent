@@ -282,7 +282,9 @@ class Dashboard:
         assert self.port > 0, f"hermes dashboard exited rc={self.proc.returncode}:\n{self.log_tail()}"
         self.base = f"http://127.0.0.1:{self.port}"
         self.http = httpx.Client(base_url=self.base, timeout=60.0, trust_env=False)
-        index = self.http.get("/")
+        from tests.e2e.core._service_readiness import service_response
+
+        index = service_response(self.http, "/")
         m = _TOKEN_RE.search(index.text)
         assert index.status_code == 200 and m, f"index.html carried no session token: {index.status_code}"
         self.token = m.group(1)

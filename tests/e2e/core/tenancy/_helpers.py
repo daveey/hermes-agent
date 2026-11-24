@@ -548,6 +548,15 @@ class ServeBackend(TuiBackend):
         self.port = poll(lambda: port_box[0] if port_box else (self.proc.poll() is not None and -1), 120,
                          "hermes serve to report its port")
         assert self.port > 0, f"hermes serve exited rc={self.proc.returncode}"
+        import httpx
+
+        from tests.e2e.core._service_readiness import service_response
+
+        # /api/health is display-ready before services; /api/status crosses the warmup fence.
+        with httpx.Client(base_url=f"http://127.0.0.1:{self.port}", timeout=60, trust_env=False,
+                          headers={"X-Hermes-Session-Token": self.token}) as client:
+            response = service_response(client, "/api/status")
+            assert response.status_code == 200, f"serve service readiness: {response.status_code} {response.text}"
         self.ws = connect(f"ws://127.0.0.1:{self.port}/api/ws?token={self.token}", open_timeout=90, max_size=None)
         self._q: queue.Queue[dict[str, Any]] = queue.Queue()
         self._rid = 0

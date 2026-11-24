@@ -235,8 +235,15 @@ def desktop_port(sp: ServeProcess, timeout: float = READY_TIMEOUT) -> int:
 
 
 def ws_rpc(port: int, token: str) -> tuple[RpcClient, Callable[[], None]]:
+    import httpx
     from websockets.sync.client import connect
 
+    from tests.e2e.core._service_readiness import service_response
+
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60, trust_env=False,
+                      headers={"X-Hermes-Session-Token": token}) as client:
+        response = service_response(client, "/api/status")
+        assert response.status_code == 200, f"serve service readiness: {response.status_code} {response.text}"
     ws = connect(f"ws://127.0.0.1:{port}/api/ws?token={token}", open_timeout=30, max_size=None)
     frames: queue.Queue[str | None] = queue.Queue()
 
