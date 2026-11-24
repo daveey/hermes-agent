@@ -416,32 +416,100 @@ def test_refresh_false_alternate_does_not_read_usage(board, monkeypatch):
         assert reads == [] and after == before, {"reads": reads, "state_changed": after != before}
 
 
-def test_later_global_stop_is_an_overlap_on_the_snapshot_and_live(board, monkeypatch):
-    """A global rule after the tick's first stop is an overlap, not an evaluated empty list.
+def _globals_by_name(rows):
+    return {row["governor"]: row for row in rows or ()}
 
-    ``dispatch_once(max_spawn=0)`` returns before it reads memory. Critical pressure is still a
-    stop; snapshot ``why`` must name it, the same way ``why --live`` does.
+
+def test_global_stops_are_board_facts_recorded_once_not_card_overlaps(board, monkeypatch):
+    """Simultaneous global stops (reviewer t_01a20f26d3867421 probe 1, under the board-level design).
+
+    ``dispatch_once(max_spawn=0)`` returns before it reads memory. The snapshot records memory pressure once in
+    ``globals`` as unreached and unknown, never as a pass or an empty overlap; ``why --live`` asks it and finds it
+    critical. Neither copies a board rule into the card's overlaps.
     """
     monkeypatch.setattr(kbd, "_memory_pressure_level", lambda sample=None: "critical")
     monkeypatch.setattr(governors, "OVERLAP_BUDGET_SECONDS", 60.0)
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="spawn cap and critical memory", assignee="default")
+        ids = [kb.create_task(conn, title=f"spawn cap and critical memory {i}", assignee="default") for i in range(2)]
         result = _tick(conn, max_spawn=0)
-        task = kb.get_task(conn, tid)
-        assert not result.spawned and task is not None and task.status == "ready"
-        card = governors.snapshot(conn)["cards"][tid]
-        assert card["governor"] == "max_spawn", card
-        snap = _why(tid)
-        live = _why(tid, "--live")
-        assert snap["source"] == "snapshot" and live["source"] == "dry_run"
-        assert snap["first_stop"]["governor"] == "max_spawn"
-        assert "memory_pressure" in [o["governor"] for o in live["overlaps"]], live["overlaps"]
-        assert "memory_pressure" in [o["governor"] for o in snap["overlaps"]], snap["overlaps"]
-        assert "memory_pressure" in [o["governor"] for o in card["overlaps"]], card
+        assert not result.spawned
+        snap = governors.snapshot(conn)
+        _sums(snap)
+        rules = _globals_by_name(snap["globals"])
+        assert list(rules) == list(governors.GLOBALS)  # one row a rule, in dispatcher order
+        assert (rules["max_spawn"]["verdict"], rules["max_spawn"]["reached"]) == ("stop", True)
+        assert (rules["max_spawn"]["reading"], rules["max_spawn"]["threshold"]) == (0, 0)
+        assert (rules["memory_pressure"]["verdict"], rules["memory_pressure"]["reached"]) == ("unknown", False)
+        assert rules["memory_pressure"]["reason"]
+        for tid in ids:
+            card = snap["cards"][tid]
+            assert card["governor"] == "max_spawn", card
+            assert not any(governors.is_global(o["governor"]) for o in card["overlaps"]), card
+            recorded, live = _why(tid), _why(tid, "--live")
+            assert recorded["source"] == "snapshot" and live["source"] == "dry_run"
+            assert recorded["first_stop"]["governor"] == live["first_stop"]["governor"] == "max_spawn"
+            assert _globals_by_name(recorded["globals"])["memory_pressure"]["verdict"] == "unknown"
+            assert _globals_by_name(live["globals"])["memory_pressure"]["verdict"] == "stop"
+            for answer in (recorded, live):
+                assert not any(governors.is_global(o["governor"]) for o in answer["overlaps"]), answer["overlaps"]
+        text = kcli.run_slash(f"why {ids[0]}")
+        assert "board rules (this tick):" in text and "not reached" in text, text
+    assert snap["global_stop"] == "max_spawn"
 
 
-def test_predicate_fault_is_unknown_not_a_cached_empty_overlap_list(board, monkeypatch):
-    """An overlap predicate that raises is unknown, and that incomplete result is not reused."""
+def test_an_early_cap_leaves_the_later_caps_unknown_not_passed(board, monkeypatch):
+    """Requested by the owning chat: an early cap, later caps unreached, and they read unknown."""
+    _usage(monkeypatch, [10.0])
+    with kbc.connect() as conn:
+        kb.create_task(conn, title="early cap", assignee="default")
+        _tick(conn, max_spawn=0, max_in_progress=0)
+        rules = _globals_by_name(governors.snapshot(conn)["globals"])
+        assert [(n, rules[n]["verdict"], rules[n]["reached"]) for n in governors.GLOBALS] == [
+            ("gateway_drain", "pass", True), ("core_update_drain", "pass", True), ("max_spawn", "stop", True),
+            ("host_slots", "unknown", False), ("board_share", "unknown", False),
+            ("memory_pressure", "unknown", False)]
+
+
+def test_a_scheduling_tick_records_every_board_rule_reached(board, monkeypatch):
+    """A tick that scheduled asked every board rule; the cap that ran its spawn budget out is the stop."""
+    _usage(monkeypatch, [10.0])
+    with kbc.connect() as conn:
+        ids = [kb.create_task(conn, title=f"card {i}", assignee="default") for i in range(3)]
+        spawned = []
+        _tick(conn, spawned, max_in_progress=1)
+        snap = governors.snapshot(conn)
+        _sums(snap)
+        rules = _globals_by_name(snap["globals"])
+        assert all(rules[n]["reached"] for n in governors.GLOBALS), rules
+        assert (rules["host_slots"]["verdict"], rules["host_slots"]["threshold"]) == ("stop", 1)
+        waiting = [t for t in ids if t not in spawned]
+        assert {snap["cards"][t]["governor"] for t in waiting} == {"host_slots"}
+
+
+def test_unreadable_card_rule_is_a_stored_unknown_value(board, monkeypatch):
+    """Reviewer t_01a20f26d3867421 probe 2: a later rule the walk cannot read is never certified empty."""
+    _usage(monkeypatch, [10.0])
+    from hermes_cli import kanban_disk_admission
+
+    def unreadable():
+        raise OSError("injected unreadable disk evidence")
+
+    monkeypatch.setattr(kanban_disk_admission, "refusal_reason", unreadable)
+    monkeypatch.setattr(governors, "OVERLAP_BUDGET_SECONDS", 60.0)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="stopped with unreadable later gate", assignee="default")
+        _tick(conn, max_spawn=0)
+        recorded = gcli.why(conn, tid)
+        live = gcli.why(conn, tid, live=True)
+        assert _chain_step(live, "disk_floor")["verdict"] == "unknown"
+        disk = [u for u in recorded["overlaps_unknown"] or () if u["governor"] == "disk_floor"]
+        assert disk == [{"governor": "disk_floor", "verdict": "unknown",
+                         "reason": "OSError: injected unreadable disk evidence"}], recorded
+        assert [u for u in live["overlaps_unknown"] if u["governor"] == "disk_floor"] == disk
+
+
+def test_predicate_fault_is_unknown_and_reasked_every_turn(board, monkeypatch):
+    """An overlap predicate that raises is an unknown value; the next evaluation asks again and recovers."""
     from hermes_cli import kanban_disk_admission as disk
 
     monkeypatch.setattr(governors, "OVERLAP_BUDGET_SECONDS", 60.0)
@@ -455,23 +523,88 @@ def test_predicate_fault_is_unknown_not_a_cached_empty_overlap_list(board, monke
         _tick(conn, max_spawn=0)
         card = governors.snapshot(conn)["cards"][tid]
         assert card["governor"] == "max_spawn", card
-        unknowns = card.get("overlaps_unknown") or []
-        assert any(u["governor"] == "disk_floor" and u["verdict"] == "unknown" for u in unknowns), card
-        assert "overlaps_at" not in card  # a fault is not a finished evaluation to reuse for 300s
-        snap = _why(tid)
-        assert any(u["governor"] == "disk_floor" for u in (snap.get("overlaps_unknown") or [])), snap
+        assert {"governor": "disk_floor", "verdict": "unknown", "reason": "OSError: probe"} in card["overlaps_unknown"]
         text = kcli.run_slash(f"why {tid}")
         assert "also unknown" in text and "Disk floor" in text, text
         assert "not evaluated yet" not in text, text
-        live = _why(tid, "--live")
-        assert _chain_step(live, "disk_floor")["verdict"] == "unknown"
 
-        _tick(conn, max_spawn=0)  # still faulting: must not reuse a cached empty list
+        _tick(conn, max_spawn=0)  # still faulting: still unknown
         again = governors.snapshot(conn)["cards"][tid]
-        assert any(u["governor"] == "disk_floor" for u in (again.get("overlaps_unknown") or [])), again
+        assert any(u["governor"] == "disk_floor" for u in again["overlaps_unknown"]), again
 
         monkeypatch.setattr(disk, "refusal_reason", lambda: None)
         _tick(conn, max_spawn=0)
         recovered = governors.snapshot(conn)["cards"][tid]
-        assert not any(u.get("governor") == "disk_floor" for u in (recovered.get("overlaps_unknown") or []))
+        assert not any(u["governor"] == "disk_floor" for u in recovered["overlaps_unknown"]), recovered
         assert "Disk floor" not in kcli.run_slash(f"why {tid}")
+
+
+def test_card_walk_uses_the_limits_this_tick_ran_with(board, monkeypatch):
+    """Reviewer t_01a20f46c623ccf4 probe 1: the overlap walk asks this tick's caps, not config or the last tick's.
+
+    The per-profile cap exists only on the second tick; the card's walk must see it at once.
+    """
+    _usage(monkeypatch, [10.0])
+    monkeypatch.setattr(governors, "OVERLAP_BUDGET_SECONDS", 60.0)
+    with kbc.connect() as conn:
+        busy = kb.create_task(conn, title="already running", assignee="default")
+        _tick(conn, max_in_progress=1)
+        assert kb.get_task(conn, busy).status == "running"
+        tid = kb.create_task(conn, title="waiting", assignee="default")
+        _tick(conn, max_spawn=1)  # no per-profile cap yet: nothing card-scoped holds it
+        card = governors.snapshot(conn)["cards"][tid]
+        assert (card["governor"], card["overlaps"]) == ("max_spawn", []), card
+
+        _tick(conn, max_spawn=1, max_in_progress_per_profile=1)
+        card = governors.snapshot(conn)["cards"][tid]
+        assert card["governor"] == "max_spawn", card
+        assert [(o["governor"], o.get("scope"), o.get("reading"), o.get("threshold")) for o in card["overlaps"]] \
+            == [("profile_cap", "default", 1, 1)], card
+        assert [o["governor"] for o in _why(tid)["overlaps"]] == ["profile_cap"]
+
+
+def test_an_unknown_on_one_card_does_not_stop_the_next_cards_evaluation(board, monkeypatch):
+    """Requested by the owning chat: card 1 has an unknown predicate; card 2's overlaps are still evaluated."""
+    from hermes_cli import kanban_capsule_admission as capsule
+
+    _usage(monkeypatch, [10.0])
+    monkeypatch.setattr(governors, "OVERLAP_BUDGET_SECONDS", 0.0)  # one card a tick
+    with kbc.connect() as conn:
+        first, second = (kb.create_task(conn, title=f"card {i}", assignee="default") for i in range(2))
+        real = capsule.dispatch_refusal
+
+        def refusal(conn_, task_id, *args, **kwargs):
+            if task_id == first:
+                raise RuntimeError("capsule registry unreadable")
+            return real(conn_, task_id, *args, **kwargs)
+
+        monkeypatch.setattr(capsule, "dispatch_refusal", refusal)
+        for _ in range(2):
+            _tick(conn, max_spawn=0)
+        cards = governors.snapshot(conn)["cards"]
+        assert {"governor": "capsule", "verdict": "unknown",
+                "reason": "RuntimeError: capsule registry unreadable"} in cards[first]["overlaps_unknown"]
+        assert cards[second]["overlaps"] == [] and cards[second]["overlaps_unknown"] is not None, cards[second]
+        assert not any(u["governor"] == "capsule" for u in cards[second]["overlaps_unknown"])
+
+
+@pytest.mark.parametrize("fault", [False, True])
+def test_a_persistently_unknown_first_card_does_not_starve_later_cards(board, monkeypatch, fault):
+    """Reviewer t_01a20f46c623ccf4 probe 2, with its no-fault control: five zero-budget ticks reach all three."""
+    from hermes_cli import kanban_disk_admission as disk
+
+    _usage(monkeypatch, [10.0])
+    monkeypatch.setattr(governors, "OVERLAP_BUDGET_SECONDS", 0.0)
+
+    def boom():
+        raise OSError("persistent unknown")
+
+    monkeypatch.setattr(disk, "refusal_reason", boom if fault else lambda: None)
+    with kbc.connect() as conn:
+        ids = [kb.create_task(conn, title=f"waiting {i}", assignee="default") for i in range(3)]
+        for _ in range(5):
+            _tick(conn, max_spawn=0)
+        cards = governors.snapshot(conn)["cards"]
+        assert all(cards[t].get("overlaps") is not None for t in ids), cards
+        for tid in ids:
+            assert any(u["governor"] == "disk_floor" for u in cards[tid]["overlaps_unknown"]) == fault, cards[tid]

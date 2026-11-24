@@ -72,6 +72,10 @@ def _print_board(snap: dict[str, Any], now: float) -> None:
         return
     stale = "  STALE: no tick for that long, treat as unknown" if snap.get("stale") else ""
     print(f"board {snap['board']}: {snap['idle_total']} idle card(s), tick {snap['age_s']}s ago{stale}")
+    for step in snap.get("globals") or ():
+        if step.get("verdict") != "pass":
+            note = "not reached this tick" if step.get("reached") is False else step.get("reason") or ""
+            print(f"  board rule {step['verdict']:<8} {_name(step):<26} {_measure(step):<14} {note}".rstrip())
     for row in snap["governors"]:
         if not row.get("active") and row.get("reading") is None:
             continue
@@ -107,8 +111,8 @@ def why(conn: Any, task_id: str, *, live: bool = False) -> dict[str, Any]:
     first["verdict"] = "stop"
     return {"task_id": task_id, "board": recorded.get("board"), "source": "snapshot", "status": recorded.get("status"),
             "first_stop": first, "overlaps": recorded.get("overlaps"),
-            "overlaps_unknown": recorded.get("overlaps_unknown"), "chain": [first], "recorded": recorded,
-            "elapsed_s": round(time.monotonic() - started, 3)}
+            "overlaps_unknown": recorded.get("overlaps_unknown"), "globals": recorded.get("globals"),
+            "chain": [first], "recorded": recorded, "elapsed_s": round(time.monotonic() - started, 3)}
 
 
 def _print_why(answer: dict[str, Any]) -> None:
@@ -136,12 +140,16 @@ def _print_why(answer: dict[str, Any]) -> None:
     for other in overlaps or ():
         print(f"  also held by: {_name({**other, 'label': other.get('label') or _label(other)})} {_measure(other)}".rstrip())
     for other in answer.get("overlaps_unknown") or ():
-        detail = other.get("detail") or {}
-        note = detail.get("error") or detail.get("reason") or "unknown"
+        note = other.get("reason") or "unknown"
         print(f"  also unknown: {_name({**other, 'label': other.get('label') or _label(other)})} ({note})")
     if answer["source"] == "dry_run":
         for step in answer.get("chain") or ():
             print(f"    {step['verdict']:<8} {_name(step):<34} {_measure(step):<14} {_value(step.get('detail'))}".rstrip())
+    elif answer.get("globals"):
+        print("  board rules (this tick):")
+        for step in answer["globals"]:
+            note = "not reached" if step.get("reached") is False else _value(step.get("detail"))
+            print(f"    {step['verdict']:<8} {_name(step):<34} {_measure(step):<14} {note}".rstrip())
 
 
 def _label(entry: dict[str, Any]) -> str:

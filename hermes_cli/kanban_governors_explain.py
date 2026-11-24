@@ -23,7 +23,6 @@ from __future__ import annotations
 import contextlib
 import time
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Optional
 
 from hermes_cli import kanban_governors as governors
@@ -48,9 +47,10 @@ class Environment:
     memo: dict = field(default_factory=dict)
 
 
-def environment(conn: Any) -> Environment:
-    """The dispatcher's limits: the ones its last recorded tick on this board ran with (a gateway resolves them
-    per tick, and ``hermes kanban dispatch --max N`` overrides config), else config read the way it reads it."""
+def environment(conn: Any, caps: Optional[dict[str, Any]] = None) -> Environment:
+    """The dispatcher's limits: ``caps`` when the caller is the tick that ran with them, else the ones its last
+    recorded tick on this board ran with (a gateway resolves them per tick, and ``hermes kanban dispatch --max N``
+    overrides config), else config read the way it reads it."""
     from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli.config import load_config
 
@@ -58,17 +58,20 @@ def environment(conn: Any) -> Environment:
         section = (load_config() or {}).get("kanban", {}) or {}
     except Exception:  # health: allow BLE001 -- an unreadable config is the dispatcher's "no caps" path too
         section = {}
-    caps = {"max_spawn": kbd._positive_int(section.get("max_spawn"), None),
-            "max_in_progress": kbd.resolve_max_in_progress(kbd._positive_int(section.get("max_in_progress"), None)),
-            "max_in_progress_per_profile": kbd._positive_int(section.get("max_in_progress_per_profile"), None)}
-    recorded = governors.snapshot(conn)
-    if recorded.get("available") and not recorded.get("stale") and isinstance(recorded.get("caps"), dict):
-        caps.update({key: recorded["caps"].get(key) for key in caps if key in recorded["caps"]})
+    limits = {"max_spawn": kbd._positive_int(section.get("max_spawn"), None),
+              "max_in_progress": kbd.resolve_max_in_progress(kbd._positive_int(section.get("max_in_progress"), None)),
+              "max_in_progress_per_profile": kbd._positive_int(section.get("max_in_progress_per_profile"), None)}
+    given: dict[str, Any] = caps if isinstance(caps, dict) else {}
+    if not isinstance(caps, dict):
+        recorded = governors.snapshot(conn)
+        fresh = recorded.get("available") and not recorded.get("stale")
+        given = recorded["caps"] if fresh and isinstance(recorded.get("caps"), dict) else {}
+    limits.update({key: given.get(key) for key in limits if key in given})
     return Environment(
         board=governors._board(conn), profile_exists=kbd._profile_exists_fn(),
         default_assignee=kbd._resolve_default_assignee(section.get("default_assignee")),
-        per_profile_cap=caps["max_in_progress_per_profile"], max_spawn=caps["max_spawn"],
-        max_in_progress=caps["max_in_progress"], review_enabled=kbd.review_dispatch_enabled())
+        per_profile_cap=limits["max_in_progress_per_profile"], max_spawn=limits["max_spawn"],
+        max_in_progress=limits["max_in_progress"], review_enabled=kbd.review_dispatch_enabled())
 
 
 @contextlib.contextmanager
@@ -509,8 +512,9 @@ def _pressure_answer(level: Any) -> dict[str, Any]:
     return {"verdict": verdict, "reading": level, "threshold": "critical"}
 
 
-def global_chain(conn: Any, env: Environment, recorded: Optional[dict] = None) -> list[dict[str, Any]]:
-    """The rules that stop a whole tick, each asked even when an earlier cap would have returned."""
+def global_chain(conn: Any, env: Environment, recorded: Optional[list] = None) -> list[dict[str, Any]]:
+    """The board-level rules, each asked even when an earlier cap would have returned. ``recorded`` is the
+    last fresh tick's ``globals``: board share is decided only inside a tick, so it is read from there."""
     from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli import kanban_gateway_drain as drain
 
@@ -532,9 +536,17 @@ def global_chain(conn: Any, env: Environment, recorded: Optional[dict] = None) -
         running = kbd.count_running_tasks(conn)
     out.append(_entry("max_spawn", _max_spawn_answer(env, spawn_result, running, spawn_error), started))
     out.append(_entry("host_slots", _host_slots_answer(env, host_result, capture, running, host_error), started))
-    out.append(_entry("board_share", _recorded(SimpleNamespace(recorded=recorded), "board_share"), started))
+    out.append(_entry("board_share", _recorded_global(recorded, "board_share"), started))
     out.append(_entry("memory_pressure", _pressure_answer(pressure), started))
     return out
+
+
+def _recorded_global(recorded: Optional[list], governor_id: str) -> Answer:
+    """A board-level rule only a tick decides: the last fresh tick's verdict, else unknown."""
+    row = next((r for r in recorded or () if isinstance(r, dict) and r.get("governor") == governor_id), None)
+    if row is None or not row.get("reached", True) or row.get("verdict") == UNKNOWN:
+        return {"verdict": UNKNOWN, "detail": {"reason": "decided only inside a dispatcher tick; none recorded it"}}
+    return {k: row[k] for k in ("verdict", "reading", "threshold", "detail") if row.get(k) is not None}
 
 
 def _core_update(hold: Any) -> Answer:
@@ -579,21 +591,30 @@ def explain(conn: Any, task_id: str, *, env: Optional[Environment] = None) -> di
         return {**out, "error": "no such task", "elapsed_s": round(time.monotonic() - started, 3)}
     recorded = governors.card(conn, task_id)
     out.update(status=row["status"], recorded=recorded)
+    board_rules: list[dict[str, Any]] = []
+    card_steps: list[dict[str, Any]] = []
     if row["status"] in LANES and not row["claim_lock"] and (row["status"] == "ready" or env.review_enabled):
-        chain = global_chain(conn, env, recorded) + card_chain(conn, task_id, env, recorded=recorded)
+        snap = governors.snapshot(conn)
+        fresh = snap.get("globals") if snap.get("available") and not snap.get("stale") else None
+        board_rules = global_chain(conn, env, fresh if isinstance(fresh, list) else None)
+        card_steps = card_chain(conn, task_id, env, recorded=recorded)
+        chain = board_rules + card_steps
     else:
         with read_only(conn):
             chain = _off_lane(conn, row)
         if not chain:
             out["note"] = f"status {row['status']}: not waiting on the dispatcher"
     stops = [step for step in chain if step["verdict"] == STOP]
-    if stops:
-        first = stops[0]
+    first = stops[0] if stops else None
+    if first is not None:
         if recorded is not None and recorded.get("governor") == first["governor"]:
             first["since"] = recorded.get("since")
         else:
             first["since"] = _skip_since(conn, task_id)
-    out.update(chain=chain, first_stop=stops[0] if stops else None, overlaps=stops[1:],
+    # A global stop is the card's first stop; overlaps are card-scoped only (board rules are ``globals``).
+    out.update(chain=chain, globals=board_rules, first_stop=first,
+               overlaps=[step for step in card_steps if step["verdict"] == STOP and step is not first],
+               overlaps_unknown=[governors._unknown_fields(step) for step in card_steps if step["verdict"] == UNKNOWN],
                elapsed_s=round(time.monotonic() - started, 3))
     return out
 
