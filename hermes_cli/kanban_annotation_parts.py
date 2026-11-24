@@ -97,7 +97,7 @@ def _done_key(scope: tuple[str, ...], wall: float) -> object:
     paths -= {str(p) for p in ksa._board_db_paths()}
     shadow_dir = _replica_dir()
     replicas = sorted(p for p in paths if p.endswith(".db") and os.path.dirname(p) == shadow_dir)
-    content = tuple((p, ksa._board_content_key(Path(p), ksa._revision.SHADOW_TABLES)) for p in replicas)
+    content = tuple((p, ksa._projection_content_key(Path(p), ksa._revision.SHADOW_TABLES)) for p in replicas)
     if not ksa._revalidate.revalidatable(content, wall):
         return object()
     return (tuple(sorted(ksa._done_checks)), content, _signature(scope, paths - set(replicas)))

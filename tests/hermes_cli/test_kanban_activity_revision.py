@@ -108,6 +108,51 @@ def test_every_table_the_counts_read_moves_the_key(board, write):
     assert ksa._board_content_key(ksa._board_db_paths()[0]) != before
 
 
+def test_projection_kinds_match_the_unseen_reader():
+    assert set(rev.PROJECTION_EVENT_KINDS) == set(ksa.UNSEEN_KINDS)
+
+
+def test_an_unread_event_wakes_notify_but_not_the_links_or_annotation_key(board):
+    """A comment or claim event still moves the notify counter, and does not move the links or annotation key.
+    An unseen kind and a task-status write move both. This is the notification-loss guard: dropping the
+    notify bump would hide the event from the gate.
+    """
+    tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
+    path = ksa._board_db_paths()[0]
+
+    def notify_key():
+        return rev.content_key(path, rev.LOCAL_TABLES, lambda p: ksa.cached_ro(p, busy_budget=0))
+
+    before_notify = notify_key()
+    before_fp = ksa._activity_fingerprint()
+    before_links = ksa._links_fingerprint()
+    assert before_fp and rev.is_revision(before_notify)
+    with kbc.write_txn(board):
+        board.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'commented', 1)", (tid,))
+    assert notify_key() != before_notify  # notification-loss: the gate key must move
+    assert ksa._board_content_key(path) != before_notify
+    assert ksa._activity_fingerprint() == before_fp
+    assert ksa._links_fingerprint() == before_links
+
+    before_fp = ksa._activity_fingerprint()
+    with kbc.write_txn(board):
+        board.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'claimed', 2)", (tid,))
+    assert ksa._activity_fingerprint() == before_fp
+    assert notify_key() != before_notify
+
+    before_fp = ksa._activity_fingerprint()
+    before_notify = notify_key()
+    with kbc.write_txn(board):
+        board.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'completed', 3)", (tid,))
+    assert ksa._activity_fingerprint() != before_fp
+    assert notify_key() != before_notify
+
+    before_fp = ksa._activity_fingerprint()
+    with kbc.write_txn(board):
+        board.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+    assert ksa._activity_fingerprint() != before_fp
+
+
 def test_claim_and_heartbeat_columns_are_bookkeeping(board):
     tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
     path = ksa._board_db_paths()[0]

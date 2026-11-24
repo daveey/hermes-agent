@@ -15,6 +15,12 @@ events (heartbeats), whose only reader (the card-details strip) is never cached 
 version reinstalls its unconditional insert trigger on init (``ensure_revision`` repairs any SQL mismatch, bumping):
 heartbeats then bump again, a superset, and readers of either version only check the trigger names.
 
+``projection_revision`` is the key the links and annotation caches compare. It bumps with ``revision`` except on
+``task_events`` inserts whose kind is not in ``PROJECTION_EVENT_KINDS`` (the kinds a cached activity reader selects).
+A comment, claim or worker-lifecycle event still moves ``revision``, so the notify gate and the host change feed
+still wake; it does not move the projection key, so those caches do not re-project thousands of rows for an event
+they do not read. A file whose triggers predate the column falls back to ``revision`` (never a hidden change).
+
 Readers (``content_key``) only trust the counter when every table they read that exists in the file carries all three
 of its triggers; otherwise (older writer, dropped trigger, rebuilt file) they fall back to the file's stat plus a
 connection-scoped SQLite data_version. Equal timestamps alone never prove an absence of commits. The key also
@@ -72,11 +78,15 @@ BOOKKEEPING_COLUMNS: dict[str, frozenset[str]] = {
 # no longer re-reads every board's counts, the links projection and the attention pass (t_01a1cee98aaa8db1). Every
 # other kind, and any update or delete of an event row, still bumps.
 UNREAD_EVENT_KINDS = ("heartbeat",)
+# Kinds a cached activity reader selects from task_events (session-activity UNSEEN_KINDS). An insert of any
+# other kind still bumps ``revision`` (notify reads it) but not ``projection_revision``.
+PROJECTION_EVENT_KINDS = ("blocked", "completed", "crashed", "gave_up", "status", "timed_out")
 _BUMP = f"UPDATE {REVISION_TABLE} SET revision = revision + 1 WHERE id = 1;"
+_BUMP_PROJECTION = (f"UPDATE {REVISION_TABLE} SET projection_revision = projection_revision + 1 WHERE id = 1;")
 # [daveey] P2 per-task change cursor (t_01a1d59d3ef805c4): which tasks each bump touched.
 CHANGE_TABLE = "kanban_task_change"
 FULL_MARK = ""  # a bump no task explains (trigger (re)install): cursors older than its rev read in full
-EPOCH = 2  # 1 = the bump-only triggers (no marker); 2 = bump + kanban_task_change upsert
+EPOCH = 3  # 1 = bump-only; 2 = bump + kanban_task_change; 3 = projection_revision beside revision
 EPOCH_MARK = f"/* kanban-activity-epoch:{EPOCH} */"
 _EPOCH_RE = re.compile(r"/\* kanban-activity-epoch:(\d+) \*/")
 # The task(s) a row belongs to. Every other watched table names it in ``task_id``.
@@ -144,6 +154,15 @@ def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _projection_bump(table: str, op: str, columns: list[str]) -> str:
+    """Bump ``projection_revision``. Event inserts bump it only for kinds a cached reader selects."""
+    if op == "INSERT" and table == "task_events" and "kind" in columns:
+        kinds = ", ".join(f"'{k}'" for k in PROJECTION_EVENT_KINDS)
+        return (f"UPDATE {REVISION_TABLE} SET projection_revision = projection_revision + 1 WHERE id = 1 "
+                f"AND COALESCE(NEW.kind, '') IN ({kinds});")
+    return _BUMP_PROJECTION
+
+
 def wanted_triggers(conn: sqlite3.Connection, tables: Iterable[str]) -> dict[str, str]:
     """Trigger name -> CREATE statement for the ``tables`` present in ``conn``, from their live columns."""
     out: dict[str, str] = {}
@@ -158,12 +177,12 @@ def wanted_triggers(conn: sqlite3.Connection, tables: Iterable[str]) -> dict[str
             if op == "INSERT" and table == "task_events" and "kind" in columns:
                 when = " WHEN COALESCE(NEW.kind, '') NOT IN ({})".format(", ".join(f"'{k}'" for k in UNREAD_EVENT_KINDS))
             out[name] = (f"CREATE TRIGGER {name} AFTER {op} ON {_quote(table)}{when} BEGIN {EPOCH_MARK} {_BUMP} "
-                         f"{_marks(op, keys)} END")
+                         f"{_projection_bump(table, op, columns)} {_marks(op, keys)} END")
         read = [c for c in columns if c not in BOOKKEEPING_COLUMNS.get(table, frozenset())]
         changed = " OR ".join(_moved(table, c) for c in read)
         name = f"{PREFIX}{table}_update"
         out[name] = (f"CREATE TRIGGER {name} AFTER UPDATE ON {_quote(table)} WHEN {changed} BEGIN {EPOCH_MARK} "
-                     f"{_BUMP} {_marks('UPDATE', keys)} END")
+                     f"{_BUMP} {_projection_bump(table, 'UPDATE', columns)} {_marks('UPDATE', keys)} END")
     return out
 
 
@@ -182,16 +201,24 @@ def ensure_revision(conn: sqlite3.Connection, tables: Iterable[str]) -> None:
                                           (REVISION_TABLE, CHANGE_TABLE, CHANGE_INDEX))}
     has_row = present == {REVISION_TABLE, CHANGE_TABLE, CHANGE_INDEX} and conn.execute(
         f"SELECT 1 FROM {REVISION_TABLE} WHERE id = 1").fetchone()
-    if has_row and found == wanted:
+    has_projection = False
+    if REVISION_TABLE in present:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({_quote(REVISION_TABLE)})")}
+        has_projection = "projection_revision" in cols
+    if has_row and has_projection and found == wanted:
         return
     from hermes_cli.kanban_db_connect import write_txn
     with write_txn(conn):
         conn.execute(f"CREATE TABLE IF NOT EXISTS {REVISION_TABLE} "
                      "(id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL)")
-        conn.execute(f"INSERT OR IGNORE INTO {REVISION_TABLE} VALUES (1, 0)")
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({_quote(REVISION_TABLE)})")}
+        if "projection_revision" not in cols:
+            conn.execute(f"ALTER TABLE {REVISION_TABLE} ADD COLUMN projection_revision INTEGER NOT NULL DEFAULT 0")
+        conn.execute(f"INSERT OR IGNORE INTO {REVISION_TABLE} (id, revision) VALUES (1, 0)")
         for ddl in _CHANGE_DDL:
             conn.execute(ddl)
         conn.execute(_BUMP)
+        conn.execute(_BUMP_PROJECTION)
         conn.execute(_mark("NULL"))  # whatever changed while the triggers were absent or older is unknown
         for name in set(found) - set(wanted):
             conn.execute(f"DROP TRIGGER IF EXISTS {name}")
@@ -327,8 +354,63 @@ def _content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
     return ("revision", db[0], db[1], *revision)
 
 
+def read_projection_key(conn: sqlite3.Connection, tables: Iterable[str]) -> tuple | None:
+    """``(projection_revision, schema_version)`` when epoch-3 triggers cover ``tables``, else None.
+
+    None means the caller must use ``revision`` (the notify counter). Never treat a missing column as
+    "unchanged": an older file has no projection counter, and hiding its writes would drop a real change.
+    """
+    tables = tuple(tables)
+    conn.execute("BEGIN")
+    try:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({_quote(REVISION_TABLE)})")}
+        if "projection_revision" not in cols:
+            return None
+        trigger = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                                (f"{PREFIX}task_events_insert",)).fetchone()
+        if trigger is None or "projection_revision" not in (trigger[0] or ""):
+            return None
+        watched = (*tables, REVISION_TABLE)
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE (type = 'trigger' AND name GLOB ?) "
+            f"OR (type = 'table' AND name IN ({','.join('?' * len(watched))}))", (PREFIX + "*", *watched))}
+        row = conn.execute(
+            f"SELECT projection_revision, (SELECT schema_version FROM pragma_schema_version) "
+            f"FROM {REVISION_TABLE} WHERE id = 1").fetchone()
+    finally:
+        conn.execute("COMMIT")
+    if row is None:
+        return None
+    for table in tables:
+        if table in names and not all(f"{PREFIX}{table}_{op}" in names for op in ("insert", "update", "delete")):
+            return None
+    return (int(row[0]), int(row[1]))
+
+
+def projection_content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple | None:
+    """The links/annotation key, or None when this file has no projection counter (caller uses ``content_key``)."""
+    lock = probe_lock(path)
+    if not lock.acquire(timeout=0.05):
+        return None
+    try:
+        db = file_stat(path)[0]
+        if db is None:
+            return None
+        try:
+            with open_ro(path) as conn:
+                row = read_projection_key(conn, tables)
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return ("projection", db[0], db[1], *row)
+    finally:
+        lock.release()
+
+
 def is_revision(key: tuple) -> bool:
-    return bool(key) and key[0] == "revision"
+    """True for a trigger-backed key (the notify counter or the links/annotation projection counter)."""
+    return bool(key) and key[0] in ("revision", "projection")
 
 
 def covered_revision(conn: sqlite3.Connection, path: Path, ident: tuple, tables: Iterable[str]) -> tuple | None:

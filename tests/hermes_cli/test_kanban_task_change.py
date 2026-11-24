@@ -294,9 +294,11 @@ def test_ensure_revision_keeps_a_newer_epochs_triggers(board):
     """A newer writer's triggers (and its extra ones) survive this writer's init instead of being dropped."""
     names = dict(board.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name GLOB ?",
                                (rev.PREFIX + "*",)))
-    newer = names[f"{rev.PREFIX}tasks_update"].replace(rev.EPOCH_MARK, "/* kanban-activity-epoch:3 */")
+    newer_epoch = rev.EPOCH + 1
+    mark = f"/* kanban-activity-epoch:{newer_epoch} */"
+    newer = names[f"{rev.PREFIX}tasks_update"].replace(rev.EPOCH_MARK, mark)
     extra = (f"CREATE TRIGGER {rev.PREFIX}future_table_insert AFTER INSERT ON tasks "
-             f"BEGIN /* kanban-activity-epoch:3 */ {rev._BUMP} END")
+             f"BEGIN {mark} {rev._BUMP} END")
     with kbc.write_txn(board):
         board.execute(f"DROP TRIGGER {rev.PREFIX}tasks_update")
         board.execute(newer)

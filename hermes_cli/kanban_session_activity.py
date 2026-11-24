@@ -818,6 +818,15 @@ def _replica_paths() -> list[Path]:
         return []
 
 
+def _projection_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
+    """Links/annotation key: ignores task_events inserts those caches do not read. Falls back to the notify
+    counter when the file has no projection column, so an older board never hides a write."""
+    key = _revision.projection_content_key(path, tables, lambda p: cached_ro(p, busy_budget=0))
+    if key is not None:
+        return key
+    return _board_content_key(path, tables)
+
+
 def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
     """Count inputs include sync shadows; the origin-ledger projection never reads them."""
     pinned = getattr(_revalidate.inputs_pin, "fingerprints", None)
@@ -827,7 +836,7 @@ def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
     signature = [_hub_content_signature(hub)] if hub is not None else []
     # [daveey] Each board's content revision (``kanban_activity_revision``), not its stat: bookkeeping writes
     # (sync stamps, dispatch stamps, a replica's pull stamp) rewrite the files ~61x/min with no task change.
-    signature.extend((str(db), _board_content_key(db)) for db in _board_db_paths())
+    signature.extend((str(db), _projection_content_key(db)) for db in _board_db_paths())
     if include_shadows:
         signature.extend(_shadow_fingerprint())
         signature.extend(_origin_ledger_fingerprint())
@@ -836,7 +845,7 @@ def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
 
 def _shadow_fingerprint() -> tuple:
     """What ``_activity_fingerprint()`` appends to the local one: each sync shadow's content key."""
-    return tuple((str(db), _board_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
+    return tuple((str(db), _projection_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
 
 
 def _board_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
