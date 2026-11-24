@@ -6,9 +6,28 @@ import pytest
 
 from hermes_cli import kanban_placement as placement
 from tests.hermes_cli import test_origin_forward_decision as origins
+from hermes_cli import kanban_creation_home as home
 
 forwarding = origins.forwarding
 authority = origins.authority
+
+
+@pytest.mark.parametrize('cfg,gateway,label', [
+    ({'worker_queue': {'hub': 'pool:worker'}}, 'worker-asg12', 'pool:worker'),
+    ({'worker_queue': {'hub': 'pool:worker', 'worker-a3': 'pool:special'}}, 'worker-a3', 'pool:special'),
+    ({}, 'worker-a3', None),
+    ({'worker_queue': []}, 'worker-a3', None),
+    ({'worker_queue': {'hub': 'machine:hub'}}, 'worker-a3', None),
+    ({'worker_queue': {'hub': 'pool:worker'}}, 'personal-linux', None),
+    ({'worker_queue': {'hub': 'pool:worker'}}, None, None),
+    ({'worker_queue': {'hub': 'pool:worker'}}, 'worker', None),
+])
+def test_dynamic_worker_policy_keeps_opt_in_and_explicit_routes(cfg, gateway, label):
+    before = copy.deepcopy(cfg)
+    effective = home._worker_config(cfg, gateway)
+    assert placement._Cfg(effective).queue_label(gateway) == label
+    assert cfg == before
+
 
 
 @pytest.mark.parametrize('labels', [['pool:worker'], ['machine:macbook']])
@@ -56,9 +75,9 @@ def test_transport_preflights_actual_client_and_preserves_options(monkeypatch, a
                ('runs_on', 'parents', 'tenant', 'max_retries', 'initial_status', 'human_request'))
 
 
+@pytest.mark.parametrize('policy', ['explicit_worker', 'hub_pool'])
 @pytest.mark.parametrize('failure', ['unclaimable', 'exception'])
-def test_worker_planning_failure_is_typed_not_local(monkeypatch, failure):
-    from hermes_cli import kanban_creation_home as home
+def test_worker_planning_failure_is_typed_not_local(monkeypatch, failure, policy):
     from hermes_cli import kanban_worker_placement as workers
 
     def queue(*args):
@@ -66,8 +85,9 @@ def test_worker_planning_failure_is_typed_not_local(monkeypatch, failure):
             raise RuntimeError('registry unavailable')
 
     monkeypatch.setattr(workers, 'queue_decision', queue)
+    cfg = {'worker_queue': {'hub' if policy == 'hub_pool' else 'worker-a3': 'pool:worker'}}
     home_plan, _, decision = home.prepare({'title': 'must not stay on worker'},
-        cfg={'worker_queue': {'worker-a3': 'pool:worker'}}, gateway='worker-a3', machine_ok=lambda _: False)
+        cfg=cfg, gateway='worker-a3', machine_ok=lambda _: False)
     assert home_plan is not None
     assert decision['where'] == 'refuse'
     assert decision['pin'] == 'hub'

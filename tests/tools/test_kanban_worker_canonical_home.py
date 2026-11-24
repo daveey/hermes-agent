@@ -72,6 +72,7 @@ def test_canonical_home_failure_never_falls_back_local(gws, monkeypatch):
     assert worker.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == before
 
 
+@pytest.mark.parametrize('policy', ['explicit_worker', 'hub_pool'])
 @pytest.mark.parametrize('card,expected', [
     ({'title': 'portable follow-up'}, ['pool:worker']),
     ({'title': 'Inspect Desktop DOM', 'skills': ['session-status-panel', 'inspecting-hermes-desktop-dom']},
@@ -83,13 +84,16 @@ def test_canonical_home_failure_never_falls_back_local(gws, monkeypatch):
     ({'title': 'Explicit creator execution', 'placement': 'local'}, ['machine:worker-1']),
     ({'title': 'Explicit creator execution by name', 'placement': 'worker-1'}, ['machine:worker-1']),
 ])
-def test_disposable_hub_really_owns_worker_created_card(gws, monkeypatch, card, expected):
+def test_disposable_hub_really_owns_worker_created_card(gws, monkeypatch, card, expected, policy):
     hub, worker = gws
     worker.enter()
     monkeypatch.setattr(placement.reg, 'self_gateway', lambda: Path(os.environ['HERMES_HOME']).parent.name)
     monkeypatch.setattr(placement, 'linux_pool_gateway', lambda gateway, *a, **kw: gateway == nodes.WORKER)
-    monkeypatch.setattr(placement, 'config', lambda: {
-        'worker_queue': {nodes.WORKER: 'pool:worker'}, 'route': {nodes.WORKER: nodes.HUB}})
+    # Production enumerates intake gateways, not dynamic/ASG worker slot names.
+    cfg = ({'worker_queue': {nodes.HUB: 'pool:worker', 'macbook': 'pool:worker'}}
+           if policy == 'hub_pool' else
+           {'worker_queue': {nodes.WORKER: 'pool:worker'}, 'route': {nodes.WORKER: nodes.HUB}})
+    monkeypatch.setattr(placement, 'config', lambda: cfg)
     monkeypatch.setattr(placement, '_machine_picks_up', lambda labels: True)
     received = []
 

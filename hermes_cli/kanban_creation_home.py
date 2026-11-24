@@ -6,6 +6,21 @@ The receiving hub still owns all admission, dependency and origin-custody gates.
 from __future__ import annotations
 
 
+def _worker_config(cfg, gateway):
+    """Extend an opted-in hub pool to dynamic worker slots without editing config.
+
+    Production lists intake gateways (hub/Macs), not autoscaled worker names.
+    An explicit worker route still wins; an unconfigured install stays unchanged.
+    """
+    from hermes_cli import kanban_placement as placement
+    policy = placement._Cfg(cfg)
+    label = policy.queue_label('hub')
+    if (isinstance(gateway, str) and gateway.startswith('worker-')
+            and not policy.queue_label(gateway) and label):
+        return {**cfg, 'worker_queue': {**cfg['worker_queue'], gateway: label}}
+    return cfg
+
+
 def plan(args, *, cfg, gateway, machine_ok):
     """Return a hub-bound view/decision, or None for an ordinary non-pool gateway.
 
@@ -16,6 +31,7 @@ def plan(args, *, cfg, gateway, machine_ok):
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_worker_placement as workers
 
+    cfg = _worker_config(cfg, gateway)
     queued_gateway = bool(placement._Cfg(cfg).queue_label(gateway))
     if not queued_gateway:
         return None  # explicit opt-in to the fork's managed worker queue policy
@@ -60,6 +76,7 @@ def plan(args, *, cfg, gateway, machine_ok):
 
 def prepare(args, *, cfg, gateway, machine_ok):
     from hermes_cli import kanban_placement as placement
+    cfg = _worker_config(cfg, gateway)
     try:
         home = plan(args, cfg=cfg, gateway=gateway, machine_ok=machine_ok)
     except Exception as exc:  # health: allow BLE001 -- opted-in pool creates fail closed, never worker-local
