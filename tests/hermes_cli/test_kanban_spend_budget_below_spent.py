@@ -85,3 +85,13 @@ def test_a_restricted_stop_keeps_its_history_so_a_spent_limit_is_refused(kanban_
     cli.run_slash(f'spend-budget {tid} --runs 9 --reason x')
     with kbc.connect_closing() as conn:
         assert budget.card_limits(conn, tid, helpers.LIMITS).runs == 9
+
+
+def test_clearing_back_to_a_board_limit_already_spent_is_refused(kanban_home, monkeypatch):
+    tid = _card_with_spend(7)
+    cli.run_slash(f'spend-budget {tid} --exempt --reason standing')
+    monkeypatch.setattr(budget, 'limits', lambda cfg=None: budget.Limits(5, helpers.LIMITS.cache_read_tokens))
+    out = cli.run_slash(f'spend-budget {tid} --clear --reason done')
+    assert "the board's runs limit 5" in out and '--runs 12' in out and '--exempt' in out, out
+    with kbc.connect_closing() as conn:
+        assert budget.card_limits(conn, tid, budget.limits()) == (0, 0)

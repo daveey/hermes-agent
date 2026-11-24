@@ -56,7 +56,7 @@ def _spent_already(conn, tid: str, runs, cache) -> str:
     if not tripped:
         return ''
     return (f"kanban spend-budget: {tid}: " + '; '.join(tripped) + ". A limit counts spend already recorded, "
-            "so this would trip the budget at once. To stop the card, block or archive it instead.")
+            "so this would trip the budget at once. Use --exempt for no limit; to stop the card, block or archive it.")
 
 
 def command(args: argparse.Namespace) -> int:
