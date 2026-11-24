@@ -432,7 +432,7 @@ def test_review_malformed_historical_provenance_marks_source_unknown():
     event(conn, 'old-bad', 'scheduled', {'awaiting': []}, 99)
     row = describe(conn, 'root', now=200)
     assert row['evidence_state'] == 'unknown'
-    assert row['release']['authority'] == 'unavailable'
+    assert row['release']['authority'] == 'kanban_release'  # unknown provenance never vetoes release's own check
     conn.close()
 
 
@@ -649,8 +649,8 @@ def test_retained_actual_prerequisite_instruction_and_release_condition_are_visi
     assert row['blocker']['prerequisite'] == 'native kanban.sync.pickup on worker-x'
     assert row['blocker']['trigger'] == 'Verified native pickup'
     assert row['instruction'] == 'Restore native pickup, then verify the claimed process'
-    assert row['release']['condition'] == 'Native process claimed and verified'
-    assert row['release']['authority'] == 'unavailable'
+    assert row['release']['condition'].endswith('Recorded note: Native process claimed and verified')
+    assert row['release']['authority'] == 'kanban_release'  # held on a real stop: release would act
     conn.close()
 
 
@@ -1542,4 +1542,26 @@ def test_missing_command_table_returns_before_schema_lookup(monkeypatch):
         raise AssertionError('missing optional table cannot require a schema lookup')
     monkeypatch.setattr(reader, 'columns', unexpected)
     assert reader.pending('root') is None
+    conn.close()
+
+
+@pytest.mark.parametrize('data', [{'disposition': {'reason': 'scope_stopped'}},
+                                  {'disposition': {'reason': 'capability_unavailable'}, 'superseded_by_safety_stop': True}])
+def test_receipt_only_rows_never_name_the_release(data):
+    """With no pending stop, release refuses not_held; a receipt-only row (even one superseded by a safety stop)
+    stays 'unavailable'. Unknown evidence no longer vetoes the offer, so offer() is what excludes these."""
+    conn = fixture()
+    conn.execute("UPDATE tasks SET status='triage' WHERE id='root'")
+    event(conn, 'receipt', 'decision_retained', {'episode_uid': 'gone', **data}, 101)
+    row = describe(conn, 'root', now=200)
+    assert row['release']['authority'] == 'unavailable'
+    conn.close()
+
+
+def test_contained_event_without_column_keeps_release_unavailable():
+    """release refuses containment_hold from `contained` events too, not only tasks.containment_episode."""
+    conn = held_fixture()
+    event(conn, 'held', 'contained', {'episode': 'held'}, 150)
+    row = describe(conn, 'root', now=200)
+    assert row['release']['authority'] == 'unavailable'
     conn.close()

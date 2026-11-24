@@ -109,10 +109,14 @@ class Reader:
 
 
 def _release_offer(conn, tid: str) -> dict | None:
-    """What `hermes kanban release` would act on for ``tid`` (kanban_release.offer), else None. Read-only."""
+    """What `hermes kanban release` would act on for ``tid``, else None. Read-only. Mirrors kanban_release._eligible:
+    offer() (held status, pending stop, safety restriction) plus the same containment guard release refuses on,
+    which also reads `contained` events and sync quarantine, not only tasks.containment_episode."""
     try:
         from hermes_cli import kanban_release
-        return kanban_release.offer(conn, tid)
+        from hermes_cli.kanban_containment_guard import pending as contained
+        offer = kanban_release.offer(conn, tid)
+        return None if offer is None or contained(conn, tid) else offer
     except EVIDENCE_ERRORS:
         return None
 
@@ -240,7 +244,7 @@ def _describe(conn, tid, *, now, reader):
     if task is None:
         raise ValueError(f'unknown task: {tid}')
     events = reader.events(tid)
-    stop, _restricted, receipt_only = _state(reader, tid, events)
+    stop, _restricted, unknown = _state(reader, tid, events)
     schedule = next((e for e in events if e['kind'] in ('scheduled', 'continued')), None)
     # Notes/notices do not replace the material source or reset its deadline.
     source = stop or select(task['status'], events,
@@ -267,8 +271,10 @@ def _describe(conn, tid, *, now, reader):
              'deadline_at': next_action.get('escalate_at') or record(next_action.get('escalation')).get('at'),
              'containment': task.get('containment_episode'), 'pending_command': reader.pending(tid),
              'human_step': _human_step(task.get('human_request')),
-             'release_offer': _release_offer(conn, tid) if stop and not receipt_only else None,
-             'unknown': reader.synced or reader.partial or missing or bool(receipt_only) or bool(source and not reader.uid(source))
+             # _release_offer is release's own eligibility; unknown evidence never vetoes it. A receipt-only row
+             # (no pending stop) fails it because offer() requires the pending stop release acts on.
+             'release_offer': _release_offer(conn, tid) if stop else None,
+             'unknown': reader.synced or reader.partial or missing or bool(unknown) or bool(source and not reader.uid(source))
                         or bool(task.get('human_request') and not _human_step(task['human_request']))}
     if source and not any((stop, facts['containment'], facts['pending_command'])):
         from hermes_cli.kanban_actionability_creation import validated_intent

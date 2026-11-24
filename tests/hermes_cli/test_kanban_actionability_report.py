@@ -160,7 +160,7 @@ def test_stopped_scope_wins_over_status_comments_and_notices(board):
     assert before['contract_key'] == after['contract_key']
     assert before['escalation']['at'] == after['escalation']['at']
     assert after['action'] == 'decide_scope'
-    assert after['release']['authority'] == 'unavailable'
+    assert after['release']['authority'] == 'kanban_release'  # named; comments and notices still never release it
     assert kb.claim_task(board, tid) is None
 
 
