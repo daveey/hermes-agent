@@ -1643,9 +1643,13 @@ def _board_slug(path: Path) -> str:
     return path.parent.name if path.parent.parent.name == "boards" else "default"
 
 
-def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...], *,
+                        scope: tuple | None = None) -> list[dict[str, Any]]:
     """Tasks on one board that any of ``ids`` created or is a ``tui`` subscriber
-    of, in ``statuses`` — the same pairs ``_read_counts`` counts."""
+    of, in ``statuses`` — the same pairs ``_read_counts`` counts.
+
+    Pass ``scope=(gateway, profile)`` to skip ``card_scope(path)`` (explicit home).
+    """
     with cached_ro(path) as conn, _execution_transaction(conn) as read_at:
         conn.row_factory = sqlite3.Row
         if "session_id" not in table_columns(conn, "tasks"):
@@ -1653,8 +1657,13 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         from hermes_cli.kanban_session_outcome_tasks import select_listed_local_tasks
         found = select_listed_local_tasks(conn, ids, statuses)
         from hermes_cli.kanban_session_acquisition import LEGACY_REPLICA, enrich_session_tasks
-        from hermes_cli.kanban_execution_observations import card_scope
-        enrich_session_tasks(conn, path, found, observed_at=read_at, scope=card_scope(path), replica=LEGACY_REPLICA)
+        if scope is None:
+            from hermes_cli.kanban_execution_observations import card_scope
+            scope = card_scope(path)
+            replica = LEGACY_REPLICA
+        else:
+            replica = None
+        enrich_session_tasks(conn, path, found, observed_at=read_at, scope=scope, replica=replica)
     board = _board_slug(path)
     return [{**t, "board": board} for t in found.values()]
 

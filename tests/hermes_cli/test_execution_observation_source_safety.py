@@ -113,6 +113,18 @@ def test_add_cards_never_breaks_the_legacy_rows_when_scope_or_projection_fails(m
     assert value["state"] == "unknown" and value["unknown_reason"] == "missing_qualified_identity"
 
 
+def test_add_cards_uses_passed_scope_without_local_scope(monkeypatch):
+    def boom():
+        raise AssertionError("local_scope")
+
+    monkeypatch.setattr(keo, "local_scope", boom)
+    rows = [{"id": "t1", "status": "running", "title": "keep", "board": "default"}]
+    out = keo.add_cards(rows, gateway="gw-home", profile="researcher")
+    (value,) = [v for v in out[0]["execution_observations"] if v.get("source") == "kanban.card"]
+    assert value["identity"]["gateway"] == "gw-home"
+    assert value["identity"]["profile"] == "researcher"
+
+
 # ── source failure keeps same-execution history only ─────────────────────────────────────────────
 
 

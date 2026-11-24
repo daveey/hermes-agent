@@ -201,15 +201,28 @@ def _merge(row, observations, *, keep_empty=False):
         row.pop("execution_observations", None)
 
 
-def add_cards(rows, *, now=None):
-    """Attach optional work evidence without replacing independent capacity diagnostics."""
+_SCOPE_UNSET = object()
+
+
+def add_cards(rows, *, now=None, gateway=_SCOPE_UNSET, profile=_SCOPE_UNSET):
+    """Attach optional work evidence without replacing independent capacity diagnostics.
+
+    Omit ``gateway``/``profile`` for the legacy process-home scope. Passing either
+    (including ``None``) binds the observation identity and never calls ``local_scope``.
+    """
     if not rows:
         return rows
-    try:
-        gateway, profile = local_scope()
-    except ADAPTER_ERRORS:
-        _log.debug("execution observation scope unavailable", exc_info=True)
-        gateway = profile = None
+    if gateway is _SCOPE_UNSET and profile is _SCOPE_UNSET:
+        try:
+            gateway, profile = local_scope()
+        except ADAPTER_ERRORS:
+            _log.debug("execution observation scope unavailable", exc_info=True)
+            gateway = profile = None
+    else:
+        if gateway is _SCOPE_UNSET:
+            gateway = None
+        if profile is _SCOPE_UNSET:
+            profile = None
     for row in rows:
         try:
             if row.get("_execution_error") and not isinstance(row.get("_execution_done"), dict):

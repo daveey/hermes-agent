@@ -869,10 +869,24 @@ def _released_closed(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:
     return bool(card.get("released")) and card.get("status") in TERMINAL_STATUSES and card.get("status") in statuses
 
 
+def _replica_scope(
+    replicas: Optional[list[tuple[str, Path]]], profile: Optional[str],
+) -> tuple[list[tuple[str, Path]], str]:
+    """Resolve replica paths and origin profile; omitted values use process home."""
+    if replicas is None:
+        from hermes_cli import kanban_sync_client as ksc
+        replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
+    if profile is None:
+        from hermes_cli.profiles import get_active_profile_name
+        profile = get_active_profile_name()
+    return replicas, profile
+
+
 def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES,
                   replicas: Optional[list[tuple[str, Path]]] = None, *, now: Optional[float] = None,
                   ledger_fallback: bool = True, unreadable_out: Optional[list[str]] = None,
-                  stale_ok: bool = False, origin_cards: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
+                  stale_ok: bool = False, origin_cards: Optional[list[dict[str, Any]]] = None,
+                  profile: Optional[str] = None) -> list[dict[str, Any]]:
     """This gateway's chats' (``session_ids``, one lineage; ``None`` = every chat) unreleased links to cards created
     on OTHER gateways, from every board's replica, shaped like the origin-ledger rows ``session_tasks`` appends.
 
@@ -892,14 +906,10 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
     - ``stale_ok`` (the Desktop linked-card strip): the owner labels come from the last ledger projection rather
       than waiting behind a rebuild of it. [daveey] Without it the strip's ``stale_ok`` stopped at this call and
       ``/api/session-kanban-tasks`` queued on ``_links_lock`` for every board write (3-7 s in a wake burst)."""
-    from hermes_cli.profiles import get_active_profile_name
     ids = None if session_ids is None else set(str(s) for s in session_ids if s)
     if ids is not None and not ids:
         return []
-    if replicas is None:
-        from hermes_cli import kanban_sync_client as ksc
-        replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
-    profile = get_active_profile_name()
+    replicas, profile = _replica_scope(replicas, profile)
     now = time.time() if now is None else now
     stale_after = _stale_after_s()
     index: Optional[tuple[dict[tuple[str, str], list[tuple[str, str, str, bool]]], list[dict[str, Any]]]] = None
