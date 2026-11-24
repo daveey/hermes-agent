@@ -103,6 +103,15 @@ async def test_a_restart_budget_ending_on_a_stall_answers_the_restart(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_the_newest_restart_verdict_is_the_one_answered(tmp_path, monkeypatch, caplog):
+    clock = _Clock()
+    _reads(monkeypatch, [GatewayDiscovery('draining'), STARTING, TIMEOUT], clock)
+    with caplog.at_level('INFO', logger=sod.__name__):
+        assert await sod.discover_session_owner(tmp_path, clock=clock, sleep=clock.sleep) is STARTING
+    assert 'last read timed out mid-restart' in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_a_stall_without_a_restart_seen_stays_control_timeout(tmp_path, monkeypatch):
     clock = _Clock()
     seen = _reads(monkeypatch, [TIMEOUT], clock)
@@ -111,14 +120,16 @@ async def test_a_stall_without_a_restart_seen_stays_control_timeout(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_a_start_ending_on_stalls_answers_the_starting_503(tmp_path, monkeypatch):
-    """The write path: the starting 503 that Desktop's restart replay matches, nothing forwarded."""
+@pytest.mark.parametrize('settling, detail', [(STARTING, sod.STARTING_DETAIL),
+                                              (GatewayDiscovery('draining'), sod.DRAINING_DETAIL)])
+async def test_a_restart_ending_on_stalls_answers_the_restart_503(tmp_path, monkeypatch, settling, detail):
+    """The write path: the restart 503 that Desktop's restart replay matches, nothing forwarded."""
     from hermes_cli import web_server_sessions
 
     _fast_poll(monkeypatch)
     monkeypatch.setattr(sod, 'OWNER_STARTING_BUDGET_S', 0.3)
     request = _standalone_request(monkeypatch, tmp_path)
-    _reads(monkeypatch, [STARTING, TIMEOUT])
+    _reads(monkeypatch, [settling, TIMEOUT])
     attempts, connects = [], []
     monkeypatch.setattr('hermes_cli.gateway_client.connect_gateway', lambda **kw: connects.append(kw))
     with _held(attempts) as held:
@@ -128,7 +139,7 @@ async def test_a_start_ending_on_stalls_answers_the_starting_503(tmp_path, monke
                 request, None, 's1', request_id='req-1', expected_revision=0,
                 operation='sidebar', payload={'archived': True})
     assert exc.value.status_code == 503
-    assert exc.value.detail == sod.STARTING_DETAIL
+    assert exc.value.detail == detail
     assert len(attempts) == 1 and connects == []
 
 

@@ -40,11 +40,14 @@ concurrent writes do not grow with N. Each caller keeps its own deadline and att
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 # Total wall-clock spent discovering one write's owner, from the request's point of view.
 OWNER_DISCOVERY_BUDGET_S = 6.0
@@ -177,7 +180,9 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
     last identify. A bare ``control_timeout`` is not replayed by Desktop (it reads it as a stall the
     server already rode out), so a slow restart turned into a manual Retry (hub, 2026-11-24 16:00Z:
     a core-update restart took over 40 s with 1.5-4.8 s loop stalls; an archive sent 15 s in ended
-    on ``control_timeout`` after the full 24 s starting budget).
+    on ``control_timeout`` after the full 24 s starting budget). The cost: an owner that answered
+    ``starting`` once and then hangs for good is replayed by Desktop for its restart window (~150 s)
+    before the user sees Retry, instead of ~24 s. Nothing is written either way.
 
     Reads are shared with concurrent callers for the same home (``_shared_read``); the shared
     read is shielded, so a caller that leaves on its own deadline never cancels it for others."""
@@ -207,5 +212,6 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
         elif not is_transient(discovery):
             return discovery
     if settled is not None and is_transient(discovery):
+        _log.info('owner discovery for %s: last read timed out mid-restart; answering %s', home, settled.state)
         return settled  # still restarting: the retryable verdict Desktop replays
     return discovery or _timed_out()  # the first read always runs; this only types the result
