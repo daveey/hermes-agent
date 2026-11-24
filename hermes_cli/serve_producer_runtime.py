@@ -213,6 +213,8 @@ class ProjectionRelay:
                             while len(self._outputs) > MAX_KEYS or sum(len(v[0]) for v in self._outputs.values()) > MAX_BYTES:
                                 self._outputs.popitem(last=False)
                         else:
+                            # A failed refresh cannot acknowledge an older publication.
+                            self._outputs.pop(key, None)
                             self.error = result.get('error', 'producer unavailable')
         except (OSError, EOFError, ValueError) as exc:
             self.error = type(exc).__name__
