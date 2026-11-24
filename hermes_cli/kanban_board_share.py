@@ -241,6 +241,7 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     except Exception:
         return 0
     total = 0
+    per_board: dict[str, int] = {}  # per-board use of the host slots, for the governor snapshot
     for meta in boards:
         slug = meta.get("slug") or _kb.DEFAULT_BOARD
         try:
@@ -250,6 +251,7 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
                 continue
             if counts is not None and resolved in counts:
                 total += counts[resolved]
+                per_board[slug] = counts[resolved]
                 continue
             if not path.exists():
                 continue
@@ -260,10 +262,13 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
                 with contextlib.suppress(Exception):
                     other.close()
             total += running
+            per_board[slug] = running
             if counts is not None:
                 counts[resolved] = running
         except Exception:
             continue
+    from hermes_cli.kanban_governors import board_use
+    board_use(per_board)
     return total
 
 

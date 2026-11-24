@@ -127,7 +127,11 @@ def row_class(row):
 
 def pool_admits(result, row):
     budget = getattr(result, "admission_budget", None)
-    return budget is None or budget.admits(row_class(row))
+    if budget is None or budget.admits(row_class(row)):
+        return True
+    from hermes_cli.kanban_governors import charge
+    charge(row["id"], "admission_pool", detail={"class": row_class(row)})
+    return False
 
 
 def pool_take(result, row):
@@ -173,9 +177,13 @@ def host_remaining(regular_cap, running_count, board, result=None):
         free = dispatch_pools(regular_cap)
     except (OSError, ValueError, TypeError):
         return 0
+    from hermes_cli.kanban_governors import host_use
     if free is None:
-        return regular_cap - running_count - count_running_tasks_other_boards(board)
+        others = count_running_tasks_other_boards(board)
+        host_use(regular_cap, running_count, others)  # the governor snapshot shows the census this tick used
+        return regular_cap - running_count - others
     regular, priority, used, priority_used = free
+    host_use(regular_cap, running_count, None if used is None else max(0, used - running_count))
     if result is not None:
         result.admission_budget = PoolBudget(regular, priority)
         if regular <= 0:

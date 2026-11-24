@@ -151,6 +151,8 @@ def global_hold(conn, reason, *, gate='capacity'):
 
 
 def capacity_tail(rows, lane_by_id, reason):
+    from hermes_cli.kanban_governors import tail
+    tail(rows, reason)  # the governor snapshot names the cap that set the budget
     for row in rows:
         note(row['id'], 'capacity', reason, stage='claim', status=lane_by_id.get(row['id'], 'ready'))
 
@@ -200,12 +202,14 @@ def read(conn, *, task_id=None, limit=1000):
 
 
 @contextmanager
-def dispatch_pass(conn, *, dry_run=False):
+def dispatch_pass(conn, *, dry_run=False, caps=None):
+    """``caps``: the tick's concurrency settings, for the governor snapshot (``kanban_governors.tick``)."""
     import socket
     from hermes_cli.kanban_db_sync import sync_state
+    from hermes_cli.kanban_governors import tick as governor_tick
     state = sync_state(conn)
     worker = str(state['gateway_id']) if state else socket.gethostname()
-    with collect(worker=worker) as capture:
+    with collect(worker=worker) as capture, governor_tick(conn, caps):
         yield
     if not dry_run:
         try:

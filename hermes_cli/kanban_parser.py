@@ -756,6 +756,12 @@ _SPECS = [
                    _arg("--report", action="store_true", help="Capacity-class effect report (ready-wait p50)"),
                    _arg("--days", type=int, default=7, help="Report window in days (default 7)"),
                    _json_flag()], help="Ready/review dispatch order with hub admission score breakdowns"),
+    _cmd("governors", [_arg("--board", default=argparse.SUPPRESS, metavar="<slug>", help="One board (default: current)"),
+                       _arg("--all-boards", action="store_true", help="Every board on this home"), _json_flag()],
+         help="What holds idle cards: per governor the reading, threshold, since and cards charged (last tick)"),
+    _cmd("why", [_TASK_ID, _arg("--board", default=argparse.SUPPRESS, metavar="<slug>", help="The card's board"),
+                 _arg("--live", action="store_true", help="Walk the dispatcher's rules now (read-only dry run)"),
+                 _json_flag()], help="Which governor stops a card, and what else holds it"),
     _cmd("lanes", children=("lanes_action", [
         _cmd("show", [_arg("--hours", type=float, default=6.0, help="Trailing window for actual share (default 6)"),
                       _arg("--local", action="store_true", help="This board only, not the fleet replica"),

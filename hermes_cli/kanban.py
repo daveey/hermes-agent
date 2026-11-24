@@ -1878,6 +1878,8 @@ _HANDLERS = {
     "owner-chats": lambda a: importlib.import_module("hermes_cli.kanban_owner_chat").command(a),
     "delegate": lambda a: importlib.import_module("hermes_cli.kanban_scope_delegate").command(a),
     "release": lambda a: importlib.import_module("hermes_cli.kanban_release").command(a),
+    "governors": lambda a: importlib.import_module("hermes_cli.kanban_governors_cli").governors_command(a),
+    "why": lambda a: importlib.import_module("hermes_cli.kanban_governors_cli").why_command(a),
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote, "resume": _cmd_resume, "quota-release": _cmd_quota_release,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch, "source-release": _cmd_source_release,

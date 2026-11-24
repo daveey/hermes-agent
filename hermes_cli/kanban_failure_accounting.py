@@ -38,6 +38,9 @@ def _record_task_failure(
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli import kanban_failure_summary as summary
     import json
+    if outcome == "spawn_failed":  # the governor snapshot: this tick tried the card and its spawn failed [daveey]
+        from hermes_cli.kanban_governors import charge
+        charge(task_id, "spawn_failed", detail={"reason": str(error)[:160], "infrastructure": infrastructure})
 
     evidence = {"error": error, **(event_payload_extra or {}), **(diagnostic or {})}
     refusal = not infrastructure and summary.classify_failure(outcome, evidence) == "provider_refusal"

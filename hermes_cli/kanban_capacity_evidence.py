@@ -188,6 +188,9 @@ def observe_dispatch(conn, result, *, board, dry_run=False, update_drain=False):
     # One durable reason per passed-over card and ready episode (kanban-dd62aef001); never raises. [daveey]
     from hermes_cli.kanban_dispatch_skip import record_tick
     record_tick(conn, result, dry_run=dry_run)
+    # Which governor stopped each idle card this tick, per board (``kanban_governors``); never raises. [daveey]
+    from hermes_cli.kanban_governors import record_tick as record_governors
+    record_governors(conn, result, dry_run=dry_run, update_drain=update_drain)
 
 
 def _unknown(reason, **fields):

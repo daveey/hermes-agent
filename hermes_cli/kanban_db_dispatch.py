@@ -1815,15 +1815,13 @@ def dispatch_once(
     """
     def _locked_tick() -> DispatchResult:
         from hermes_cli.kanban_candidate_receipts import dispatch_pass
-        with dispatch_pass(conn, dry_run=dry_run):
+        caps = dict(max_spawn=max_spawn, max_in_progress=max_in_progress, spawn_quota=spawn_quota,
+                    max_in_progress_per_profile=max_in_progress_per_profile)
+        with dispatch_pass(conn, dry_run=dry_run, caps=caps):  # caps: the governor snapshot's thresholds
             result = _dispatch_once_locked(
-                conn, spawn_fn=spawn_fn, ttl_seconds=ttl_seconds, dry_run=dry_run,
-                max_spawn=max_spawn, max_in_progress=max_in_progress,
-                failure_limit=failure_limit, stale_timeout_seconds=stale_timeout_seconds,
-                board=board, default_assignee=default_assignee,
-                max_in_progress_per_profile=max_in_progress_per_profile,
-                reconcile_orphans=reconcile_orphans, spawn_quota=spawn_quota,
-            )
+                conn, spawn_fn=spawn_fn, ttl_seconds=ttl_seconds, dry_run=dry_run, failure_limit=failure_limit,
+                stale_timeout_seconds=stale_timeout_seconds, board=board, default_assignee=default_assignee,
+                reconcile_orphans=reconcile_orphans, **caps)
         from hermes_cli.kanban_capacity_evidence import observe_dispatch
         observe_dispatch(conn, result, board=board, dry_run=dry_run,
                          update_drain=observation_update_drain)

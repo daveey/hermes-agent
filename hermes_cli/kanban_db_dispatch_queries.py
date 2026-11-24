@@ -38,11 +38,13 @@ def lane_rows(conn: sqlite3.Connection, status: str, *, marked_first: bool = Fal
         f"ORDER BY {DISPATCH_ORDER}"
     ).fetchall()
     from hermes_cli.kanban_containment_connections import drop_held
-    rows = drop_held(conn, rows)
+    from hermes_cli.kanban_governors import dropped  # the rows each filter removes are charged to its governor
+    rows = dropped(rows, drop_held(conn, rows), "containment")
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     from hermes_cli.kanban_lanes import drop_paused
     from hermes_cli.kanban_lane_workers import drop_full
-    rows = order_with_remote_waiters(conn, drop_full(conn, drop_paused(conn, rows)))
+    rows = dropped(rows, drop_paused(conn, rows), "lane_paused")
+    rows = order_with_remote_waiters(conn, dropped(rows, drop_full(conn, rows), "lane_max_workers"))
     if marked_first:  # replica donation reorders within a class, never across the pool partition
         rows.sort(key=lambda row: row["admission_class"] not in ("capacity", "urgent"))
     return rows

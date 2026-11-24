@@ -327,7 +327,7 @@ def reserve_hold(state: Any, provider: str, now: float, cfg: lp.PacingConfig) ->
             "detail": f"{accounts} account(s) all at reserve"}
 
 
-def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict]]:
+def _verdicts(conn, task, providers, lane, cfg, host=None, refresh=True) -> Optional[list[dict]]:
     """One verdict per governed candidate pool at reserve (:func:`reserve_hold`, after refreshing it); None when
     none is (the card starts as routed). ``host``: the board whose dispatcher reads the pools (pickup judges a
     replica card for this machine).
@@ -340,7 +340,8 @@ def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict
     now = time.time()
     verdicts = []
     for provider in providers:
-        pace_for(host, provider, cfg, now)
+        if refresh:
+            pace_for(host, provider, cfg, now)
         verdict = reserve_hold(_hold_state(), provider, now, cfg)
         if verdict is not None:
             verdicts.append(verdict)
@@ -532,8 +533,10 @@ def admission_skip(stored: Any) -> Optional[dict[str, Any]]:
             **({"until": min(until)} if until else {})}
 
 
-def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run: bool = False) -> bool:
-    """True when the card must wait for its provider's pool to come back under reserve (recorded on ``result``)."""
+def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run: bool = False,
+         refresh: bool = True) -> bool:
+    """True when the card must wait for its provider's pool to come back under reserve (recorded on ``result``).
+    ``refresh=False`` judges the pools as stored, with no usage read (``kanban_governors_explain``)."""
     try:
         if not dry_run:
             # A fresh judgment: an offer from an earlier tick whose claim never happened must not steer this one.
@@ -544,7 +547,7 @@ def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run:
         if judged is None:
             return False
         task, providers = judged
-        verdicts = _verdicts(conn, task, providers, lane, cfg)
+        verdicts = _verdicts(conn, task, providers, lane, cfg, refresh=refresh)
         if verdicts is None:
             return False
         moved = _pace_alternate(conn, task, lane, cfg, conn, verdicts)
