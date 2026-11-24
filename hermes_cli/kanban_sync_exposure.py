@@ -66,8 +66,14 @@ def _sources(conn, op, ops, legacy_parents):
     return sources
 
 
+def _observation_capability(capability):
+    """Unsupported or non-object capability is unidentified, never a principal set."""
+    return capability if isinstance(capability, dict) else {}
+
+
 def _observe(conn, ops, board, endpoint, ident, capability, *, legacy_parents=()):
     """Append under the writer reservation; COMMIT is a prerequisite to sending."""
+    capability = _observation_capability(capability)
     principal = capability.get('gateway_principal')
     incarnation = capability.get('board_incarnation')
     authenticated = all(isinstance(value, str) and value for value in (principal, incarnation))
@@ -141,7 +147,7 @@ def send(hub, conn, board, ops, *, replay=None, legacy_parents=()):
             if exc.status not in (404, 405, 501, 503):
                 raise
             capability = {}
-        _observe(conn, ops, board, endpoint, transport.ident, capability,
+        _observe(conn, ops, board, endpoint, transport.ident, _observation_capability(capability),
                  legacy_parents=legacy_parents if replay is None else ())
         body = dict(replay, ops=ops) if replay is not None else dict(ops=ops)
         return transport._call('POST', endpoint, body)
