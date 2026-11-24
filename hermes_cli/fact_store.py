@@ -45,6 +45,11 @@ class Snapshot:
         return Ready(fact.value["encoded"], self.epoch, self.rev)
 
 
+def _same_content(old: Fact | None, fact: Fact) -> bool:
+    """*fact* equals the stored *old* apart from ``rev``: publishing it changes nothing."""
+    return old is not None and replace(fact, rev=old.rev) == old
+
+
 class FactStore:
     """Owner publishes entire generations; request readers retain immutable snapshots."""
 
@@ -109,15 +114,34 @@ class FactStore:
                 deleted_keys: Iterable[FactKey] = ()) -> int:
         # Validate wire values before committing, and never encode under the publication lock.
         # Reserve room for owner-generated stale health without budget growth.
-        prepared = []
+        # [daveey] An upsert equal to the stored fact (rev aside) is not encoded: its size is only used when it
+        # changes, and its content was validated when it was stored. The reducers hand every dirty derived fact
+        # back unchanged, and on the hub (2026-11-23) re-encoding them was 45% of the fact-change-feed thread,
+        # which held the GIL ~65% of the time and stretched every syscall-heavy request (/api/profiles/sessions
+        # up to 120 s). If a skipped fact turns out to be a change at commit, all are sized and it commits once more.
+        upserts = list(upserts)
+        deleted_keys = tuple(deleted_keys)
         for fact in upserts:
             deadline = fact.valid_until
             if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
                 raise ValueError("invalid_validity_deadline")
-            prepared.append((fact, encoded_size(fact) + 128))
-        return self._publish(prepared, deleted_keys)
+        with self._condition:
+            current = self._facts
+        sizes = [None if _same_content(current.get(fact.key), fact) else encoded_size(fact) + 128
+                 for fact in upserts]
+        revision = self._publish(list(zip(upserts, sizes)), deleted_keys)
+        if revision is None:
+            # A skipped fact is a change after all: the store moved meanwhile, or this batch's own deletes or an
+            # earlier duplicate key changed what it is compared with. Size every skipped fact outside the lock
+            # and commit once more; with every fact sized, _publish cannot refuse again.
+            prepared = [(fact, encoded_size(fact) + 128 if size is None else size)
+                        for fact, size in zip(upserts, sizes)]
+            revision = self._publish(prepared, deleted_keys)
+        return revision
 
     def _publish(self, prepared, deleted_keys):
+        """Commit *prepared* ``(fact, size)``; None (nothing committed) when a fact passed unsized because it
+        matched the store has since become a change, so the caller sizes it outside the lock and retries."""
         with self._condition:
             staged = self._facts
             sizes = self._sizes
@@ -130,6 +154,8 @@ class FactStore:
                 old = staged.get(fact.key)
                 normalized = replace(fact, rev=old.rev if old else 0)
                 if old != normalized:
+                    if size is None:
+                        return None
                     staged = staged.put(fact.key, replace(fact, rev=self._rev + 1))
                     sizes = sizes.put(fact.key, size)
                 touched.add(fact.key)
