@@ -10,18 +10,35 @@ def _text(value):
     return value if isinstance(value, str) and value.strip() else None
 
 
+# Each of these leaves (or re-enters) the todo phase: an obligation never carries across one.
+EPISODE_EXITS = frozenset({'promoted', 'promoted_manual', 'claimed', 'reclaimed', 'scheduled', 'continued',
+                           'blocked', 'unblocked', 'completed', 'archived', 'review_requested',
+                           'failure_finalized', 'spend_budget_triaged', 'reopened'})
+
+
+def _todo_entry(kind, payload):
+    """Sources that put (or keep) a card waiting in todo on its parents."""
+    return kind in ('dependency_wait', 'linked') or (kind == 'unblocked' and payload.get('status') == 'todo')
+
+
 def intent_for(task, kind, payload, *, now):
     """Derive once from source clocks; the same pure function verifies recorded intent."""
     if not isinstance(payload, dict):
         return None
     timed = kind == 'scheduled' or (kind == 'continued' and payload.get('status') == 'scheduled')
-    if not timed and kind not in ('blocked', 'dependency_wait'):
+    todo = _todo_entry(kind, payload)
+    if not timed and kind != 'blocked' and not todo:
         return None
-    status = 'scheduled' if timed else ('todo' if kind == 'dependency_wait' or payload.get('kind') == 'assignment' else 'blocked')
+    status = 'scheduled' if timed else ('todo' if todo or payload.get('kind') == 'assignment' else 'blocked')
     if task.get('status') != status:
         return None
     wake = positive_time(payload.get('wake_at')) if timed else None
     deadline = wake + 600 if wake else (now + 86400 if not timed else None)
+    # A new edge on a card already waiting in todo keeps that episode's frozen
+    # obligation, overdue included; it can only ever be earlier, never renewed.
+    carried = positive_time(payload.get('actionability_carried_deadline')) if kind == 'linked' else None
+    if carried and deadline:
+        deadline = min(deadline, carried)
     human = payload.get('human_request')
     human = _text(human.get('action')) if isinstance(human, dict) else None
     parents = payload.get('actionability_parent_ids') or []
@@ -34,7 +51,7 @@ def intent_for(task, kind, payload, *, now):
         reason = 'wake_invalid'
     elif timed and not valid_awaiting(payload.get('awaiting')):
         reason = 'producer_malformed'
-    elif deadline is None or deadline <= now:
+    elif deadline is None or (deadline <= now and deadline != carried):
         reason = 'deadline_not_future'
     elif (timed and not (payload.get('awaiting') or _text(payload.get('wake_check')))) or (not timed and not human and not dependencies):
         reason = 'trigger_missing'
@@ -48,19 +65,46 @@ def intent_for(task, kind, payload, *, now):
             'invalid_reason': reason, 'execution_authority': False}
 
 
+def _carried(conn, task_id, task):
+    """The current todo episode's frozen obligation, read in the writer's txn before this event."""
+    from hermes_cli.kanban_actionability_selection import select
+    events = [dict(r) for r in conn.execute(
+        'SELECT * FROM task_events WHERE task_id=? ORDER BY id', (task_id,))]
+    key = lambda e: (e['created_at'], e['id'])  # the census source order
+    source = select('todo', events, order_key=key)
+    if source is None or any(e['kind'] in EPISODE_EXITS and key(e) > key(source) for e in events):
+        return None
+    try:
+        data = json.loads(source['payload'] or 'null')
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    intent = validated_intent(task, {'kind': source['kind'], 'created_at': source['created_at'], 'data': data})
+    # Provenance: the synced event uid, or the local event id on an unsynced board.
+    return (intent['deadline_at'], source.get('uid') or str(source['id'])) if intent and intent['status'] == 'todo' else None
+
+
 def stamp(conn, task_id, kind, payload, *, now):
     """Freeze ordinary administrative policy with the actual source event clock."""
-    if kind not in ('scheduled', 'blocked', 'continued', 'dependency_wait'):
+    if kind not in ('scheduled', 'blocked', 'continued', 'dependency_wait', 'linked', 'unblocked'):
         return payload
     original = payload
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+    if kind in ('linked', 'unblocked') and (row is None or row['status'] != 'todo' or not isinstance(payload, dict)):
+        return payload  # only a todo entry; every other status keeps its own source
     if isinstance(payload, dict):
         from hermes_cli.kanban_db_sync import run_uid
         from hermes_cli.kanban_actionability_parents import snapshot
         parents = [r[0] for r in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (task_id,))]
+        if kind in ('linked', 'unblocked') and not parents:
+            return original  # no parent to wait on: not a dependency wait, so nothing to freeze
         payload = {**payload, 'actionability_parent_ids': parents,
                    'actionability_parent_states': snapshot(conn, parents),
                    'actionability_run_uid': run_uid(conn, row['current_run_id']) if row else None}
+        carried = _carried(conn, task_id, dict(row)) if kind == 'linked' and row else None
+        if carried:
+            payload['actionability_carried_deadline'], payload['actionability_carried_from'] = carried
     intent = intent_for(dict(row), kind, payload, now=now) if row else None
     return {**payload, 'actionability_intent': intent} if intent is not None else original
 

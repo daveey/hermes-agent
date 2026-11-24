@@ -3,10 +3,20 @@ from __future__ import annotations
 
 import json
 
-KINDS = {'todo': ('created', 'linked', 'dependency_wait'), 'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
+KINDS = {'todo': ('created', 'linked', 'dependency_wait', 'unblocked'),
+         'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
          'review': ('review_requested', 'created'), 'blocked': ('blocked',),
          'scheduled': ('scheduled', 'continued'),
          'triage': ('failure_finalized', 'spend_budget_decision_ready', 'created'), 'running': ('claimed',)}
+
+
+def _data(event):
+    try:
+        raw = event.get('payload')
+        data = raw if isinstance(raw, dict) else json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def select(status, events, *, order_key, episode=None):
@@ -14,14 +24,15 @@ def select(status, events, *, order_key, episode=None):
     def assignment(event):
         if status != 'todo' or event.get('kind') != 'blocked':
             return False
-        try:
-            raw = event.get('payload')
-            data = raw if isinstance(raw, dict) else json.loads(raw)
-        except (TypeError, ValueError):
-            return False
-        return isinstance(data, dict) and data.get('kind') == 'assignment' and not any(
+        data = _data(event)
+        return data is not None and data.get('kind') == 'assignment' and not any(
             e.get('kind') == 'unblocked' and order_key(e) > order_key(event) for e in events)
 
-    candidates = [e for e in events if e.get('uid') == episode] if episode else [
-        e for e in events if e['kind'] in KINDS.get(status, ()) or assignment(e)]
+    def matches(event):
+        if event['kind'] not in KINDS.get(status, ()):
+            return assignment(event)
+        # An unblock is a todo source only when parents re-gated it there; a release to ready is not.
+        return status != 'todo' or event['kind'] != 'unblocked' or (_data(event) or {}).get('status') == 'todo'
+
+    candidates = [e for e in events if e.get('uid') == episode] if episode else [e for e in events if matches(e)]
     return max(candidates, key=order_key) if candidates else None
