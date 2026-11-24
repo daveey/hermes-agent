@@ -66,6 +66,90 @@ def test_deferred_gap_reads_lone_trailing_write(monkeypatch, tmp_path):
     assert not writes
 
 
+def test_ready_source_is_not_redrained_during_coalesce(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(loop, 'time', clock)
+    reads, waits, beats = [], [], []
+
+    class Events:
+        control_only = False
+
+        def wait(self, timeout):
+            if clock.is_set():
+                return False
+            assert not waits or clock.now > waits[-1], 'ready source redrained without blocking'
+            waits.append(clock.now)
+            if clock.now == 0:
+                clock.now = .1
+            return True
+
+    def refresh():
+        reads.append(clock.now)
+        if len(reads) == 2:
+            clock.set()
+
+    loop.run(Events(), clock, SimpleNamespace(held=lambda: True, beat=lambda: beats.append(clock.now)),
+             refresh, interval=1, coalesce=3, floor_all=True)
+    assert reads == [0, 3]
+    assert waits == [0, 1, 2, 3]
+    assert beats == [0, 1, 2, 3], 'coalescing must preserve lease maintenance'
+
+
+def test_control_then_source_during_floor_keeps_source_classification(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(loop, 'time', clock)
+    seen = []
+
+    class Events:
+        control_only = False
+
+        def wait(self, timeout):
+            if clock.is_set():
+                return False
+            if clock.now == 0:
+                clock.now = .1
+                self.control_only = True
+                return True
+            assert clock.now == 1, 'source hint should be drained at the lease boundary'
+            self.control_only = False
+            return True
+
+    events = Events()
+
+    def refresh():
+        seen.append(events.control_only)
+        if len(seen) == 2:
+            clock.set()
+
+    loop.run(events, clock, SimpleNamespace(held=lambda: True, beat=lambda: None),
+             refresh, interval=1, coalesce=1, floor_all=True)
+    assert seen == [False, False], 'queued source invalidation must not become a control-only read'
+
+
+def test_stop_during_floor_does_not_drain_or_refresh(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(loop, 'time', clock)
+    reads = []
+
+    def stopped_wait(timeout):
+        clock.set()
+        return True
+
+    clock.wait = stopped_wait
+
+    class Events:
+        control_only = False
+
+        def wait(self, timeout):
+            assert clock.now == 0, 'stop must not drain after the coalesced wait'
+            clock.now = .1
+            return True
+
+    loop.run(Events(), clock, SimpleNamespace(held=lambda: True, beat=lambda: None),
+             lambda: reads.append(clock.now), interval=1, coalesce=3, floor_all=True)
+    assert reads == [0]
+
+
 def test_failed_wait_rearms_with_source_refresh(monkeypatch):
     clock = Clock()
     monkeypatch.setattr(loop, 'time', clock)

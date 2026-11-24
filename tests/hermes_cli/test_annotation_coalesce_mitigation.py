@@ -16,7 +16,15 @@ def test_flag(monkeypatch, flag, gap):
 def test_hundred_events_one_second_and_idle(monkeypatch, control):
     clock = [100.0]
     monkeypatch.setattr(loop, 'time', SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
-    stop = threading.Event()
+    class Stop:
+        def is_set(self):
+            return clock[0] >= 110
+
+        def wait(self, timeout):
+            clock[0] += timeout
+            return self.is_set()
+
+    stop = Stop()
     calls = []
     # Initial ownership seeds coverage once. No source work on maintenance ticks.
     schedule = [101 + i / 100 for i in range(100)]
@@ -25,12 +33,12 @@ def test_hundred_events_one_second_and_idle(monkeypatch, control):
         def wait(self, timeout):
             end = clock[0] + timeout
             if schedule and schedule[0] <= end:
-                clock[0] = schedule.pop(0)
+                clock[0] = max(clock[0], schedule.pop(0))
+                while schedule and schedule[0] <= clock[0]:
+                    schedule.pop(0)  # one native drain coalesces already queued hints
                 self.control_only = control
                 return True
             clock[0] = end
-            if clock[0] >= 110:
-                stop.set()
             return False
     loop.run(Events(), stop, SimpleNamespace(held=lambda: True, beat=lambda: None),
              lambda: calls.append(clock[0]), coalesce=3.0, floor_all=True)

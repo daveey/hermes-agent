@@ -69,6 +69,16 @@ def run(events, stop, lease, refresh, *, interval=2.0, coalesce=COALESCE_S, floo
             timeout = min(timeout, max(0.0, quiet - time.monotonic()))
         elif owned and due is not None:
             timeout = min(timeout, max(0.0, due - time.time()))
+        if deferred:
+            # One source hint already owns the trailing refresh. Watching a
+            # continuously readable descriptor during this floor only drains
+            # more hints for the same work. Sleep on stop until the next lease
+            # beat or refresh deadline, then drain once to retain source versus
+            # control classification (a source may arrive after a control hint).
+            stop.wait(timeout)
+            if stop.is_set():
+                break
+            timeout = 0
         try:
             changed = events.wait(timeout)
             dirty |= changed
