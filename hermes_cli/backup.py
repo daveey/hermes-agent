@@ -28,6 +28,8 @@ from hermes_cli.sqlite_safe_read import connect_tracked, has_live_connection, re
 from agent.provider_media import GENERATED_SUBDIR
 from hermes_cli.archive_safe import normalize_archive_parts
 from hermes_cli.backup_atomic import _atomic_output_path
+from hermes_cli.backup_prune import QUICK_DEFAULT_KEEP as _QUICK_DEFAULT_KEEP
+from hermes_cli.backup_prune import _prune_quick_snapshots, prune_after_snapshot
 from hermes_cli.backup_sqlite import _close_quietly, _safe_copy_db
 from hermes_cli.config_backend import drop_other_access, require_file_tooling, supports_file_tooling
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, SECRET_CACHE_FILES, profile_root_entry
@@ -1102,7 +1104,6 @@ _QUICK_STATE_FILES = (
     "feishu_comment_pairing.json",      # Feishu comment subscription pairings
 )
 
-_QUICK_DEFAULT_KEEP = 20
 
 
 def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
@@ -1442,28 +1443,10 @@ def _create_quick_snapshot_locked(
     # Auto-prune. Defaults preserve historical manual /snapshot behavior; callers
     # with known high-churn safety snapshots (for example pre-update) can pass a
     # smaller keep value so large state.db copies do not accumulate indefinitely.
-    # #68805 review: skip pruning when a present DB failed to capture OR was
-    # skipped for size — either way the snapshot is incomplete and the older
-    # snapshot may contain the only recoverable database.
-    incomplete = failed_dbs or oversized_skipped
-    if not incomplete:
-        _prune_quick_snapshots(root, keep=_QUICK_DEFAULT_KEEP if keep is None else keep)
-    else:
-        if oversized_skipped:
-            print(
-                "  ⚠ Skipping snapshot prune: DB file(s) skipped for size: "
-                + ", ".join(oversized_skipped)
-            )
-            logger.warning(
-                "Quick snapshot skipped oversized DB file(s): %s",
-                ", ".join(oversized_skipped),
-            )
-        logger.warning(
-            "Skipping snapshot prune because %d DB(s) failed to capture "
-            "and/or %d were oversized — preserving older snapshots as "
-            "recovery source",
-            len(failed_dbs), len(oversized_skipped),
-        )
+    # Auto-prune policy (#68805 and the size-capped leak) lives in backup_prune.
+    prune_after_snapshot(
+        root, _QUICK_DEFAULT_KEEP if keep is None else keep, failed_dbs, oversized_skipped
+    )
 
     logger.info(
         "quick snapshot phase=copy status=complete id=%s files=%d bytes=%d",
@@ -1950,32 +1933,6 @@ def restore_cron_jobs_all_profiles(
             result["profile"] = name
             restored.append(result)
     return restored
-
-
-def _prune_quick_snapshots(root: Path, keep: int = _QUICK_DEFAULT_KEEP) -> int:
-    """Remove oldest quick snapshots beyond the keep limit. Returns count deleted."""
-    if not root.exists():
-        return 0
-
-    dirs = sorted(
-        (
-            d
-            for d in root.iterdir()
-            if d.is_dir() and not d.name.startswith(".") and not d.name.endswith(".partial")
-        ),
-        key=lambda d: d.name,
-        reverse=True,
-    )
-
-    deleted = 0
-    for d in dirs[keep:]:
-        try:
-            shutil.rmtree(d)
-            deleted += 1
-        except OSError as exc:
-            logger.warning("Failed to prune snapshot %s: %s", d.name, exc)
-
-    return deleted
 
 
 def prune_quick_snapshots(
