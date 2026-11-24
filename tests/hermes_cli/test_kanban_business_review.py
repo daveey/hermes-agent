@@ -369,6 +369,42 @@ def test_02_unqualified_diff_paths(env, tmp_path):
     assert env.hub.calls == [] and sidecar_rows(env) == []
 
 
+@pytest.mark.parametrize("nonblocking", [False, True])
+def test_02_fifo_diff_is_rejected_without_waiting(env, nonblocking):
+    """A FIFO inside the kanban home must not block prepare before fstat."""
+    rv = make_review(env)
+    rv.diff_path.unlink()
+    os.mkfifo(rv.diff_path)
+    control = ""
+    if nonblocking:
+        control = (
+            "real_open = os.open\n"
+            "def nonblocking_open(path, flags, *a, **k):\n"
+            f"    if str(path) == {str(rv.diff_path)!r}: flags |= os.O_NONBLOCK\n"
+            "    return real_open(path, flags, *a, **k)\n"
+            "os.open = nonblocking_open\n"
+        )
+    script = _subprocess_script(env, control +
+        "class Hub:\n"
+        "    def _call(self, *a): raise AssertionError('no hub call expected')\n"
+        "conn = kbc.connect()\n"
+        "print('entering', flush=True)\n"
+        f"print(br.prepare(conn, Hub(), {env.board!r}, {rv.review!r}), flush=True)\n")
+    proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        out, err = b"", b""
+        try:
+            out, err = proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            pytest.fail("prepare hung on a FIFO diff before fstat/type rejection")
+        assert proc.returncode == 0, err
+        assert out.splitlines() == [b"entering", b"unqualified"]
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+
 def test_02_diff_of_exactly_one_mib_qualifies(env):
     rv = make_review(env, diff=b"y" * br.MAX_DIFF)
     env.hub.lease_replies = [{"status": "other"}]
@@ -1177,6 +1213,13 @@ BAD_OUTPUTS = {
     "too_big": json.dumps({"verdict": "approve", "summary": "s" * 3000, "findings": []}).encode()
     + b" " * (64 * 1024),
     "invalid_utf8": b'{"verdict":"approve","summary":"\xff","findings":[]}',
+    "unpaired_surrogate_summary": b'{"verdict":"approve","summary":"\\ud800","findings":[]}',
+    "unpaired_surrogate_finding_title": (
+        b'{"verdict":"request_changes","summary":"s","findings":[{"title":"\\ud800","body":"b"}]}'
+    ),
+    "unpaired_surrogate_finding_body": (
+        b'{"verdict":"request_changes","summary":"s","findings":[{"title":"t","body":"\\ud800"}]}'
+    ),
     "maybe": json.dumps({"verdict": "maybe", "summary": "s", "findings": []}).encode(),
     "approve_with_finding": json.dumps({"verdict": "approve", "summary": "s",
                                         "findings": [{"title": "t", "body": "b"}]}).encode(),
@@ -1222,6 +1265,12 @@ def test_30_valid_outputs_parse():
     assert br.parse_verdict(b"  " + VERDICT_CHANGES.encode() + b"\n\t ")["verdict"] == "request_changes"
     exact = json.dumps({"verdict": "approve", "summary": "s" * 4000, "findings": []}).encode()
     assert br.parse_verdict(exact) is not None
+    emoji = json.dumps({"verdict": "approve", "summary": "ok \U0001f600", "findings": []}).encode()
+    parsed_emoji = br.parse_verdict(emoji)
+    assert parsed_emoji is not None and parsed_emoji["summary"] == "ok \U0001f600"
+    pair = b'{"verdict":"approve","summary":"\\ud83d\\ude00","findings":[]}'
+    parsed = br.parse_verdict(pair)
+    assert parsed is not None and parsed["summary"].encode("utf-8") == "\U0001f600".encode("utf-8")
 
 
 # ----------------------------------------------------------- 31-37. settlement

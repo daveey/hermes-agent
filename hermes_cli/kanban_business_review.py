@@ -177,7 +177,7 @@ def _read_diff(diff_path: str) -> Optional[bytes]:
         home = _kanban_home().resolve()
         if not resolved.is_relative_to(home):
             return None
-        fd = os.open(str(raw), os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(str(raw), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
             st = os.fstat(fd)
             import stat as _stat
@@ -665,7 +665,13 @@ def _no_constant(name):
 
 
 def _text_ok(value: Any, limit: int) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def parse_verdict(raw: bytes) -> Optional[dict]:
