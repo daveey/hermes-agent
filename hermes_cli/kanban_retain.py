@@ -130,8 +130,10 @@ def _next_action(conn, task, stop, data) -> dict:
                        "AND json_extract(payload,'$.episode')=? ORDER BY id DESC LIMIT 1",
                        (task, decision.NOTICE, episode)).fetchone()
     route = json.loads(row[0]).get('producer') if row else None
+    # No producer, or the producer found nobody to route to: the stranded-park sweep is what escalates.
+    owned = isinstance(route, dict) and route.get('kind') != 'unavailable'
     return {'version': 1, 'owner': route or {'kind': 'unavailable'}, 'instruction': data['next_step'],
             'release': {'authority': 'unavailable', 'condition': data['release_condition']},
             'blocker': {'prerequisite': data['release_condition'], 'evidence': data['evidence']},
-            'escalation': {'at': int(time.time()) + 86400, 'route': route,
-                           'state': 'pending' if route else 'unavailable'}}
+            'escalation': {'at': int(time.time()) + 86400, 'route': route if owned else None,
+                           'state': 'pending' if owned else 'unavailable'}}

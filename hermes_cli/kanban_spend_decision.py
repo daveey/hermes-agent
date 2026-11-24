@@ -16,7 +16,7 @@ def ensure_producer(conn, task_id: str) -> None:
     if _producer_repair(conn, task_id) is None:
         return
     with kb.write_txn(conn, allow_nested=True):
-        repair = _producer_repair(conn, task_id)
+        repair = _producer_repair(conn, task_id, paced=False)
         if repair is None:
             return
         episode, payload, route, live = repair
@@ -24,11 +24,13 @@ def ensure_producer(conn, task_id: str) -> None:
         if not live and reviewer.queue(conn, task_id, episode):
             return  # an immediate review decides first; it routes the stop here only if it escalates
         if not live:
-            route = producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
+            previous, route = route, producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
+            if route == previous:
+                return  # an ownerless stop re-checked for a returned chat (_chat_returned) and still ownerless
         kb._append_event(conn, task_id, NOTICE, {**payload, "episode": episode, "producer": route})
 
 
-def _producer_repair(conn, task_id):
+def _producer_repair(conn, task_id, *, paced=True):
     """Read-only need check; never authorizes a repair outside its transaction."""
     import json
     stop = pending_episode(conn, task_id)
@@ -50,6 +52,8 @@ def _producer_repair(conn, task_id):
     prior_route = prior.get('producer') if isinstance(prior, dict) else None
     route = episode_route(conn, task_id, episode) or prior_route
     live = _live_route(conn, route)
+    if live and route == {'kind': 'unavailable'} and _chat_returned(conn, task_id, paced=paced):
+        live = False  # no owner could be reached at the stop; a chat that is live now takes the decision
     if live and route == prior_route and (cause is None or prior.get('cause') == cause):
         return None
     if cause:
@@ -96,6 +100,8 @@ def _live_route(conn, route) -> bool:
         return task is not None and task.status not in ('done', 'archived')
     # Explicit administrative exhaustion is a terminal routing boundary, not
     # permission to recurse into another decision owner or release the root hold.
+    # A bare ``unavailable`` (a stop with a cause and no live chat) holds only until
+    # a chat of the card is live again: ``_producer_repair`` re-checks it.
     return route.get('kind') in ('chats', 'unavailable', 'dismissed')
 
 
@@ -286,14 +292,43 @@ def producer(conn, task_id: str, note: str) -> dict:
                       lambda gw, profile, session: local_chat_dead(gw, profile, session, own=own, liveness=liveness))
 
 
-def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
-    """``producer`` body after setup. ``dead``: a chat of this gateway that is archived/hidden/missing, or ended and
-    idle, is no route for the decision: the notice would sit unread (kanban_stranded_park). One ``Liveness`` per
-    call: each state.db is opened at most once."""
-    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
+_RECHECK_SECONDS = 300  # kanban_stranded_park.DEFAULT_SWEEP_INTERVAL_SECONDS: the same state.db reads, as rarely
+_RECHECKED: dict[tuple[str, str], float] = {}
+
+
+def _chat_returned(conn, task_id: str, *, paced: bool) -> bool:
+    """Read-only: does an ownerless stop's card have a live owning chat now? ``paced`` (the dispatcher's unlocked
+    pre-check) asks at most once per ``_RECHECK_SECONDS`` per card: each answer may open a state.db."""
+    import time
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from hermes_cli.kanban_origin import gateway_names
+    from hermes_cli.kanban_stranded_park import Liveness, local_chat_dead, settings
+    from hermes_cli.profiles import get_active_profile_name
+    if paced:
+        key, now = (_main_db_file(conn) or f"conn:{id(conn)}", task_id), time.monotonic()
+        last = _RECHECKED.get(key)
+        if last is not None and now - last < _RECHECK_SECONDS:
+            return False
+        if len(_RECHECKED) > 4096:
+            _RECHECKED.clear()
+        _RECHECKED[key] = now
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        return False
+    own, bound = gateway_names()[0], []
+    with Liveness(idle=settings()[1]) as liveness:
+        # ``bind`` only records: a chat ``producer`` would bind is live. ``producer`` itself decides the route.
+        return _chat_route(conn, task_id, task, own, get_active_profile_name(), lambda *chat: bound.append(chat),
+                           lambda gw, profile, session: local_chat_dead(gw, profile, session, own=own,
+                                                                        liveness=liveness)) or bool(bound)
+
+
+def _chat_route(conn, task_id, task, own, active, bind, dead) -> bool:
+    """Bind the card's live chats; True when one owns the decision. ``dead``: a chat of this gateway that is
+    archived/hidden/missing, or ended and idle, is no route for the decision: the notice would sit unread
+    (kanban_stranded_park). One ``Liveness`` per call: each state.db is opened at most once."""
     from hermes_cli.kanban_creator_chats import _chat_links
     from hermes_cli.kanban_db_notify import is_headless_session
-    from hermes_cli.kanban_triage_sweep import _supervisor_profile
 
     # Bind legacy origin sessions before appending the notice so its cursor cannot skip this event.
     if task.session_id and not is_headless_session(task.session_id) and not dead(own, active, task.session_id):
@@ -322,6 +357,15 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
                 origin = None
             if origin is not None and dead(origin.gateway, origin.profile, origin.session):
                 continue
+        return True
+    return False
+
+
+def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
+    """``producer`` body after setup: the card's live chats (``_chat_route``), else the stop's decision card."""
+    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
+    from hermes_cli.kanban_triage_sweep import _supervisor_profile
+    if _chat_route(conn, task_id, task, own, active, bind, dead):
         return {"kind": "chats"}
     stop = pending_episode(conn, task_id)
     episode = (stop.get('uid') or str(stop['id'])) if stop else None
@@ -331,14 +375,14 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
     from hermes_cli.kanban_refusal_receipt import restricted
     safety = restricted(conn, task_id)
     stopped = execution_restricted(conn, task_id)
-    # A decision card's only power is ``spend_promote``, which releases an ordinary budget stop and nothing else.
-    # A stop with a cause (capability_unavailable, scope_stopped, safety_refusal) gets no card: its worker could
-    # only retain it, a second stop and no decision. The stranded-park escalation owns it (kanban_stranded_park),
-    # so the card built below is always for an ordinary stop.
-    import json
-    if safety or stopped or (stop and json.loads(stop['payload'] or '{}').get('cause')):
-        return {'kind': 'unavailable'}
     import json as _json
+    # A stop with a cause (capability_unavailable, scope_stopped, safety_refusal) gets no decision card. The card's
+    # worker decides spend; it cannot restore a capability, renew a scope or clear a refusal, so it could only
+    # retain the card: a second stop and no decision. With no live chat nobody is routed, and the stranded-park
+    # sweep asks a human once the park is old enough (kanban_stranded_park), unless an open parent or a recorded
+    # wait explains it. #4245 edits the lines below; their restricted branches are unreachable and go after it.
+    if safety or stopped or (stop and _json.loads(stop['payload'] or '{}').get('cause')):
+        return {'kind': 'unavailable'}
     stop = pending_episode(conn, task_id)
     listed = _json.loads(stop['payload'] or '{}').get('refused_providers') if stop is not None and safety else None
     guidance = notice({'reason': note, **({'cause': 'safety_refusal' if safety else 'scope_stopped'} if stopped else {}),

@@ -144,6 +144,9 @@ def eligible(conn: sqlite3.Connection, task_id: str, episode: str, cfg: Optional
         return False
     if decision.execution_restricted(conn, task_id) or restricted(conn, task_id) or _disposed(conn, task_id, episode):
         return False
+    stop = decision.pending_episode(conn, task_id)
+    if stop is not None and _payload(stop.get("payload")).get("cause"):
+        return False  # e.g. capability_unavailable: more runs meet the same wall, so there is no budget to judge
     row = conn.execute("SELECT created_by FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None or row[0] == "kanban-spend-budget" or conn.execute(
             "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'administrative_decision'", (task_id,)).fetchone():

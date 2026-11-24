@@ -769,10 +769,15 @@ chat gets one board-supervisor decision card. The supervisor uses
 A local owning chat that is archived, hidden or gone, or ended and idle longer
 than `kanban.stranded_owner_idle_seconds` (default 86400), is not a route: the
 decision then goes to the supervisor card.
-Only an ordinary budget stop gets that card: its one power, a promote, releases
-nothing else. A stop with a cause (`capability_unavailable`, `scope_stopped`,
-`safety_refusal`) and no live chat records producer kind `unavailable`, files no
-card and is left to the stranded-park escalation below.
+Only an ordinary budget stop gets that card. A stop with a cause
+(`capability_unavailable`, `scope_stopped`, `safety_refusal`) and no live chat
+records producer kind `unavailable` and files no card: the card's worker decides
+spend, and cannot restore a capability, renew a scope or clear a refusal. Such a
+stop is not sent to the spend reviewer either. If one of the card's chats is live
+again later, the next route repair sends that chat the notice, once. Otherwise
+the stranded-park escalation below asks a human. A retained card with an open
+parent, or a wait it recorded, is not asked about until that parent closes or
+the wait ends: an explained wait is not an ask.
 
 **Stranded parked cards.** A parked card (`triage` or `blocked`) never stays
 invisible. Every `kanban.stranded_sweep_interval_seconds` (default 300) the

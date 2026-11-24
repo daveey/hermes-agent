@@ -188,7 +188,9 @@ def project(facts: dict, *, now: int) -> dict:
         if all(d.get('administrative_owner', {}).get('kind') == 'unavailable' for d in deps):
             row['violations'].append('dependency_recovery_unavailable')
     if row['owner']['kind'] == 'unavailable':
-        row['violations'].append('owner_missing')
+        # A stopped card whose human request is stored (the stranded-park ask) is owned by that ask.
+        if not (facts.get('stop') and facts.get('human_step')):
+            row['violations'].append('owner_missing')
     elif row['owner']['kind'] == 'unknown' or not row['owner'].get('refs'):
         row['evidence_state'] = 'unknown'
     if not deadline:
