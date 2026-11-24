@@ -151,3 +151,86 @@ def test_strict_send_failure_does_not_starve_pull(live, status):
             assert recovery.fault(live) is not None
         finally:
             hub.close()
+
+
+def test_paused_send_does_not_starve_pull(live):
+    kb.create_task(live, title='healthy feed during sender pause', assignee='worker')
+    receiver = Receiver()
+    original = receiver._call
+
+    def reply(method, path, body=None):
+        if '/changes' in path or '/snapshot' in path:
+            return {'events': [], 'cursor': 0, 'more': False}
+        return original(method, path, body)
+
+    receiver._call = reply
+    broken = [True]
+    path = Path(live.execute('PRAGMA database_list').fetchone()[2])
+    frozen = journal.pending_wire(live)
+    with serving(live, receiver, response_status=lambda p: 410 if broken[0] and p.endswith('/inspect') else 200) as (url, requests, _):
+        hub = hub_at(url)
+        try:
+            for _ in range(4):
+                with pytest.raises(client.HubError):
+                    client.sync_board('default', path, hub, 'macbook')
+            assert any('/changes' in p for _, p, _, _ in requests)
+            assert recovery.fault(live)['paused'] == 1
+            before = len(requests)
+            broken[0] = False
+            with pytest.raises(client.SyncUnavailable):
+                client.sync_board('default', path, hub, 'macbook')
+            assert any('/changes' in p or '/snapshot' in p for _, p, _, _ in requests[before:]), 'sender pause starved the healthy feed'
+            assert journal.pending_wire(live) == frozen
+        finally:
+            hub.close()
+
+
+def test_current_row_hold_does_not_starve_pull(live):
+    _tid, receiver = issued_parent(live)
+    original = receiver._call
+
+    def reply(method, path, body=None):
+        if '/changes' in path or '/snapshot' in path:
+            return {'events': [], 'cursor': 0, 'more': False}
+        if '/evidence' in path:
+            return receiver.evidence
+        return original(method, path, body)
+
+    receiver._call = reply
+    path = Path(live.execute('PRAGMA database_list').fetchone()[2])
+    frozen = journal.pending_wire(live)
+    with serving(live, receiver, response_status=lambda p: 410 if '/evidence' in p else 200) as (url, requests, _):
+        hub = hub_at(url)
+        try:
+            with pytest.raises(existence.CurrentRowHold):
+                client.sync_board('default', path, hub, 'macbook')
+            assert any('/changes' in p or '/snapshot' in p for _, p, _, _ in requests)
+            assert journal.pending_wire(live) == frozen
+        finally:
+            hub.close()
+
+
+def test_malformed_strict_envelope_does_not_starve_pull(live):
+    kb.create_task(live, title='malformed capability still pulls', assignee='worker')
+    receiver = Receiver()
+    original = receiver._call
+
+    def reply(method, path, body=None):
+        if '/changes' in path or '/snapshot' in path:
+            return {'events': [], 'cursor': 0, 'more': False}
+        if path.endswith('/capability'):
+            return []
+        return original(method, path, body)
+
+    receiver._call = reply
+    path = Path(live.execute('PRAGMA database_list').fetchone()[2])
+    frozen = journal.pending_wire(live)
+    with serving(live, receiver) as (url, requests, _):
+        hub = hub_at(url)
+        try:
+            with pytest.raises(client.ReplayFault):
+                client.sync_board('default', path, hub, 'macbook')
+            assert any('/changes' in p or '/snapshot' in p for _, p, _, _ in requests)
+            assert journal.pending_wire(live) == frozen
+        finally:
+            hub.close()

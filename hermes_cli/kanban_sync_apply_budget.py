@@ -96,7 +96,7 @@ def round_pushes(live, hub, slug, gateway, mode, result, evidence):
     def send():
         try:
             client._send(live, hub, slug, gateway, mode, result, after_pull=False, before_head=True, seen=evidence)
-        except (client.HubError, OSError) as exc:
+        except (client.HubError, OSError, client.SyncUnavailable, client.ReplayFault) as exc:
             client._log.info("kanban sync: %s interleaved push failed (%s)", slug, exc)
     return push_service(send)
 

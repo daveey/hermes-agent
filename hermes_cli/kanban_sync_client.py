@@ -1028,7 +1028,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         evidence = backlog.round_evidence(path)
         try:
             _send(live, hub, slug, gateway, mode, result, after_pull=False, before_head=True, seen=evidence)
-        except (HubError, OSError) as exc:
+        except (HubError, OSError, SyncUnavailable, ReplayFault) as exc:
             _log.info("kanban sync: %s push before the pull failed (%s); pulling anyway", slug, exc)
         from hermes_cli.kanban_sync_apply_budget import round_pushes
         with round_pushes(live, hub, slug, gateway, mode, result, evidence), quarantine.mirroring(live), _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
@@ -1092,7 +1092,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         # Still behind the head: the Board may hold a run's end in a page not read yet, so run rows wait.
         try:
             _send(live, hub, slug, gateway, mode, result, after_pull=True, before_head=result.behind, seen=evidence)
-        except (HubError, OSError):
+        except (HubError, OSError, SyncUnavailable, ReplayFault):
             backlog.note(path, result.behind)  # the pulls landed: a board still behind reruns at once
             raise
         if mode == "primary":
