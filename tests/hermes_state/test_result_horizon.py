@@ -14,11 +14,11 @@ TURN = [{'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'c1'}]},
         {'role': 'assistant', 'content': 'the reply'}]
 
 
-def _settle(db, epoch, request, session='chat'):
+def _settle(db, epoch, request, session='chat', reply='the reply'):
     rt.admit_session_input(db, epoch=epoch, principal_id='api', session_id=session, request_id=request,
                            payload={'text': 'question ' + request})
     row = rt.claim_session_input(db, epoch=epoch, session_id=session)
-    result = {'result': {'final_response': 'the reply', 'messages': [dict(m) for m in TURN], 'completed': True,
+    result = {'result': {'final_response': reply, 'messages': [dict(m) for m in TURN], 'completed': True,
                          'last_reasoning': 'thinking ' * 50},
               'usage': {'input_tokens': 7, 'output_tokens': 3}}
     retain_result(db, epoch=epoch, row=row, result=result)
@@ -114,9 +114,34 @@ def test_an_unsettled_admission_and_a_malformed_result_are_left_alone(tmp_path):
                                                   {'result': {'messages': [{'role': 'assistant', 'content': 'x'}]}}))))
         db._execute_write(lambda c: c.execute('UPDATE session_admissions SET settled_at=1.0'))
         assert db._execute_write(compact_settled_results) == 0  # started, not terminal
-        db._execute_write(lambda c: c.execute('UPDATE state_meta SET value=? WHERE key=?',
-                                              ('not json', RESULT_PREFIX + row['admission_id'])))
+        db.create_session('other', source='api_server')  # 'chat' still has its running turn
+        settled, _ = _settle(db, epoch, 'bad-row', session='other')
+        _age(db, settled, RETRY_HORIZON_S + 60)
+        for value in ('not json', '[1, 2]', '{"result": "flat"}', '{"result": {"messages": "text"}}'):
+            db._execute_write(lambda c, value=value: c.execute('UPDATE state_meta SET value=? WHERE key=?',
+                                                               (value, RESULT_PREFIX + settled)))
+            assert db._execute_write(compact_settled_results) == 0, value  # terminal and aged, but not a turn result
+            assert _size(db, settled) == len(value)
+
+
+def test_a_turn_that_ended_without_a_final_reply_keeps_its_messages(tmp_path):
+    db, epoch = _db(tmp_path)
+    with db:
+        silent, _ = _settle(db, epoch, 'silent', reply='')
+        _age(db, silent, RETRY_HORIZON_S + 60)
+        stored = admission_result(db, silent)
         assert db._execute_write(compact_settled_results) == 0
+        assert admission_result(db, silent) == stored and len(stored['result']['messages']) == 3
+
+
+def test_a_row_inserted_already_terminal_is_stamped(tmp_path):
+    db, _ = _db(tmp_path)
+    with db:
+        db._execute_write(lambda c: c.execute(
+            "INSERT INTO session_admissions(admission_id,request_id,principal_id,target_session_id,lineage_json,"
+            "payload_json,payload_digest,intent,status,outcome) VALUES('imported','r','api','chat','[]','{}','d',"
+            "'queue','terminal','completed')"))
+        assert abs(_settled_at(db, 'imported') - time.time()) < 5
 
 
 def test_the_prune_pass_runs_it(tmp_path):

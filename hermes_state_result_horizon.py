@@ -7,7 +7,8 @@ On the MacBook on 2026-11-23 that was 395 MB in 6,466 rows, 300 MB of it settled
 
 The promise is byte-exact replay within ``RETRY_HORIZON_S``. Past it, a terminal admission's result gets the same
 compaction retirement applies (``_compact_result``): the final response, flags and usage stay, the transcript
-copies go. ``session_admissions.settled_at`` is stamped by trigger when a row turns terminal; a row settled before
+copies go. A result with no final response is left whole. It runs in every ``prune_sessions`` pass (auto-prune,
+per-source retention, ``hermes sessions prune``, the web prune endpoint); a store that never prunes never compacts. ``session_admissions.settled_at`` is stamped by trigger when a row turns terminal; a row settled before
 the column existed is stamped by the first pass here and ages from that pass.
 """
 import time
@@ -22,7 +23,10 @@ _DUE = (
     "SELECT a.admission_id FROM session_admissions a JOIN state_meta m ON m.key = ? || a.admission_id "
     "WHERE a.status = 'terminal' AND a.settled_at < ? AND json_valid(m.value) "
     "AND json_type(m.value, '$.result.messages') = 'array' "
-    "AND json_array_length(m.value, '$.result.messages') > 0 ORDER BY a.seq LIMIT ?")
+    "AND json_array_length(m.value, '$.result.messages') > 0 "
+    # A turn that ended with no final reply keeps its messages: Bot Chat rebuilds the "no final reply; their
+    # last message this turn" text from them whenever it re-projects a receipt (session_bot_outcome).
+    "AND COALESCE(json_extract(m.value, '$.result.final_response'), '') <> '' ORDER BY a.seq LIMIT ?")
 
 
 def compact_settled_results(conn, older_than=RETRY_HORIZON_S, limit=COMPACT_LIMIT, now=None):
