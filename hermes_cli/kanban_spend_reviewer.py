@@ -234,6 +234,7 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     now = int(time.time()) if now is None else int(now)
     skip = foreign_ids(conn)
     queue_backlog(conn, now=now, cfg=cfg, skip=skip)
+    _THREADS[:] = [t for t in _THREADS if t.is_alive()]  # a long-lived dispatcher keeps only running reviews
     db, started = _db_path(conn), []
     for task_id, episode, attempts in _due(conn, now, skip):
         if attempts >= MAX_ATTEMPTS:
@@ -421,6 +422,8 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
     stop = decision.pending_episode(conn, task_id)
     if row is None or row[0] != "triage" or episode_of(stop) != episode or state(conn, task_id, episode) != STARTED:
         return "the stop was decided or changed while the reviewer read it"
+    if not settings()[0]:
+        return "the reviewer was turned off while it read the stop"
     if row[1] or row[2] in HUMAN_BLOCK_KINDS:
         return "the card waits on a human"
     if decision.execution_restricted(conn, task_id) or decision.execution_refusal(conn, task_id):

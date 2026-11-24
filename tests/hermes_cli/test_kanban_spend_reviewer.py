@@ -27,6 +27,9 @@ class _Inline:
     def start(self):
         self._call()
 
+    def is_alive(self):
+        return False
+
 
 @pytest.fixture
 def inline(monkeypatch):
@@ -144,7 +147,7 @@ def test_an_undecided_routed_stop_is_reviewed_and_its_decision_card_closed(kanba
 def test_an_unfinished_review_is_retried_then_escalated(kanban_home, spend_reviewer, monkeypatch):
     started = []
     monkeypatch.setattr(reviewer, "threading", types.SimpleNamespace(
-        Thread=lambda target, args, **kw: types.SimpleNamespace(start=lambda: started.append(args))))
+        Thread=lambda target, args, **kw: types.SimpleNamespace(start=lambda: started.append(args), is_alive=lambda: True)))
     with kbc.connect_closing() as conn:
         tid, episode = _stopped(conn)
         now = int(time.time())
@@ -281,7 +284,7 @@ def test_an_open_parent_turns_a_grant_into_an_escalation(kanban_home, spend_revi
 
 def test_reviews_per_process_are_bounded(kanban_home, spend_reviewer, monkeypatch):
     monkeypatch.setattr(reviewer, "threading", types.SimpleNamespace(
-        Thread=lambda target, args, **kw: types.SimpleNamespace(start=lambda: None, join=lambda t=None: None)))
+        Thread=lambda target, args, **kw: types.SimpleNamespace(start=lambda: None, join=lambda t=None: None, is_alive=lambda: True)))
     reviewer._INFLIGHT.clear()
     try:
         with kbc.connect_closing() as conn:
@@ -304,3 +307,40 @@ def test_a_decision_by_someone_else_resets_the_grant_cap(kanban_home, spend_revi
         with kb.write_txn(conn):
             kb._append_event(conn, tid, "promoted_manual", {"actor": "david", "spend_budget": {"runs": 5}})
         assert reviewer.consecutive_grants(conn, tid) == 0
+
+
+def test_the_backlog_ages_each_stop_by_its_own_notice(kanban_home, spend_reviewer, monkeypatch):
+    with kbc.connect_closing() as conn:
+        tid, episode = _routed_with_reviewer_off(conn, monkeypatch)
+        with kb.write_txn(conn):  # an older stop's notice must not make this one look stale
+            kb._append_event(conn, tid, decision.NOTICE, {"episode": "older-stop", "producer": {"kind": "chats"}})
+            conn.execute("UPDATE task_events SET created_at = created_at - 86400 WHERE task_id = ? AND "
+                         "json_extract(payload, '$.episode') = 'older-stop'", (tid,))
+        assert reviewer.start_due(conn, now=int(time.time()) + 60) == []
+        assert reviewer.state(conn, tid, episode) is None
+
+
+def test_a_grant_is_refused_once_the_reviewer_is_turned_off(kanban_home, spend_reviewer, inline, monkeypatch):
+    with kbc.connect_closing() as conn:
+        tid, episode = _stopped(conn)
+
+        def judge_then_disable(ctx):
+            monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (False, 2))
+            return _grant()
+
+        monkeypatch.setattr(reviewer, "judge", judge_then_disable)
+        reviewer.start_due(conn)
+        assert kb.get_task(conn, tid).status == "triage"
+        assert reviewer.state(conn, tid, episode) == reviewer.ESCALATED
+        assert decision.NOTICE in _kinds(conn, tid)
+
+
+def test_one_shot_dispatch_waits_for_its_reviews_and_finished_threads_are_dropped(monkeypatch):
+    import threading
+    done = threading.Event()
+    thread = threading.Thread(target=lambda: done.wait(5) or done.set())
+    thread.start()
+    reviewer._THREADS[:] = [thread]
+    done.set()
+    reviewer.wait_for_reviews(timeout=5)
+    assert reviewer._THREADS == [] and not thread.is_alive()
