@@ -119,6 +119,13 @@ def _failed(conn, board, error, started):
 
 
 def completed(conn):
+    state = journal.snapshot(conn)
+    if state['pending'] is None:
+        # A successful predecessor retires its elapsed window even when it never
+        # created a durable fault. The next issued identity owns only its time.
+        sample = _SAMPLE.get()
+        if sample is not None and sample['started'] is not None:
+            sample['started'] = time()
     held = fault(conn)
     if held is None:
         return
