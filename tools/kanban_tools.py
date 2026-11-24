@@ -29,7 +29,7 @@ from tools.kanban_tools_placement import (_local_placement, _machine_placement, 
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
                                           _effective_board_args, _origin_enrollment, _landing_placement, _pinned_note,
                                           _admission_refused, _effective_requires, _with_admission, _forwarding_fields,
-                                          _placed_rejection, _standing_owner_refusal)
+                                          _placed_rejection, _standing_owner_refusal, _canonical_origin_home, _origin_route)
 # SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
 from tools.kanban_tools_attach_url import _download_url_with_cap, _store_attachment
 from tools.kanban_tools_db_hint import generic_tool_error
@@ -1624,11 +1624,11 @@ def _handle_create(args: dict, **kw) -> str:
                                                      title=str(title).strip(), session_id=session_id, self_tid=self_tid, parents=parents)
         if refused:
             return refused
-        if courier_intent is None and origin is None:
+        if courier_intent is None and _canonical_origin_home(args, origin):
             check_tool_create(args.get("requires"), workspace_kind=workspace_kind, project_id=project_id,
                               skills=skills, assignee=str(assignee))  # before placement routes it away [daveey]
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
-            place_origin = _placement_origin(conn, self_tid, session_id)  # a worker's: its creator's chat
+            place_origin = _origin_route(conn, self_tid, session_id, origin)
             remote, marker_placement = _place_remote(
                 args, assignee=str(assignee), skills=skills, parents=parents, project_id=project_id, conn=conn,
                 creator_task_id=self_tid, note_local_pin=pinned_machine is None, **place_origin)

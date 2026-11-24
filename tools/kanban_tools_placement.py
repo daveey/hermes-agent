@@ -22,6 +22,21 @@ def _courier_landing(conn, args, origin_intent, marker, runs_on, **effective):
     return courier_plan(conn, {**args, **effective}, runs_on, request_id=origin_intent.get("request_id")) or marker
 
 
+def _canonical_origin_home(args, origin):
+    """Pool custody overrides legacy origin-local storage, not origin authority."""
+    if origin is None:
+        return True
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli.kanban_creation_home import plan
+    return plan(args, cfg=kp.config(), gateway=kp.reg.self_gateway(), machine_ok=None) is not None
+
+
+def _origin_route(conn, creator_task_id, session_id, origin):
+    if origin is None:
+        return _placement_origin(conn, creator_task_id, session_id)
+    return {"session_id": origin.session, "origin_profile": origin.profile, "origin_gateway": origin.gateway}
+
+
 def _origin_enrollment(args, origin, marker, **effective):
     """Chat ownership pins storage, not execution; never forward an origin-bound card."""
     if origin is None:
