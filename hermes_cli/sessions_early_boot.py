@@ -1,4 +1,4 @@
-"""Pre-import native capture custody, after producer admission and plugin discovery."""
+"""Pre-import native capture custody, after producer admission, before app assembly."""
 from contextlib import contextmanager
 import os
 import signal

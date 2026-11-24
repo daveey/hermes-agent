@@ -1,7 +1,10 @@
 """Publish delivery hooks without eagerly importing the agent/provider tree."""
 import importlib
+import atexit
 
-_OWNER = object()
+from tui_gateway.plugin_inject import _TUI_INJECT_OWNER as _OWNER
+
+_atexit_registered = False
 
 
 def load_gateway():
@@ -20,8 +23,12 @@ def _inject(**kwargs):
 
 def install_message_host():
     from hermes_cli.plugins import get_plugin_manager, publish_tui_message_host
+    global _atexit_registered
     publish_tui_message_host(_OWNER, _inject)
     get_plugin_manager().set_tui_message_injector(_OWNER, _inject)
+    if not _atexit_registered:
+        atexit.register(clear_message_host)
+        _atexit_registered = True
 
 
 def clear_message_host():

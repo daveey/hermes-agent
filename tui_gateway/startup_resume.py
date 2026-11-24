@@ -231,15 +231,18 @@ def start_startup_resume_sweep(*, stop: threading.Event | None = None) -> thread
 
     home = Path(get_hermes_home())
 
+    def handler(rid, params):
+        # Marker observation is not an agent consumer. Import only when an
+        # eligible interrupted turn actually reaches the resume boundary.
+        from tui_gateway import server
+        resume = server._methods.get("session.resume")
+        if resume is None:
+            raise RuntimeError("startup resume: session.resume handler not installed")
+        return resume(rid, params)
+
     def _run() -> None:
         time.sleep(delay)
-        handler = None
         try:
-            from tui_gateway import server
-            handler = server._methods.get("session.resume")
-            if handler is None:
-                logger.warning("startup resume: session.resume handler not installed")
-                return
             done = resume_interrupted_sessions(handler, home, cfg)
             if done:
                 logger.info("startup resume: %d interrupted session(s) processed", len(done))
@@ -248,8 +251,7 @@ def start_startup_resume_sweep(*, stop: threading.Event | None = None) -> thread
             # Keep observing every eligible marker, including ordinary interrupted turns.
         except Exception:
             logger.exception("startup resume sweep failed")
-        if handler is not None:
-            _observe_markers(handler, home, cfg, stop or threading.Event())
+        _observe_markers(handler, home, cfg, stop or threading.Event())
 
     from agent.memory_provider import spawn_context_thread
     t = spawn_context_thread(_run, name="startup-resume-sweep", passive=True)

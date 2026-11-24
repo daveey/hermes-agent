@@ -21,7 +21,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.command in ('GET', 'HEAD') and self.path.split('?', 1)[0] == '/api/health':
-            status, body = 200, b'{"status":"starting","ready":false,"ok":false}'
+            status, body = 503, b'{"status":"starting","ready":false,"ok":false}'
         else:
             status, body = 503, b'{"detail":"Application and authentication warming"}'
         self.send_response(status)

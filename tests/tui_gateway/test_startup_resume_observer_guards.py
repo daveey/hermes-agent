@@ -103,7 +103,8 @@ def test_boot_scan_failure_still_starts_observer(tmp_path, monkeypatch):
 
     stop = threading.Event()
     observed = []
-    handler = lambda *a: None
+    resumed = []
+    handler = lambda *a: resumed.append(a)
     monkeypatch.setattr(proof_home, "recovery_home_allowed", lambda *a: True)
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(config, "load_config", dict)
@@ -119,4 +120,33 @@ def test_boot_scan_failure_still_starts_observer(tmp_path, monkeypatch):
     assert thread is not None
     thread.join(5)
     assert not thread.is_alive()
-    assert observed == [(handler, tmp_path, {}, stop)]
+    assert len(observed) == 1 and observed[0][1:] == (tmp_path, {}, stop)
+    observed[0][0]('late', {'session_id': 'fixture'})
+    assert resumed == [('late', {'session_id': 'fixture'})]
+
+
+def test_empty_boot_scan_does_not_import_gateway_but_observer_retains_lazy_resume(tmp_path, monkeypatch):
+    import builtins
+    from hermes_cli import config, proof_home
+    import hermes_constants
+
+    imports, observers = [], []
+    real_import = builtins.__import__
+
+    def observe_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == 'tui_gateway' and 'server' in (fromlist or ()):
+            imports.append(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, '__import__', observe_import)
+    monkeypatch.setattr(proof_home, 'recovery_home_allowed', lambda *a: True)
+    monkeypatch.setattr(hermes_constants, 'get_hermes_home', lambda: tmp_path)
+    monkeypatch.setattr(config, 'load_config', dict)
+    monkeypatch.setattr(sr, 'time', SimpleNamespace(sleep=lambda *a: None))
+    monkeypatch.setattr(sr, '_observe_markers', lambda *a: observers.append(a))
+    thread = sr.start_startup_resume_sweep()
+    assert thread is not None
+    thread.join(5)
+    assert not thread.is_alive()
+    assert imports == []
+    assert len(observers) == 1 and callable(observers[0][0])

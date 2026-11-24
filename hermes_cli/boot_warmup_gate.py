@@ -1,4 +1,4 @@
-"""Hold the always-on dashboard's socket until its boot prewarms finish (bounded). [daveey]
+"""Hold the always-on dashboard's application readiness until prewarms finish (bounded). [daveey]
 
 Every hub core update retires the always-on ``serve`` (code skew) and its supervisor starts a new one. The new
 process starts the kanban board, session-list annotation and project-tree prewarms on daemon threads and binds its
@@ -8,8 +8,8 @@ all cold. Those requests wait on the prewarms' single-flight reads while ~60 thr
 them, so ~4 s of warm-up CPU took 39 s of wall time on 2026-11-12 (``kanban board prewarm finished ...
 elapsed_s=39.274``) and the Desktop's 6 s / 30 s request deadlines expired: a timeout burst on every core update.
 
-uvicorn runs the lifespan startup before it binds, so waiting here keeps the port closed while the prewarms run
-uncontended. Desktop's always-on attach treats a closed port as "waiting for its supervisor restart" and keeps
+uvicorn runs the lifespan startup before accepting app traffic. A headless bootstrap listener may already own
+the socket, but returns HTTP503 (including health) until this gate completes. Desktop treats this as not ready and keeps
 failing fast for up to 20 s (``ALWAYS_ON_RESTART_WAIT_MS`` in ``apps/desktop/electron/remote-lifecycle.ts``), then
 attaches to a warm backend. The wait is capped (at most 6 s, and it ends by 17 s after process start, since boot
 alone takes 11-18 s on the hub; see ``ALWAYS_ON_BIND_DEADLINE_S`` for how that fits the window) so a slow warm-up
@@ -17,7 +17,7 @@ degrades to today's behaviour (bind with prewarms still running) instead of push
 owned backend.
 
 Only the always-on backend waits: a Desktop-owned ``serve --isolated`` is dialled with a 10 s ready probe and must
-bind at once (GH-73083).
+become ready promptly (GH-73083).
 """
 
 from __future__ import annotations

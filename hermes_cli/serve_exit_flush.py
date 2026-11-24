@@ -24,8 +24,11 @@ def dispatch(signum, frame, previous):
     if callable(previous):
         previous(signum, frame)
     else:
-        signal.signal(signum, signal.SIG_DFL)
-        os.kill(os.getpid(), signum)
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        except (OSError, ValueError):
+            raise SystemExit(128 + int(signum)) from None
 
 
 def _handle(signum, frame):
@@ -35,7 +38,12 @@ def _handle(signum, frame):
 def install():
     if threading.current_thread() is not threading.main_thread():
         return False
+    installed = False
     for signum in (signal.SIGTERM, signal.SIGINT):
-        if signal.getsignal(signum) is not _handle:
-            _previous[signum] = signal.signal(signum, _handle)
-    return True
+        try:
+            if signal.getsignal(signum) is not _handle:
+                _previous[signum] = signal.signal(signum, _handle)
+            installed = True
+        except (OSError, ValueError):
+            continue
+    return installed

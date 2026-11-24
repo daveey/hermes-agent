@@ -146,6 +146,9 @@ def test_idle_session_key_drains_onto_that_prompt_queue(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server, "_run_prompt_submit", fake_run_prompt_submit)
     monkeypatch.setattr(server, "_session_uses_compute_host", lambda session: False)
+    # A real idle session has already opened its transcript DB. Keep admission
+    # real, but establish that prerequisite before the bounded async assertion.
+    server._get_db()
     origin = _session("ses_idle", running=False)
     monkeypatch.setattr(server, "_sessions", {"ui-idle": origin})
     server.install_tui_message_injector(manager)

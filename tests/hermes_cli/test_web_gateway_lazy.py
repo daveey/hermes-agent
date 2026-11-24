@@ -42,3 +42,9 @@ def test_hosted_service_proxy_resolves_attributes_on_first_use(monkeypatch):
     assert not calls
     assert proxy._methods == {'x': 'handler'}
     assert calls == ['load']
+
+
+def test_lazy_host_has_same_owner_as_loaded_gateway_host():
+    from hermes_cli import web_gateway_lazy as lazy
+    from tui_gateway import plugin_inject
+    assert lazy._OWNER is plugin_inject._TUI_INJECT_OWNER
