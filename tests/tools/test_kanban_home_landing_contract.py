@@ -74,7 +74,7 @@ def test_supported_hold_and_retry_options_reach_hub_row(gws, monkeypatch, option
             worker.enter()
         return {'ok': True, 'request_id': 'contract-hold-landing', 'queued_only': True}
 
-    monkeypatch.setattr(placement, 'hub_runner', lambda argv: (0, '--option canonical-home-v1', ''))
+    monkeypatch.setattr(placement, 'hub_runner', lambda argv: (0, '--option --canonical-home canonical-home-v2 canonical-home-v1', ''))
     monkeypatch.setattr(placement, 'create_remote', courier)
     result = json.loads(tools._handle_create({'title': 'Retry and hold contract', 'assignee': 'default',
                                              'requires': [], **options}))

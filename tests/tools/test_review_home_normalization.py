@@ -21,7 +21,7 @@ def test_runs_on_normalization(gws, monkeypatch, forwarded, value):
     sent = []
     def run(argv):
         if argv[-1] == '--help':
-            return 0, '--option canonical-home-v1', ''
+            return 0, '--option --canonical-home canonical-home-v2 canonical-home-v1', ''
         sent.append(argv)
         return 3, 'queued', ''
     monkeypatch.setattr(placement, 'hub_runner', run)

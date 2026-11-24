@@ -107,7 +107,7 @@ def test_caller_field_contract(gws, monkeypatch, field, value, local_expected, r
 
     def run(argv):
         if argv[-1] == '--help':
-            return 0, '--option canonical-home-v1', ''
+            return 0, '--option --canonical-home canonical-home-v2 canonical-home-v1', ''
         sent.append(argv)
         return 3, 'durably queued', ''
 

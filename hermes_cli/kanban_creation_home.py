@@ -96,16 +96,10 @@ def transport_options(args, *, hub_cli):
     """Expand/contract preflight against the installed client, before any request write."""
     from hermes_cli import kanban_placement as placement
     rc, help_text, _ = placement.hub_runner([hub_cli, 'create-task', '--help'])
-    if rc or 'canonical-home-v1' not in help_text or '--option' not in help_text:
+    if rc or not all(token in help_text for token in ('canonical-home-v2', '--canonical-home', '--option')):
         raise ValueError('canonical_home_transport_unavailable: update the courier client before forwarding')
-    if args.get('pin_mandatory'):
-        raise ValueError('canonical_home_transport_unavailable: mandatory model pin cannot be forwarded')
-    keys = ('runs_on', 'parents', 'tenant', 'max_retries', 'initial_status', 'human_request',
-            'requires', 'skills', 'priority')
-    # Preserve explicit retry overrides and empty label/dependency lists. The
-    # core owner entrypoint validates typed values; never stringify safety fields.
-    carried = placement.carried_options(args)
-    return {key: carried.get(key, args[key]) for key in keys if args.get(key) is not None}
+    from hermes_cli.kanban_creation_contract import payload
+    return payload(args)
 
 
 def result(args, fields, *, tid, status, target):

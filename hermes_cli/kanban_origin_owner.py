@@ -83,6 +83,8 @@ def receive(request: dict, *, selfwork_context=None) -> dict:
             or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}', create['session_id'])
             or ('board' in create and create['board'] != board)):
         raise ValueError('origin_request_invalid')
+    from hermes_cli.kanban_creation_contract import validate_forward
+    validate_forward({key: value for key, value in create.items() if key != 'board'})
     args = {**create, 'board': board}
     return _dispatch_owner_tool('kanban_create', args, intent, selfwork_context)
 

@@ -53,7 +53,7 @@ def test_transport_preflights_actual_client_and_preserves_options(monkeypatch, a
     def run(argv):
         argv_seen.append(argv)
         if argv[-1] == '--help':
-            return 0, '--option canonical-home-v1' if available else '--option', ''
+            return 0, '--option --canonical-home canonical-home-v2 canonical-home-v1' if available else '--option', ''
         return 0, 'queued', ''
 
     placement._help_cache.clear()

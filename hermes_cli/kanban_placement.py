@@ -1298,10 +1298,11 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     if not carried and any(args.get(k) not in (None, "", []) for k in (*IDENTITY_OPTIONS, "self_work")):
         return {"ok": False, "fatal": True, "error": "create identity requires hermes-hub create-task --option"}
     try:
-        options = carried_options(args) if carried else {}
         if canonical_home:
             from hermes_cli.kanban_creation_home import transport_options
-            options.update(transport_options(args, hub_cli=hub_cli))
+            options = transport_options(args, hub_cli=hub_cli)
+        else:
+            options = carried_options(args) if carried else {}
     except (TypeError, ValueError) as exc:
         return {"ok": False, "fatal": True, "error": str(exc)}
     transport_args = {**args, "idempotency_key": transport_key} if transport_key else args
@@ -1312,8 +1313,11 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
         # the complete envelope: the same key can also name changed or formerly dropped metadata.
         return {"ok": True, "request_id": rid, "queued_only": False, "retry": True}
     argv = [hub_cli, "create-task", target, str(args.get("title") or "untitled").strip()[:300],
-            "--body", remote_body(args, self_gw=self_gw, target=target, carried=carried),
+            "--body", (args.get("body") or "") if canonical_home else remote_body(
+                args, self_gw=self_gw, target=target, carried=carried),
             "--assignee", str(args.get("assignee") or "default"), "--id", rid]
+    if canonical_home:
+        argv.append("--canonical-home")
     for k, v in options.items():
         argv += ["--option", f"{k}={json.dumps(v)}"]
     if origin_session:
