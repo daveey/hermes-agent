@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 import sys
 import time
 from dataclasses import dataclass
@@ -70,8 +71,30 @@ class ProcessCensus:
         return not self.errors
 
 
-def _read_bytes(path: Path, limit: int) -> bytes:
-    with path.open('rb') as stream:
+_O_NONBLOCK = getattr(os, 'O_NONBLOCK', 0)
+_O_NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+_O_CLOEXEC = getattr(os, 'O_CLOEXEC', 0)
+
+
+def _read_bytes(path: Path, limit: int, *, nofollow: bool = False) -> bytes:
+    """Bounded read of one REGULAR file; never blocks on the path's file type.
+
+    A FIFO/socket/device swapped in for a ledger (before or after an lstat) must
+    be refused rather than hold the caller, and with it the launch gate. The
+    nonblocking open returns immediately for a FIFO with no writer; the type is
+    judged on the opened descriptor, so a swap after any path check is covered.
+    procfs files report S_IFREG and read normally. ``nofollow`` additionally
+    refuses a symlink final component (ELOOP is an OSError, hence uncertainty).
+    """
+    fd = os.open(path, os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC | (_O_NOFOLLOW if nofollow else 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise CensusUnavailable('nonregular observation input')
+        stream = os.fdopen(fd, 'rb')
+    except BaseException:
+        os.close(fd)
+        raise
+    with stream:
         value = stream.read(limit + 1)
     if len(value) > limit:
         raise CensusUnavailable('observation byte budget')
@@ -260,7 +283,7 @@ def read_ledger_strict(path: Path) -> tuple[dict, ...]:
     readable evidence only, never proof that no unregistered process exists.
     """
     try:
-        first_raw = _read_bytes(path, _MAX_LEDGER)
+        first_raw = _read_bytes(path, _MAX_LEDGER, nofollow=True)
         rows = json.loads(first_raw.decode('utf-8-sig'))
         if not isinstance(rows, list) or len(rows) > MAX_PROCESSES or not all(_valid_row(row) for row in rows):
             raise CensusUnavailable('invalid ledger schema')
@@ -275,7 +298,7 @@ def read_ledger_strict(path: Path) -> tuple[dict, ...]:
             candidate = pending / name
             if candidate.suffix != '.json' or candidate.is_symlink():
                 raise CensusUnavailable('unknown pending ledger entry')
-            raw = _read_bytes(candidate, _MAX_LEDGER - total)
+            raw = _read_bytes(candidate, _MAX_LEDGER - total, nofollow=True)
             total += len(raw)
             pending_bytes[name] = raw
             row = json.loads(raw.decode('utf-8-sig'))
@@ -284,12 +307,12 @@ def read_ledger_strict(path: Path) -> tuple[dict, ...]:
             rows.append(row)
         # Folding moves rows from pending into main. Validate BOTH sources after
         # the cut; checking only pending names misses a continuously present row.
-        if _read_bytes(path, _MAX_LEDGER) != first_raw:
+        if _read_bytes(path, _MAX_LEDGER, nofollow=True) != first_raw:
             raise CensusUnavailable('main ledger changed')
         if pending.exists() and _bounded_names(pending, MAX_PROCESSES) != names:
             raise CensusUnavailable('pending ledger changed')
         for name, raw in pending_bytes.items():
-            if _read_bytes(pending / name, len(raw)) != raw:
+            if _read_bytes(pending / name, len(raw), nofollow=True) != raw:
                 raise CensusUnavailable('pending ledger content changed')
         return tuple(rows)
     except (OSError, ValueError, UnicodeError, RecursionError) as exc:

@@ -96,7 +96,7 @@ def read_participants_strict(runtime: Path) -> tuple[LaunchReceipt, ...]:
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):  # windows-footgun: ok — Linux adapter
             raise CensusUnavailable('unsafe participant ledger')
-        raw = _read_bytes(path, _MAX_RECEIPTS)
+        raw = _read_bytes(path, _MAX_RECEIPTS, nofollow=True)
         values = json.loads(raw)
         if not isinstance(values, list) or len(values) > _MAX_PARTICIPANTS:
             raise CensusUnavailable('participant ledger budget/schema')
@@ -107,7 +107,7 @@ def read_participants_strict(runtime: Path) -> tuple[LaunchReceipt, ...]:
             raise CensusUnavailable('foreign pid namespace')
         if len({receipt.identity for receipt in receipts}) != len(receipts):
             raise CensusUnavailable('duplicate participant incarnation')
-        if _read_bytes(path, _MAX_RECEIPTS) != raw:
+        if _read_bytes(path, _MAX_RECEIPTS, nofollow=True) != raw:
             raise CensusUnavailable('participant ledger changed')
         return receipts
     except (OSError, ValueError, UnicodeError, RecursionError) as exc:
@@ -228,9 +228,77 @@ def _inside(value: str, root: str) -> bool:
     return left == right or right in left.parents
 
 
+# Environment variables whose value is an os.pathsep-separated search path, not one path.
+_PATH_LIST_ENV = frozenset(('PYTHONPATH',))
+_MAX_PATH_LIST_ENTRIES = 256
+_MAX_PATH_BYTES = 4096
+
+
+def _absolute(value: str, cwd: str) -> str | None:
+    """Lexical absolute form; None when a relative value cannot be anchored at the cwd.
+
+    A deleted/unreadable cwd leaves ``..`` unresolvable (it could climb anywhere).
+    Without ``..`` the value lies under that cwd, which is tested separately.
+    """
+    if value.startswith('/'):
+        return '/' + os.path.normpath(value).lstrip('/')
+    if cwd.startswith('/') and not cwd.endswith(' (deleted)'):
+        return '/' + os.path.normpath(os.path.join(cwd, value)).lstrip('/')
+    return None if '..' in value.split('/') else ''
+
+
+def _may_reach(value: str, cwd: str, roots: tuple[str, ...], *, follow_links: bool) -> bool:
+    """True unless this one reference provably cannot name a path under any root.
+
+    Relative references resolve against the OBSERVED cwd. Symlinks are followed
+    for import search paths, where an indirection really changes what is imported;
+    other references (argv words, flag values) are judged lexically, so a census
+    does not stat arbitrary foreign paths.
+    """
+    absolute = _absolute(value, cwd)
+    if absolute is None:
+        return True
+    if not absolute or len(absolute) > _MAX_PATH_BYTES:
+        return False
+    if any(_inside(absolute, root) for root in roots):
+        return True
+    if not follow_links:
+        return False
+    try:
+        real = os.path.realpath(absolute)
+    except (OSError, ValueError):
+        return True
+    return any(_inside(real, root) for root in roots)
+
+
 def _record_touches(record, *roots: str) -> bool:
-    values = (record.exe, record.cwd, *record.argv, *(value for _, value in record.environment))
-    return any(_inside(value, root) for value in values for root in roots if root)
+    """Fail toward 'touches': absence of access must be positively established."""
+    anchors = []
+    for root in roots:
+        if root and root.startswith('/'):
+            anchors.append('/' + os.path.normpath(root).lstrip('/'))
+            try:
+                anchors.append(os.path.realpath(root))
+            except (OSError, ValueError):
+                return True
+    anchors = tuple(dict.fromkeys(anchors))
+    if not anchors:
+        return False
+    cwd = record.cwd
+    values = [(record.exe, False), (cwd, False)]
+    for item in record.argv:
+        values.append((item, False))
+        if '=' in item:  # --flag=/path, KEY=/path
+            values.append((item.partition('=')[2], False))
+    for key, value in record.environment:
+        if key in _PATH_LIST_ENV:
+            entries = value.split(os.pathsep)
+            if len(entries) > _MAX_PATH_LIST_ENTRIES:
+                return True
+            values.extend((entry, True) for entry in entries)
+        else:
+            values.append((value, False))
+    return any(value and _may_reach(value, cwd, anchors, follow_links=links) for value, links in values)
 
 
 def _module_token(argv: tuple[str, ...]) -> str | None:
@@ -462,9 +530,13 @@ def configured_homes(root: Path) -> tuple[Path, ...]:
 def collect_raw_ledger(root: Path) -> CollectorEvidence:
     path = root / 'spawn-ledger.json'
     try:
-        path.lstat()
+        info = path.lstat()
     except FileNotFoundError as exc:
         raise CensusUnavailable('ledger missing') from exc
+    if not stat.S_ISREG(info.st_mode):
+        # Early refusal only; the opened descriptor is re-judged without blocking,
+        # so a FIFO/device/symlink swapped in after this lstat cannot hold the gate.
+        raise CensusUnavailable('unsafe:spawn-ledger.json')
     rows = read_ledger_strict(path)
     return CollectorEvidence((f'ledger:{path}:{len(rows)}',), ())
 
@@ -520,7 +592,7 @@ def collect_supervisor_ports(root: Path) -> CollectorEvidence:
             except FileNotFoundError:
                 refs.append(f'{name}:absent')
                 continue
-            raw = _read_bytes(path, 1024 * 1024)
+            raw = _read_bytes(path, 1024 * 1024, nofollow=True)
             if not isinstance(json.loads(raw), dict):
                 raise CensusUnavailable(f'{name}:schema')
             refs.append(f'{name}:{hashlib.sha256(raw).hexdigest()}')
@@ -537,7 +609,7 @@ def collect_supervisor_ports(root: Path) -> CollectorEvidence:
             continue
         try:
             _regular_owned(pid_path)
-            payload = json.loads(_read_bytes(pid_path, 1024 * 1024))
+            payload = json.loads(_read_bytes(pid_path, 1024 * 1024, nofollow=True))
             pid = payload.get('pid') if isinstance(payload, dict) else None
             if type(pid) is not int or pid <= 0:
                 raise CensusUnavailable('gateway pid')

@@ -115,6 +115,8 @@ def test_launcher_coverage_is_complete_for_supported_sources():
     assert set(coverage['roles']) == set(admission.SUPPORTED_LAUNCHES)
 
 
+@pytest.mark.allow_real_home_io  # subject is the LIVE host census: classifying foreign processes lstat()s their
+# PYTHONPATH entries (read-only metadata), which on a developer host may lie under the real Hermes home.
 def test_inspect_host_hub_shaped_does_not_treat_live_python_as_empty(tmp_path, monkeypatch):
     root = _home(tmp_path)
     monkeypatch.setenv('HERMES_GATEWAY_LOCK_DIR', str(tmp_path / 'no-locks'))

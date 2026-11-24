@@ -153,3 +153,17 @@ def test_identical_generation_from_another_install_is_not_participation(tmp_path
     record = adapter.read_process(os.getpid(), adapter.boot_id())
     assert admission.classify_process(record, (receipt,), receipt.generation,
                                       installation='/other-install').kind == 'unrelated'
+
+
+def test_enrollment_of_a_process_that_does_not_exist_fails_closed_and_publishes_nothing(tmp_path, monkeypatch):
+    """Positive admission stays strict: a fake pid (as some fixtures install) is refused, never enrolled.
+
+    Fixtures must scope fake pids to their own module (see tests/gateway/test_agent_cli_visibility.py)
+    instead of letting import-time launch enrollment observe them.
+    """
+    runtime = tmp_path / 'runtime'
+    monkeypatch.setattr(os, 'getpid', lambda: 2 ** 22 + 12345)
+    with pytest.raises((CensusUnavailable, OSError)):
+        admission.enroll_launch(runtime, 'serve', installation=Path(__file__).parents[2])
+    monkeypatch.undo()
+    assert not (runtime / 'participants.json').exists()

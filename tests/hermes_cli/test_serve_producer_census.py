@@ -239,9 +239,9 @@ def test_pending_to_main_fold_cannot_disappear_from_read(tmp_path, monkeypatch):
     original = census._read_bytes
     changed = False
 
-    def folded(candidate, limit):
+    def folded(candidate, limit, **kwargs):
         nonlocal changed
-        result = original(candidate, limit)
+        result = original(candidate, limit, **kwargs)
         if candidate == path and not changed:
             changed = True
             path.write_text(json.dumps([row]))
