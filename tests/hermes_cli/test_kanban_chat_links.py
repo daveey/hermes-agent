@@ -492,6 +492,85 @@ def test_a_profile_board_card_stays_the_chats_from_the_ledger_and_links_diff_is_
     assert ksa.active_task_counts() == {"s1": 2}
 
 
+def test_reconcile_never_writes_a_profile_board_cards_link_whether_or_not_the_ledger_lists_it(live, monkeypatch):
+    """[daveey] The Board has no row for a profile-own board card, so it refuses every write of that card's link.
+    The MacBook's link to hub ci-sweeper card t_225e0450 flipped unreleased/released as the ledger projection listed
+    the card or not, and each flip was a refused op (8 in 3 h, 2026-11-24). Reconcile now leaves such a link as it
+    is: neither ledger-driven writes nor releases, while an ordinary ledger link is still written and released."""
+    flipping = links.link_uid("t_225e0450", ME, "default", "s_old", "created")
+    steady = links.link_uid("t_d3e3f88a", ME, "default", "s1", "shepherd")
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+                     "released, created_at) VALUES (?, 't_225e0450', ?, 'default', 's_old', 'created', 1, 1)",
+                     (flipping, ME))
+        live.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+                     "released, created_at) VALUES (?, 't_d3e3f88a', ?, 'default', 's1', 'shepherd', 0, 1)",
+                     (steady, ME))
+        live.execute("DELETE FROM kanban_sync_outbox")
+    listed = [_profile_board_row("t_225e0450", "s_old", profile="ci-sweeper", via="origin", status="archived"),
+              _profile_board_row("t_d3e3f88a", "s1"), _ledger_row("t_open", "s1")]
+    unlisted = listed[1:]
+    rows = listed
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: rows)
+    for rows in (listed, unlisted, listed, unlisted):
+        links.reconcile(live, "default", ME)
+    queued = [r[0] for r in live.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name='task_chat_links'")]
+    assert flipping not in queued and steady not in queued
+    assert ("t_225e0450", "s_old", "created", 1) in _links(live) and ("t_d3e3f88a", "s1", "shepherd", 0) in _links(live)
+    assert ("t_open", "s1", "shepherd", 0) in _links(live)  # an ordinary ledger link is still written
+    rows = [_profile_board_row("t_d3e3f88a", "s1")]
+    assert links.reconcile(live, "default", ME)["released"] == 1  # and t_open's is released once the ledger drops it
+    assert ("t_open", "s1", "shepherd", 1) in _links(live) and ("t_d3e3f88a", "s1", "shepherd", 0) in _links(live)
+
+
+def test_an_unreleased_profile_board_link_is_released_once_when_the_ledger_drops_it(live, monkeypatch):
+    """A link left unreleased (written before this fix) whose card the ledger stops listing is released once, one
+    refused write at most, and then stays put: no further pass queues it."""
+    uid = links.link_uid("t_gone", ME, "default", "s1", "shepherd")
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+                     "released, created_at) VALUES (?, 't_gone', ?, 'default', 's1', 'shepherd', 0, 1)", (uid, ME))
+        live.execute("DELETE FROM kanban_sync_outbox")
+    rows = [_profile_board_row("t_gone", "s1")]
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: rows)
+    links.reconcile(live, "default", ME)
+    assert ("t_gone", "s1", "shepherd", 0) in _links(live)  # listed: left alone
+    rows = []
+    for _ in range(3):
+        links.reconcile(live, "default", ME)
+    queued = [r[0] for r in live.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name='task_chat_links'")]
+    assert queued == [uid] and ("t_gone", "s1", "shepherd", 1) in _links(live)
+
+
+def test_a_profile_card_the_replica_carries_keeps_its_ledger_link(live, kanban_home, monkeypatch, tmp_path):
+    """The writer uses the readers' test: a non-default profile's card the Board DOES carry (its replica has the task
+    row) is no profile-own board card, so its ledger link is written as before."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_carried", "carried", "running", OTHER)], [])
+    monkeypatch.setattr(ksc, "shadow_path", lambda slug: rep)
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [
+        _profile_board_row("t_carried", "s1", profile="work"), _profile_board_row("t_d3e3f88a", "s1")])
+    links.reconcile(live, "default", ME)
+    assert _links(live) == {("t_carried", "s1", "shepherd", 0)}
+
+
+def test_a_machine_session_link_to_a_profile_board_card_is_not_reported_as_a_release(live, monkeypatch):
+    """Reconcile leaves a profile-board card's link alone, so the machine-session release receipt and the
+    ``machine_links`` dry run do not list it either (it would be listed on every pass, never released)."""
+    uid = links.link_uid("t_d3e3f88a", ME, "default", "s_machine", "shepherd")
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+                     "released, created_at) VALUES (?, 't_d3e3f88a', ?, 'default', 's_machine', 'shepherd', 0, 1)",
+                     (uid, ME))
+        live.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+                     "released, created_at) VALUES (?, 't_plain', ?, 'default', 's_machine', 'shepherd', 0, 1)",
+                     (links.link_uid("t_plain", ME, "default", "s_machine", "shepherd"), ME))
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [_profile_board_row("t_d3e3f88a", "s_machine")])
+    monkeypatch.setattr("hermes_cli.kanban_db_notify.machine_sessions",
+                        lambda gateway, refs, **kw: {str(r) for r in refs})
+    assert [o["task_id"] for o in links.machine_links(live, "default", ME)] == ["t_plain"]
+
+
 def test_a_replica_that_carries_a_profile_owned_card_keeps_its_own_answer(tmp_path, monkeypatch):
     """The ledger fallback is only for cards no readable replica carries: when the Board has the card (a profile
     the ledger names on a synced board), the replica's links decide, released ones included. A board no replica
