@@ -165,6 +165,27 @@ def test_policy_failure_quiet_retry_and_unsupported_census(monkeypatch, tmp_path
         policy.close()
 
 
+def test_cold_and_repeated_off_need_no_data_watch(monkeypatch, tmp_path):
+    from hermes_cli import config, fact_source_watch
+    from tests.tui_gateway.test_gateway_native_source_lifecycle import Watch
+
+    monkeypatch.setattr(config, 'get_config_path', lambda: tmp_path / 'config.yaml')
+    monkeypatch.setattr(config, 'load_config_readonly', lambda: {'display': {'gateway_notification_f': False}})
+    monkeypatch.setattr(fact_source_watch, 'NativeSourceWatch', Watch)
+    owner = sources.Sources(threading.Event())
+    action = owner.add(lambda: None)
+    try:
+        owner.step(0, reconcile=True)
+        assert owner.watch is None
+        assert not owner.ready
+        assert not action.due(legacy_due=False)
+        owner.step(30, reconcile=True)
+        assert owner.watch is None
+        assert owner.policy.watch is not None
+    finally:
+        owner.close()
+
+
 def test_policy_watch_loss_revokes_native_until_quiet_retry(monkeypatch, tmp_path):
     from hermes_cli import config, fact_source_watch
     from tui_gateway.notification_gateway_policy import Policy
