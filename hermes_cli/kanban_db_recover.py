@@ -483,10 +483,19 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
                                  for rid in entries), default=0) for name, _sql in tables}
             _rebuild_sequence(src, dst, tables, fill, floors)
         from hermes_cli.kanban_replay_admission import mark_rebuilt
+        present = {name for name, _sql in tables}
+        enrolled = 'kanban_replay_sender1' in present
+        if not enrolled:
+            try:
+                row = src.execute('SELECT journal_id FROM kanban_sync_state LIMIT 1').fetchone()
+            except sqlite3.DatabaseError:
+                row = None
+            enrolled = row is not None and row[0] is not None
         mark_rebuilt(dst, {name: asdict(loss) for name, loss in result.tables.items()
                            if name.startswith(('kanban_replay_', 'kanban_sync_', 'kanban_failure_',
                                                'kanban_actionability_')) and
-                           (loss.unreadable_paths or loss.known_lost or loss.possibly_lost)})
+                           (loss.unreadable_paths or loss.known_lost or loss.possibly_lost)},
+                     enrolled=enrolled)
         dst.execute("COMMIT")
         for sql in later:
             with contextlib.suppress(sqlite3.Error):  # an index the data now violates is reported by the check below

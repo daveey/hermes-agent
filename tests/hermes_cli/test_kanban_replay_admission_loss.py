@@ -83,13 +83,15 @@ def test_built_custody_loss_is_reported_not_absence(tmp_path, table, mutable):
         conn.close()
 
 
-def test_no_sync_state_at_rebuild_does_not_erase_loss_on_later_install(tmp_path):
+def test_no_sync_state_at_rebuild_does_not_invent_hold_on_later_install(tmp_path):
     path, rebuilt = tmp_path / 'plain.db', tmp_path / 'rebuilt.db'
     conn = kbc.connect(path)
     conn.close()
     report = recovery.RecoveryResult(status='building', db_path=str(path))
     recovery._build(path, rebuilt, None, report)
     with sqlite3.connect(rebuilt) as conn:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert 'kanban_replay_recovery_loss1' not in names
         conn.executescript(sync.SYNC_SCHEMA_SQL)
         for table, column, sql in sync._SYNC_COLUMN_DDL:
             if table == 'kanban_sync_state':
@@ -97,7 +99,72 @@ def test_no_sync_state_at_rebuild_does_not_erase_loss_on_later_install(tmp_path)
         conn.execute("INSERT INTO kanban_sync_state(board_id,gateway_id,hlc_last,mode) "
                      "VALUES ('default','macbook','','shadow')")
         conn.commit()
-        assert_held(conn)
+        flag = conn.execute('SELECT replay_restore_required FROM kanban_sync_state').fetchone()[0]
+        assert flag in (0, None)
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_replay_recovery_loss1'"
+        ).fetchone() is None
+
+
+def test_never_enrolled_rebuild_keeps_legacy_round_and_reconcile(tmp_path, monkeypatch):
+    """Auto-recovery of a never-enrolled board must not raise RestoreRequired on push/round/reconcile."""
+    from tests.hermes_cli import kanban_sync_support as support
+    from tests.hermes_cli.kanban_sync_fake_board import FakeService
+
+    home = support.kanban_home(tmp_path, monkeypatch)
+    support.write_sync_config(home, True)
+    path = home / 'kanban.db'
+    conn = kbc.connect(path)
+    client.ensure_identity(conn, 'default', 'macbook')
+    assert conn.execute('SELECT journal_id FROM kanban_sync_state').fetchone()[0] is None
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert 'kanban_replay_sender1' not in tables
+    kb.create_task(conn, title='legacy after rebuild', assignee='worker')
+    conn.close()
+    damage._forget(path)
+
+    control = FakeService().hub('macbook')
+    with kbc.connect(path) as before:
+        assert client.push(before, control, 'default', 'macbook', primary=False, max_batches=1).applied >= 1
+    damage._forget(path)
+    pending = kbc.connect(path)
+    try:
+        kb.create_task(pending, title='pending across rebuild', assignee='worker')
+    finally:
+        pending.close()
+    damage._forget(path)
+
+    rebuilt = tmp_path / 'rebuilt-never-enrolled.db'
+    report = recovery.RecoveryResult(status='building', db_path=str(path))
+    recovery._build(path, rebuilt, None, report)
+    protocol = [loss for name, loss in report.tables.items()
+                if name.startswith(('kanban_replay_', 'kanban_sync_', 'kanban_failure_', 'kanban_actionability_'))]
+    assert all(not (loss.unreadable_paths or loss.known_lost or loss.possibly_lost) for loss in protocol)
+    recovery._install(rebuilt, path)
+    damage._forget(path)
+
+    svc = FakeService()
+    hub = svc.hub('macbook')
+    live = kbc.connect(path)
+    try:
+        result = client.push(live, hub, 'default', 'macbook', primary=False, max_batches=1)
+        assert result.applied >= 1
+        flag = live.execute('SELECT replay_restore_required FROM kanban_sync_state').fetchone()[0]
+        assert flag in (0, None)
+        assert live.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_replay_recovery_loss1'"
+        ).fetchone() is None
+    finally:
+        live.close()
+
+    monkeypatch.setattr(client, 'publish_pickup_if_changed', lambda hub: None)
+    from hermes_cli import kanban_source_clones
+    monkeypatch.setattr(kanban_source_clones, 'attest_if_due', lambda hub: None)
+    results = client.sync_all_once(hub, boards=[('default', path)])
+    assert results[0].error is None
+    counts = client.reconcile('default', path, hub=hub)
+    assert counts.get('board') == 'default'
+    assert 'RestoreRequired' not in str(counts)
 
 
 def test_restore_hold_isolated_to_its_board_in_real_sync_round(live, monkeypatch):

@@ -11,12 +11,15 @@ class RestoreRequired(ValueError):
     """Local custody is incomplete; network retry cannot repair this board."""
 
 
-def mark_rebuilt(conn, losses):
+def mark_rebuilt(conn, losses, *, enrolled=False):
     """Persist recovery independently of a potentially lost sync-state row.
 
     This marker is custody LOSS, not a reconstructed receipt or reconciliation.
     Reconciliation of an incomplete database is deliberately not provided here.
+    Never-enrolled images with no protocol-table loss keep legacy transport.
     """
+    if not losses and not enrolled:
+        return
     conn.execute(_SCHEMA)
     old = conn.execute(f'SELECT loss FROM {_RECOVERY} WHERE singleton=1').fetchone()
     history = json.loads(old[0]) if old else []
