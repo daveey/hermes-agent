@@ -31,11 +31,12 @@ def classify_parked_request(conn, task_id: str, *, human_request: dict | None,
         ).fetchone()
         if row is None or row["status"] not in ("blocked", "triage") or row["current_run_id"] is not None:
             return False
-        # A contained card's lifecycle belongs to its containment authority: the Board refuses this generic
-        # write (containment_hold), which used to leave a never-applicable rejected upload behind.
         request = validate_human_request(human_request, kind=row["block_kind"])
+        # A contained card's lifecycle belongs to its containment authority: the Board refuses this generic
+        # write (containment_hold), which used to leave a never-applicable rejected upload behind. The guard
+        # also holds a sync-quarantined card or one with a pending containment request.
         from hermes_cli.kanban_containment_guard import pending as contained
-        if contained(conn, task_id):  # also a sync quarantine or a pending containment request
+        if contained(conn, task_id):
             return False
         from hermes_cli.kanban_ask_resolved import filing_fields, store_request
         store_request(conn, task_id, request)  # adds, changes or removes the resolved_check probe [daveey]
