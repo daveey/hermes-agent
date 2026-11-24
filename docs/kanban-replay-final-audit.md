@@ -103,17 +103,40 @@ in the diagnostic producer test file.
    reentrancy change was added. Baseline production passes these controls; no
    production RED is claimed. Three targeted premature-commit/exposure-omission
    mutants fail at their intended assertions, with original source restored.
-4. **State and model/throughput evidence.** Add many-settlement/reopen and seeded
-   reference-model sender interleavings, separating constant stream state from
-   intentional business/diagnostic obligations. Measure backlog/lease-sensitive
-   throughput with request counts, declared thresholds and realistic latency after
-   correcting the ACK path. A three-operation fake-peer example is not this proof.
-5. **Isolation and remaining condition reconciliation.** Test an active healthy
-   strict stream after a faulted stream, observation interruption on strict failure,
-   and malformed peer-response behavior at the supported transport boundary. A
-   generated count of 1213 syntactic mutants is neither 1213 distinct behavior
-   requirements nor a kill claim. Reconcile the remaining meaningful condition
-   classes with specific behavioral controls, marking true equivalents honestly.
+4. **State and model evidence (local campaign now exercised).** Four fixed seeds
+   drive an independent integer-prefix receiver oracle through56 scheduled faults
+   or clean turns per seed, with a real SQLite reopen and full journal/source
+   custody comparison after each attempted turn. Each seed reaches all eight
+   capability/inspect/session/operation/ACK boundary cuts; accepted operation IDs,
+   exact canonical digest, predecessor ACK and W=1 prefix invariants are checked
+   independently of production reconcile/recover. A successful drain leaves no
+   pending sources and equal local settled/remote H/A, and an idle reopened turn
+   cannot resend. A singleton/encoded-state bound rejects per-settlement journal
+   accumulation while intentionally excluding business obligations and test oracle
+   history. Baseline production is GREEN, not a new production RED. Three model
+   mutants (omitted uncertain-verdict recovery, idle ACK, bounded state) are killed
+   at assertions. This is neither deployed receiver correctness nor a proof of all
+   possible interleavings.
+
+   **Throughput remains open:** measure backlog/lease-sensitive throughput with
+   request counts, declared thresholds and realistic latency. Constant-state and
+   many-settlement correctness are not throughput or lease-renewal acceptance.
+5. **Active-stream isolation now exercised; remaining condition reconciliation.**
+   Four real multi-board dispatch cases place a faulted strict stream before a
+   second active strict shadow stream. Capability, inspect, session and transport
+   faults preserve the first stream's exact source/journal custody while the
+   second sends, settles, ACKs and drains all its work through production rounds.
+   The failed board's durable observation token changes independently of the
+   successful board's process-global epoch, and repair later progresses its same
+   original intent. An interruption-omission mutant initially survived a weak
+   global-epoch assertion: the healthy board itself rotates that epoch. The final
+   board-local durable-token assertion kills it. Empty feed/receiver fixtures are
+   not real Board interoperability. No sender/round/journal function is replaced.
+
+   Malformed peer-response behavior at the supported transport boundary and the
+   remaining meaningful condition inventory still need reconciliation. A
+   generated count of1213 syntactic mutants is neither1213 distinct behavior
+   requirements nor a kill claim. Mark true equivalents honestly.
 
 ## Downstream proof boundaries (unchanged)
 
