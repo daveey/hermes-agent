@@ -59,13 +59,12 @@ def _http_probe(
 ) -> tuple[int, str]:
     """Poll ``http://127.0.0.1:9119<path>`` from inside the container.
 
-    Returns ``(status_code, body)`` as soon as the dashboard answers any
-    HTTP response — 200, 401, 503, anything. The image doesn't ship
-    ``curl`` but the venv's stdlib ``urllib`` is good enough; we use a
-    proper ``try``/``except`` to intercept ``HTTPError`` because
-    ``urlopen`` raises on 4xx/5xx, and we treat those as legitimate
-    responses (the OAuth gate's 401 IS the success signal for the
-    gate-engaged test).
+    Returns ``(status_code, body)`` as soon as the dashboard answers an
+    HTTP response other than the exact standalone-services warmup 503.
+    Other errors return immediately: in particular, 401 is the success
+    signal for the gate-engaged test. The image doesn't ship ``curl`` but
+    the venv's stdlib ``urllib`` is good enough; we intercept ``HTTPError``
+    because ``urlopen`` raises on 4xx/5xx.
 
     Connection errors (uvicorn still starting, fail-closed exited) keep
     the poll loop running until ``deadline_s`` elapses.
@@ -108,7 +107,11 @@ except urllib.error.HTTPError as h:
             try:
                 status = int(lines[0].strip())
                 body = lines[1] if len(lines) > 1 else ""
-                return status, body
+                if status == 503 and body == '{"detail":"Backend services warming"}':
+                    # The listener is live before standalone services are ready.
+                    last_err = f"startup warmup: {body}"
+                else:
+                    return status, body
             except (ValueError, IndexError) as exc:
                 last_err = f"parse: {exc!r} / stdout={r.stdout!r}"
         else:

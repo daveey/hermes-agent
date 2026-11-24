@@ -120,3 +120,40 @@ def test_sleep_between_failed_probes_stops_at_the_deadline(monkeypatch, module):
         with pytest.raises(AssertionError, match="never returned HTTP"):
             module._http_probe("c", "/api/status", deadline_s=1.0)
     assert clock.now <= 1.0
+
+
+@pytest.mark.parametrize("ready_status", [200, 401])
+def test_dashboard_http_probe_waits_through_services_warmup(monkeypatch, ready_status):
+    """Listener readiness must not expose the intentional startup 503 to gate assertions."""
+    clock = _Clock()
+    monkeypatch.setattr(test_dashboard, "time", clock)
+    warming = SimpleNamespace(returncode=0, stdout='503\n{"detail":"Backend services warming"}', stderr="")
+    ready = SimpleNamespace(returncode=0, stdout=f"{ready_status}\nready", stderr="")
+    outcomes = [warming, ready]
+    monkeypatch.setattr(test_dashboard, "docker_exec_sh", _scripted_exec(clock, outcomes))
+    assert test_dashboard._http_probe("c", "/api/auth/providers") == (ready_status, "ready")
+    assert outcomes == [ready]
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(401, '{"detail":"Backend services warming"}'), (500, '{"detail":"Backend services warming"}'),
+     (503, '{"detail":"unavailable"}'), (503, "not json")],
+)
+def test_dashboard_http_probe_preserves_non_warmup_errors(monkeypatch, status, body):
+    clock = _Clock()
+    monkeypatch.setattr(test_dashboard, "time", clock)
+    response = SimpleNamespace(returncode=0, stdout=f"{status}\n{body}", stderr="")
+    monkeypatch.setattr(test_dashboard, "docker_exec_sh", _scripted_exec(clock, [response]))
+    assert test_dashboard._http_probe("c", "/api/sessions") == (status, body)
+    assert clock.now == 0.1
+
+
+def test_dashboard_http_probe_warmup_keeps_original_deadline(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(test_dashboard, "time", clock)
+    warming = SimpleNamespace(returncode=0, stdout='503\n{"detail":"Backend services warming"}', stderr="")
+    monkeypatch.setattr(test_dashboard, "docker_exec_sh", _scripted_exec(clock, [warming]))
+    with pytest.raises(AssertionError, match="Backend services warming"):
+        test_dashboard._http_probe("c", "/api/auth/providers", deadline_s=2.0)
+    assert clock.now <= 2.0
