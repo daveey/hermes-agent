@@ -182,7 +182,9 @@ export function requestStages(url: string, method: string, output?: StageBuffer)
         emit('response_start', { status: res.statusCode || 0 })
         let bytes = 0
         res.on('data', chunk => { bytes += chunk.length })
-        res.once('end', () => emit('response_end', { bytes }))
+        // The JSON consumer registers first; receipt must precede its synchronous
+        // decompression/delta decoding/JSON parsing, not include that local work.
+        res.prependOnceListener('end', () => emit('response_end', { bytes }))
         res.once('close', () => emit('response_close', { bytes, complete: res.complete }))
       })
       req.once('error', () => emit('error'))

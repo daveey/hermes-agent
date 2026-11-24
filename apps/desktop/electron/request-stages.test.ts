@@ -129,6 +129,34 @@ describe('request-stage capture', () => {
     } finally { await server.close() }
   })
 
+  it.each(['private', 'public'])('records %s response receipt before synchronous decoding', async kind => {
+    const observed: string[] = []
+    const { rows, buffer } = capture()
+    const emit = buffer.emit.bind(buffer)
+    vi.spyOn(buffer, 'emit').mockImplementation((stage, fields) => { observed.push(stage); emit(stage, fields) })
+    const realTrace = tracing.requestStages
+    vi.spyOn(tracing, 'requestStages').mockImplementation((url, method) => realTrace(url, method, buffer))
+    const parse = JSON.parse
+    vi.spyOn(JSON, 'parse').mockImplementation((text, reviver) => {
+      if (text === '{"ok":true}') { observed.push('decode_started') }
+
+      return parse(text, reviver)
+    })
+    const server = await serverFor((_req, res) => res.end('{"ok":true}'))
+
+    try {
+      const url = server.base + route
+      const answer = kind === 'private' ? await fetchJsonWith(deps, url, null) : await fetchPublicJsonWith(deps, url)
+      expect(answer).toEqual({ ok: true })
+      expect(observed).toContain('response_end')
+      expect(observed).toContain('decode_started')
+      expect(observed.indexOf('response_end')).toBeLessThan(observed.indexOf('decode_started'))
+      await buffer.flush()
+      expect(rows.filter(row => row.stage === 'response_end')).toHaveLength(1)
+      expect(rows.find(row => row.stage === 'response_end').bytes).toBe(11)
+    } finally { await server.close(); await buffer.flush() }
+  })
+
   it('records Agent queue deadline before a socket and does not change POST replay policy', async () => {
     const { rows, buffer } = capture()
     const agent = keepAliveAgent(http, 1)
