@@ -40,14 +40,14 @@ def _ready_floor(conn, task_id: str) -> int:
     """``kanban_diagnostics._last_ready_entry_ts`` computed from only the rows that can move it, never the
     whole event history (the hub's maintenance pass loaded every event/run of every parent here).
 
-    Same predicate: max of (latest floor-kind event, latest ``continued`` event whose payload says
+    Same predicate: max of (latest floor-kind event, latest conditional registry event whose payload says
     status=ready, latest run end), after dropping unused Board grants' runs and their run-tagged events. An
     unused grant needs ``outcome='released'`` and its judgement reads only that run's own events, so only
     released runs are loaded whole (``idx_events_run``); other runs contribute just ``ended_at``. Event
     reads use ``idx_events_kind_task_id``; ``heartbeat`` & co. are never touched."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_diagnostics import _event_ts, _parse_payload
-    from hermes_cli.kanban_ready_events import READY_WAIT_FLOOR_KINDS
+    from hermes_cli.kanban_ready_events import READY_ENTRY_CONDITIONAL_KINDS, READY_WAIT_FLOOR_KINDS
     from hermes_cli.kanban_unused_grant import unused_grant_run
 
     unused: set = set()
@@ -65,13 +65,13 @@ def _ready_floor(conn, task_id: str) -> int:
         "AND (outcome IS NULL OR outcome != 'released')", (task_id,))]
     floor = max([0, *(e for e in (kb._to_epoch(v) for v in ends) if e)])
 
-    kinds = sorted(READY_WAIT_FLOOR_KINDS | {"continued"})
+    kinds = sorted(READY_WAIT_FLOOR_KINDS | READY_ENTRY_CONDITIONAL_KINDS)
     marks = ",".join("?" * len(kinds))
     for ev in conn.execute(f"SELECT kind, payload, created_at, run_id FROM task_events "
                            f"WHERE task_id = ? AND kind IN ({marks})", (task_id, *kinds)):
         if ev["run_id"] in unused:
             continue
-        if ev["kind"] == "continued" and _parse_payload(ev).get("status") != "ready":
+        if ev["kind"] in READY_ENTRY_CONDITIONAL_KINDS and _parse_payload(ev).get("status") != "ready":
             continue
         floor = max(floor, _event_ts(ev))
     return floor

@@ -95,6 +95,18 @@ def test_matches_previous_semantics_with_large_irrelevant_history(conn, scenario
     assert pu.ready_since(conn, task, created_at) == _oracle(conn, task, created_at)
 
 
+@pytest.mark.parametrize("kind", ["continued", "shared_blocker_cleared"])
+@pytest.mark.parametrize("status", [None, "ready", "review", "blocked"])
+def test_conditional_registry_matches_oracle_without_full_history(conn, kind, status):
+    task = "t_conditional"
+    _ev(conn, task, "created", 100)
+    _ev(conn, task, kind, 700, {"status": status})
+    _noise(conn, task, 40)
+    conn.commit()
+    assert pu.ready_since(conn, task) == _oracle(conn, task)
+    assert pu.ready_since(conn, task) == (700 if status == "ready" else 100)
+
+
 def test_does_not_materialise_full_history(conn, monkeypatch):
     task = "t_target"
     _ev(conn, task, "created", 100)
