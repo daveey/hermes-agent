@@ -70,6 +70,9 @@ def test_unproven_native_creator_is_refused_atomically(attested, monkeypatch, ca
             conn.commit()
     result = support.invoke(world, monkeypatch, capsys)
     assert result.get('created') is not True, result
+    if damage == 'missing':
+        assert result['status'] == 'rejected', result
+        assert result['code'] == 'origin_creator_unproven', result
     with kbc.connect_closing() as conn:
         assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone():

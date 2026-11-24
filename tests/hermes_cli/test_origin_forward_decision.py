@@ -1,5 +1,6 @@
 """Immutable forwarding authorization survives retries, never payload changes."""
 import copy
+import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +65,34 @@ def test_native_same_home_creator_is_frozen(forwarding):
     first = decide(forwarding, request, **kwargs)
     assert first['args']['creator'] == creator
     assert decide(forwarding, request, now_ms=lambda: 99999, **kwargs) == first
+
+
+@pytest.mark.parametrize('difference', ['gateway', 'profile', 'board', 'nonnative'])
+def test_creator_stamp_requires_native_exact_destination(forwarding, difference):
+    from hermes_cli.kanban_origin_ledger import _binding_key, binding_hash
+
+    request = copy.deepcopy(forwarding[0])
+    creator = request['args']['creator']
+    creator['gateway'] = 'macbook'
+    request['args']['destination']['gateway'] = 'macbook'
+    binding = {'binding_id': 'native-task-1', 'version': 1, 'publication_version': 1,
+               'owner': creator, 'origin': request['args']['origin'],
+               'task_record_key': 'default/default/task-1'}
+    overrides = {'native_lookup': lambda origin, owner: binding}
+    if difference == 'nonnative':
+        # An ordinary accepted same-home ledger binding authenticates the chat,
+        # but is not a native creator-task receipt.
+        binding['binding_id'] = 'binding-ordinary'
+        with sqlite3.connect(forwarding[1]['ledger']) as db:
+            db.execute('DELETE FROM origin_obligations')
+            db.execute('INSERT INTO origin_obligations VALUES(?,?,?,?,?,?,?)',
+                       (_binding_key(binding), binding_hash(binding), json.dumps(binding), 'chat-1', '{}', 1, 0))
+        overrides = {}
+    else:
+        request['args']['destination'][difference] = 'hub' if difference == 'gateway' else 'other'
+    result = decide(forwarding, request, **overrides)
+    assert 'creator' not in result['args'], result
+    assert result['args']['origin'] == request['args']['origin']
 
 
 @pytest.mark.parametrize("field", ["create", "destination", "run_uid", "creator"])
