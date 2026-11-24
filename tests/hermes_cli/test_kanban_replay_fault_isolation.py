@@ -26,6 +26,9 @@ def test_strict_refusal_isolated_in_real_multiboard_round(live, tmp_path, monkey
                 result['slot'] = dict(result['slot'], journal_id='foreign-journal')
             return result
 
+        def changes(self, board, since, limit=500):
+            return dict(changes=[], next=since, head=since, more=False)
+
     from hermes_cli import kanban_db as kb
     kb.create_task(live, title='unresolved strict custody', assignee='worker')
     peer = RefusingPeer()
