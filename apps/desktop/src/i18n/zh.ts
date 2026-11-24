@@ -3102,6 +3102,7 @@ export const zhOverrides = {
     noMatch: query => `没有会话匹配"${query}"。`,
     results: '结果',
     pinned: '已置顶',
+    background: '后台',
     sessions: '会话',
     terminal: '终端',
     files: '文件',

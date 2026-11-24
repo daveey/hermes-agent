@@ -3704,6 +3704,7 @@ export const frOverrides = {
     noMatch: query => `Aucune session ne correspond à « ${query} ».`,
     results: 'Résultats',
     pinned: 'Épinglées',
+    background: 'Arrière-plan',
     sessions: 'Sessions',
     terminal: 'Terminal',
     files: 'Fichiers',

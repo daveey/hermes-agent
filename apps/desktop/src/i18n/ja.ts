@@ -2228,6 +2228,7 @@ export const jaOverrides = {
     noMatch: query => `"${query}" に一致するセッションがありません。`,
     results: '結果',
     pinned: 'ピン留め',
+    background: 'バックグラウンド',
     sessions: 'セッション',
     terminal: 'ターミナル',
     files: 'ファイル',

@@ -2854,6 +2854,7 @@ export interface Translations extends NoticeTranslations {
     noMatch: (query: string) => string
     results: string
     pinned: string
+    background: string
     sessions: string
     terminal: string
     files: string

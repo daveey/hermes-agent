@@ -140,6 +140,7 @@ import type { SidebarNavItem } from '../../types'
 import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session-drag'
 
 import { useArchivedView } from './archived-view'
+import { SidebarPinnedAndBackgroundSections } from './background-section'
 import { SidebarSectionAddButton } from './chrome'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarDraftSections } from './draft-sections'
@@ -1551,11 +1552,9 @@ export function ChatSidebar({
             )}
 
             {!trimmedQuery && (
-              <SidebarSessionsSection
+              <SidebarPinnedAndBackgroundSections
                 activeSessionId={activeSidebarSessionId}
-                // Inbox style rides whichever view is active — pinned rows
-                // included, so one column never mixes card and inline
-                // geometry at the section boundary.
+                // Pins and background owners share the active row geometry.
                 card={cardRows}
                 contentClassName="flex flex-col gap-px rounded-lg pb-2 pt-1"
                 dndSensors={dndSensors}

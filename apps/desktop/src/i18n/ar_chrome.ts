@@ -219,6 +219,7 @@ export const arChrome = {
     noMatch: query => `لا توجد جلسات تطابق "${query}"`,
     results: 'النتائج',
     pinned: 'المثبتة',
+    background: 'الخلفية',
     sessions: 'الجلسات',
     terminal: 'الطرفية',
     files: 'الملفات',

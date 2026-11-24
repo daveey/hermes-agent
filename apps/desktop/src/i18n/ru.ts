@@ -2496,6 +2496,7 @@ export const ruOverrides = {
     noMatch: query => `Нет сеансов по запросу «${query}».`,
     results: 'Результаты',
     pinned: 'Закреплённые',
+    background: 'Фоновые',
     sessions: 'Сеансы',
     terminal: 'Терминал',
     files: 'Файлы',
