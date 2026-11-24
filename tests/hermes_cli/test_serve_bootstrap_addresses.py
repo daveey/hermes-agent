@@ -30,6 +30,22 @@ def test_ipv6_listener_never_accepts_ipv4():
         assert listener.server.socket.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
 
 
+@pytest.mark.platforms('linux', 'macos', 'windows')
+def test_localhost_keeps_both_real_address_families(monkeypatch):
+    if not ipv6_loopback_available():
+        pytest.skip('IPv6 loopback unavailable')
+    with monkeypatch.context() as patch:
+        patch.setattr(bootstrap.socket, 'getaddrinfo', lambda *args, **kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('::1', 0, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 0))])
+        listener = bootstrap.BootstrapListener('localhost', 0)
+    with listener:
+        assert len(listener.servers) == 2
+        assert {server.server_address[1] for server in listener.servers} == {listener.port}
+        assert request(listener.port, '/api/health', '::1')[0] == 503
+        assert request(listener.port, '/api/health', '127.0.0.1')[0] == 503
+
+
 @pytest.mark.parametrize('unavailable_first', [True, False])
 def test_hostname_skips_unavailable_resolved_address(monkeypatch, unavailable_first):
     unavailable = (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.1', 0))
