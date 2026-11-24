@@ -29,7 +29,9 @@ it('references and cached shim captures belong to evaluation, not replaced regis
   const sdkRef=(globalThis as any).__HERMES_PLUGIN_SDK__, reactRef=(globalThis as any).__HERMES_REACT__
 
   try {
-    await load(companion.replace('export default', 'globalThis.__HERMES_PLUGIN_SDK__={foreign:true}; globalThis.__HERMES_REACT__={foreign:true}; export default'));expect(read().status).toBe('MATCH')
+    await load(companion.replace('export default', 'globalThis.__HERMES_PLUGIN_SDK__={foreign:true}; globalThis.__HERMES_REACT__={foreign:true}; export default'))
+    // Captured dependency references remain honest, but operations now see a foreign global.
+    expect(read()).toMatchObject({status:'NOT_READY',reason:'SDK_CHANGED'})
     expect((globalThis as any).__HERMES_PLUGIN_SDK__.foreign).toBe(true)
     const next=await runtime.capturedSdkDependencies(['@hermes/plugin-sdk','react','react/jsx-runtime'])
     expect(next.dependencies[0].namespace).toBe(sdkRef)

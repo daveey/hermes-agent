@@ -16,6 +16,14 @@ import type { CapturedDependency } from '@/contrib/session-tasks-identity'
 import { identifyBytes, readServedAssets } from './loaded-assets'
 
 import * as sdk from './index'
+const ownDescriptor = Object.getOwnPropertyDescriptor
+
+/** SDK objects are mutable for compatibility; this predicate never trusts their published copies. */
+export function sessionTasksRuntimeCurrent(): boolean {
+  const published = ownDescriptor(globalThis, '__HERMES_PLUGIN_SDK__')
+
+  return published?.value === sdk && sdk.sessionTasksSdkCurrent()
+}
 
 // Resolved LAZILY, never as a module-scope literal. This module sits in an
 // import cycle — `sdk/index` → `contrib/*` → `contrib/runtime-loader` →

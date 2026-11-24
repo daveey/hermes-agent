@@ -168,6 +168,11 @@ export default defineConfig(({ command }) => ({
     // imports stay lazy, and the file count stays in the tens.
     chunkSizeWarningLimit: 25000,
     rolldownOptions: {
+      input: {
+        app: path.resolve(__dirname, 'index.html'),
+        'session-tasks-diagnostics': path.resolve(__dirname, 'src/session-tasks-diagnostics.ts')
+      },
+      preserveEntrySignatures: 'strict',
       output: {
         advancedChunks: {
           groups: [

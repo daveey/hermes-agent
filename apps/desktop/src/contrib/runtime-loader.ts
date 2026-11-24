@@ -40,7 +40,7 @@ import { atom } from 'nanostores'
 
 import { isReadFileErrorResult } from '@/lib/desktop-fs'
 import { identifyBytes } from '@/sdk/loaded-assets'
-import { beginSdkCapture, capturedSdkDependencies, installPluginSdk, sdkImportMap } from '@/sdk/runtime'
+import { beginSdkCapture, capturedSdkDependencies, installPluginSdk, sdkImportMap, sessionTasksRuntimeCurrent } from '@/sdk/runtime'
 import { notifyError } from '@/store/notifications'
 import { forgetPluginPreviewAccess } from '@/store/plugin-preview-grants'
 
@@ -54,7 +54,12 @@ import {
   type PluginKind,
   publishPlugin
 } from './plugins-store'
-import { sessionTasksActivation } from './session-tasks-identity'
+import { createSessionTasksIdentity } from './session-tasks-identity'
+const sessionTasksIdentity = createSessionTasksIdentity()
+
+export function readSessionTasksLoadedIdentity() { return sessionTasksIdentity.read() }
+
+export function readSessionTasksLoadedIdentityJson(): string { return sessionTasksIdentity.readJson() }
 
 interface LoadOptions {
   /** Root-level default-enable CAP: `false` ships the plugin opt-in (inventory
@@ -423,6 +428,7 @@ async function runtimeIdentity(source: string, rewritten: string, pluginId: stri
 
   const supported = new Set(['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'])
   const dependencies = pluginId === 'session-tasks' ? await capturedSdkDependencies(specifiers) : { dependencies: [], reason: null }
+
   try {
     const [originalIdentity, rewrittenIdentity] = await Promise.all([identifyBytes(source), identifyBytes(rewritten)])
     const dependencyReason = dynamic || specifiers.some(specifier => !supported.has(specifier)) ? 'UNSUPPORTED_DEPENDENCIES' : dependencies.reason
@@ -492,6 +498,7 @@ async function evaluateRuntimePlugin(
 
     const rewritten = rewriteSpecifiers(source)
     const url = URL.createObjectURL(new Blob([rewritten], { type: 'text/javascript' }))
+    const sdkWasCurrent = sessionTasksRuntimeCurrent()
     const endCapture = beginSdkCapture()
 
     let mod: { default?: HermesPlugin }
@@ -550,10 +557,12 @@ async function evaluateRuntimePlugin(
 
     try {
       identity = await runtimeIdentity(source, rewritten, plugin.id)
+
       if (pendingIdentities.get(plugin.id) !== claim || !isCurrent()) {return {id:null, cancelled:true}}
     } finally {
       if (pendingIdentities.get(plugin.id) === claim) {pendingIdentities.delete(plugin.id)}
     }
+
     const capabilities = declaredCapabilities(plugin)
     const { dependencies, originalIdentity, rewrittenIdentity, dependencyReason } = identity
 
@@ -590,8 +599,8 @@ async function evaluateRuntimePlugin(
       // Registered BEFORE register() runs so a throw mid-way is disposable.
       loaded.set(plugin.id, disposers)
 
-      const activation = sessionTasksActivation({ pluginId:plugin.id, origin, path:options.file, module:mod, sourceText:{original:source, rewritten},
-        original:originalIdentity, rewritten:rewrittenIdentity, dependencies:dependencies.dependencies, dependencyReason })
+      const activation = sessionTasksIdentity.activate({ pluginId:plugin.id, origin, path:options.file, module:mod, sourceText:{original:source, rewritten},
+        original:originalIdentity, rewritten:rewrittenIdentity, dependencies:dependencies.dependencies, dependencyReason:sdkWasCurrent ? dependencyReason : 'SDK_CHANGED', sdkCurrent:sessionTasksRuntimeCurrent })
 
       invalidators.set(disposers, () => activation.invalidate())
 
@@ -876,6 +885,7 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
 
   try {
     const text = await readPluginSourceText(entry.file)
+
     if (!isCurrent()) {return true}
 
     const result = await evaluateRuntimePlugin(text, entry.origin, {
@@ -911,6 +921,7 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
     return true
   } catch (error) {
     if (!isCurrent()) {return true}
+
     // An oversize source is a REAL failure the user must see (the silent
     // shape was the bug: a truncated file evaluated as a syntax error, or
     // worse, as half a plugin). It is a completed read of an existing file,

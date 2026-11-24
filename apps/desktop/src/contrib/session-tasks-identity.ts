@@ -4,6 +4,14 @@
  */
 import { randomUuid } from '@hermes/shared'
 
+import { descriptorCustody, diagnosticJson } from './diagnostic-primitives'
+const ownDescriptor = Object.getOwnPropertyDescriptor
+const ownedDocument = () => document
+const ownedLocation = typeof window === 'undefined' ? null : window.location
+const locationHref = typeof window === 'undefined' ? undefined : Object.getOwnPropertyDescriptor(window.location, 'href')?.get
+const invoke = Reflect.apply
+const navigationHref = () => locationHref && ownedLocation ? invoke(locationHref, ownedLocation, []) as string : location.href
+
 import type { ByteIdentity, ServedAsset } from '@/sdk/loaded-assets'
 
 export interface DependencyIdentity {
@@ -41,6 +49,7 @@ interface Input {
   sourceText: { original: string; rewritten: string }
   dependencies: CapturedDependency[]
   dependencyReason: string | null
+  sdkCurrent: () => boolean
 }
 interface Activation {
   input: Input
@@ -49,9 +58,10 @@ interface Activation {
   navigation: string
   reason: string
   surface?: object
-  descriptors?: PropertyDescriptorMap
-  names?: PropertyKey[]
+  surfaceCurrent?: () => boolean
 }
+
+export function createSessionTasksIdentity() {
 const realm = randomUuid()
 let generation = 0
 let current: Activation | undefined
@@ -66,25 +76,13 @@ if (typeof window !== 'undefined') {
 }
 
 function sameSurface(activation: Activation): boolean {
-  if (!activation.surface) {return false}
-  const descriptor = Object.getOwnPropertyDescriptor(window, '__sessionTasks')
+  if (!activation.surface || !activation.surfaceCurrent) {return false}
+  const descriptor = ownDescriptor(window, '__sessionTasks')
 
-  if (descriptor?.value !== activation.surface) {return false}
-  const names = Reflect.ownKeys(activation.surface)
-
-  if (names.length !== activation.names?.length) {return false}
-  const actual = Object.getOwnPropertyDescriptors(activation.surface)
-
-  return activation.names.every(name => {
-    const before = Reflect.get(activation.descriptors!, name) as PropertyDescriptor
-    const after = Reflect.get(actual, name) as PropertyDescriptor | undefined
-
-    return after !== undefined && ['configurable','enumerable','writable','value','get','set'].every(key =>
-      Object.is(Reflect.get(before,key), Reflect.get(after,key)))
-  })
+  return descriptor?.value === activation.surface && activation.surfaceCurrent()
 }
 
-export function sessionTasksActivation(input: Input) {
+function sessionTasksActivation(input: Input) {
   const activation: Activation = { input, generation: ++generation, document, navigation: location.href, reason: 'REGISTRATION_PENDING' }
 
   if (input.pluginId === 'session-tasks') {current = activation}
@@ -103,8 +101,7 @@ export function sessionTasksActivation(input: Input) {
     }
 
     activation.surface = surface
-    activation.names = Reflect.ownKeys(surface)
-    activation.descriptors = Object.getOwnPropertyDescriptors(surface)
+    activation.surfaceCurrent = descriptorCustody(surface)
   }
 
   return {
@@ -128,22 +125,39 @@ export function sessionTasksActivation(input: Input) {
 }
 
 /** Synchronous and by-value: getters on the companion are never invoked. */
-export function readSessionTasksLoadedIdentity(): SessionTasksLoadedIdentity {
+function readSessionTasksLoadedIdentity(): SessionTasksLoadedIdentity {
   const active = current
   const zero = { sha256: '', byteLength: 0 }
 
   if (!active) {return { schemaVersion:1, status:'NOT_READY', reason:'NOT_LOADED', pluginId:'session-tasks', source:{origin:'',path:null}, original:zero, rewritten:zero, activationGeneration:0, realm, navigation:location.href, dependencies:[], currentSurfaceMatches:false }}
 
-  if (active.document !== document || active.navigation !== location.href) {invalidate(active, 'NAVIGATION_CHANGED')}
+  if (active.document !== ownedDocument() || active.navigation !== navigationHref()) {invalidate(active, 'NAVIGATION_CHANGED')}
   const matches = sameSurface(active)
-  const reason = active.reason === 'MATCH' && !matches ? 'SURFACE_CHANGED' : active.reason
+  const reason = active.reason !== 'MATCH' ? active.reason : !active.input.sdkCurrent() ? 'SDK_CHANGED' : !matches ? 'SURFACE_CHANGED' : 'MATCH'
+  const dependencies: DependencyIdentity[] = []
+
+  for (let i = 0; i < active.input.dependencies.length; i++) {
+    const input = active.input.dependencies[i]
+    const servedAssets: ServedAsset[] = []
+
+    for (let j = 0; j < input.servedAssets.length; j++) { servedAssets[j] = {...input.servedAssets[j]} }
+    dependencies[i] = {specifier:input.specifier, handle:input.handle, shimUrl:input.shimUrl, shim:{...input.shim}, servedAssets}
+  }
 
   return {
     schemaVersion:1, status: reason === 'MATCH' ? 'MATCH' : 'NOT_READY', reason,
     pluginId:active.input.pluginId, source:{origin:active.input.origin,path:active.input.path ?? null},
     original:{...active.input.original}, rewritten:{...active.input.rewritten}, activationGeneration:active.generation,
     realm, navigation:active.navigation,
-    dependencies:active.input.dependencies.map(({specifier,handle,shimUrl,shim,servedAssets}) => ({specifier,handle,shimUrl,shim:{...shim},servedAssets:servedAssets.map(asset => ({...asset}))})),
+    dependencies,
     currentSurfaceMatches:matches
   }
+}
+
+/** Supported immutable ESM binding. Primitive return avoids then/toJSON host hooks. */
+function readSessionTasksLoadedIdentityJson(): string {
+  return diagnosticJson(readSessionTasksLoadedIdentity())
+}
+
+return { activate: sessionTasksActivation, read: readSessionTasksLoadedIdentity, readJson: readSessionTasksLoadedIdentityJson }
 }

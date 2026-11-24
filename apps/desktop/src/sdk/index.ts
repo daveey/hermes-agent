@@ -503,11 +503,12 @@ function waitForFocusedSessionHydration({
   })
 }
 
-import { readSessionTasksLoadedIdentity } from '@/contrib/session-tasks-identity'
+import { readSessionTasksLoadedIdentity } from '@/contrib/runtime-loader'
 
 // Wait for a profile switch, but never longer than the wake budget.
 //
 import { awaitProfileActivation } from './profile-activation'
+import { sessionTasksHostCustody } from './session-tasks-custody'
 
 export const host = {
   diagnostics: { readSessionTasksLoadedIdentity },
@@ -1490,6 +1491,10 @@ export const host = {
    *  `host.i18n.languageOptions()` lists what the switcher shows. */
   i18n: i18nHost
 }
+
+const sessionTasksSdkCheck = sessionTasksHostCustody(host)
+
+export function sessionTasksSdkCurrent(): boolean { return sessionTasksSdkCheck() }
 
 // -- react bridge -------------------------------------------------------------
 
