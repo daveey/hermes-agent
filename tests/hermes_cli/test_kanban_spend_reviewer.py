@@ -344,3 +344,23 @@ def test_one_shot_dispatch_waits_for_its_reviews_and_finished_threads_are_droppe
     done.set()
     reviewer.wait_for_reviews(timeout=5)
     assert reviewer._THREADS == [] and not thread.is_alive()
+
+
+def test_a_dispatcher_tick_drops_finished_review_threads(kanban_home, spend_reviewer):
+    finished = types.SimpleNamespace(is_alive=lambda: False)
+    running = types.SimpleNamespace(is_alive=lambda: True)
+    reviewer._THREADS[:] = [finished, running]
+    try:
+        with kbc.connect_closing() as conn:
+            reviewer.start_due(conn)
+        assert reviewer._THREADS == [running]
+    finally:
+        reviewer._THREADS.clear()
+
+
+def test_the_one_shot_dispatch_command_waits_for_its_reviews(kanban_home, monkeypatch):
+    from hermes_cli import kanban as kc
+    waited = []
+    monkeypatch.setattr(reviewer, "wait_for_reviews", lambda timeout=None: waited.append(1))
+    kc.run_slash("dispatch --max 0")
+    assert waited == [1]
