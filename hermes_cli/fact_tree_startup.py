@@ -41,6 +41,9 @@ class TreeBinding:
 # single capture may take up to TREE_CAPTURE_SECONDS. A failed capture still marks its input stale at once.
 TREE_INPUT_VALID_SECONDS = 300
 TREE_CAPTURE_SECONDS = 60
+# With the 300 s validity live, the tree still 503'd in the loaded backend (169 Desktop errors in 12 min, 23:02-23:22
+# UTC) because its captures queued behind the board views' on the one shared worker: it gets its own capture lane.
+TREE_CAPTURE_LANE = 'tree'
 
 
 class TreeRuntime:
@@ -64,7 +67,8 @@ class TreeRuntime:
         paths = [path for _name, home in self.targets for path in (home, home / 'state.db', home / 'projects.db')]
         self.owner = ViewOwner(self.scope, partial(fact_tree_inputs.capture, self.targets, self.source_id),
             fact_tree_inputs.project, ('tree', 'project_sessions'), paths=paths, bindings=bindings, consumer='projects',
-            input_options={'valid_seconds': TREE_INPUT_VALID_SECONDS, 'max_capture_seconds': TREE_CAPTURE_SECONDS})
+            input_options={'valid_seconds': TREE_INPUT_VALID_SECONDS, 'max_capture_seconds': TREE_CAPTURE_SECONDS,
+                           'capture_lane': TREE_CAPTURE_LANE})
 
     def start(self):
         self.handle = self.owner.start()

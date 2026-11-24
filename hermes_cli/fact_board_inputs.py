@@ -35,7 +35,7 @@ from hermes_cli.fact_capture import CaptureBudgetExceeded
 from hermes_cli.fact_contract import Fact, FactKey, evolve, freeze
 from hermes_cli.fact_store import view_key
 from hermes_cli.fact_source_watch import NativeSourceWatch
-from hermes_cli.fact_capture_queue import submit
+from hermes_cli.fact_capture_queue import DEFAULT_LANE, submit
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ class BoardCapture:
 class BoardInputSource:
     """One bounded round-robin evidence source per authenticated board scope."""
     def __init__(self, engine, source, capture, *, paths=(), max_selectors=128, refresh_seconds=30, valid_seconds=60,
-                 min_gap_seconds=5, max_capture_seconds=30):
+                 min_gap_seconds=5, max_capture_seconds=30, capture_lane=DEFAULT_LANE):
         if source.scope != engine.scope or source.kind != 'board.input':
             raise ValueError('invalid board input source')
         if (max_selectors <= 0 or not 0 < refresh_seconds < valid_seconds or not 0 <= min_gap_seconds < refresh_seconds
@@ -68,6 +68,7 @@ class BoardInputSource:
         self.engine, self.source, self._capture = engine, source, capture
         self.key = FactKey(source.scope, 'BoardInput', '')  # one operational input namespace per scope
         self._maximum, self._refresh, self._valid = max_selectors, refresh_seconds, valid_seconds
+        self._lane = capture_lane  # fact_capture_queue lane: the tree captures on its own worker, not the boards'
         self._capture_seconds = max_capture_seconds  # replaces the owner budget's max_seconds; max_bytes still applies
         self._gap, self._last_start = min_gap_seconds, {}  # key -> monotonic start of its last capture
         self._began = None  # monotonic start of the running capture; its deadline (self._deadline) runs from here
@@ -139,11 +140,12 @@ class BoardInputSource:
                         self._last_start[pending] + self._gap for pending in self._pending))
                 self._active, self._last_start[key], self._began, self._deadline = key, now, None, None
                 view, selector = self._wanted[key]
-                self._worker = submit(lambda: self._context.run(self._build, key, view, selector, budget))
+                self._worker = submit(lambda: self._context.run(self._build, key, view, selector, budget),
+                                      lane=self._lane)
             if self._deadline is not None and time.monotonic() >= self._deadline:
                 self._deadline = None
                 return BoardCapture(key=self._active, after=cursor, failed=True, observed_at=time.time())
-            if self._began is None:  # queued behind other boards on the shared worker: its budget has not started
+            if self._began is None:  # queued behind other jobs in this source's capture lane: no budget spent yet
                 return BoardCapture(after=cursor, next_deadline=time.monotonic() + 1)
             return BoardCapture(after=cursor, next_deadline=self._deadline)
 

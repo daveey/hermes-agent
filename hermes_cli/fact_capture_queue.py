@@ -1,10 +1,19 @@
-"""One bounded board-capture worker, with independently drainable jobs. [daveey]"""
+"""Bounded capture workers, one per lane, with independently drainable jobs. [daveey]
+
+Every board's and the project tree's native input captures used to queue on the one ``fact-board-capture`` worker.
+On the hub (2026-11-24, board facts on) the tree's four selectors, each walking twelve profiles, waited behind the
+board views' captures, so a tree cycle outgrew even a 300 s input validity and the projects tree answered 503
+``dependency_unavailable``. A lane is a separate worker: the default lane keeps the board captures serialized as
+before, and the tree has its own (``fact_tree_startup``), so neither waits behind the other. Captures inside one lane
+stay serialized; a lane's worker exits when its queue is empty and restarts on the next submission.
+"""
 from collections import deque
 import threading
 
+DEFAULT_LANE = 'board'
 _lock = threading.Lock()
-_pending = deque()
-_worker = None
+_pending: dict[str, deque] = {}
+_workers: dict[str, threading.Thread] = {}
 
 
 class CaptureJob:
@@ -26,36 +35,55 @@ class CaptureJob:
         self.done.wait(timeout)
 
 
-def submit(callback):
-    global _worker
+def submit(callback, lane=DEFAULT_LANE):
     job = CaptureJob(callback)
     with _lock:
-        _pending.append(job)
-        if _worker is None:
-            # health: allow HX012 -- each queued callback enters its own saved scope, never the first caller's context
-            _worker = threading.Thread(target=_run, name='fact-board-capture', daemon=True)
+        pending = _pending.setdefault(lane, deque())
+        pending.append(job)
+        if lane not in _workers:
             try:
-                _worker.start()
+                _start(lane)
             except BaseException:
-                _worker = None
-                _pending.remove(job)
+                pending.remove(job)
                 raise
     return job
 
 
-def _run():
-    global _worker
-    while True:
+def _start(lane):
+    """Start ``lane``'s worker (caller holds ``_lock``); on failure nothing stays registered."""
+    # health: allow HX012 -- each queued callback enters its own saved scope, never the first caller's context
+    worker = threading.Thread(target=_run, args=(lane,), name=f'fact-{lane}-capture', daemon=True)
+    _workers[lane] = worker
+    try:
+        worker.start()
+    except BaseException:
+        del _workers[lane]
+        raise
+
+
+def _run(lane):
+    try:
+        while True:
+            with _lock:
+                pending = _pending.get(lane)
+                if not pending:
+                    _workers.pop(lane, None)
+                    return
+                job = pending.popleft()
+                if job.cancelled:
+                    continue
+                job.started = True
+            try:
+                job.callback()
+            finally:
+                job.callback = None
+                job.done.set()
+    except BaseException:
+        # A callback that escapes with a non-Exception (SystemExit, KeyboardInterrupt) ends this worker: release
+        # the lane so the next submission starts a fresh one, instead of leaving it registered and dead forever.
         with _lock:
-            if not _pending:
-                _worker = None
-                return
-            job = _pending.popleft()
-            if job.cancelled:
-                continue
-            job.started = True
-        try:
-            job.callback()
-        finally:
-            job.callback = None
-            job.done.set()
+            if _workers.get(lane) is threading.current_thread():
+                del _workers[lane]
+                if _pending.get(lane):  # jobs queued behind the failed one still get a worker
+                    _start(lane)
+        raise
