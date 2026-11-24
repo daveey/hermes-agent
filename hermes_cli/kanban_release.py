@@ -10,7 +10,8 @@ again within minutes: 60 scope stops on 27 cards and 38 decision cards in 24 h o
 1. the target is the card, or the stopped card an administrative decision card was filed for;
 2. a provider safety restriction and a containment hold are refused, as everywhere else;
 3. the caller is whoever ``renew-scope`` accepts (``kanban_scope_renewal_cli.resolve_actor``): a human
-   operator, the owning chat or the creator task. A run of the stopped card is refused. A trusted in-process
+   operator, the owning chat, the creator task or a delegate chat (``kanban_scope_delegate``). A run of the
+   stopped card is refused. A trusted in-process
    caller states a human act with ``writer=human_writer(...)`` (the Desktop Unblock click);
 4. ONE goal-level mandate comment (:data:`MANDATE`), a scope renewal on it when the stop is a scope stop, a
    spend budget of the runs already counted plus ``runs`` with no cache-read limit, then promotion. Open
@@ -209,8 +210,13 @@ def release(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = Non
         try:
             if ancestry is None:
                 ancestry = ancestry_environs()
-            renewal_cli.resolve_actor(conn, tid, writer=writer, environs=[*ancestry, env],
-                                      gateway=gateway_names()[0], profile=get_active_profile_name() or "default")
+            from hermes_cli import kanban_scope_delegate as delegates
+            gateway, profile = gateway_names()[0], get_active_profile_name() or "default"
+            # The grant lookup renew() makes: a chat holding a live human grant may release a card it does not
+            # own. Without it this pre-check would refuse a delegate before the renewal is ever reached.
+            renewal_cli.resolve_actor(conn, tid, writer=writer, environs=[*ancestry, env], gateway=gateway,
+                                      profile=profile, delegate=lambda s: delegates.live_grant(
+                                          conn, board, gateway=gateway, profile=profile, session=s))
         except Inconclusive as exc:
             return _refused(out, "identity_unavailable", f"the caller's process ancestry could not be read ({exc})")
         except renewal.RenewalRefused as exc:

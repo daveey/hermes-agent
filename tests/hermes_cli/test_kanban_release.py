@@ -263,3 +263,42 @@ def test_released_by_names_the_card_only_for_the_note_that_released_it(board):
     assert release.released_by(board, tid, note) == tid
     assert release.released_by(board, tid, release.desktop_note('op-8')) is None
     assert release.released_by(board, tid, '') is None
+
+
+TRIAGE = '20261123_101500_a1b2c3'  # a desk chat: no link to the stopped card, no run of it
+
+
+def as_triage(board, tid, **kw):
+    started = {'HERMES_SESSION_ID': TRIAGE}
+    return release.release(board, tid, writer=('agent', TRIAGE, '4242:HERMES_SESSION_ID'), env=started,
+                           ancestry=[started], **kw)
+
+
+def test_a_delegate_chat_releases_a_scope_stopped_card_it_does_not_own(board, monkeypatch):
+    from hermes_cli import kanban_scope_delegate as delegates
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)  # another chat owns the card
+    before = written(board, tid)
+    out = as_triage(board, tid)  # a non-owner chat without a grant is still refused, with nothing written
+    assert out['outcome'] == 'refused' and out['refusal'] == 'not_scope_authority'
+    assert written(board, tid) == before and status(board, tid) == 'triage'
+    made = delegates.grant(board, session=TRIAGE, reason='triage chat may unblock cards', writer=scope.HUMAN)
+    out = as_triage(board, tid, runs=5)
+    assert out['outcome'] == 'released', out
+    assert status(board, tid) == 'ready' and not decision.pending(board, tid)
+    renewed = json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='scope_renewed'",
+                                       (tid,)).fetchone()[0])
+    assert renewed['authority_kind'] == 'delegate' and renewed['authority_ref'] == made['uid']
+    assert renewed['actor_session'] == TRIAGE
+
+
+def test_a_delegate_chat_releases_an_ordinary_spend_stop_and_a_revoked_grant_is_refused(board):
+    from hermes_cli import kanban_scope_delegate as delegates
+    first, second = spend_stopped(board), spend_stopped(board)
+    delegates.grant(board, session=TRIAGE, reason='triage chat may unblock cards', writer=scope.HUMAN)
+    assert as_triage(board, first)['outcome'] == 'released'
+    delegates.revoke(board, session=TRIAGE, reason='done', writer=scope.HUMAN)
+    before = written(board, second)
+    out = as_triage(board, second)
+    assert out['outcome'] == 'refused' and out['refusal'] == 'not_scope_authority'
+    assert written(board, second) == before and status(board, second) == 'triage'

@@ -397,16 +397,11 @@ def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
     # worker decides spend; it cannot restore a capability, renew a scope or clear a refusal, so it could only
     # retain the card: a second stop and no decision. With no live chat nobody is routed, and the stranded-park
     # sweep asks a human once the park is old enough (kanban_stranded_park), unless an open parent or a recorded
-    # wait explains it. #4245 edits the lines below; their restricted branches are unreachable and go after it.
+    # wait explains it. Only an ordinary budget stop reaches the decision card below.
     if safety or stopped or (stop and _json.loads(stop['payload'] or '{}').get('cause')):
         return {'kind': 'unavailable'}
-    stop = pending_episode(conn, task_id)
-    listed = _json.loads(stop['payload'] or '{}').get('refused_providers') if stop is not None and safety else None
-    guidance = notice({'reason': note, 'task_id': task_id, **({'cause': 'safety_refusal' if safety else 'scope_stopped'} if stopped else {}),
-                       **({'refused_providers': listed} if listed else {})})
-    action = ('\n\nRecord the administrative scope/authority decision without execution release. '
-              'Do not run the original work here. Administrative acceptance is decision recorded; authority unavailable, not root-work completion.' if stopped else
-              f"\n\nRecord the decision on {task_id}; use `hermes kanban promote {task_id} --reason '<what changed>'` "
+    guidance = notice({'reason': note, 'task_id': task_id})
+    action = (f"\n\nRecord the decision on {task_id}; use `hermes kanban promote {task_id} --reason '<what changed>'` "
               'only after re-scoping or justifying further spend, or archive it. Do not run the original work here.')
     sup = kb.create_task(
         conn, title=forwarded_title(f"Spend budget decision: {task.title}"[:200], f"Spend budget decision: {task_id}"),
