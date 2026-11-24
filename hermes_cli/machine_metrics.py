@@ -340,17 +340,32 @@ class Reporter:
 
     def report_due(self, send: Optional[Callable[[dict], Any]] = None) -> bool:
         """The sync loop's report (through *send*, default the Reporter's own): True sent; False not due, failed, or
-        withheld (a CPU-less report while the gate is on and a report was sent within KEEPALIVE_S)."""
-        if not self._lock.acquire(blocking=False):
-            return False  # the sender thread is reporting right now
-        try:
+        withheld (a CPU-less report while the gate is on and a report was sent within KEEPALIVE_S).
+
+        ``sync.detail/<step>.due`` is this not-due decision, including a lock miss.
+        Always-on ``outer=False``; not an opt-in timing span.
+        """
+        from hermes_cli import kanban_sync_cpu as sync_cpu
+        gate = {"held": False, "now": None}
+
+        def decide() -> bool:
+            if not self._lock.acquire(blocking=False):
+                return False  # the sender thread is reporting right now
+            gate["held"] = True
             now = self.clock()
             if now < self.next_at:
                 return False
             self.next_at = now + REPORT_EVERY_S
-            return self._report(now, send or self.send) is True
+            gate["now"] = now
+            return True
+
+        try:
+            if not sync_cpu.detail("due", decide):
+                return False
+            return self._report(gate["now"], send or self.send) is True
         finally:
-            self._lock.release()
+            if gate["held"]:
+                self._lock.release()
 
     def report_tick(self, send: Callable[[dict], Any]) -> Optional[bool]:
         """The anchored sender's report through its own transport *send*: True sent, False failed, None skipped.
@@ -375,15 +390,20 @@ class Reporter:
             self._lock.release()
 
     def _report(self, now: float, send: Callable[[dict], Any], wait: bool = False) -> Optional[bool]:
-        """Collect, attach the CPU triple and send. None: withheld (CPU-less while the gate is on, see KEEPALIVE_S)."""
+        """Collect, attach the CPU triple and send. None: withheld (CPU-less while the gate is on, see KEEPALIVE_S).
+
+        ``sync.detail/<step>.collect`` times ``collect()`` only. ``.send`` times the
+        send callable only (each attempt). Always-on ``outer=False``, not timing.span.
+        """
         try:
+            from hermes_cli import kanban_sync_cpu as sync_cpu
             from hermes_cli import kanban_sync_timing as timing
             from hermes_cli import machine_cpu_metrics as cpu
             from hermes_cli.machine_drain_metrics import send_compatible
             with timing.span("collect"):
                 _REPORT.census = self.census_fn
                 try:
-                    sample = dict((self.collect_fn or collect)())
+                    sample = dict(sync_cpu.detail("collect", self.collect_fn or collect))
                 finally:
                     _REPORT.census = None
             with timing.span("limit"):
@@ -414,9 +434,13 @@ class Reporter:
 
             def claiming_rejected() -> None:
                 self.claiming_off_until = now + UNSUPPORTED_RETRY_S
+
+            def send_once(payload):
+                return sync_cpu.detail("send", send, payload)
+
             self.started_at = now
             with timing.span("send"):  # preserve the transport's existing hard 2 s budget
-                send_compatible(send, sample, counters_rejected, claiming_rejected)
+                send_compatible(send_once, sample, counters_rejected, claiming_rejected)
             self.sent_at = self.clock()  # a failed send left the row as it was: it is no keepalive
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync

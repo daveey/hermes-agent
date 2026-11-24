@@ -13,7 +13,8 @@ from hermes_cli import loop_accounting as la
 def test_real_loop_publishes_step_names(monkeypatch, enabled):
     from hermes_cli import kanban_sync_links_pass, machine_metrics
     from hermes_cli import machine_cpu_sampler, machine_metrics_sender
-    from hermes_cli import kanban_sync_schema_alert
+    from hermes_cli import kanban_sync_schema_alert, kanban_sync_sweep_cadence
+    kanban_sync_sweep_cadence.reset()
     la.stop()
     la.reset()
     monkeypatch.setattr(la, "scopes_enabled", lambda: enabled)

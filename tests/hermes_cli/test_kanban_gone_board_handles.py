@@ -75,6 +75,8 @@ def _remove(path: Path) -> Path:
 def test_one_sync_loop_pass_closes_the_watch_connection_of_a_removed_board(home, monkeypatch, tmp_path):
     """The acceptance shape: query a board through ``_WATCH`` in one round, remove its directory, and the next
     pass of the real loop (which no longer lists it) leaves no descriptor on its deleted files."""
+    from hermes_cli import kanban_sync_sweep_cadence
+    kanban_sync_sweep_cadence.reset()
     path = _board("probe")
     boards = [("probe", path)]
     rounds, _waits = loop_support._fake_loop(monkeypatch, tmp_path, boards)
@@ -424,6 +426,16 @@ def test_a_shared_reader_reopened_meanwhile_is_kept(home, monkeypatch):
     monkeypatch.setattr(watch_module, "path_gone", reopened_meanwhile)
     assert retention.release_gone() == 0
     assert activity._RO_CACHE[key] is newer
+
+
+def test_real_sweep_closes_two_successive_removed_boards(home):
+    """Parent-green control: cadence must never move inside the shared sweep."""
+    for slug in ("first", "second"):
+        path = _board(slug)
+        assert ksc._WATCH.query(path, SQL)[1] == (0,)
+        directory = _remove(path)
+        assert gone.sweep() >= 1
+        assert _fds_under(directory) == []
 
 
 def test_gateway_housekeeping_runs_the_sweep(monkeypatch):

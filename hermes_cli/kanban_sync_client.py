@@ -48,6 +48,7 @@ from hermes_cli import kanban_sync_outbox_age as outbox_age  # oldest pending op
 from hermes_cli.kanban_sync_backlog import BUSY_RETRY_S, PULL_PAGE_BUDGET, Pulled
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli import kanban_sync_cpu as sync_cpu
+from hermes_cli import kanban_sync_probe_diag as probe_diag, kanban_sync_sweep_cadence as sweep_cadence
 from hermes_cli.kanban_sync_pending import (discard_replica_writes, guard_replica, pending_task_fields,
                                            without_pending)
 from hermes_cli import kanban_sync_refusal as refusal  # one board's ContainmentRefused ends only its round
@@ -482,17 +483,8 @@ class Hub(HubRoutesMixin):
 
 def board_paths() -> list[tuple[str, Path]]:
     """``(slug, kanban.db)`` for every board on this host that ``kanban.sync.boards`` selects."""
-    from hermes_cli import kanban_db, kanban_db_boards
-    root = kanban_db.kanban_home()
-    found = [("default", root / "kanban.db")] if (root / "kanban.db").exists() else []
-    # The shared real-board enumerator: ``_archived/`` and other non-slug folders are not boards.
-    found += [(slug, p) for slug, p in kanban_db_boards.named_board_db_files() if BOARD_ID_RE.match(slug)]
-    local = {slug for slug, _ in found}
-    links_dir = root / "kanban" / sync.LINKS_DIR
-    if links_dir.is_dir():  # boards only another gateway has, where this gateway's chats have cards
-        found += [(p.stem, p) for p in sorted(links_dir.glob("*.db")) if BOARD_ID_RE.match(p.stem) and p.stem not in local]
-    config = sync.sync_config()  # [daveey] once, not per board: every Desktop session-list poll lands here
-    return [(slug, path) for slug, path in found if sync.board_selected(str(path), config)]
+    from hermes_cli.kanban_sync_board_paths import board_paths as discover
+    return discover(sync, BOARD_ID_RE)
 
 
 def ensure_link_boards(slugs: Iterable[str], gateway: str) -> list[str]:
@@ -1425,6 +1417,7 @@ def _repair_inputs(live_path: Path, replica: sqlite3.Connection, mode: str, gate
     pulled_at stamp, which the scans never read. None (cannot tell) always scans. [daveey]"""
     got = _WATCH.query(live_path, "SELECT revision, schema_version FROM kanban_repair_revision, "
                       "pragma_schema_version WHERE id = 1")
+    probe_diag.note(live_path, got)
     if got is None or got[1] is None:
         return None
     live_version = (got[0], tuple(got[1]))
@@ -1444,6 +1437,7 @@ def outbox_pending(paths: Iterable[Path]) -> bool:
     for path in paths:
         got = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1",
                            unchanged_ok=True)
+        probe_diag.note(path, got)
         if got is not None and got[1]:
             return True
     return False
@@ -1526,10 +1520,13 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     sender = MetricsSender(metrics, board_post(ident))
     sender.start()
     try:
+        probe_diag.enter()
         with sync_cpu.iterations(keep_running) as rounds:
             for _round in rounds:
                 boards = sync_cpu.step(board_paths)
-                sync_cpu.step(sweep_gone_board_handles)  # close handles a removed board pins
+                probe_diag.install(boards)
+                if sweep_cadence.due(boards, time.monotonic()):
+                    sync_cpu.step(sweep_gone_board_handles)  # close handles a removed board pins
                 for slug, _path in boards:
                     if slug not in watchers or not watchers[slug].is_alive():
                         watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
@@ -1580,6 +1577,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                     remaining = min(remaining, retry_in)
                 sync_cpu.step(sync_timing.wait, wait_for_work, wake, [p for _, p in ready], remaining, keep_running)
     finally:
+        probe_diag.leave()
         links.stop()
         _LINKS_RUNNER = None  # no stale runner for the next loop's tests to wait on
         sender.close()

@@ -181,7 +181,8 @@ class BoardWatch:
         after ``_conn`` accepted the file as it is, so the baseline still follows its stat."""
         ent = self._conns.get(key)
         if ent is not None and ent[4] != version:
-            self._conns[key] = (*ent[:3], _wal_evidence.read(ent[5]), version, *ent[5:])
+            wal = _sync_cpu.detail("query_rebaseline", _wal_evidence.read, ent[5])
+            self._conns[key] = (*ent[:3], wal, version, *ent[5:])
 
     def _drop(self, key: str) -> None:
         self._answers.pop(key, None)

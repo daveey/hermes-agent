@@ -93,10 +93,26 @@ def sendable_age_s(conn: sqlite3.Connection, path: Path, now: Optional[float] = 
     return _since(min(ages), now) if ages else None
 
 
-def _sample(path: Path) -> Optional[tuple[str, float]]:
-    """Oldest sendable unanswered identity and wall age; unknown reads reset observation."""
+def _sample_full(path: Path) -> Optional[tuple[str, float]]:
+    """Original clock, backlog and sendability read for one board that is not structurally empty."""
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_sync_backlog as backlog
+    with kbc.connect_closing(path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' "
+            "AND (retry_after IS NULL OR retry_after <= ?) ORDER BY created_at, rowid",
+            (int(time.time()),))]
+        if backlog.behind(path):
+            rows, _ = backlog.sendable_before_head(
+                conn, _NoBoardReads(), "", rows, backlog.evidence(path))
+        row = next((r for r in rows if r["retry_after"] is None), None)
+        return (row["op_id"], _since(row["created_at"])) if row else None
+
+
+def _sample(path: Path) -> Optional[tuple[str, float]]:
+    """Oldest sendable unanswered identity and wall age; unknown reads reset observation."""
+    from hermes_cli import kanban_sync_cpu as sync_cpu
     if not Path(path).exists():
         return None
     try:
@@ -107,19 +123,15 @@ def _sample(path: Path) -> Optional[tuple[str, float]]:
         # backlog say: a board whose pending ops are all Board-deferred skips the
         # fresh schema open each round (Mac, t_01a203e5bc71cc65: 4.4 ms a round).
         from hermes_cli.kanban_sync_client import _WATCH
-        empty = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' "
-                             "AND retry_after IS NULL LIMIT 1", unchanged_ok=True)
+
+        from hermes_cli import kanban_sync_probe_diag as probe_diag
+        empty = sync_cpu.detail("sample_query", lambda: _WATCH.query(
+            path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' "
+            "AND retry_after IS NULL LIMIT 1", unchanged_ok=True))
+        probe_diag.note(path, empty)
         if empty is not None and empty[1] is None:
-            return None
-        with kbc.connect_closing(path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' "
-                "AND (retry_after IS NULL OR retry_after <= ?) ORDER BY created_at, rowid", (int(time.time()),))]
-            if backlog.behind(path):
-                rows, _ = backlog.sendable_before_head(conn, _NoBoardReads(), "", rows, backlog.evidence(path))
-            row = next((r for r in rows if r["retry_after"] is None), None)
-            return (row["op_id"], _since(row["created_at"])) if row else None
+            return sync_cpu.detail("sample_skip", lambda: None)
+        return sync_cpu.detail("sample_full", _sample_full, path)
     except (sqlite3.Error, OSError, ValueError, TypeError):
         return None
 
@@ -130,12 +142,20 @@ def _age(path: Path) -> Optional[float]:
 
 
 def _observed(path: Path, mono, age, awake=True):
+    from hermes_cli import kanban_sync_cpu as sync_cpu
     sample = _sample(path)
     # Retain the age injection seam for callers suppressing outbox observations.
     if age is not _age and age(path) is None:
         sample = None
     now = mono()  # sample and timestamp under the same observation lock
-    seen = observation.observe(path, sample[0] if sample else None, now, awake=awake)
+    op_id = sample[0] if sample else None
+    seen = sync_cpu.detail(
+        "sample_observe",
+        lambda op_id, now, awake: observation.observe(path, op_id, now, awake=awake),
+        op_id,
+        now,
+        awake,
+    )
     return seen, sample[1] if sample else None, now
 
 
@@ -151,7 +171,8 @@ def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
     """Record round outcome and WARN after :data:`STALE_S` observed-awake seconds for one sendable op.
     Returns the boards warned about. Never raises.
 
-    ``sync.detail/after_round.awake`` and ``.sample`` are inclusive diagnostics of this step's parts
+    ``sync.detail/after_round.awake`` and ``.sample`` (and sample's query, skip or full,
+    and observe) are inclusive diagnostics of this step's parts
     (``kanban_sync_cpu.detail``, ``outer=False``): never sum them with steps."""
     from hermes_cli import kanban_sync_cpu as sync_cpu
     awake = sync_cpu.detail("awake", replica_age.fully_awake, awake_fn)
