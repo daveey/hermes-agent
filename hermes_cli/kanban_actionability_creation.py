@@ -18,7 +18,7 @@ EPISODE_EXITS = frozenset({'promoted', 'promoted_manual', 'claimed', 'reclaimed'
 
 def _todo_entry(kind, payload):
     """Sources that put (or keep) a card waiting in todo on its parents."""
-    return kind in ('dependency_wait', 'linked') or (kind == 'unblocked' and payload.get('status') == 'todo')
+    return kind in ('dependency_wait', 'linked', 'unlinked') or (kind == 'unblocked' and payload.get('status') == 'todo')
 
 
 def intent_for(task, kind, payload, *, now):
@@ -34,9 +34,9 @@ def intent_for(task, kind, payload, *, now):
         return None
     wake = positive_time(payload.get('wake_at')) if timed else None
     deadline = wake + 600 if wake else (now + 86400 if not timed else None)
-    # A new edge on a card already waiting in todo keeps that episode's frozen
+    # An edge change on a card already waiting in todo keeps that episode's frozen
     # obligation, overdue included; it can only ever be earlier, never renewed.
-    carried = positive_time(payload.get('actionability_carried_deadline')) if kind == 'linked' else None
+    carried = positive_time(payload.get('actionability_carried_deadline')) if kind in ('linked', 'unlinked') else None
     if carried and deadline:
         deadline = min(deadline, carried)
     human = payload.get('human_request')
@@ -87,22 +87,22 @@ def _carried(conn, task_id, task):
 
 def stamp(conn, task_id, kind, payload, *, now):
     """Freeze ordinary administrative policy with the actual source event clock."""
-    if kind not in ('scheduled', 'blocked', 'continued', 'dependency_wait', 'linked', 'unblocked'):
+    if kind not in ('scheduled', 'blocked', 'continued', 'dependency_wait', 'linked', 'unlinked', 'unblocked'):
         return payload
     original = payload
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
-    if kind in ('linked', 'unblocked') and (row is None or row['status'] != 'todo' or not isinstance(payload, dict)):
+    if kind in ('linked', 'unlinked', 'unblocked') and (row is None or row['status'] != 'todo' or not isinstance(payload, dict)):
         return payload  # only a todo entry; every other status keeps its own source
     if isinstance(payload, dict):
         from hermes_cli.kanban_db_sync import run_uid
         from hermes_cli.kanban_actionability_parents import snapshot
         parents = [r[0] for r in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (task_id,))]
-        if kind in ('linked', 'unblocked') and not parents:
+        if kind in ('linked', 'unlinked', 'unblocked') and not parents:
             return original  # no parent to wait on: not a dependency wait, so nothing to freeze
         payload = {**payload, 'actionability_parent_ids': parents,
                    'actionability_parent_states': snapshot(conn, parents),
                    'actionability_run_uid': run_uid(conn, row['current_run_id']) if row else None}
-        carried = _carried(conn, task_id, dict(row)) if kind == 'linked' and row else None
+        carried = _carried(conn, task_id, dict(row)) if kind in ('linked', 'unlinked') and row else None
         if carried:
             payload['actionability_carried_deadline'], payload['actionability_carried_from'] = carried
     intent = intent_for(dict(row), kind, payload, now=now) if row else None

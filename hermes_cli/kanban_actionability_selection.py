@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-KINDS = {'todo': ('created', 'linked', 'dependency_wait', 'unblocked'),
+KINDS = {'todo': ('created', 'linked', 'unlinked', 'dependency_wait', 'unblocked'),
          'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
          'review': ('review_requested', 'created'), 'blocked': ('blocked',),
          'scheduled': ('scheduled', 'continued'),
