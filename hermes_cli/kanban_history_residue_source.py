@@ -111,6 +111,27 @@ def _absence(value: object, *, board: str, event: str, head: int) -> None:
              and 'tombstone' in value and value['tombstone'] is None, 'absence_unproven')
 
 
+def validate_receipt(receipt: dict, exact_source: str, *, gateway: str, board: str) -> None:
+    """Check an immutable historical observation, never a current authorization."""
+    row = decode_source(exact_source)
+    fields = strict_object(row['fields'])
+    _require(isinstance(receipt, dict) and set(receipt) == {'version', 'gateway', 'source_json', 'reason',
+             'disposition', 'canonical_acceptance', 'historical_identity_certified', 'execution_authority',
+             'reported_rejection_only', 'snapshot_only', 'observed_at_ms', 'observed_head', 'parent', 'absence'},
+             'receipt_keys')
+    _require(type(receipt.get('version')) is int and receipt['version'] == 1
+             and receipt.get('gateway') == gateway and receipt.get('source_json') == exact_source
+             and receipt.get('disposition') == 'retained_unreplayed' and _text(receipt.get('reason')), 'receipt_identity')
+    for key, expected in {'canonical_acceptance': False, 'historical_identity_certified': False,
+                          'execution_authority': False, 'reported_rejection_only': True, 'snapshot_only': True}.items():
+        _require(receipt.get(key) is expected, 'receipt_authority')
+    _require(_positive(receipt.get('observed_at_ms')) and type(receipt.get('observed_head')) is int
+             and receipt['observed_head'] >= 0 and isinstance(receipt.get('parent'), dict)
+             and receipt['parent'].get('uid') == fields['task_id']
+             and receipt['parent'].get('created_on') == gateway, 'historical_snapshot')
+    _absence(receipt.get('absence'), board=board, event=row['row_uid'], head=receipt['observed_head'])
+
+
 def validate_current(raw: str, exact_source: str, *, gateway: str, board: str, head: int) -> dict:
     """Validate response structure only, NOT HTTP origin, local custody, freshness or admission.
 
@@ -127,25 +148,10 @@ def validate_current(raw: str, exact_source: str, *, gateway: str, board: str, h
              and data['version'] == 1 and data['gateway'] == gateway, 'proof_identity')
     receipt, current = data['receipt'], data['current']
     _require(isinstance(receipt, dict) and isinstance(current, dict), 'proof_objects')
-    _require(set(receipt) == {'version', 'gateway', 'source_json', 'reason', 'disposition',
-             'canonical_acceptance', 'historical_identity_certified', 'execution_authority',
-             'reported_rejection_only', 'snapshot_only', 'observed_at_ms', 'observed_head', 'parent', 'absence'},
-             'receipt_keys')
+    validate_receipt(receipt, exact_source, gateway=gateway, board=board)
     _require(set(current) == {'observed_at_ms', 'observed_head', 'parent', 'absence', 'no_lease',
              'no_running_run', 'no_retained_op_receipt', 'op_history_certified', 'retained_receipt_floor1',
              'execution_authority'}, 'current_keys')
-    _require(type(receipt.get('version')) is int and receipt['version'] == 1
-             and receipt.get('gateway') == gateway and receipt.get('source_json') == exact_source
-             and receipt.get('disposition') == 'retained_unreplayed'
-             and _text(receipt.get('reason')), 'receipt_identity')
-    for key, expected in {'canonical_acceptance': False, 'historical_identity_certified': False,
-                          'execution_authority': False, 'reported_rejection_only': True, 'snapshot_only': True}.items():
-        _require(receipt.get(key) is expected, 'receipt_authority')
-    _require(_positive(receipt.get('observed_at_ms')) and type(receipt.get('observed_head')) is int
-             and receipt['observed_head'] >= 0 and isinstance(receipt.get('parent'), dict)
-             and receipt['parent'].get('uid') == fields['task_id']
-             and receipt['parent'].get('created_on') == gateway, 'historical_snapshot')
-    _absence(receipt.get('absence'), board=board, event=row['row_uid'], head=receipt['observed_head'])
     _require(type(head) is int and head >= 0 and type(current.get('observed_head')) is int
              and current['observed_head'] == head and _positive(current.get('observed_at_ms')),
              'current_cut')
