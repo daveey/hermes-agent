@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from hermes_cli.config_backend import ConfigBackendUnavailable
+
 log = logging.getLogger(__name__)
 
 
@@ -42,7 +44,8 @@ class Policy:
                 raise ValueError('configuration read failed') from config.read_error
             self.enabled = config.get('display', {}).get('gateway_notification_f', False) is True
             self.retry_at = float('inf')
-        except (OSError, ValueError, RuntimeError) as exc:
+        except (OSError, ValueError, RuntimeError, ConfigBackendUnavailable) as exc:
+            # The selected backend refusal is SystemExit, not an ordinary Exception.
             # Unknown policy cannot authorize native work. Legacy custody remains.
             self.enabled = False
             self.retry_at = now + 1.0
