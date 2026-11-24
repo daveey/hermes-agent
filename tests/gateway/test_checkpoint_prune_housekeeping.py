@@ -110,7 +110,23 @@ def _settle(prune, loop_thread=None):
 
 
 def _worker(**kwargs):
-    from gateway.run_checkpoint_prune import CheckpointPruneWorker
+    import pytest
+
+    try:
+        from gateway.run_checkpoint_prune import CheckpointPruneWorker
+    except ModuleNotFoundError as exc:
+        if exc.name != "gateway.run_checkpoint_prune":
+            raise
+        # Old gateways have no worker API. Prove the missing behavior, rather than
+        # counting an import failure as a regression failure.
+        from unittest.mock import patch
+
+        seen = []
+        with patch("tools.checkpoint_maintenance.auto_prune_from_config",
+                   side_effect=lambda: seen.append(threading.current_thread().name)):
+            gateway_run._start_gateway_housekeeping(_OneTickStopEvent(), interval=0)
+        assert seen == [PRUNE_THREAD], "checkpoint pruning still runs inline, without worker lifecycle"
+        pytest.fail("asynchronous pruning exists but its request/close API is unavailable")
     return CheckpointPruneWorker(logging.getLogger("test.checkpoint_prune"), **kwargs)
 
 
@@ -306,6 +322,32 @@ def test_no_pass_starts_after_close(monkeypatch):
     never_started.close()
     never_started.request()
     assert never_started.thread is None and prune.entries == 1
+
+
+def test_surviving_prune_retains_runtime_lock_after_loop_cleanup(monkeypatch, tmp_path):
+    """The real ownership cleanup must retain custody until the last prune writer exits."""
+    from gateway import runtime_ownership
+    from gateway.status import is_gateway_runtime_lock_active
+
+    home = tmp_path / "owned-profile"
+    home.mkdir()
+    owner = runtime_ownership.ProfileOwnership()
+    owner.reserve([home])
+    monkeypatch.setattr(runtime_ownership, "process_ownership", owner)
+    prune = _Prune(monkeypatch, blocked=True)
+    stop = _TickStopEvent(1, {1: prune.wait_entered})
+    loop_thread = None
+    try:
+        loop_thread = _run_housekeeping(stop)
+        assert not loop_thread.is_alive(), HELD
+        assert prune.done == 0 and prune.threads[0].is_alive()
+        owner.close()
+        assert is_gateway_runtime_lock_active(home / "gateway.lock"), (
+            "cleanup released runtime custody while the prune writer was still alive")
+    finally:
+        _settle(prune, loop_thread)
+        owner.close()
+    assert not is_gateway_runtime_lock_active(home / "gateway.lock")
 
 
 def test_the_prune_sees_the_housekeeping_threads_context(monkeypatch, tmp_path):
