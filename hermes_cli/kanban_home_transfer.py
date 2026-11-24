@@ -1,0 +1,133 @@
+"""Dormant local preparation for a cooperative administrative-home transfer.
+
+This is NOT a Board ACK, migration command or permission to change created_on.
+No production caller prepares a transfer yet. It is one half of a coordinated
+protocol: fences remain durable on an unknown outcome, with no timed release.
+SQLite cannot revoke already serialized packets; Board ingress fencing is also
+required before this substrate can be used for a production transfer. [daveey]
+"""
+from __future__ import annotations
+
+import re
+import sqlite3
+
+_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
+_NONCE = re.compile(r"[A-Za-z0-9._:-]{16,128}\Z")
+_TABLE = "kanban_home_prepared1"
+
+
+def _install(conn: sqlite3.Connection) -> None:
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {_TABLE} (
+        task_id TEXT PRIMARY KEY, source TEXT NOT NULL, destination TEXT NOT NULL,
+        nonce TEXT NOT NULL, expected_version INTEGER NOT NULL)""")
+    # Include local-only task custody (wake/ask probes, subscriptions, private
+    # restriction records), not just the rows sent by sync. Discover task_id
+    # tables from this board's real schema, retaining guards across sync detach.
+    related = {}
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+        quoted = '"' + table.replace('"', '""') + '"'
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({quoted})")}
+        if "task_id" in columns and table != _TABLE:
+            related[table] = columns
+    for table in ("tasks", "task_links", *sorted(related)):
+        quoted = '"' + table.replace('"', '""') + '"'
+        for action in ("INSERT", "UPDATE", "DELETE"):
+            refs = ["NEW"] if action == "INSERT" else ["OLD"] if action == "DELETE" else ["OLD", "NEW"]
+            if table == "tasks":
+                ids = [f"{ref}.id" for ref in refs]
+            elif table == "task_links":
+                ids = [f"{ref}.{col}" for ref in refs for col in ("parent_id", "child_id")]
+            else:
+                ids = [f"{ref}.task_id" for ref in refs]
+            tests = [f"task_id IN ({','.join(ids)})"]
+            if action == "INSERT" and table in related:
+                # REPLACE's implicit deletion need not fire DELETE triggers.
+                # Every unique identity matters, not only conventional id/uid.
+                # A private custody row may be keyed by an episode or compound
+                # receipt. SQL equality uses the column's declared collation.
+                groups = []
+                primary = [r[1] for r in conn.execute(f"PRAGMA table_info({quoted})") if r[5]]
+                if primary:
+                    groups.append([(col, None) for col in primary])
+                for index in conn.execute(f"PRAGMA index_list({quoted})"):
+                    if not index[2]:
+                        continue
+                    index_name = '"' + index[1].replace('"', '""') + '"'
+                    cols = [(r[2], r[4]) for r in conn.execute(f"PRAGMA index_xinfo({index_name})") if r[5]]
+                    if not cols or any(col is None for col, _ in cols):
+                        raise ValueError("unsupported expression identity in home custody")
+                    groups.append(cols)
+                conflicts = []
+                for cols in groups:
+                    parts = []
+                    for col, collation in cols:
+                        name = '"' + col.replace('"', '""') + '"'
+                        coll = '' if collation is None else ' COLLATE "' + collation.replace('"', '""') + '"'
+                        parts.append(f'{name}{coll}=NEW.{name}{coll}')
+                    conflicts.append('(' + ' AND '.join(parts) + ')')
+                if conflicts:
+                    tests.append(f"task_id IN (SELECT task_id FROM {quoted} WHERE {' OR '.join(conflicts)})")
+            cond = " OR ".join(tests)
+            trigger = '"home_prepared1_' + table.replace('"', '""') + '_' + action.lower() + '"'
+            conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger}
+                BEFORE {action} ON {quoted} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE {cond})
+                BEGIN SELECT RAISE(ABORT, 'home transfer prepared'); END""")
+    for action in ("UPDATE", "DELETE"):
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_prepared1_marker_{action.lower()}
+            BEFORE {action} ON {_TABLE}
+            BEGIN SELECT RAISE(ABORT, 'home transfer preparation immutable'); END""")
+    conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_prepared1_marker_insert
+        BEFORE INSERT ON {_TABLE} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE task_id=NEW.task_id)
+        BEGIN SELECT RAISE(ABORT, 'home transfer preparation immutable'); END""")
+
+
+def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination: str,
+            nonce: str, expected_version: int) -> dict:
+    """Fence one idle local task inside the caller's write transaction.
+
+    An exact retry returns the existing immutable tuple even after reopening.
+    Refusals roll back this helper even when caught by a caller which commits.
+    Outbox drainage is conservative across the entire board, including rejected
+    custody and synthetic parents. This does not attest remote receipt/drainage.
+    """
+    if not conn.in_transaction:
+        raise ValueError("home preparation requires a write transaction")
+    if (not isinstance(source, str) or not _NAME.fullmatch(source)
+            or not isinstance(destination, str) or not _NAME.fullmatch(destination)
+            or source == destination or not isinstance(nonce, str) or not _NONCE.fullmatch(nonce)
+            or type(expected_version) is not int or expected_version < 1):
+        raise ValueError("invalid home preparation identity")
+    record = dict(task_id=task_id, source=source, destination=destination,
+                  nonce=nonce, expected_version=expected_version)
+    conn.execute("SAVEPOINT home_prepare")
+    try:
+        _install(conn)
+        old = conn.execute(f"SELECT task_id,source,destination,nonce,expected_version FROM {_TABLE} WHERE task_id=?",
+                           (task_id,)).fetchone()
+        if old:
+            if tuple(old) != tuple(record.values()):
+                raise ValueError("home preparation identity changed")
+        else:
+            state = conn.execute("SELECT gateway_id FROM kanban_sync_state").fetchall()
+            if len(state) != 1 or state[0][0] != source:
+                raise ValueError("home preparation is not on the source gateway")
+            row = conn.execute("SELECT created_on,sync_version,status,claim_lock,worker_pid,lease_holder,"
+                               "workspace_custody FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not row or row[0] != source or row[1] != expected_version:
+                raise ValueError("home preparation version or source changed")
+            if row[2] in ("running", "done", "archived") or any(row[i] is not None for i in (3, 4, 5, 6)):
+                raise ValueError("home preparation requires an idle open task without custody")
+            if conn.execute("SELECT 1 FROM task_runs WHERE task_id=? AND ended_at IS NULL LIMIT 1", (task_id,)).fetchone():
+                raise ValueError("home preparation has an unended run")
+            if (conn.execute("SELECT 1 FROM kanban_sync_outbox LIMIT 1").fetchone()
+                    or conn.execute("SELECT 1 FROM kanban_sync_parent_envelopes LIMIT 1").fetchone()
+                    or conn.execute("SELECT 1 FROM kanban_sync_omissions LIMIT 1").fetchone()):
+                raise ValueError("home preparation requires drained pending custody")
+            conn.execute(f"INSERT INTO {_TABLE}(task_id,source,destination,nonce,expected_version) VALUES (?,?,?,?,?)",
+                         tuple(record.values()))
+    except BaseException:
+        conn.execute("ROLLBACK TO home_prepare")
+        conn.execute("RELEASE home_prepare")
+        raise
+    conn.execute("RELEASE home_prepare")
+    return {"phase": "prepared_local", **record}
