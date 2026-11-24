@@ -7,6 +7,10 @@ chat); without a grant it could only relay "unblock this" to the owning chats. A
 
 * ``grant`` and ``revoke`` are a human operator's alone, classified exactly as ``renew-scope`` classifies a human
   (``kanban_comment_writer.cli_comment_writer``); an agent caller is refused ``not_human``. No flag asserts it.
+  That is process provenance (no agent marker anywhere in the caller's ancestry), not authentication of a person.
+* ``*`` is wide: it covers every session of that gateway and profile that is not a run of the stopped card and
+  carries no Kanban task marker, headless one-shot sessions included. It therefore lasts at most 30 days; a
+  single-session grant may last 366.
 * On a synced board the grant is canonical Board state (ops ``delegate_scope_grant`` / ``delegate_scope_revoke``,
   read back from ``GET /v2/boards/{board}/scope-delegates``); the Board advertises ``scope_delegate: 1`` next to
   ``scope_renewal: 1`` and nothing is sent without it (``board_unsupported``). A board that never synced keeps
@@ -30,6 +34,7 @@ from hermes_cli.kanban_scope_renewal import MAX_REASON, RenewalRefused
 ANY = "*"
 DEFAULT_HOURS = 168.0
 MIN_TTL_S, MAX_TTL_S = 60, 366 * 86400  # the Board's bounds
+MAX_ANY_TTL_S = 30 * 86400  # a '*' grant covers every non-card session of a gateway and profile: 30 days at most
 CAPABILITY = "scope_delegate"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 _GATEWAY = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -38,10 +43,10 @@ CREATE TABLE IF NOT EXISTS scope_delegates (
     uid TEXT PRIMARY KEY, gateway TEXT NOT NULL, profile TEXT NOT NULL, session TEXT NOT NULL,
     granted_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, granted_by_gateway TEXT NOT NULL,
     granted_by_profile TEXT NOT NULL, reason TEXT NOT NULL,
-    revoked_at INTEGER, revoked_by_gateway TEXT, revoke_reason TEXT
+    revoked_at INTEGER, revoked_by_gateway TEXT, revoked_by_profile TEXT, revoke_reason TEXT
 )"""
 _FIELDS = ("uid", "gateway", "profile", "session", "granted_at", "expires_at", "granted_by_gateway",
-           "granted_by_profile", "reason", "revoked_at", "revoked_by_gateway", "revoke_reason")
+           "granted_by_profile", "reason", "revoked_at", "revoked_by_gateway", "revoked_by_profile", "revoke_reason")
 
 
 def _here() -> tuple[str, str]:
@@ -205,6 +210,9 @@ def grant(conn: sqlite3.Connection, *, session: str, reason: str, gateway: Optio
         ttl = 0
     if not MIN_TTL_S <= ttl <= MAX_TTL_S:
         raise RenewalRefused("invalid_hours", "--hours must be between one minute and 366 days")
+    if session == ANY and ttl > MAX_ANY_TTL_S:
+        raise RenewalRefused("invalid_hours", "a '*' grant covers every chat session of the gateway and profile and "
+                             "lasts at most 30 days (--hours 720); grant one session for longer")
     target, uid = _store(conn, board), sync.uuid7()
     if target is not None:
         gateway = _board_gateway(gateway)
@@ -215,9 +223,9 @@ def grant(conn: sqlite3.Connection, *, session: str, reason: str, gateway: Optio
     now = int(time.time())
     with kb.write_txn(conn):
         conn.execute(_LOCAL_SQL)
-        conn.execute("UPDATE scope_delegates SET revoked_at=?, revoked_by_gateway=?, revoke_reason=? WHERE gateway=? "
-                     "AND profile=? AND session=? AND revoked_at IS NULL AND expires_at>?",
-                     (now, here, f"superseded by {uid}", gateway, profile, session, now))
+        conn.execute("UPDATE scope_delegates SET revoked_at=?, revoked_by_gateway=?, revoked_by_profile=?, "
+                     "revoke_reason=? WHERE gateway=? AND profile=? AND session=? AND revoked_at IS NULL "
+                     "AND expires_at>?", (now, here, active, f"superseded by {uid}", gateway, profile, session, now))
         conn.execute("INSERT INTO scope_delegates (uid,gateway,profile,session,granted_at,expires_at,"
                      "granted_by_gateway,granted_by_profile,reason) VALUES (?,?,?,?,?,?,?,?,?)",
                      (uid, gateway, profile, session, now, now + ttl, here, active, reason))
@@ -248,8 +256,8 @@ def revoke(conn: sqlite3.Connection, *, session: str, reason: str, gateway: Opti
         if not live:
             raise RenewalRefused("no_live_grant", "no live delegate grant names this gateway, profile and session")
         for uid in live:
-            conn.execute("UPDATE scope_delegates SET revoked_at=?, revoked_by_gateway=?, revoke_reason=? WHERE uid=?",
-                         (now, here, reason, uid))
+            conn.execute("UPDATE scope_delegates SET revoked_at=?, revoked_by_gateway=?, revoked_by_profile=?, "
+                         "revoke_reason=? WHERE uid=?", (now, here, active, reason, uid))
     return live
 
 

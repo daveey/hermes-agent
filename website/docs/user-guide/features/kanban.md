@@ -1626,9 +1626,15 @@ its running creator task, and a **delegate**. A delegate is a chat session a hum
 granted renewal rights with `hermes kanban delegate grant` (one session, or `'*'`
 for every chat session of a gateway and profile; 168 hours unless `--hours` says
 otherwise), so a triage or desk chat told to "unblock these cards" can renew cards
-it does not own instead of relaying to each owning chat. Only a human terminal can
-grant or revoke (an agent caller is refused `not_human`); `delegate list` shows
-live, expired and revoked grants. The delegate still writes its own mandate comment
+it does not own instead of relaying to each owning chat. `'*'` is wide: it covers
+every session of that gateway and profile that is not a run of the stopped card and
+is not inside a Kanban task, headless one-shot sessions included, so it lasts at
+most 30 days (one session: up to 366). Only a human terminal can grant or revoke
+(an agent caller is refused `not_human`). "Human" here is process provenance, the
+same check `hermes kanban comment` uses (no agent marker anywhere in the caller's
+process ancestry), not authentication of a person. `delegate list` shows live,
+expired and revoked grants, and a refused `renew-scope` prints the exact grant
+command for that chat. The delegate still writes its own mandate comment
 after the stop, a run of the stopped card and any caller inside a Kanban task are
 refused as before, and a safety stop has no renewal. On a synced board the grant is
 stored by the Board, which must advertise `scope_delegate`; otherwise the commands

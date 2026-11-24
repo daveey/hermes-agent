@@ -52,6 +52,13 @@ def test_an_agent_can_neither_grant_nor_revoke(board, writer):
     assert [(g['session'], g['live']) for g in delegates.grants(board)] == [(TRIAGE, True)]
 
 
+def test_star_lasts_30_days_and_one_session_366(board):
+    assert grant(board, session='*', hours=30 * 24)['expires_at'] - int(time.time()) in range(30 * 86400 - 5, 30 * 86400 + 1)
+    assert grant(board, hours=366 * 24)['live']
+    with pytest.raises(RenewalRefused, match='at most 30 days'):
+        grant(board, session='*', hours=31 * 24)
+
+
 def test_the_real_caller_classifier_decides_who_is_human(board, monkeypatch):
     """No writer handed in: the modelled process ancestry is read, as ``renew-scope`` reads it."""
     env = base.ancestry(monkeypatch, {'HERMES_SESSION_ID': TRIAGE}, {'HERMES_AGENT': '1'}, {})
@@ -67,6 +74,7 @@ def test_bad_input_is_refused_and_writes_nothing(board):
     refused('invalid_reason', delegates.grant, board, session=TRIAGE, reason=' ', writer=HUMAN)
     for hours in (0, -1, 0.001, 400 * 24, float('nan'), float('inf')):
         refused('invalid_hours', grant, board, hours=hours)
+    refused('invalid_hours', grant, board, session='*', hours=30 * 24 + 1)  # '*' is wide: 30 days at most
     refused('no_live_grant', delegates.revoke, board, session=TRIAGE, reason='x', writer=HUMAN)
     assert delegates.grants(board) == []
 
@@ -81,6 +89,9 @@ def test_regrant_supersedes_and_list_keeps_ended_grants(board):
                      wide['uid']: (False, False, None), second['uid']: (True, False, None)}
     assert delegates.revoke(board, session=TRIAGE, reason='done', writer=HUMAN) == [second['uid']]
     assert not any(g['live'] for g in delegates.grants(board))
+    ended = {g['uid']: g for g in delegates.grants(board)}[second['uid']]
+    assert (ended['revoked_by_gateway'], ended['revoked_by_profile'], ended['revoke_reason']) == (
+        gateway_names()[0], 'default', 'done')
 
 
 # ---- renewal by a delegate ---------------------------------------------------------------------------------
@@ -99,6 +110,11 @@ def test_a_delegate_with_an_exact_session_grant_renews_a_card_it_does_not_own(bo
     tid, _, episode = base.stopped(board, monkeypatch)
     comment = base.mandate(board, tid, session=TRIAGE)
     restricted(board, tid, 'not_scope_authority', episode, comment)  # no grant: still not the owning chat
+    # The refusal prints the whole grant command for THIS chat, so it works typed on another machine.
+    with pytest.raises(RenewalRefused) as hint:
+        cli.resolve_actor(board, tid, writer=AGENT, environs=[{'HERMES_SESSION_ID': TRIAGE}], gateway='mbp',
+                          profile='work')
+    assert f'`hermes kanban delegate grant --session {TRIAGE} --gateway mbp --profile work --reason <why>`' in str(hint.value)
     made = grant(board)
     payload = renew(board, tid, episode, comment)
     assert {k: payload[k] for k in ('actor_kind', 'actor_session', 'authority_kind', 'authority_ref')} == {
@@ -396,6 +412,9 @@ def test_a_board_that_cannot_be_read_grants_and_renews_nothing(live, monkeypatch
         raise client.HubError(503, 'rollover')
     hub.scope_delegates = down
     refused('board_unavailable', grant, live)
+    # Pinned: the capability read succeeded and the grant read failed. A chat with no grant is told the Board is
+    # unavailable, not that it lacks authority: with the grants unread, "no grant" would hide a real outage from a
+    # chat that does hold one.
     refused('board_unavailable', renew_synced, live, tid, episode, comment)
     hub.scope_delegates = lambda board: {'version': 2, 'grants': []}
     refused('board_unavailable', delegates.grants, live)

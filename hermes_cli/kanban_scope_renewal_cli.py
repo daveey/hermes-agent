@@ -109,8 +109,9 @@ def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, envi
             return Actor("agent", session, "delegate", str(grant), gateway, profile)
         raise RenewalRefused("not_scope_authority", f"this session is not {task_id}'s owning chat (an unreleased "
                              "created chat link); shepherd/touch subscriptions and unrelated agents cannot renew. "
-                             "A human operator can grant this chat renewal rights: `hermes kanban delegate grant "
-                             f"--session {session} --reason <why>`")
+                             "A human operator can grant this chat renewal rights from any terminal on the "
+                             f"fleet: `hermes kanban delegate grant --session {session}"
+                             f"{' --gateway ' + gateway if gateway else ''} --profile {profile} --reason <why>`")
     return Actor("agent", session, "chat", f"@session:{profile}@{gateway}/{session}", gateway, profile)
 
 
