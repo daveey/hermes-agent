@@ -86,7 +86,9 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
     created = [dict(r) for r in conn.execute(
         "SELECT l.* FROM task_chat_links l WHERE l.chat_gateway=? AND l.kind='created' "
         "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=l.task_id "
-        "AND e.kind='creator_chats_resolved')", (gateway,))] if has_links else []
+        "AND e.kind='creator_chats_resolved' AND (COALESCE(json_extract(e.payload,'$.local_adoption'),0)!=1 "
+        "OR json_extract(e.payload,'$.explicit_origin') = '@session:' || COALESCE(NULLIF(l.chat_profile,''),'default') "
+        "|| '@' || l.chat_gateway || '/' || l.chat_session))", (gateway,))] if has_links else []
     # Cards this gateway owns (a picked-up foreign copy keeps the owner's answer, see _owner_written_releases).
     foreign = {r[0] for r in conn.execute(
         "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != '' AND created_on != ?", (gateway,))} \

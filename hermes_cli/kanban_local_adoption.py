@@ -84,7 +84,8 @@ def adopt(conn, task_id: str) -> dict:
 def _confer_created_ownership(conn, task_id: str, sid: str, me: str, profile: str) -> None:
     """Durable, sync-compatible ownership, the same shape an explicit courier origin writes
     (``kanban_creator_chats``): an unreleased ``created`` link plus a ``creator_chats_resolved`` event, which is what
-    keeps :func:`kanban_chat_links._local_links` wanting the link, so reconcile preserves it. ``tasks.session_id`` is
+    keeps :func:`kanban_chat_links._local_links` wanting only its explicit-origin link, not unrelated released
+    owners, so reconcile preserves it. ``tasks.session_id`` is
     not touched. Runs only after the conflict checks, in their transaction. A chat that released this card (here or
     upstream) is never silently re-owned; the write is idempotent."""
     from hermes_cli import kanban_db as kb

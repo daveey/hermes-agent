@@ -227,6 +227,30 @@ def test_adopted_profile_owner_survives_reconcile(tmp_path, monkeypatch, profile
                     actor(conn, tid)
 
 
+@pytest.mark.parametrize('old_profile', [None, 'default', 'builder'])
+def test_adopting_fresh_chat_preserves_other_released_owner(world, capsys, old_profile):
+    conn, tid, home = world
+    old = '20261123_121212_aaaaaa'
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute("INSERT INTO sessions VALUES (?,'desktop','desktop')", (old,))
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_chat_links "
+            "(uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,created_at) "
+            "VALUES (?,?,?,?,?,'created',1,1)",
+            (chat_links.link_uid(tid, GW, old_profile, old, 'created'), tid, GW, old_profile, old))
+    with pytest.raises(RenewalRefused):
+        actor(conn, tid, old)
+    assert adopt(tid, capsys)['adopted']
+    for _ in range(2):
+        chat_links.reconcile(conn, 'default', GW, ledger=False)
+        assert actor(conn, tid).authority == 'chat'
+        previous = [row for row in links(conn, tid) if row['chat_session'] == old]
+        assert [row['released'] for row in previous] == [1]
+        with pytest.raises(RenewalRefused):
+            actor(conn, tid, old)
+
+
 def test_adoption_does_not_authorize_another_chat(world, capsys):
     conn, tid, _ = world
     assert adopt(tid, capsys)['adopted'] is True
