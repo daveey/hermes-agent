@@ -971,6 +971,9 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str, max_pages: Optional[int] 
             replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
             pulled = Pulled(resync(replica, hub, slug, observers=False), status_changed=acw.rebuilt(before, replica))
+        if not diagnostic:
+            from hermes_cli.kanban_sync_closure_backfill import backfill
+            pulled.status_changed.update(backfill(replica, hub, slug))
         if not pulled.more:  # both mean "holds everything up to the feed head", not "a page was read"
             lag.pull_done(path, generation)
             try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
