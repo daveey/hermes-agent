@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from hermes_cli import kanban_last_checkpoint as last_checkpoint
 from hermes_cli import kanban_parent_unclaimed as pu
+from hermes_cli.kanban_ready_events import conditional_ready_entry_sql
 
 _log = logging.getLogger(__name__)
 
@@ -125,10 +126,11 @@ def notice_text(payload: Any) -> str:
             + ".")
 
 
-def _floor_kinds() -> str:
+def _floor_kinds(*, include_conditional: bool = True) -> str:
     from hermes_cli.kanban_ready_events import READY_ENTRY_CONDITIONAL_KINDS
     from hermes_cli.kanban_ready_events import READY_WAIT_FLOOR_KINDS as _READY_WAIT_FLOOR_KINDS
-    return ", ".join(f"'{k}'" for k in sorted({*_READY_WAIT_FLOOR_KINDS, *READY_ENTRY_CONDITIONAL_KINDS}))
+    kinds = _READY_WAIT_FLOOR_KINDS | (READY_ENTRY_CONDITIONAL_KINDS if include_conditional else frozenset())
+    return ", ".join(f"'{k}'" for k in sorted(kinds))
 
 
 # Prefilter only (``pu.ready_since`` decides): the same event floor as the diagnostic, and the latest run's end,
@@ -141,8 +143,9 @@ _CANDIDATES = (
     "SELECT t.id, t.title, t.created_at FROM tasks t "
     "WHERE t.status = 'ready' AND t.claim_lock IS NULL "
     "AND (t.session_id IS NOT NULL OR EXISTS (SELECT 1 FROM kanban_notify_subs s WHERE s.task_id = t.id)) "
-    f"AND MAX(COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN "
-    f"({_floor_kinds()}) AND NOT (e.kind = 'claimed' AND e.run_id IN "
+    f"AND MAX(COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND (e.kind IN "
+    f"({_floor_kinds(include_conditional=False)}) OR {conditional_ready_entry_sql('e.kind', 'e.payload')}) "
+    f"AND NOT (e.kind = 'claimed' AND e.run_id IN "
     f"(SELECT r.id FROM task_runs r WHERE r.task_id = t.id AND {_UNUSED_RUN}))), t.created_at), "
     f"COALESCE((SELECT MAX(r.ended_at) FROM task_runs r WHERE r.task_id = t.id AND NOT ({_UNUSED_RUN})), 0)) "
     "BETWEEN ? AND ? ORDER BY t.id"
