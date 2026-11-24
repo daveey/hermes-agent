@@ -111,7 +111,9 @@ def _WAKE_CHECK_ARGS():
     return (
         _arg("--wake-check", dest="wake_check", default=None,
              help="Shell probe run while parked (bash -lc, 30 s timeout): exit 0 wakes the card at "
-                  "once, exit 1 = not yet. Required for a park more than 2 h out unless --clock-only."),
+                  "once, exit 1 = not yet. On exit 0 the probe is run again at once and the card wakes only "
+                  "if that run exits 0 too: it must give the same answer when re-run seconds later. "
+                  "Required for a park more than 2 h out unless --clock-only."),
         _arg("--check-every", dest="check_every", type=int, default=None,
              help="Seconds between --wake-check probes (default 900, min 120, max 21600)"),
         _arg("--clock-only", dest="clock_only", action="store_true",

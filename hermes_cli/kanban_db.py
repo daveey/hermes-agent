@@ -988,7 +988,7 @@ CREATE TABLE IF NOT EXISTS task_wake_checks (
     last_at   INTEGER,
     last_rc   INTEGER,
     last_out  TEXT,
-    fails     INTEGER NOT NULL DEFAULT 0, first_failure_at INTEGER,
+    fails     INTEGER NOT NULL DEFAULT 0, first_failure_at INTEGER, confirm_fails INTEGER NOT NULL DEFAULT 0,
     generation TEXT, purpose TEXT NOT NULL DEFAULT 'wake'  -- 'wake' (park) | 'ask_resolved' (kanban_ask_resolved)
 );
 CREATE INDEX IF NOT EXISTS idx_wake_checks_next_at  ON task_wake_checks(next_at);

@@ -294,7 +294,9 @@ _WAKE_CHECK_PROPS = {
     "wake_check": _prop("string", (
         "Shell command probed by the dispatcher while the card is parked (bash -lc, 30 s "
         "timeout, cwd = the task workspace): exit 0 = the condition holds and the card wakes "
-        "at once (its stdout reaches the next run), exit 1 = not yet. Any other exit 3 times in "
+        "at once (its stdout reaches the next run), exit 1 = not yet. "
+        "On exit 0 the probe is run again at once and the card wakes only if that run exits 0 too: "
+        "it must give the same answer when re-run seconds later. Any other exit 3 times in "
         "a row wakes the card to fix the probe. REQUIRED for a wait on any readable fact (a DB "
         "row, a git tag, a file, a log line, a service state) that wakes more than 2 h out, e.g. "
         "`gh api repos/O/R/tags --jq '.[].name' | grep -q '^v2'`. A probe alone is not a producer: "

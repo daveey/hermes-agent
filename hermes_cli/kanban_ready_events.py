@@ -14,7 +14,7 @@ READY_ENTRY_EVENT_KINDS = frozenset({
     "created", "promoted", "promoted_manual", "triage_swept",
     "containment_released", "review_reopened", "reopened", "changes_requested",
     "reclaimed", "unblocked", "continuation_woken", "condition_met",
-    "wake_probe_stale", "wake_check_stale", "owner_restart_lost",
+    "wake_probe_stale", "wake_check_stale", "wake_check_flapping", "owner_restart_lost",
     "wake_check_broken", "wake_check_lost", "ci_run_unstartable",
     "wake_check_dead_ancestry", "external_ref_broken", "external_service_down",
     "supervisor_request_wake",

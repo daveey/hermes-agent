@@ -890,10 +890,10 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             return None
         rc_col = rc if isinstance(rc, int) else -1
         episode.reconcile(conn, task_id)
-        if rc == 0 or (diagnostics and diagnostics.get("first_rc") == 0):
-            episode.reset(conn, task_id)
-            if rc != 0:
-                kb._append_event(conn, task_id, "wake_episode_reset")
+        from hermes_cli.kanban_wake_confirm import note_result
+        flapping = note_result(conn, task_id, cmd, rc, tail, diagnostics)
+        if flapping:
+            return flapping
         from hermes_cli import kanban_external_watch as kew  # [daveey] external-run card record + HERMES_WATCH
         ext_result, delay = kew.note_probe(conn, task_id, cmd, rc, out, float(now), state["every"])
         if rc == 0 or (ext_result and ext_result.get("outcome") in ("succeeded", "failed", "cancelled")):
@@ -1145,13 +1145,16 @@ def _render_wake_context(conn: sqlite3.Connection, task_id: str) -> str:
     lines: list[str] = []
     from hermes_cli.kanban_comment_origin import WAKE_PROBE_STALE_EVENT
 
-    kinds = (*SCHEDULED_ENTRY_EVENTS, CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT, episode.STALE_EVENT)
+    from hermes_cli.kanban_wake_confirm import EVENT as FLAPPING_EVENT
+    kinds = (*SCHEDULED_ENTRY_EVENTS, CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT, episode.STALE_EVENT, FLAPPING_EVENT)
     marks = ",".join("?" for _ in kinds)
     row = conn.execute(
         f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
         "ORDER BY id DESC LIMIT 1", (task_id, *kinds)).fetchone()
-    if row is not None and row[0] in (CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT, episode.STALE_EVENT):
+    if row is not None and row[0] in (CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT, episode.STALE_EVENT, FLAPPING_EVENT):
         payload = kb._json_dict(row[1])
+        if row[0] == FLAPPING_EVENT:
+            return f"## Woken to fix a flapping wake check\n{payload.get('note', '')}\n"
         if row[0] == episode.STALE_EVENT:
             return f"## Woken to reconsider a never-passing wake check\n{payload.get('note', '')}\n"
         if row[0] == WAKE_PROBE_STALE_EVENT and payload.get("reason") == PRODUCER_FINISHED:
