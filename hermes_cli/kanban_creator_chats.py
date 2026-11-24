@@ -124,6 +124,10 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str, *, verdicts: L
                 continue
             seen.add(task_id)
             for row in _chat_links(conn, task_id):
+                # Passive visibility is not ownership. Preserve source provenance before
+                # inherit_chats records the selected owner as the child's created link.
+                if row.get("kind", "created") != "created":
+                    continue
                 if not is_placeholder_session(row["chat_session"]) and _owner(task_id, row):
                     key = (row["chat_gateway"], row["chat_profile"], row["chat_session"])
                     owners.setdefault(key, dict(row))
