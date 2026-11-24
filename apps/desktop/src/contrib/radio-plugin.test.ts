@@ -5,7 +5,10 @@ import { discoverBundledPlugins } from './plugins'
 import { $pluginDecisions, $pluginRecords, setPluginEnabled } from './plugins-store'
 import { registry } from './registry'
 
-vi.mock('./runtime-loader', () => ({ watchRuntimePlugins: vi.fn() }))
+vi.mock('./runtime-loader', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  watchRuntimePlugins: vi.fn()
+}))
 
 interface RadioPlayer {
   play: () => Promise<void>
