@@ -660,14 +660,52 @@ def test_on_a_links_less_board_a_subscription_without_a_reason_is_not_an_owner(k
         assert owner.backfill(conn, apply=True)["linked"] == 1
 
 
-def test_a_new_owner_chat_is_not_left_amber_with_no_outcome(kanban_home):
+def test_a_new_owner_chat_is_not_left_amber_with_no_outcome(kanban_home, monkeypatch):
     from hermes_state import SessionDB
-    from hermes_state_outcome import _parse
+    from hermes_state_outcome import _parse, derive_outcome
     with kbc.connect_closing() as conn:
         kb.create_task(conn, title="a", assignee="default", created_by="ci-main-watch")
+    sid = owner.session_id("ci-main-watch")
     db = SessionDB(db_path=kanban_home / "state.db")
     try:
-        outcome = _parse(db.get_session(owner.session_id("ci-main-watch"))["outcome_json"])
-        assert outcome["kind"] == "done" and outcome["source"] == "declared"
+        stored = _parse(db.get_session(sid)["outcome_json"])
+        assert stored["kind"] == "done" and stored["source"] == "declared"
+        # the live symptom was unresolved{no_summary}; with its open card the chat now derives waiting{card}
+        assert derive_outcome(sid, db=db)["kind"] in ("done", "waiting")
+        monkeypatch.setattr(owner, "_ENSURED", {})
+        owner.ensure("ci-main-watch")  # a second ensure leaves the stored outcome alone
+        assert _parse(db.get_session(sid)["outcome_json"])["at"] == stored["at"]
+        db.append_message(sid, "user", "Kanban notice: t_x stopped on its spend budget")
+        lapsed = derive_outcome(sid, db=db)
+        assert lapsed.get("source") != "declared"  # a notice makes the idle declaration lapse
     finally:
         db.close()
+
+
+def test_an_owner_chat_with_real_turns_is_never_declared_idle(kanban_home, monkeypatch):
+    from hermes_state import SessionDB
+    sid = owner.ensure("ci-main-watch")
+    db = SessionDB(db_path=kanban_home / "state.db")
+    try:
+        db._write_sql("UPDATE sessions SET outcome_json=NULL WHERE id=?", (sid,))
+        db.append_message(sid, "user", "Kanban notice: t_x stopped")
+    finally:
+        db.close()
+    monkeypatch.setattr(owner, "_ENSURED", {})
+    owner.ensure("ci-main-watch")
+    db = SessionDB(db_path=kanban_home / "state.db")
+    try:
+        assert not db.get_session(sid)["outcome_json"]
+    finally:
+        db.close()
+
+
+def test_a_failing_idle_declaration_never_fails_the_create(kanban_home, monkeypatch):
+    import hermes_state_outcome
+
+    def boom(*a, **k):
+        raise ValueError("unknown session")
+    monkeypatch.setattr(hermes_state_outcome, "declare_outcome", boom)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="a", assignee="default", created_by="ci-main-watch")
+        assert _links(conn, tid)[0]["chat_session"] == owner.session_id("ci-main-watch")

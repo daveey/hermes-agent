@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sqlite3
 import threading
 from typing import Optional
 
@@ -163,11 +164,15 @@ def ensure(producer: str, *, force: bool = False) -> str:
             row = db.get_session(sid) or {}
             if not row.get("message_count"):
                 db.append_message(sid, "assistant", brief(producer))
-            if not row.get("outcome_json"):
+            if not row.get("outcome_json") and (row.get("message_count") or 0) <= 1:
                 # The sidebar paints a chat with no outcome (or the seed, judged no summary) amber "attention"
-                # for good; the standing chat has nothing pending until a notice wakes it, whose turn re-declares.
+                # for good. A chat holding only its seed has nothing pending; a notice row later makes this
+                # declaration lapse and derivation takes over. A chat with real turns is never declared done here.
                 from hermes_state_outcome import declare_outcome
-                declare_outcome(sid, {"kind": "done", "summary": idle_summary(producer)}, db=db)
+                try:
+                    declare_outcome(sid, {"kind": "done", "summary": idle_summary(producer)}, db=db)
+                except (ValueError, sqlite3.Error):  # only the sidebar colour is lost, never the card
+                    log.warning("kanban owner chat %s: idle outcome not declared", sid, exc_info=True)
             if not db.get_session_title(sid):
                 try:
                     db.set_session_title(sid, title(producer))
