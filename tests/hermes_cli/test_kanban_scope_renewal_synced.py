@@ -74,6 +74,22 @@ def renew(live, tid, episode, comment):
                      ancestry=[{'HERMES_SESSION_ID': CHAT}])
 
 
+@pytest.mark.parametrize('pending', [False, True])
+def test_new_renewal_captures_home_at_identity_creation(live, monkeypatch, pending):
+    from tests.hermes_cli.test_home_typed_capture import mirror
+    hub = Hub({'decision_retain': 1, 'scope_renewal': 1})
+    tid, episode, comment = stopped(live, monkeypatch, hub)
+    mirror(live, tid, 'renewal-capture-epoch', pending=int(pending))
+    if pending:
+        with pytest.raises(ValueError, match='home transfer pending'):
+            renew(live, tid, episode, comment)
+        assert not hub.sent
+    else:
+        renew(live, tid, episode, comment)
+        assert hub.sent[0].get('home_generations') == {tid: 'renewal-capture-epoch'}
+        assert 'home_generations' not in hub.sent[0]['payload']
+
+
 def test_board_applies_and_the_exact_event_is_projected(live, monkeypatch):
     hub = Hub({'decision_retain': 1, 'scope_renewal': 1})
     tid, episode, comment = stopped(live, monkeypatch, hub)

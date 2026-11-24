@@ -122,8 +122,9 @@ def _request(conn, board, gateway, task, meta=None, human_op=None):
     op = {"op": "archive", "task": task, "client_op_id": uid, **({"archive_metadata": meta} if meta else {}),
           **({"human_operator": human_op} if human_op else {})}
     with kb.write_txn(conn):
-        conn.execute("INSERT INTO containment_delivery(request_uid,board,gateway,op_json,confirmed) VALUES (?,?,?,?,0)",
-                     (uid, board, gateway, json.dumps(op, sort_keys=True, separators=(",", ":"))))
+        epoch = canonical.home.capture(conn, op)
+        conn.execute("INSERT INTO containment_delivery(request_uid,board,gateway,op_json,confirmed,home_generations) VALUES (?,?,?,?,0,?)",
+                     (uid, board, gateway, json.dumps(op, sort_keys=True, separators=(",", ":")), epoch))
     return uid, op, 0
 
 
@@ -215,7 +216,7 @@ def archive(conn, task, *, comment=None, precondition=None, via=None, event_extr
                                          "archive yet; nothing was changed. Retry after the Board deployment")
         request, op, confirmed = _request(conn, board, hub.ident.gateway, task, meta, human_op)
         if not confirmed:
-            response = hub.ops(board, [op])
+            response = hub.ops(board, [canonical.outbound(conn, request, op)])
             results = response.get("results") if isinstance(response, dict) else None
             if (not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict)
                     or results[0].get("client_op_id") != request):

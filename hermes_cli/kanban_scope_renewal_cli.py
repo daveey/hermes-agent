@@ -170,7 +170,16 @@ def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict
         wire = {"client_op_id": event_uid, "op": "renew_scope", "task": task_id, "event_uid": event_uid,
                 "episode": payload["episode"], "mandate_comment_uid": payload["mandate_comment_uid"],
                 "mandate_body": body, "payload": {"version": 1, **audit}}
-        results = hub.ops(board, [wire]).get("results", [])
+        # The identity above is NEW, not a durable/replayed command. Capture
+        # against the same read snapshot even for a read-only foreign replica.
+        from hermes_cli import kanban_home_command as home
+        snapshot = evidence if evidence is not None else conn
+        snapshot.execute('SAVEPOINT renewal_home_capture')
+        try:
+            epoch = home.capture(snapshot, wire)
+        finally:
+            snapshot.execute('RELEASE renewal_home_capture')
+        results = hub.ops(board, [home.outbound({'home_generations': epoch}, wire)]).get("results", [])
         if len(results) != 1 or results[0].get("client_op_id") != event_uid or results[0].get("status") != "applied":
             reply = results[0] if len(results) == 1 else {}
             raise RenewalRefused(str(reply.get("reason") or "board_rejected"),

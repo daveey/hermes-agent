@@ -116,6 +116,20 @@ def test_missing_terminal_capability_refuses_before_local_write(synced_conn, mon
     assert hub.posts == [] and hub.closed
 
 
+def test_archive_retries_original_captured_epoch_not_current_mirror(synced_conn, monkeypatch):
+    from tests.hermes_cli.test_home_typed_capture import mirror
+    hub = setup(synced_conn, monkeypatch)
+    mirror(synced_conn, hub.target, 'archive-original-epoch')
+    hub.fail = True
+    with pytest.raises(TimeoutError):
+        kb.archive_task(synced_conn, hub.target)
+    mirror(synced_conn, hub.target, 'archive-new-epoch')
+    with pytest.raises(TimeoutError):
+        kb.archive_task(synced_conn, hub.target)
+    assert hub.posts[0] == hub.posts[1]
+    assert hub.posts[0][0]['home_generations'] == {hub.target: 'archive-original-epoch'}
+
+
 def test_unknown_archive_recovers_same_request(synced_conn, monkeypatch):
     hub = setup(synced_conn, monkeypatch)
     hub.fail = True

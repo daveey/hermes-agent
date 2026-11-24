@@ -11,6 +11,7 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
+from hermes_cli import kanban_home_command as home
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_containment_policy import identity
 from hermes_cli.kanban_containment_state import _payload, _release, _stop, _uid, fingerprint
@@ -89,6 +90,7 @@ def _schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS containment_delivery ("
                  "request_uid TEXT PRIMARY KEY, board TEXT NOT NULL, gateway TEXT NOT NULL, "
                  "op_json TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0)")
+    home.install(conn, 'containment_delivery')
 
 
 def stage(conn: sqlite3.Connection, *, board: str, gateway: str, op: dict) -> str:
@@ -110,9 +112,19 @@ def stage(conn: sqlite3.Connection, *, board: str, gateway: str, op: dict) -> st
         if prior and tuple(prior) != (board, gateway, raw):
             raise ContainmentRefused("request identity already binds different containment bytes")
         if not prior:
-            conn.execute("INSERT INTO containment_delivery(request_uid,board,gateway,op_json) VALUES (?,?,?,?)",
-                         (request, board, gateway, raw))
+            epoch = home.capture(conn, op)
+            conn.execute("INSERT INTO containment_delivery(request_uid,board,gateway,op_json,home_generations) VALUES (?,?,?,?,?)",
+                         (request, board, gateway, raw, epoch))
     return request
+
+
+def outbound(conn: sqlite3.Connection, request: str, op: dict) -> dict:
+    """Read the immutable capture sidecar, including legacy NULL; never today's epoch."""
+    row = conn.execute('SELECT op_json,home_generations FROM containment_delivery WHERE request_uid=?',
+                       (request,)).fetchone()
+    if row is None or json.loads(row[0]) != op:
+        raise ContainmentRefused('containment operation differs from durable request')
+    return home.outbound({'home_generations': row[1]}, op)
 
 
 def deliver(conn: sqlite3.Connection, hub: Any, *, request: str) -> dict:
@@ -136,7 +148,7 @@ def deliver(conn: sqlite3.Connection, hub: Any, *, request: str) -> dict:
     if confirmed < 0:
         raise ContainmentRefused("Board previously refused this exact containment request")
     if not confirmed:
-        response = hub.ops(board, [op])
+        response = hub.ops(board, [outbound(conn, request, op)])
         results = response.get("results") if isinstance(response, dict) else None
         if (not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict)
                 or results[0].get("client_op_id") != request):
