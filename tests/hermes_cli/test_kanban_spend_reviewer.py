@@ -73,6 +73,8 @@ def test_a_grant_with_quoted_progress_promotes_into_a_fresh_window_of_exactly_th
         assert kb.get_task(conn, tid).status == "ready"
         assert reviewer.state(conn, tid, episode) == reviewer.GRANTED
         assert ksb.card_limits(conn, tid, helpers.LIMITS).runs == 5
+        granted = ksb.card_override(conn, tid)  # the reviewer is an automated model review: an agent's limit
+        assert granted["writer_kind"] == "agent" and "cache_read_writer_kind" not in granted
         assert ksb.spend(conn, tid).runs == 0 and not decision.pending(conn, tid)
         assert ksb.hold(conn, tid, lim=helpers.LIMITS) is None
         assert "Spend reviewer granted 5" in kb.list_comments(conn, tid)[-1].body

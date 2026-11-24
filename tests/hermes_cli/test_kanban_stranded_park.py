@@ -862,3 +862,72 @@ def test_remote_unblock_on_a_stamp_the_sweep_did_not_record_is_a_plain_unblock(k
         with pytest.raises(ca.AnswerRefused, match="ask_changed_or_held|spend_decision_pending"):
             _answer(conn, tid, "unblock")
         assert _row(conn, tid)[0] == "triage" and _no_release(conn, tid)
+
+
+# --- dead release buttons are re-filed once by the sweep ------------------------------------------------------------
+
+def _offer_ok(conn, tid):
+    from hermes_cli import kanban_release
+    return kanban_release.offered(conn, tid, json.loads(_row(conn, tid)[2])) == tid
+
+
+@pytest.mark.parametrize("dead", ["no_record", "foreign_origin", "forged_text"])
+def test_an_ask_whose_release_offer_has_no_record_here_is_refiled_once(kanban_home, own_gateway, dead):
+    """Asks filed by the core before the record existed, a rehomed card, an event whose origin was overwritten."""
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid] and _offer_ok(conn, tid)
+        with kb.write_txn(conn):
+            if dead == "foreign_origin":
+                if "origin_gateway" not in {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}:
+                    conn.execute("ALTER TABLE task_events ADD COLUMN origin_gateway TEXT")
+                conn.execute("UPDATE task_events SET origin_gateway='worker-9' WHERE task_id=? AND kind=?",
+                             (tid, stranded.EVENT))
+            else:
+                conn.execute("UPDATE task_events SET payload=json_remove(payload,'$.release_target') "
+                             "WHERE task_id=? AND kind=?", (tid, stranded.EVENT))
+        if dead == "forged_text":
+            _restamp(conn, tid, lambda ask: ask.update(action="Unblock = I archive the root card."))
+        assert not _offer_ok(conn, tid)
+        assert _sweep(conn, now=_later(3.2), cfg={}) == [tid]
+        assert _offer_ok(conn, tid)
+        ask = json.loads(_row(conn, tid)[2])
+        assert ask["action"].startswith("Decide how to handle: Bounded work")  # the sweep's own brief, never stored text
+        events = _events(conn, tid, stranded.EVENT)
+        assert len(events) == 2 and events[-1]["refiled"] is True
+        assert events[-1]["release_target"] == ask["release_target"]
+        assert _sweep(conn, now=_later(3.4), cfg={}) == [] and len(_events(conn, tid, stranded.EVENT)) == 2
+        _answer(conn, tid, "unblock")
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_a_card_that_stopped_again_under_its_old_ask_is_refiled_for_the_new_stop(kanban_home, own_gateway):
+    from hermes_cli import kanban_release
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        old = json.loads(_row(conn, tid)[2])["release_target"]
+        with kb.write_txn(conn):  # decided elsewhere and stopped again; the old ask is still on the row
+            kb._append_event(conn, tid, "promoted_manual", {"actor": "someone", "reason": "one more"})
+            kb._append_event(conn, tid, decision.EVENT, {"reason": "Spend budget: again"})
+        assert decision.pending(conn, tid) and not _offer_ok(conn, tid)
+        assert _sweep(conn, now=_later(3.2), cfg={}) == [tid]
+        new = json.loads(_row(conn, tid)[2])["release_target"]
+        assert new == kanban_release.offer(conn, tid) and new["episode"] != old["episode"] and _offer_ok(conn, tid)
+        _answer(conn, tid, "unblock")
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_an_ask_that_can_offer_nothing_now_is_not_refiled(kanban_home, own_gateway):
+    """A safety-restricted card offers no release: its stamped ask is left as it is (the click records the refusal)."""
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        stop = decision.pending_episode(conn, tid)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "decision_hold_restricted",
+                             {"cause": "safety_refusal", "episode": stop.get("uid") or str(stop["id"])})
+            conn.execute("UPDATE task_events SET payload=json_remove(payload,'$.release_target') "
+                         "WHERE task_id=? AND kind=?", (tid, stranded.EVENT))
+        before = _row(conn, tid)[2]
+        assert _sweep(conn, now=_later(3.2), cfg={}) == [] and _row(conn, tid)[2] == before

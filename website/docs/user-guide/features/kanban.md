@@ -771,8 +771,11 @@ or a budget decision was recorded after the stop: the refusal prints those comme
 accepted only as the id of the newest one it printed (`seen_not_needed` when nothing needs reading); a
 human caller proceeds. An agent's mandate supersedes only limits agents wrote and states the budget it
 leaves. An agent adds N runs but keeps the cache-read limit of any budget override it cannot attribute
-to an agent (`spend_budget_set.writer_kind`, recorded on new events), and is refused
-`budget_limit_in_force` when that limit is already reached; a human lifts it.
+to an agent (`spend_budget_set.writer_kind`, recorded on new events by release, `spend-budget`, the
+spend reviewer and the operator-courier promote; a limit that is only carried over keeps its own
+attribution in `cache_read_writer_kind`, so a later agent release keeps it too), and is refused
+`budget_limit_in_force` when that limit is already reached; a human lifts it, also on a card with no
+run limit.
 
 Each release records a `stop_released` event (authority, runs, mandate comment); a rerun after it is
 `already_released`. A rerun after a failure past the mandate comment reuses that comment (unless newer
@@ -783,7 +786,9 @@ The Desktop Unblock button makes the same release, recorded as a human act with 
 `Desktop Unblock, operation <id>`, only on an ask that offered it: the stranded-park ask for a held
 card (or for the decision card of its pending stop) carries a `release_target` stamp that no agent,
 tool or CLI request can supply, and the sweep records the same stamp on its `stranded_park_escalated`
-event: a stamp on the synced ask column alone, without this board's own event, offers nothing. An agent-written ask, an ask with its own choices, an ask filed
+event: a stamp on the synced ask column alone, without this board's own event, offers nothing. An
+open ask whose stamp has no such record here, or names an earlier stop than the pending one, is
+re-filed once by the sweep from its own brief (`refiled: true` on the event), so the button works again. An agent-written ask, an ask with its own choices, an ask filed
 before the stamp existed and a decision card for an earlier stop keep the plain unblock. Local
 clicks go through the user-steps mirror, remote ones through `kanban_card_answer` on the card's home.
 

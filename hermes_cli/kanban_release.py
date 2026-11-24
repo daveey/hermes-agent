@@ -185,6 +185,16 @@ def _home_filed(conn: sqlite3.Connection, task_id: str, stamp: dict) -> bool:
     return not row[1] or row[1] in own
 
 
+def dead_offer(conn: sqlite3.Connection, task_id: str, ask: Any) -> bool:
+    """``ask`` carries a release stamp its button cannot honour although a release could be offered now: the
+    stamp names an earlier stop, or this board has no record of filing it (an ask filed before the record
+    existed, a card rehomed after the ask, an event whose origin was overwritten). The stranded-park sweep
+    re-files such an ask from its own brief (``kanban_stranded_park``), never by blessing the stored text."""
+    stamp = ask.get(STAMP) if isinstance(ask, dict) else None
+    current = offer(conn, task_id) if isinstance(stamp, dict) else None
+    return current is not None and (stamp != current or not _home_filed(conn, task_id, stamp))
+
+
 def _newest_stop(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
     from hermes_cli.kanban_spend_decision import EVENT
     row = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
@@ -426,31 +436,41 @@ def _resume(conn: sqlite3.Connection, out: dict, tid: str, by: str, recorded: di
 
 
 def _budget_plan(conn: sqlite3.Connection, s) -> tuple[Optional[int], Optional[int], int, str]:
-    """``(runs limit, cache-read limit, runs spent, text)`` this release leaves on the card; None = leave as is.
+    """``(runs limit, cache-read limit, runs spent, text)`` this release leaves on the card; a None run limit
+    leaves the override untouched.
 
-    Everyone: an exempt card (run limit 0) stays exempt, and the run limit is the runs already counted plus N.
-    A human lifts the cache-read limit (0). An agent authority keeps the cache-read limit of any override it
-    cannot attribute to an agent (``spend_budget_set.writer_kind``; older events record no writer and count as
-    possibly a person's): it adds N runs and raises nothing else. If that kept limit is already reached the
-    release would stop at once, so it is refused before anything is written (``budget_limit_in_force``)."""
+    Everyone: a card with no run limit (run limit 0; exempt when the cache-read limit is 0 too) keeps that, and
+    otherwise the run limit is the runs already counted plus N. A human lifts the cache-read limit (0). An
+    agent authority keeps the cache-read limit of any override it cannot attribute to an agent
+    (``kanban_spend_budget.cache_attribution``; older events record nothing and count as possibly a person's):
+    it adds N runs and raises nothing else. ``s.keeps_limit`` records that, so the event this release writes carries
+    the limit's own attribution forward and a later agent release keeps it too.
+
+    A cache-read limit that is already reached in the window the card runs in would stop it again at once.
+    A human (or an agent replacing an agent's limit) lifts it; an agent that must keep it is refused before
+    anything is written (``budget_limit_in_force``). That holds for a card with no run limit as well."""
     from hermes_cli import kanban_spend_budget as ksb
     prior = ksb.card_override(conn, s.tid) or {}
     spent = ksb.spend(conn, s.tid)
-    kept = s.writer[0] != "human" and ksb.override_set(prior) and prior.get("writer_kind") != "agent"
-    if ksb._limit_value(prior.get("runs")) == 0:
-        return None, None, spent.runs, "unchanged (no run limit on this card)"
-    runs = spent.runs + s.runs
-    if not kept:
-        return runs, 0, spent.runs, f"{runs} runs ({s.runs} more than the {spent.runs} counted), no cache-read limit"
+    s.keeps_limit = (s.writer[0] != "human" and ksb.override_set(prior) and ksb.cache_attribution(prior) != "agent")
+    s.prior = prior
     cache = ksb._limit_value(prior.get("cache_read_tokens"))
     limit = ksb.limits().cache_read_tokens if cache is None else cache
     used = spent.tokens["cache_read_tokens"]
-    if limit and used >= limit and ksb.limit_window(conn, s.tid) == "current":
+    reached = bool(limit) and used >= limit and ksb.limit_window(conn, s.tid) == "current"
+    if reached and s.keeps_limit:
         raise _Refusal("budget_limit_in_force", f"{s.tid} has reached its cache-read limit ({used} of {limit}) and an "
                        "agent does not raise a limit a person may have set; a human runs "
                        f"`hermes kanban release {s.tid}` or `hermes kanban spend-budget {s.tid}`")
-    return runs, cache, spent.runs, (f"{runs} runs ({s.runs} more than the {spent.runs} counted), cache-read limit "
-                                     f"kept at {'the board limit' if cache is None else limit or 'no limit'}")
+    unlimited = ksb._limit_value(prior.get("runs")) == 0
+    if unlimited and not reached:
+        return None, None, spent.runs, "unchanged (no run limit on this card)"
+    runs = 0 if unlimited else spent.runs + s.runs
+    said = "no run limit" if unlimited else f"{runs} runs ({s.runs} more than the {spent.runs} counted)"
+    if not s.keeps_limit:
+        return runs, 0, spent.runs, f"{said}, no cache-read limit"
+    return runs, cache, spent.runs, (f"{said}, cache-read limit kept at "
+                                     f"{'the board limit' if cache is None else limit or 'no limit'}")
 
 
 def _mandate_and_budget(conn: sqlite3.Connection, out: dict, s) -> None:
@@ -487,8 +507,10 @@ def _mandate_and_budget(conn: sqlite3.Connection, out: dict, s) -> None:
     else:
         s.budget = runs
         try:
+            who = kind if kind in ("human", "agent") else None
             ksb.set_override(conn, s.tid, runs=runs, cache_read_tokens=cache, by=s.by, reason=s.reason,
-                             seen=s.budget_seen, board=s.board, writer_kind=kind if kind in ("human", "agent") else None)
+                             seen=s.budget_seen, board=s.board, writer_kind=who,
+                             cache_read_writer_kind=ksb.carried(s.prior).get("cache_read_writer_kind") if s.keeps_limit else None)
         except unread.UnreadComments as exc:  # a budget decision recorded since the check above
             raise _Refusal("budget_decision_unread", f"{exc}{s.kept}")
     out.update(spent_runs=spent, budget_runs=s.budget)

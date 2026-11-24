@@ -458,7 +458,7 @@ def grant(conn: sqlite3.Connection, task_id: str, episode: str, runs: int, reaso
             raise RuntimeError(f"{task_id} left triage inside the spend review transaction")
         kb._append_event(conn, task_id, ksb.OVERRIDE_EVENT, {
             "runs": runs, "cache_read_tokens": ksb._limit_value(prior.get("cache_read_tokens")),
-            "by": AUTHOR, "reason": reason, "episode": episode})
+            "by": AUTHOR, "reason": reason, "episode": episode, **ksb.carried(prior)})
         kb._append_event(conn, task_id, "promoted_manual", {
             "actor": AUTHOR, "reason": reason, "from_status": "triage",
             WINDOW_KEY: {"runs": runs, "episode": episode, "decision": "spend_review"}})

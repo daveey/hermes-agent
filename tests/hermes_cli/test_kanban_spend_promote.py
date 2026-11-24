@@ -86,6 +86,8 @@ def test_decision_card_promotes_with_an_exact_four_run_window(fleet):
     assert kb.get_task(f.h, f.target).status == "ready"
     budget = _events(f.h, f.target, ksb.OVERRIDE_EVENT)[-1]
     assert (budget["runs"], budget["cache_read_tokens"], budget["episode"]) == (4, 5_000_000, episode)
+    # The decision card's worker is an agent; the cache-read limit it carried over was never attributed.
+    assert (budget["writer_kind"], budget["cache_read_writer_kind"]) == ("agent", "unknown")
     promoted = _events(f.h, f.target, "promoted_manual")
     assert len(promoted) == 1
     p = promoted[0]

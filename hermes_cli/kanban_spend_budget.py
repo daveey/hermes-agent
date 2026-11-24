@@ -119,6 +119,23 @@ def card_limits(conn: sqlite3.Connection, task_id: str, lim: Limits) -> Limits:
     return Limits(lim.runs if runs is None else runs, lim.cache_read_tokens if cache is None else cache)
 
 
+def cache_attribution(data: Optional[dict]) -> Optional[str]:
+    """Who set an override's cache-read limit: ``human``, ``agent``, ``unknown``, or None when the event records
+    nothing (written before attribution existed). A limit a later writer only carried over keeps its own
+    attribution (``cache_read_writer_kind``); otherwise it is the event's writer."""
+    data = data or {}
+    return data.get("cache_read_writer_kind") or data.get("writer_kind")
+
+
+def carried(prior: Optional[dict], writer_kind: str = "agent") -> dict:
+    """Attribution fields for an override that sets its own run limit and carries ``prior``'s cache-read limit
+    over unchanged (the spend reviewer, the operator-courier promote, an agent release that keeps a limit)."""
+    out = {"writer_kind": writer_kind}
+    if _limit_value((prior or {}).get("cache_read_tokens")) is not None:
+        out["cache_read_writer_kind"] = cache_attribution(prior) or "unknown"
+    return out
+
+
 def override_set(data: Optional[dict]) -> bool:
     """Whether an override payload sets any limit (a cleared or malformed one does not)."""
     return any(_limit_value((data or {}).get(key)) is not None for key in ("runs", "cache_read_tokens"))
@@ -143,7 +160,7 @@ def window_text(window: str) -> str:
 def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = None,
                  cache_read_tokens: Optional[int] = None, by: str, reason: str,
                  seen: Optional[int] = None, board: Optional[str] = None,
-                 writer_kind: Optional[str] = None) -> dict:
+                 writer_kind: Optional[str] = None, cache_read_writer_kind: Optional[str] = None) -> dict:
     """Give ``task_id`` its own limits (0 = no limit; None = the board's), recorded as a ``spend_budget_set``
     event and a comment naming ``by`` and ``reason``. Both None clears the override. Replacing a spend-stop
     decision requires ``seen`` to acknowledge its comment, checked atomically even after promotion.
@@ -161,6 +178,10 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
         # Who set it, as the comment classifier sees the caller: an agent authority does not raise a limit it
         # cannot attribute to an agent (kanban_release._budget_plan). Older events have no writer.
         payload["writer_kind"] = writer_kind
+    if cache_read_writer_kind in ("human", "agent", "unknown"):
+        # The cache-read limit was carried over from an earlier override, not chosen by this writer: it keeps
+        # the attribution it had (cache_attribution), so a kept limit never starts to look agent-set.
+        payload["cache_read_writer_kind"] = cache_read_writer_kind
     with kb.write_txn(conn):
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
             raise ValueError(f"unknown task {task_id}")

@@ -737,3 +737,89 @@ def test_an_offer_another_gateway_pushed_is_not_this_boards_offer(board):
     kb._append_event(board, tid, 'stranded_park_escalated', {'request': True})
     board.commit()
     assert release.offered(board, tid, ask) is None
+
+
+# ---- follow-up 2: a kept limit keeps its attribution; a card with no run limit over its cache-read limit ----
+
+def stop_again(board, tid):
+    """The released card ran its budget out and the dispatcher stopped it again."""
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+        kb._append_event(board, tid, decision.EVENT, {'reason': 'Spend budget: again'})
+
+
+def newest_budget(board, tid):
+    return json.loads(board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='spend_budget_set' "
+                                    "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0])
+
+
+def test_a_kept_limit_is_still_kept_by_a_second_agent_release(board):
+    tid = spend_stopped(board)
+    scope.link(board, tid)
+    budget.set_override(board, tid, runs=3, cache_read_tokens=5_000_000, by='david', reason='small and cheap',
+                        writer_kind='human')
+    shown = as_owner(board, tid)
+    assert as_owner(board, tid, seen=max(shown['unread']))['outcome'] == 'released'
+    first = newest_budget(board, tid)
+    assert first['writer_kind'] == 'agent' and first['cache_read_writer_kind'] == 'human'
+    assert first['cache_read_tokens'] == 5_000_000 and budget.cache_attribution(first) == 'human'
+    stop_again(board, tid)
+    assert as_owner(board, tid)['outcome'] == 'released'  # nothing new to read after the second stop
+    second = newest_budget(board, tid)
+    assert second is not first and second['cache_read_tokens'] == 5_000_000
+    assert second['cache_read_writer_kind'] == 'human'
+    assert budget.card_limits(board, tid, budget.limits()).cache_read_tokens == 5_000_000
+    # An override that records no writer at all is carried as unknown, and still kept the next time.
+    old = spend_stopped(board)
+    scope.link(board, old)
+    budget.set_override(board, old, runs=3, cache_read_tokens=7_000_000, by='someone', reason='before attribution')
+    shown = as_owner(board, old)
+    as_owner(board, old, seen=max(shown['unread']))
+    assert newest_budget(board, old)['cache_read_writer_kind'] == 'unknown'
+    stop_again(board, old)
+    as_owner(board, old)
+    assert budget.card_limits(board, old, budget.limits()).cache_read_tokens == 7_000_000
+
+
+def test_carried_attribution_for_the_reviewer_and_the_courier_promote():
+    assert budget.carried({}) == {'writer_kind': 'agent'}  # no cache-read limit of the card's own to attribute
+    assert budget.carried({'cache_read_tokens': 5, 'writer_kind': 'human'}) == {
+        'writer_kind': 'agent', 'cache_read_writer_kind': 'human'}
+    assert budget.carried({'cache_read_tokens': 5}) == {'writer_kind': 'agent', 'cache_read_writer_kind': 'unknown'}
+    assert budget.carried({'cache_read_tokens': 5, 'writer_kind': 'agent', 'cache_read_writer_kind': 'human'}) == {
+        'writer_kind': 'agent', 'cache_read_writer_kind': 'human'}
+
+
+def over_cache(monkeypatch, tokens):
+    real = budget.spend
+
+    def spend(conn, task, **kw):
+        spent = real(conn, task, **kw)
+        return spent._replace(tokens={**spent.tokens, 'cache_read_tokens': tokens})
+    monkeypatch.setattr(budget, 'spend', spend)
+
+
+def test_an_exempt_card_over_the_board_cache_limit_is_left_alone_and_not_stopped(board, monkeypatch):
+    """Exempt is 0/0: the spend budget never stops it, whatever it has read. Pinned."""
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    budget.set_override(board, tid, runs=0, cache_read_tokens=0, by='david', reason='standing card')
+    over_cache(monkeypatch, budget.limits().cache_read_tokens * 3)
+    out = run(board, tid)
+    assert out['outcome'] == 'released' and out['budget_runs'] == 0
+    assert newest_budget(board, tid)['by'] == 'david'  # untouched
+    assert budget.hold(board, tid) is None and status(board, tid) == 'ready'
+
+
+def test_a_card_with_no_run_limit_over_its_cache_limit_is_not_handed_back_to_be_stopped(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    budget.set_override(board, tid, runs=0, by='david', reason='no run cap; the board cache limit applies')
+    over_cache(monkeypatch, budget.limits().cache_read_tokens + 1)
+    shown = as_owner(board, tid)
+    before = written(board, tid)
+    out = as_owner(board, tid, seen=max(shown['unread']))
+    assert out['refusal'] == 'budget_limit_in_force' and written(board, tid) == before  # an agent does not lift it
+    out = run(board, tid)
+    assert out['outcome'] == 'released'
+    assert budget.card_limits(board, tid, budget.limits()) == budget.Limits(0, 0)  # still no run limit; lifted
+    assert budget.hold(board, tid) is None and status(board, tid) == 'ready'

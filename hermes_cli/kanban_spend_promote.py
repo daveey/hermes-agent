@@ -186,7 +186,7 @@ def apply(conn: sqlite3.Connection, payload: dict, extra: dict) -> tuple[str, Op
         if upd.rowcount != 1:
             raise RuntimeError(f"{target} left triage inside the promotion transaction")
         budget = {"runs": runs, "cache_read_tokens": ksb._limit_value(prior.get("cache_read_tokens")),
-                  "by": actor, "reason": reason, "episode": episode, **extra}
+                  "by": actor, "reason": reason, "episode": episode, **ksb.carried(prior), **extra}
         kb._append_event(conn, target, ksb.OVERRIDE_EVENT, budget)
         kb._append_event(conn, target, "promoted_manual", {
             "actor": actor, "reason": reason, "from_status": "triage", **extra,

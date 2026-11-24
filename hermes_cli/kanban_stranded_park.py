@@ -463,6 +463,43 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
     return True
 
 
+def _dead_offer(conn: sqlite3.Connection, row: dict) -> bool:
+    from hermes_cli import kanban_release
+    try:
+        ask = json.loads(row.get("human_request") or "null")
+    except (TypeError, ValueError):
+        return False
+    return kanban_release.dead_offer(conn, row["id"], ask)
+
+
+def _refile(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int) -> bool:
+    """Replace an ask whose release button is dead with this sweep's own brief and record the offer.
+
+    The click releases only an ask whose stamp this board recorded for the card's pending stop
+    (``kanban_release.offered``). An ask filed before that record existed, one whose card was rehomed or whose
+    event lost its origin, and the old ask of a card that has since stopped again all show a button that can
+    only be refused. The ask is rewritten from the brief, so a stamp that arrived on stored text this board
+    never wrote gains nothing. Once: after it the stamp is current and recorded."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_ask_resolved import store_request
+    from hermes_cli.kanban_human_request import NONHUMAN_KINDS
+    tid = row["id"]
+    with kb.write_txn(conn):
+        fresh = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        fresh = dict(fresh) if fresh is not None else None
+        if fresh is None or fresh["status"] not in PARKED or _leased(fresh, now) or not _dead_offer(conn, fresh):
+            return False
+        kind = fresh.get("block_kind")
+        filed = _request(conn, fresh, entry, age, "The earlier ask's release offer had no record on this board or "
+                         "named an earlier stop", "needs_input" if kind in NONHUMAN_KINDS else kind)
+        store_request(conn, tid, filed)
+        kb._append_event(conn, tid, EVENT, {
+            "episode_start": entry["created_at"] if entry else int(fresh.get("created_at") or 0),
+            "reason": _reason(entry), "desk_chat": None, "request": True, "refiled": True,
+            **({"release_target": filed["release_target"]} if filed.get("release_target") else {})})
+    return True
+
+
 def _escalated(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> bool:
     return conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND id > ? LIMIT 1",
                         (task_id, EVENT, entry["id"] if entry else 0)).fetchone() is not None
@@ -514,6 +551,13 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
             entry = park_entry(conn, tid)
             start = entry["created_at"] if entry else int(row.get("created_at") or 0)
             age = now - start
+            if _dead_offer(conn, row):  # an open ask whose release button cannot work: re-file it, once
+                try:
+                    if _refile(conn, row, entry, now=now, age=age):
+                        escalated.append(tid)
+                except Exception:  # health: allow BLE001 -- one card's failure must not stop the backstop for the rest
+                    logger.warning("kanban: stranded-park re-file failed for %s", tid, exc_info=True)
+                continue
             if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
                     or _excluded(conn, row, now, age=age, defer=defer_s)):
                 continue
