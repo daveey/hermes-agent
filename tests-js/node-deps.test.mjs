@@ -345,13 +345,16 @@ function background(source, env, ...args) {
   let output = ''
   child.stdout.on('data', data => { output += data })
   child.stderr.on('data', data => { output += data })
-  const exit = new Promise(done => child.on('exit', (code, signal) => done({ code, signal, output })))
+  // Exit can precede pipe drain; snapshot only once every stdio stream has closed.
+  const exit = new Promise(done => child.on('close', (code, signal) => done({ code, signal, output })))
   // The job's stdin may already be closed (the job is gone) when a line is written.
   child.stdin.on('error', () => {})
   return {
     exit,
     // A line on the job's stdin, which the run passes on to pnpm.
     input: text => child.stdin.write(text),
+    // Force output to drain only after exit, as can happen under CI scheduling.
+    pauseOutput: () => { child.stdout.pause(); child.stderr.pause() },
     kill: () => process.kill(-child.pid, 'SIGKILL'),
     // As Ctrl-Z and `fg` do: the whole job.
     stop: () => process.kill(-child.pid, 'SIGSTOP'),
@@ -633,6 +636,7 @@ test.skipIf(process.platform === 'win32').each([[false, false], [true, false], [
   }
   const built = readFileSync(join(webOnly(source), 'built'), 'utf8')
   expect(existsSync(passed)).toBe(false)
+  owner.pauseOutput()
   owner.input('\n')
   owner.resume()
   const { code, output } = await owner.exit
