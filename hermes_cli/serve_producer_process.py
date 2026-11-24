@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import array
+import errno
 import hashlib
 import hmac
 import importlib.util
@@ -109,6 +110,15 @@ def receive_control(channel):
     return Channel(socket.socket(fileno=fds[0]))
 
 
+def shutdown_channel(channel):
+    """Both broker threads may drain a channel already closed after child exit."""
+    try:
+        channel.sock.shutdown(socket.SHUT_RDWR)
+    except OSError as exc:
+        if exc.errno not in (errno.EBADF, errno.ENOTCONN):
+            raise
+
+
 def broker(channel, config):
     from hermes_cli._startup_fast import project_root_str
     from hermes_cli.serve_producer_enrollment import BrokerEnrollment
@@ -160,7 +170,7 @@ def broker(channel, config):
             data_error.append(type(exc).__name__)
             stop.set()
         finally:
-            data.sock.shutdown(socket.SHUT_RDWR)
+            shutdown_channel(data)
             data.close()
             child.wait()
 
@@ -190,7 +200,7 @@ def broker(channel, config):
         stop.set()
         # EOF requests child shutdown when it finishes its current call. An
         # unresponsive child keeps the inherited family fence, even if we exit.
-        data.sock.shutdown(socket.SHUT_RDWR)
+        shutdown_channel(data)
         channel.sock.shutdown(socket.SHUT_RDWR)
         channel.close()
         control.close()

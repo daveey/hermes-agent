@@ -109,7 +109,7 @@ def test_blocked_child_keeps_off_custody_but_does_not_block_http_or_control(tmp_
 
 
 @pytest.mark.platforms('posix')
-def test_actual_crash_restarts_child_before_acknowledging(tmp_path):
+def test_actual_crash_restarts_child_before_acknowledging(tmp_path, capfd):
     from hermes_cli.serve_producer_runtime import ProjectionRelay
 
     path = tmp_path / 'crash.py'
@@ -131,6 +131,7 @@ def test_actual_crash_restarts_child_before_acknowledging(tmp_path):
         assert relay.ping()['child_pid'] != old
     finally:
         assert relay.close()
+    assert 'Traceback' not in capfd.readouterr().err
 
 
 def test_mailbox_has_hard_count_bound_and_no_partial_overload(tmp_path):

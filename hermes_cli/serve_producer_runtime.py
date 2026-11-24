@@ -245,13 +245,17 @@ class ProjectionRelay:
         self._wake.set()
         with self._lock:
             self._outputs.clear()
-        if self._control is not None:
-            with self._control_lock:
-                self._control.send(self._envelope('STOP'), secrets.token_hex(8))
-                self._control.close()
-                self._control = None
-        elif self._channel is not None:
-            self._channel.close()
+        with self._control_lock:
+            if self._control is not None:
+                try:
+                    self._control.send(self._envelope('STOP'), secrets.token_hex(8))
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # peer already drained; waitpid below still proves exit
+                finally:
+                    self._control.close()
+                    self._control = None
+            elif self._channel is not None:
+                self._channel.close()
         if self._process is not None:
             try:
                 self._process.wait(timeout=timeout)
