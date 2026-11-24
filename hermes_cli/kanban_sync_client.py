@@ -1772,8 +1772,10 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
         last_error = r[0] if r else None
     mode = sync.board_mode(conn)
     from hermes_cli.kanban_replay_existence import fault
+    from hermes_cli.kanban_replay_recovery import fault as transport_fault
     out = {"mode": mode, "board_id": st.get("board_id"), "gateway": st.get("gateway_id"),
            "replay_fault": fault(conn),
+           "replay_transport_fault": transport_fault(conn),
            "cursor": st.get("cursor"), "pending": counts.get("pending", 0), "rejected": counts.get("rejected", 0),
            "oldest_pending_age_s": round(age) if st and (age := outbox_age.oldest_pending_age_s(conn)) is not None
            else None, "last_error": last_error}

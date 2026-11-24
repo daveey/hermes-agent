@@ -12,6 +12,7 @@ from hermes_cli import kanban_replay_episodes as episodes
 from hermes_cli import kanban_replay_diagnostics as diagnostics
 from hermes_cli import kanban_replay_journal as journal
 from hermes_cli import kanban_replay_existence as existence
+from hermes_cli import kanban_replay_recovery as transport
 from hermes_cli import kanban_actionability_transport as actionability
 from hermes_cli import kanban_failure_release as failure
 from hermes_cli import kanban_sync_reserved_key as reserved
@@ -37,7 +38,7 @@ CASES = [
 def install(conn):
     conn.executescript(sync.SYNC_SCHEMA_SQL)
     for sql in (journal._SCHEMA, observation._SCHEMA, observation._CURSOR, observation._READS,
-                episodes._SCHEMA, episodes._CLOCK, existence._SCHEMA, diagnostics._SCHEMA):
+                episodes._SCHEMA, episodes._CLOCK, existence._SCHEMA, diagnostics._SCHEMA, transport._SCHEMA):
         conn.execute(sql)
     deferred.install(conn)
     failure._ensure_commands(conn)
@@ -78,6 +79,7 @@ def test_damaged_protocol_rows_are_not_refilled_from_stale_index_matching_backup
 @pytest.mark.parametrize('table', [
     'kanban_replay_sender1', 'kanban_replay_observation_cursor1',
     'kanban_replay_episode_clock1', 'kanban_replay_existence_fault1',
+    'kanban_replay_transport_fault1',
 ])
 def test_current_singleton_schemas_have_no_backup_listing_path(tmp_path, table):
     path, rebuilt = tmp_path / 'singleton.db', tmp_path / 'rebuilt.db'

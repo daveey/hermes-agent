@@ -68,7 +68,7 @@ _NO_FILL_TABLES = frozenset({"kanban_sync_outbox", "kanban_sync_state", "sqlite_
                              # than resurrect mutable protocol history from a backup.
                              "kanban_replay_deferred1", "kanban_replay_observation1",
                              "kanban_replay_observation_reads1", "kanban_replay_episode1",
-                             "kanban_replay_diagnostic1",
+                             "kanban_replay_diagnostic1", "kanban_replay_transport_fault1",
                              "kanban_failure_commands", "kanban_actionability_commands",
                              "kanban_sync_omissions", "kanban_sync_status_origins",
                              "kanban_sync_key_supersessions", "kanban_sync_key_supersession_ops",

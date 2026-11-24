@@ -95,7 +95,7 @@ def test_unbound_or_nonconsuming_reply_requires_inspect_before_prune(live, field
     assert receiver.slot['a'] == '0' and 'ack' not in receiver.calls
 
 
-def test_successor_disconnect_restart_keeps_frozen_predecessor_and_exact_intent(live):
+def test_successor_disconnect_restart_keeps_frozen_predecessor_and_exact_intent(live, monkeypatch):
     from hermes_cli import kanban_db_connect as kbc
     kb.create_task(live, title='settled predecessor', assignee='worker')
     kb.create_task(live, title='uncertain successor', assignee='worker')
@@ -123,6 +123,7 @@ def test_successor_disconnect_restart_keeps_frozen_predecessor_and_exact_intent(
     conn = kbc.connect(Path(path))
     try:
         assert journal.pending_wire(conn) == saved
+        sender.retry_due(conn, monkeypatch)
         result = client.push(conn, receiver, 'default', 'macbook', primary=False, max_batches=1)
         assert result.applied == 1
         actual = dict(receiver.sent[-1])

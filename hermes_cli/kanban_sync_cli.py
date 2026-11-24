@@ -352,10 +352,12 @@ def _history_residue(args: argparse.Namespace) -> int:
 
 
 def _replay_resume(args: argparse.Namespace) -> int:
-    from hermes_cli.kanban_replay_existence import resume
+    from hermes_cli.kanban_replay_existence import resume, fault
+    from hermes_cli import kanban_replay_recovery as recovery
     conn = kbc.connect(_path(_board(args)))
     try:
-        report = resume(conn, args.expect, args.reason)
+        report = (resume(conn, args.expect, args.reason) if fault(conn)
+                  else recovery.resume(conn, args.expect, args.reason))
     except ValueError as exc:
         print(str(exc))
         return 2

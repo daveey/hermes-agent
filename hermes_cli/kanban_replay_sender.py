@@ -12,6 +12,7 @@ from urllib.parse import quote
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_replay_journal as journal
 from hermes_cli import kanban_replay_controls as controls
+from hermes_cli import kanban_replay_recovery as recovery
 from hermes_cli.kanban_db_connect import write_txn
 from hermes_cli.kanban_replay_reconcile import reconcile
 
@@ -67,8 +68,9 @@ def _push(conn, hub, board, gateway, *, primary, max_batches, before_head, seen)
         from hermes_cli import kanban_replay_existence as existence
         existence.guard(conn)
         try:
-            return _push_authenticated(conn, hub, board, gateway, max_batches=max_batches,
-                                primary=primary, before_head=before_head, seen={} if seen is None else seen)
+            with recovery.turn(conn, board):
+                return _push_authenticated(conn, hub, board, gateway, max_batches=max_batches,
+                                    primary=primary, before_head=before_head, seen={} if seen is None else seen)
         except existence.CurrentRowHold as exc:
             from hermes_cli.kanban_replay_episodes import interrupt
             interrupt(conn)
@@ -92,6 +94,7 @@ def _push_authenticated(conn, hub, board, gateway, *, max_batches, primary, befo
         journal.snapshot(conn)  # Corrupt local custody refuses before even a read-only probe.
         from hermes_cli.kanban_sync_exposure import replay_session
         with replay_session(hub, board) as (transport, capability, send_ops):
+            recovery.reachable()
             return _push_strict(conn, transport, board, gateway, max_batches=max_batches,
                                 primary=primary, before_head=before_head, seen=seen,
                                 capability=capability, send_ops=send_ops)
@@ -107,20 +110,21 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
     local = journal.snapshot(conn)
     if isinstance(hub, client._HTTP_HUB) and send_ops is None:
         raise ValueError('strict HTTP transport requires pinned session')
-    cap = hub._call('GET', root + 'capability') if capability is None else capability
+    cap = recovery.call(hub, 'GET', root + 'capability') if capability is None else capability
     if (cap.get('processed_prefix') is not True or
             cap.get('board_incarnation') != local['board_incarnation'] or
             cap.get('gateway_principal') != local['gateway_principal']):
         raise ValueError('replay capability unavailable')
-    remote = hub._call('GET', root + 'inspect')['slot']
+    remote = recovery.call(hub, 'GET', root + 'inspect')['slot']
     reconcile(local, remote)  # inspect before authenticated full-state session CAS
     identity = dict(board_incarnation=local['board_incarnation'], journal_id=local['journal_id'])
     expected = dict(remote, session=str(int(remote['session']) + 1))
-    remote = hub._call('POST', root + 'session', dict(identity, expected=remote))['slot']
+    remote = recovery.call(hub, 'POST', root + 'session', dict(identity, expected=remote))['slot']
     if remote != expected:
         raise ValueError('session readback mismatch')
     reconcile(local, remote)
     remote = _ack_settled(conn, hub, root, identity, remote)
+    recovery.completed(conn)
 
     def source():
         pending = journal.snapshot(conn)['pending']
@@ -398,20 +402,31 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             if not allowed:
                 break
         wire['replay']['session'] = remote['session']
-        if send_ops is not None:
-            reply = send_ops(conn, [wire], identity)
-        else:
-            reply = hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
+        recovery.guard(conn, mutation=True)
+        try:
+            if send_ops is not None:
+                reply = send_ops(conn, [wire], identity)
+            else:
+                reply = recovery.call(hub, 'POST', root + 'ops', dict(identity, ops=[wire]))
+        except (OSError, client.HubError):
+            # Inspect immediately, but leave recording/ACK to the next serialized
+            # turn. A lost mutation reply never authorizes a blind resend.
+            try:
+                reconcile(journal.snapshot(conn), recovery.call(hub, 'GET', root + 'inspect')['slot'])
+            except (OSError, client.HubError):
+                pass  # Offline inspection preserves the original transport error/custody.
+            raise
         out.sent += 1
         from hermes_cli.kanban_replay_reply import consumed_slot
         remote = (consumed_slot(reply, wire, remote, journal.snapshot(conn)) or
-                  hub._call('GET', root + 'inspect')['slot'])
+                  recovery.call(hub, 'GET', root + 'inspect')['slot'])
         membership = refresh_capacity()
         current_row = refresh_current_row()
         with settlement():
             decision = journal.recover(conn, remote, record)
         if decision['action'] != 'record':
             break
+        recovery.completed(conn)
         # The next issued envelope freezes the durable predecessor ACK. Keep
         # standalone ACK for idle/end-of-turn and recovery, not between sends.
     settled = journal.snapshot(conn)
@@ -425,7 +440,7 @@ def _ack_settled(conn, hub, root, identity, remote):
     settled = journal.snapshot(conn)
     if settled['settled'] != '0' and remote['a'] != settled['settled']:
         expected = dict(remote, a=settled['settled'])
-        remote = hub._call('POST', root + 'ack', dict(identity, session=remote['session'],
+        remote = recovery.call(hub, 'POST', root + 'ack', dict(identity, session=remote['session'],
             generation=settled['generation'], ack=dict(sequence=settled['settled'],
                 op_id=settled['last_op_id'], payload_sha256=settled['last_payload_sha256'])))['slot']
         from hermes_cli.kanban_replay_reply import same_slot

@@ -38,3 +38,26 @@ a new operation, delete custody, cancel work or acknowledge the Board. The next
 normal push inspects and recovers the exact verdict without resending known work.
 A mismatching journal/operation requires recovery of the saved journal, not manual
 fault-table deletion or a guessed `--expect` value.
+
+## General transport recovery
+
+`replay_transport_fault` is a separate status field for ordinary strict transport
+failures. It retains the journal, generation, sequence and exact operation identity,
+reason, attempt count, observed reachable seconds, mutation retry deadline and repair
+command. Eight failed reachable attempts or five observed reachable minutes pause
+all automatic sender I/O. The pause survives restart and logs once. Explicit
+`replay-resume` checks that identity under the writer reservation; it never sends,
+allocates, discards a pending operation or acknowledges a verdict.
+
+Mutation retry deadlines grow exponentially, capped at60seconds. During backoff,
+inspection and exact-verdict recovery remain allowed; an uncertain mutation cannot
+be resent before its deadline. A mutation timeout, gap or ACK-required refusal
+causes an immediate inspection. Its result is not a fabricated success: the next
+serialized turn still records the exact retained verdict before acknowledging it.
+
+Observed reachable time is counted only within a sender turn after a successful
+authenticated exchange. Failed initial probes, wholly offline attempts, scheduler
+gaps and process downtime do not age custody or consume the reachable-attempt
+budget. Repair the actual transport prerequisite before explicit resume. When a
+current-row hold also exists, the command clears that read hold first, leaving
+independent transport custody intact until recovered or separately resumed.

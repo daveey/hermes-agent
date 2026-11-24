@@ -309,7 +309,17 @@ def reopen(conn):
     return kbc.connect(Path(path))
 
 
-def test_precommit_disconnect_reopens_and_retries_same_bytes_with_new_session(live):
+def retry_due(conn, monkeypatch):
+    """Advance only the recovery clock, retaining all real admission/custody gates."""
+    from hermes_cli import kanban_replay_recovery as recovery
+    held = recovery.fault(conn)
+    assert held is not None and not held['paused']
+    monkeypatch.setattr(recovery, 'time', lambda: held['retry_after'])
+
+
+def test_precommit_disconnect_reopens_and_retries_same_bytes_with_new_session(live, monkeypatch):
+    from hermes_cli import kanban_replay_recovery as recovery
+    monkeypatch.setattr(recovery, 'time', lambda: 1000.0)
     kb.create_task(live, title='restart retry', assignee='worker')
     receiver = PrecommitFailure()
     with pytest.raises(OSError, match='before commit'):
@@ -319,6 +329,7 @@ def test_precommit_disconnect_reopens_and_retries_same_bytes_with_new_session(li
     restarted = reopen(live)
     recovered = Receiver()
     recovered.slot = dict(receiver.slot)
+    monkeypatch.setattr(recovery, 'time', lambda: 1061.0)  # Automatic retry is now due.
     try:
         result = client.push(restarted, recovered, 'default', 'macbook', primary=False, max_batches=1)
         assert result.applied == 1 and result.sent == 1
@@ -527,7 +538,9 @@ def test_selection_never_holds_a_writer_transaction(live, monkeypatch):
 
 
 @pytest.mark.parametrize('loss', ['before', 'after'])
-def test_synthetic_parent_restart_keeps_wire_and_never_issues_child_early(live, loss):
+def test_synthetic_parent_restart_keeps_wire_and_never_issues_child_early(live, loss, monkeypatch):
+    from hermes_cli import kanban_replay_recovery as recovery
+    monkeypatch.setattr(recovery, 'time', lambda: 1000.0)
     tid = kb.create_task(live, title='synthetic restart', assignee='worker')
     with kbc.write_txn(live):
         live.execute('DELETE FROM kanban_sync_outbox')
@@ -547,6 +560,7 @@ def test_synthetic_parent_restart_keeps_wire_and_never_issues_child_early(live, 
             resumed.slot = receiver.slot
             receiver = resumed
         receiver.lose_reply = False
+        monkeypatch.setattr(recovery, 'time', lambda: 1061.0)
         result = client.push(restarted, receiver, 'default', 'macbook', primary=False, max_batches=1)
         assert result.applied == 1 and len(receiver.sent) == 1
         actual = json.loads(json.dumps(receiver.sent[0]))

@@ -44,7 +44,7 @@ def test_pre_head_holds_unissued_run_without_allocating(live):
 
 
 @pytest.mark.parametrize('committed', [False, True])
-def test_pre_head_reopen_records_known_run_but_holds_uncertain_retry(live, committed):
+def test_pre_head_reopen_records_known_run_but_holds_uncertain_retry(live, committed, monkeypatch):
     run_intent(live)
     receiver = helpers.Receiver() if committed else helpers.PrecommitFailure()
     receiver.lose_reply = True
@@ -64,6 +64,7 @@ def test_pre_head_reopen_records_known_run_but_holds_uncertain_retry(live, commi
         else:
             assert result.applied == 0 and resumed.slot['a'] == '0'
             assert journal.pending_wire(restarted) == frozen
+            helpers.retry_due(restarted, monkeypatch)
             assert push(restarted, resumed, before_head=False).applied == 1
             assert len(resumed.sent) == 1
     finally:
@@ -89,7 +90,7 @@ def test_pre_head_reuses_round_terminal_read_cache(live):
     assert journal.pending_wire(live) is None and not receiver.sent
 
 
-def test_pre_head_retry_checks_frozen_status_not_rewritten_source_fields(live):
+def test_pre_head_retry_checks_frozen_status_not_rewritten_source_fields(live, monkeypatch):
     tid = kb.create_task(live, title='frozen stale wake', assignee='worker')
     with kbc.write_txn(live):
         live.execute('UPDATE tasks SET sync_version=2 WHERE id=?', (tid,))
@@ -111,6 +112,7 @@ def test_pre_head_retry_checks_frozen_status_not_rewritten_source_fields(live):
     resumed.slot = dict(receiver.slot)
     assert push(live, resumed).sent == 0
     assert not resumed.sent and journal.pending_wire(live) == frozen
+    helpers.retry_due(live, monkeypatch)
     assert push(live, resumed, before_head=False).applied == 1
 
 

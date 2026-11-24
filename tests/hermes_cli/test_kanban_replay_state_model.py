@@ -145,7 +145,10 @@ def compare_prefix(conn, peer):
 
 
 @pytest.mark.parametrize('seed', [17, 101, 733, 2048])
-def test_seeded_many_settlements_reopen_and_disconnects(live, seed, record_property):
+def test_seeded_many_settlements_reopen_and_disconnects(live, seed, record_property, monkeypatch):
+    from hermes_cli import kanban_replay_recovery as recovery
+    clock = [1000.0]
+    monkeypatch.setattr(recovery, 'time', lambda: clock[0])
     rng = random.Random(seed)
     path = Path(live.execute('PRAGMA database_list').fetchone()[2])
     peer = PrefixOracle()
@@ -164,6 +167,10 @@ def test_seeded_many_settlements_reopen_and_disconnects(live, seed, record_prope
             # An ACK cut needs a successful turn first when the initial send was
             # only an uncertain operation. Keep trying until this one-shot fires.
             for _ in range(4):
+                clock[0] += 61  # Each simulated scheduler turn is beyond retry backoff.
+                held = recovery.fault(conn)
+                if held and held['paused']:
+                    recovery.resume(conn, held['op_id'], 'oracle operator repaired one-shot transport')
                 try:
                     client.push(conn, peer, 'default', 'macbook', primary=False, max_batches=rng.randint(1, 5))
                 except OSError as exc:
@@ -182,6 +189,7 @@ def test_seeded_many_settlements_reopen_and_disconnects(live, seed, record_prope
         # source rewriting is used to make the journal look empty.
         expected_ops = len(peer.accepted) + conn.execute('SELECT COUNT(*) FROM kanban_sync_outbox').fetchone()[0]
         for _ in range(expected_ops + 2):
+            clock[0] += 61
             client.push(conn, peer, 'default', 'macbook', primary=False, max_batches=25)
             turns += 1
             compare_prefix(conn, peer)

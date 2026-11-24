@@ -72,13 +72,37 @@ in the diagnostic producer test file.
    mismatch remains explicitly receiver/integration-owned and unproven. Do not
    unilaterally change frozen wire identity. Fixture request counts are not real
    Board/latency/backlog/lease throughput evidence.
-2. **General bounded transport recovery.** Spec lines 384–393 bound automatic
-   timeout/gap/ACK-required recovery to eight attempts or five reachable minutes,
-   preserve custody offline, stop with one actionable recovery fault and require
-   explicit resume. `kanban_replay_existence` currently bounds current-row faults
-   only. Ordinary strict OSError/HubError paths interrupt observation and rethrow;
-   `SyncWork.finished` caps delay at 60s but does not stop attempts. Prove the
-   general public path, restart persistence, offline exclusion and exact custody.
+2. **General bounded transport recovery (local slice implemented; D not closed).**
+   The public strict sender now retains one durable journal/generation/sequence/
+   operation-bound transport fault after reachable OSError/HubError failures. Eight
+   failed reachable attempts or300 observed reachable seconds pause automatic I/O;
+   the status fault includes the exact identity, reason and explicit `replay-resume`
+   repair command. Retry mutation deadlines grow exponentially to60s. An unpaused
+   stream may inspect/recover a known verdict during backoff, but may not resend
+   an uncertain mutation before its deadline. Mutation timeout/gap/ACK-required
+   errors trigger immediate authenticated inspect without changing custody; the
+   following serialized turn performs normal exact-verdict recording and ACK.
+
+   Only intervals inside a turn after a successful authenticated exchange are
+   charged. No baseline crosses turns/restarts; wholly offline attempts preserve
+   the fault, attempt count, age and issued bytes unchanged. This intentionally
+   does not infer continuous reachability during scheduler gaps. The fault survives
+   reopen, logs once on pause and requires identity-checked explicit resume; the
+   existing current-row hold takes precedence when both holds are present. Clearing
+   a read hold never silently clears a separate transport hold. A successful exact
+   settlement/ACK boundary retires a superseded recovery episode before new work.
+   Rebuild never fills this mutable fault state from backup.
+
+   New public-path controls cover8-attempt stop/reopen/resume,300-second stop,
+   deduplicated logging, offline custody, inspection-only backoff,409 gap/ACK-required,
+   wrong identities/reasons, caller-transaction refusal and actual CLI dispatch.
+   Existing precommit-retry fixtures advance a controlled clock beyond the new
+   deadline rather than disabling admission or sleeping. The seeded model now
+   explicitly resumes a paused one-shot fault to continue exploring later history;
+   it no longer assumes infinite automatic retries. Remaining proof reconciliation
+   includes paused multi-board and production-HTTP budget campaigns, monotonic-clock
+   and exact fault-write failure boundaries plus the new meaningful conditions.
+   This local slice is not real Board interoperability or final D acceptance.
 3. **Aggregate fault/storage proof (local boundaries now exercised).** Three new
    test scenarios run in both DELETE and WAL journal modes with real SQLite
    `max_page_count` exhaustion and assert `SQLITE_FULL`, not

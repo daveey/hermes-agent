@@ -93,7 +93,7 @@ def test_multibatch_unrelated_intents_ack_each_slot_before_next_send(live):
     assert receiver.slot['a'] == receiver.slot['h'] and journal.pending_wire(live) is None
 
 
-def test_ack_failure_holds_issued_successor_and_preserves_other_intents(live):
+def test_ack_failure_holds_issued_successor_and_preserves_other_intents(live, monkeypatch):
     for i in range(2):
         kb.create_task(live, title=f'ACK gated {i}', assignee='worker')
     receiver = Window(live)
@@ -107,6 +107,7 @@ def test_ack_failure_holds_issued_successor_and_preserves_other_intents(live):
     assert json.loads(frozen)['replay']['ack']['op_id'] == receiver.sent[0]['client_op_id']
     assert live.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE state='pending'").fetchone()[0] > 0
     receiver.ack_failure = False
+    helpers.retry_due(live, monkeypatch)
     # Recovery acknowledges the durable predecessor, then retries the SAME
     # issued successor before selecting any additional identity.
     client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=25)
