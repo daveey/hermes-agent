@@ -177,6 +177,8 @@ def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict
         snapshot.execute('SAVEPOINT renewal_home_capture')
         try:
             epoch = home.capture(snapshot, wire)
+        except ValueError as exc:
+            raise RenewalRefused("home_capture_refused", str(exc)) from exc
         finally:
             snapshot.execute('RELEASE renewal_home_capture')
         results = hub.ops(board, [home.outbound({'home_generations': epoch}, wire)]).get("results", [])

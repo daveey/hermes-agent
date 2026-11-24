@@ -48,6 +48,61 @@ def host(conn: sqlite3.Connection, task_id: str, event_id: int, explicit: str | 
     return UNKNOWN
 
 
+def remote_baseline(conn, task_id, event_id, source, explicit, now):
+    """Start a bounded, durable liveness window for a formerly local probe.
+
+    The old local probe had no obligation to publish remote ALIVE events. Only
+    the exact hostless park in this epoch's authenticated destination manifest
+    gets a new observation baseline. Repeated sweeps/restarts never renew it;
+    ordinary explicit remote probes retain their existing silence accounting.
+    This is not an ALIVE attestation and never grants readiness or execution.
+    """
+    from hermes_cli import kanban_db_connect as dbc
+    from hermes_cli.kanban_home_transfer import frozen
+
+    if explicit:
+        return 0
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {'kanban_home_materialized1', 'kanban_home_generations1'} <= tables:
+        return 0
+    row = conn.execute('SELECT m.manifest,g.nonce FROM kanban_home_materialized1 m '
+                       'JOIN kanban_home_generations1 g ON g.task_id=m.task_id WHERE m.task_id=?',
+                       (task_id,)).fetchone()
+    event = conn.execute('SELECT uid FROM task_events WHERE task_id=? AND id=?', (task_id, event_id)).fetchone()
+    if row is None or event is None:
+        return 0
+    try:
+        record = json.loads(row[0])
+        matches = (record['task'] == task_id and record['source'] == source and record['nonce'] == row[1]
+                   and any(r['table'] == 'task_events' and r['uid'] == event[0] for r in record['rows']))
+    except (ValueError, TypeError, KeyError):
+        return 0
+    if not matches:
+        return 0
+    key = (task_id, event[0], row[1])
+    read = 'SELECT first_at FROM kanban_home_probe_watch1 WHERE task_id=? AND event_uid=? AND nonce=?'
+    if 'kanban_home_probe_watch1' in tables:
+        saved = conn.execute(read, key).fetchone()
+        if saved is not None:
+            return saved[0]
+    with dbc.write_txn(conn):
+        if frozen(conn, task_id):
+            return now  # concurrent preparation still owns custody; no probe writes
+        conn.execute('CREATE TABLE IF NOT EXISTS kanban_home_probe_watch1 '
+                     '(task_id TEXT NOT NULL,event_uid TEXT NOT NULL,nonce TEXT NOT NULL,first_at INTEGER NOT NULL,'
+                     'PRIMARY KEY(task_id,event_uid,nonce))')
+        conn.execute('INSERT OR IGNORE INTO kanban_home_probe_watch1 VALUES (?,?,?,?)', (*key, now))
+        return conn.execute(read, key).fetchone()[0]
+
+
+def remote_last(conn, task_id, event_id, source, explicit, now):
+    from hermes_cli.kanban_wake_check import ALIVE_EVENT
+
+    last = conn.execute('SELECT MAX(created_at) FROM task_events WHERE task_id=? AND id>? AND kind=?',
+                        (task_id, event_id, ALIVE_EVENT)).fetchone()[0]
+    return max(int(last or 0), remote_baseline(conn, task_id, event_id, source, explicit, now))
+
+
 def claim_wake(conn, task_id, cmd, every, generation, purpose, status, ts, claim):
     """Check handoff custody under the same writer lock as the probe claim."""
     from hermes_cli import kanban_db_connect as dbc

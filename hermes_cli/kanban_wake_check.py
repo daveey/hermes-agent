@@ -453,9 +453,8 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
         if host and own and host != own:
             if copy:
                 continue  # another gateway's probe on a card another gateway owns
-            last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",
-                                (tid, park_id, ALIVE_EVENT)).fetchone()[0]
-            silent = now - max(parked_at, int(last or 0))
+            last = kanban_home_probe.remote_last(conn, tid, park_id, host, payload.get("probe_host"), now)
+            silent = now - max(parked_at, last)
             if silent <= ALIVE_EVERY + 2 * every + SILENT_GRACE:
                 continue
             with kb.write_txn(conn):

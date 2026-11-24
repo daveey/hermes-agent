@@ -92,7 +92,10 @@ def finalize_source(conn: sqlite3.Connection, record: dict) -> dict:
                 if ("tasks", column) in sync.REF_COLUMNS:
                     run = conn.execute("SELECT uid FROM task_runs WHERE id=?", (value,)).fetchone()
                     value = run[0] if run else None
-                if wire not in fields or sync._from_wire(fields[wire]) != value:
+                received = sync._from_wire(fields.get(wire))
+                if column in sync.SECONDS_COLUMNS.get("tasks", ()):
+                    received = sync.to_seconds(received)
+                if wire not in fields or received != value:
                     raise ValueError(f"source stop changed task field: {column}")
             for table in ("kanban_sync_outbox", "kanban_sync_parent_envelopes", "kanban_sync_omissions"):
                 if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():

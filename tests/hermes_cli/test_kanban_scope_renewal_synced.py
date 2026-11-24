@@ -81,7 +81,7 @@ def test_new_renewal_captures_home_at_identity_creation(live, monkeypatch, pendi
     tid, episode, comment = stopped(live, monkeypatch, hub)
     mirror(live, tid, 'renewal-capture-epoch', pending=int(pending))
     if pending:
-        with pytest.raises(ValueError, match='home transfer pending'):
+        with pytest.raises(RenewalRefused, match='home transfer pending'):
             renew(live, tid, episode, comment)
         assert not hub.sent
     else:

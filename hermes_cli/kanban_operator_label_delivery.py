@@ -43,6 +43,8 @@ def push_event(conn, board, own, task, event_uid, payload):
             # Existing attempted jobs have UNKNOWN capture custody. Never enrich
             # them from today's epoch. They remain fail-closed on a moved task.
             evidence = hub.row_evidence(board, 'tasks', task)
+            if evidence.get('state') == 'deleted':
+                return 'rejected', 'not_found: canonical label result target deleted'
             target = evidence.get('row') if evidence.get('state') == 'live' else None
             captured = home.from_evidence(task, target)
             epoch = None if legacy else captured
