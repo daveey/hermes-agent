@@ -136,8 +136,12 @@ class _InputMixin:
         # to the coordinate form or the bare window. Some driver schemas reject x/y on scroll: only send
         # coordinates when the driver advertises support; otherwise it scrolls the targeted window
         # (window_id is still sent for routing).
+        # Coordinates are safe when either the token or BOTH live schema properties advertise them.
+        # Schema-only drivers otherwise silently take the untargeted keystroke path.
         xy = lambda: ({"x": x, "y": y}
-                      if self._session.supports_capability("input.scroll.coordinates", tool="scroll") else {})
+                      if (self._session.supports_capability("input.scroll.coordinates", tool="scroll")
+                          or (self._session.supports_input_property("scroll", "x")
+                              and self._session.supports_input_property("scroll", "y"))) else {})
         refusal = self._pointer_args("scroll", args, (
             ("element scroll", {"element_index": element}
              if element is not None and self._active_window_id is not None else None),
