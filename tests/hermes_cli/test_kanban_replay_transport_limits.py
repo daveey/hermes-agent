@@ -77,10 +77,20 @@ def test_resume_rollback_and_changed_identity_preserve_fault(live):
     assert recovery.fault(live)['journal_id'] == 'foreign-journal'
     with kbc.write_txn(live):
         live.execute('UPDATE kanban_replay_transport_fault1 SET journal_id=?', (held['journal_id'],))
-    with pytest.raises(RuntimeError, match='transaction'):
+    frozen = journal.pending_wire(live)
+    # resume_all composes local-only releases with savepoints. A caller abort
+    # must still restore the exact fault, not commit a partially released hold.
+    with pytest.raises(RuntimeError, match='abort outer transaction'):
         with kbc.write_txn(live):
-            recovery.resume(live, held['op_id'], 'caller transaction cannot own recovery')
+            result = recovery.resume(live, held['op_id'], 'verified transport repair')
+            assert result['action'] == 'retry_exact'
+            assert recovery.fault(live) is None
+            raise RuntimeError('abort outer transaction')
     assert recovery.fault(live) == held
+    assert journal.pending_wire(live) == frozen
+    recovery.resume(live, held['op_id'], 'verified transport repair')
+    assert recovery.fault(live) is None
+    assert journal.pending_wire(live) == frozen
 
 
 def test_cli_transport_resume_is_identity_checked_and_has_no_io(live, monkeypatch, capsys):
