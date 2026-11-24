@@ -241,6 +241,15 @@ def scenario(tmp_path_factory: pytest.TempPathFactory):
         port = int(_poll(lambda: (m := re.search(rb"backend listening on [\d.]+:(\d+)", log.read_bytes()))
                          and m.group(1) or (serve.poll() is not None and b"-1"), BOOT_S, "serve port", log))
         assert port > 0, f"serve exited rc={serve.returncode}\n{log.read_text(errors='replace')}"
+        import httpx
+
+        from tests.e2e.core._service_readiness import service_response
+
+        # The listener line precedes service readiness; /api/status crosses the warmup fence.
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60, trust_env=False,
+                          headers={"X-Hermes-Session-Token": token}) as http:
+            ready = service_response(http, "/api/status")
+            assert ready.status_code == 200, f"serve service readiness: {ready.status_code} {ready.text}"
         sws = connect(f"ws://127.0.0.1:{port}/api/ws?token={token}", open_timeout=90, max_size=None)
         sinks.append(sws)
         created = _rpc(sws, 1, "session.create", {})

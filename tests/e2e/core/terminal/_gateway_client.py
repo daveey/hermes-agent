@@ -130,7 +130,23 @@ class Backend:
         except BaseException:
             self.stop()
             raise
+        self._await_services()
         return self
+
+    def _await_services(self) -> None:
+        """The listener line precedes service readiness; /api/status crosses the warmup fence."""
+        import httpx
+
+        from tests.e2e.core._service_readiness import service_response
+
+        try:
+            with httpx.Client(base_url=f"http://127.0.0.1:{self.port}", timeout=60, trust_env=False,
+                              headers={"X-Hermes-Session-Token": self.token}) as client:
+                response = service_response(client, "/api/status")
+            assert response.status_code == 200, f"serve service readiness: {response.status_code} {response.text}"
+        except BaseException:
+            self.stop()
+            raise
 
     @property
     def ws_url(self) -> str:
