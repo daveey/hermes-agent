@@ -13,6 +13,7 @@ from tests.hermes_cli import test_kanban_selfwork_nochat as support
 
 world = support.world
 request_envelope = support.request_envelope
+unsynced_envelope = support.unsynced_envelope
 
 
 def invoke(operation, value, monkeypatch, capsys):
@@ -30,7 +31,7 @@ def create_args(key='page1'):
 
 
 @pytest.mark.parametrize('placement', [{}, {'runs_on': ['pool:worker'], 'requires': ['terminal', 'file']}])
-def test_composed_cli_owner_refuses_authorityless_create_and_replay(request_envelope, tmp_path, monkeypatch, capsys, placement):
+def test_composed_cli_owner_create_append_and_replay(request_envelope, tmp_path, monkeypatch, capsys, placement):
     from hermes_cli import kanban_selfwork_outbound as outbound
 
     from hermes_cli import kanban_db_sync as sync, kanban_worker_node as wn
@@ -58,8 +59,7 @@ def test_composed_cli_owner_refuses_authorityless_create_and_replay(request_enve
         request = {'id': rid, 'from': 'gw:owner', 'to_gw': home['gateway'], 'coll': 'tasks',
                    'action': 'selfwork-create', 'key': home['profile'] + '/' + home['board'], 'args': body}
         result = support.invoke(request, monkeypatch, capsys)
-        assert result == {'status': 'pending', 'code': 'self_work_dispatch_pending', 'handoff_complete': False}, (
-            result, raw_results)
+        assert result.get('handoff_complete') is True, (result, raw_results)
         requests.append(result)
         with db:
             db.execute('INSERT OR REPLACE INTO sent VALUES(?,?,?,?)',
@@ -83,8 +83,8 @@ def test_composed_cli_owner_refuses_authorityless_create_and_replay(request_enve
         first = invoke('prepare', {**create_args(), **placement}, monkeypatch, capsys)
         assert not requests
         result = invoke('advance', first, monkeypatch, capsys)
-        pending = {'version': 1, 'status': 'pending', 'request_id': first['request_id'], 'owner': None}
-        assert result == pending, (result, requests)
+        assert result['status'] == 'completed', (result, requests)
+        assert result['disposition'] == 'create'
         if placement:
             for field in ('runs_on', 'requires'):
                 changed = json.loads(json.dumps(first))
@@ -93,30 +93,36 @@ def test_composed_cli_owner_refuses_authorityless_create_and_replay(request_enve
                 assert refused['status'] == 'pending'
                 assert 'envelope mismatch' in refused['error']
             assert len(requests) == 1
-        # A headless producer carries no registered chat or native grant. Neither
-        # courier authentication, execution placement nor repeated delivery grants
-        # permission to create, and a pending receipt must never become success.
-        assert invoke('advance', first, monkeypatch, capsys) == pending
+        second = invoke('prepare', {**create_args('page2'), **(
+            {'runs_on': ['linux'], 'requires': []} if placement else {})}, monkeypatch, capsys)
+        appended = invoke('advance', second, monkeypatch, capsys)
+        assert appended['disposition'] == 'append', appended
+        assert appended['owner'] == result['owner']
+        assert invoke('advance', second, monkeypatch, capsys) == appended
+        # Lost courier cache after commit replays the same intake journal receipt.
         with db:
             db.execute('DELETE FROM sent')
-        assert invoke('advance', first, monkeypatch, capsys) == pending
-        assert len(requests) == 3
-        assert len(raw_results) == 3
-        for raw in raw_results:
-            error = json.loads(raw)
-            assert not error.get('created'), error
-            assert 'authority' in error['error'], error
+        assert invoke('advance', second, monkeypatch, capsys) == appended
+        assert requests[-1]['replayed'] is True
         with kbc.connect_closing() as conn:
-            assert not kb.list_tasks(conn)
-            for table in ('comments', 'task_events', 'kanban_notify_subs', 'self_work_intake'):
-                if conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (table,)).fetchone():
-                    assert conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+            tasks = kb.list_tasks(conn)
+            assert len(tasks) == 1
+            assert tasks[0].idempotency_key == 'page1'
+            assert 'immutable manifest page page1' in tasks[0].body
+            if placement:
+                row = conn.execute('SELECT runs_on,requires FROM tasks WHERE id=?', (tasks[0].id,)).fetchone()
+                assert json.loads(row[0]) == ['pool:worker']
+                assert set(json.loads(row[1])) == {'terminal', 'file'}
+            notes = kb.list_comments(conn, tasks[0].id)
+            assert len(notes) == 1
+            assert 'immutable manifest page page2' in notes[0].body
     finally:
         db.close()
 
 
 @pytest.mark.parametrize('labels', [[], ['pool:worker']])
-def test_unsynced_intake_stays_pending_without_local_fallback(request_envelope, monkeypatch, capsys, labels):
+def test_unsynced_intake_stays_pending_without_local_fallback(unsynced_envelope, monkeypatch, capsys, labels):
+    request_envelope = unsynced_envelope  # a synced fixture would make this pass or fail for another reason
     from hermes_cli import kanban_selfwork_outbound as outbound
     monkeypatch.delenv('HERMES_KANBAN_WORKER_TASK', raising=False)
     frozen = producer.prepare({**create_args(), 'runs_on': labels, 'requires': ['terminal', 'file']})

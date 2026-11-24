@@ -1684,7 +1684,8 @@ def _handle_create(args: dict, **kw) -> str:
                 # Reject a worktree path the dispatcher could never resolve now, to the
                 # creator, instead of burning spawn retries on it later. [daveey]
                 validate_workspace=True, validate_skills=True,
-                require_scope_authority=origin_intent is None,  # origin courier checks after binding; no-chat intake must check here
+                # origin courier checks after binding; self-work intake (receiver-set selfwork_intent) is chat-less by contract
+                require_scope_authority=origin_intent is None and selfwork_intent is None,
                 insert_guard=after_create.guard)  # re-checks overlap under the write lock [daveey]
             if self_work is not None:
                 from hermes_cli.kanban_selfwork_owner import create
