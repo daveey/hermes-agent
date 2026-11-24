@@ -1614,6 +1614,7 @@
     "desktop.poolSlotTimeoutOpenSettings",
     "desktop.profileStatus",
     "desktop.promptFailed",
+    "desktop.promptNotSent",
     "desktop.providerCredentialRequired",
     "desktop.readOnlyTranscriptBody",
     "desktop.readOnlyTranscriptSendBlocked",

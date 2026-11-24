@@ -211,6 +211,7 @@ import {
   rememberResolvedResumeOwner,
   resolveResumeOwner
 } from './resume-owner'
+import { preservePendingTurnAcrossResume } from './resume-pending-turn'
 import {
   livePromptStreamId,
   liveTurnSettledDuringResume,
@@ -243,7 +244,6 @@ import {
   overlayConcurrentMessageChanges,
   patchSessionWorkspace,
   preserveEquivalentTranscript,
-  preserveLocalPendingTurnMessages,
   removeRepresentedLocalLiveProjection,
   resolveResumedBusy,
   resolveSessionProfile,
@@ -1564,7 +1564,7 @@ export function useSessionActions({
             : cachedState
 
         if (resumedSameSelectedSession) {
-          const messages = preserveLocalPendingTurnMessages(cachedViewState.messages, resumeStartMessages)
+          const messages = preservePendingTurnAcrossResume(cachedViewState.messages, resumeStartMessages)
 
           if (messages !== cachedViewState.messages) {
             cachedViewState = { ...cachedViewState, messages }
@@ -2139,7 +2139,7 @@ export function useSessionActions({
         const watchWindow = isWatchWindow()
 
         let localSnapshot = resumedSameSelectedSession
-          ? preserveLocalPendingTurnMessages(viewMessagesForReconcile(), resumeStartMessages)
+          ? preservePendingTurnAcrossResume(viewMessagesForReconcile(), resumeStartMessages)
           : viewMessagesForReconcile()
 
         let prefetchApplied = false
@@ -2225,7 +2225,7 @@ export function useSessionActions({
         // and never rebuilds the transcript a second time.
         if (prefetchedResult && isCurrentResume()) {
           const previousMessages = resumedSameSelectedSession
-            ? preserveLocalPendingTurnMessages(viewMessagesForReconcile(), resumeStartMessages)
+            ? preservePendingTurnAcrossResume(viewMessagesForReconcile(), resumeStartMessages)
             : viewMessagesForReconcile()
 
           // Tail page + previously backfilled prefix (same-session re-resume).
@@ -2322,7 +2322,7 @@ export function useSessionActions({
           }
 
           const previousMessages = resumedSameSelectedSession
-            ? preserveLocalPendingTurnMessages(currentMessages, resumeStartMessages)
+            ? preservePendingTurnAcrossResume(currentMessages, resumeStartMessages)
             : currentMessages
 
           const resumedMessages = reconcileAuthoritativeMessages(resumed.messages, previousMessages, resumed)
@@ -2566,7 +2566,7 @@ export function useSessionActions({
           }
 
           const previousMessages = resumedSameSelectedSession
-            ? preserveLocalPendingTurnMessages(viewMessagesForReconcile(), resumeStartMessages)
+            ? preservePendingTurnAcrossResume(viewMessagesForReconcile(), resumeStartMessages)
             : viewMessagesForReconcile()
 
           // Resume failed, so there is no live projection — the journal is the
@@ -2622,7 +2622,7 @@ export function useSessionActions({
 
             if (stored && stored.messages.length > 0) {
               const previousMessages = resumedSameSelectedSession
-                ? preserveLocalPendingTurnMessages(viewMessagesForReconcile(), resumeStartMessages)
+                ? preservePendingTurnAcrossResume(viewMessagesForReconcile(), resumeStartMessages)
                 : viewMessagesForReconcile()
 
               setMessages(reconcileAuthoritativeMessages(stored.messages, previousMessages))

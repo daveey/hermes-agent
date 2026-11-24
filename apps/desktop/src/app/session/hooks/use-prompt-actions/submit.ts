@@ -59,6 +59,7 @@ import {
   removePreparedSubmission,
   writePreparedSubmission
 } from './prepared-submissions'
+import { rejectSendOnFailedResume, startOptimisticSend } from './rejected-optimistic-sends'
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import { captureSubmissionDestination, destinationAfterCreate, sameAuthorityPublishedOwner } from './submission-destination'
 import {
@@ -648,7 +649,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         }
       }
 
-      const optimisticId = `user-${submissionId}`
+      const optimisticId = startOptimisticSend(submissionId)
 
       // What the bubble shows. A `/skill` send carries the whole expanded
       // skill body as its text — model-facing scaffolding — so the dispatcher
@@ -856,7 +857,16 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       const resumeRoutedStoredSession = async (routedId: string): Promise<false | null | string> => {
         try {
           await resumeStoredSession(routedId)
-        } catch {
+        } catch (err) {
+          // Not sent: say so (a session switch stays silent), then drop the bubble.
+          rejectSendOnFailedResume(err, {
+            copy,
+            drift: sessionDriftReason(),
+            hidden: options?.displayKind === 'hidden',
+            optimisticId,
+            quiet: Boolean(queueAdmission || options?.fromQueue)
+          })
+
           return abortForSessionSwitch(null)
         }
 
@@ -971,12 +981,21 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
               })
             }
           }
-        } catch {
+        } catch (err) {
           // A target stored conversation is not a new-chat draft. If its
           // runtime cannot be rebound, stop here rather than silently replacing
           // it with a contextless session (#55578). For a background/queued
           // drain this abort is a no-op on foreground state (both helpers are
-          // targetIsCurrentView-guarded) and simply drops the queued send.
+          // targetIsCurrentView-guarded) and simply drops the queued send. A
+          // foreground send is not sent either: say so, then drop the bubble.
+          rejectSendOnFailedResume(err, {
+            copy,
+            drift: sessionDriftReason(),
+            hidden: options?.displayKind === 'hidden',
+            optimisticId,
+            quiet: Boolean(queueAdmission || options?.fromQueue)
+          })
+
           return abortForSessionSwitch(null)
         }
 

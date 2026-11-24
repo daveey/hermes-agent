@@ -415,6 +415,7 @@ export const zhHantChat = {
     sessionUnavailable: '工作階段不可用',
     createSessionFailed: '無法建立新工作階段',
     promptFailed: '提示詞傳送失敗',
+    promptNotSent: '訊息未傳送，已放回輸入框。',
     providerCredentialRequired: '傳送第一則訊息前請先新增提供方憑證。',
     emptySlashCommand: '空的斜線指令',
     slashCommandIgnoredTitle: '指令未傳送',

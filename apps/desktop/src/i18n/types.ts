@@ -4250,6 +4250,7 @@ export interface Translations extends NoticeTranslations {
     sessionUnavailable: string
     createSessionFailed: string
     promptFailed: string
+    promptNotSent: string
     providerCredentialRequired: string
     emptySlashCommand: string
     slashCommandIgnoredTitle: string

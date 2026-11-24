@@ -392,6 +392,7 @@ export const arChat = {
     sessionUnavailable: 'الجلسة غير متاحة',
     createSessionFailed: 'فشل إنشاء الجلسة',
     promptFailed: 'فشل إرسال الرسالة',
+    promptNotSent: 'لم تُرسل الرسالة. أُعيدت إلى مربع الكتابة.',
     providerCredentialRequired: 'مطلوب اعتماد المزود',
     emptySlashCommand: 'أمر slash فارغ',
     slashCommandIgnoredTitle: 'لم يتم إرسال الأمر',
