@@ -108,7 +108,7 @@ def _release(conn, board, task, token):
 
 def observe_one(conn, hub, root, local, cap):
     """Observe at most one tracked task outside the writer; failure never means empty."""
-    from hermes_cli.kanban_sync_client import HubError
+    from hermes_cli.kanban_sync_client import HubError, Resync
     if cap.get('deferred_observation') != 'origin_pending1':
         episodes.interrupt(conn)
         return dict(status='unavailable')
@@ -120,7 +120,7 @@ def observe_one(conn, hub, root, local, cap):
     try:
         reply = hub._call('GET', root + 'deferred?task=' + quote(task, safe=''))
         deferred.validate_membership(reply, local, task)
-    except (OSError, ValueError, HubError) as exc:
+    except (OSError, ValueError, HubError, Resync) as exc:
         episodes.interrupt(conn)
         with write_txn(conn):
             _release(conn, local['board_incarnation'], task, token)

@@ -113,11 +113,22 @@ def snapshot(conn: sqlite3.Connection) -> dict:
     return _read(conn)[0]
 
 
+def _bound_custody(conn: sqlite3.Connection) -> bool:
+    """A lost anchor cannot erase surviving enrollment or recovery-loss evidence."""
+    anchor = conn.execute('SELECT journal_id,replay_restore_required FROM kanban_sync_state LIMIT 1').fetchone()
+    if anchor is not None and anchor[0] is not None:
+        return True
+    evidence = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name IN "
+                            "('kanban_replay_sender1','kanban_replay_recovery_loss1') LIMIT 1").fetchone()
+    if evidence or (anchor is not None and anchor[1] != 0):
+        raise ValueError('journal restore reconciliation required; custody LOSS or invalid anchor')
+    return False
+
+
 def guard_import(conn: sqlite3.Connection, tables: tuple[str, ...], only: Mapping[str, set[str]] | None) -> bool:
     """Fence import scopes under the writer reservation; imports are not replay repair."""
     _transaction(conn)
-    anchor = conn.execute('SELECT journal_id FROM kanban_sync_state').fetchone()
-    if anchor is None or anchor[0] is None:
+    if not _bound_custody(conn):
         return False
     _reserve(conn)
     _state, encoded = _read(conn)
@@ -134,8 +145,7 @@ def guard_import(conn: sqlite3.Connection, tables: tuple[str, ...], only: Mappin
 
 def issued_operation(conn: sqlite3.Connection) -> str | None:
     """Reserve and validate bound custody before an explicit identity-changing repair."""
-    anchor = conn.execute('SELECT journal_id FROM kanban_sync_state LIMIT 1').fetchone()
-    if anchor is None or anchor[0] is None:
+    if not _bound_custody(conn):
         return None
     _reserve(conn)
     state, _encoded = _read(conn)
@@ -150,8 +160,7 @@ def parent_cleanup_hold(conn: sqlite3.Connection, *, task_id: str | None = None,
     bookkeeping transaction. Ordinary cleanup has no authority to infer a final
     outcome from local row existence or a newer sync version.
     """
-    anchor = conn.execute('SELECT journal_id FROM kanban_sync_state LIMIT 1').fetchone()
-    if anchor is None or anchor[0] is None:
+    if not _bound_custody(conn):
         return None
     _reserve(conn)
     state, encoded = _read(conn)

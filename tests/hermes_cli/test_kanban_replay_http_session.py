@@ -19,7 +19,7 @@ live = sender.live
 
 
 @contextmanager
-def serving(conn, receiver, *, before_reply=None, lose_ops_reply=False, encode_reply=None):
+def serving(conn, receiver, *, before_reply=None, lose_ops_reply=False, encode_reply=None, response_status=None):
     path = conn.execute('PRAGMA database_list').fetchone()[2]
     requests = []
     observations = []
@@ -61,7 +61,7 @@ def serving(conn, receiver, *, before_reply=None, lose_ops_reply=False, encode_r
                 if before_reply is not None:
                     before_reply(self.path)
                 data = json.dumps(reply).encode() if encode_reply is None else encode_reply(self.path, reply)
-                self.send_response(200)
+                self.send_response(200 if response_status is None else response_status(self.path))
                 self.send_header('Content-Length', str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)

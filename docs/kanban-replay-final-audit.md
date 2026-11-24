@@ -213,3 +213,33 @@ Fixture peers do not establish those facts. Accepted A/B1–B5 and local sender
 fence/writer2 proofs are not to be repeated. No activation, deploy or held-original
 release occurs here. Section 9 rollback remains mandatory. Fresh independent
 exact-head review, required CI and canonical ship still follow completed D work.
+
+## Independent review corrections (not approval)
+
+Review6034244968 at3a3920360deec766a9ba15592a5475bd87d60876 found three
+introduced behavior defects. These corrections stay in the dormant sender PR:
+
+- Custody helpers no longer classify NULL/missing sync anchors as never enrolled
+  when the sender journal, recovery-loss marker or restore flag survives. Import,
+  lifecycle stripping, parent pruning/retirement and feed echoes refuse before
+  source edits. Thirty damaged-anchor/evidence/consumer cases retain exact source,
+  journal, parent and task bytes; five no-evidence legacy controls still progress.
+  Missing-row feed/import public preflights already refuse; their lower custody
+  helpers are additionally exercised under the writer, not bypassed in production.
+- Current-row retry deadlines now use monotonic time and a persisted process-clock
+  identity, just like general transport recovery. A foreign/legacy clock rearms
+  one bounded delay without resetting attempts or automatically resuming paused
+  faults. Six cases cover rollback, forward jumps, inclusive deadline progress,
+  process-clock replacement, legacy schema migration and unchanged paused state.
+  This is simulated interpreter-clock replacement, not an actual host reboot.
+- Optional observation treats production HTTP410/Resync as unavailable, interrupting
+  its timing episode and releasing its read token rather than escaping after ACK.
+  Three actual loopback HTTP cases (410,403,503) preserve old membership and pending
+  origins, retain committed settlement/ACK, release tokens and allow the next origin
+  event to drain. A read refusal is never empty membership or business success.
+
+All three defects were reproduced on unchanged production before their fixes.
+Historical malformed-reply, storage, model and migration evidence above is not
+independent approval. Exact-head consumer/mutation receipts, required CI, a fresh
+independent review and canonical landing are still separate gates. No activation,
+deployment, runtime hook, authorizer or reentrancy change is authorized here.
