@@ -147,21 +147,51 @@ def held_realpath(path: str) -> Optional[str]:
     direct = once(path)
     if direct is not None:
         return direct
-    parent = path
-    missing: list[str] = []
-    while True:
-        parent, tail = os.path.split(parent)
-        if not tail:
-            break
-        missing.append(tail)
-        resolved = once(parent if parent else ".")
-        if resolved is not None:
-            for part in reversed(missing):
-                resolved = os.path.join(resolved, part)
-            return resolved
-        if not parent or parent == os.sep:
-            break
-    return None
+    # libc realpath is strict: a dangling link makes the whole call fail. Walk
+    # its components instead of appending an unresolved suffix literally.
+    cwd = once(".") if not path.startswith("/") else "/"
+    if cwd is None or _readlink is None:
+        return None
+    return _non_strict_realpath(path, cwd, _readlink, buf)
+
+
+def _non_strict_realpath(filename, cwd, readlink, buf):
+    """Non-strict POSIX resolution, using GIL-held readlink even for missing paths.
+
+    An unsuccessful readlink is an ordinary/missing component, just as non-strict
+    os.path.realpath ignores lstat/readlink errors. Stack markers memoize fully
+    resolved links and detect active cycles without a recursion-depth limit.
+    """
+    rest = filename.split("/")[::-1]
+    path = "/" if filename.startswith("/") else cwd
+    seen = {}
+    while rest:
+        name = rest.pop()
+        if name is None:
+            seen[rest.pop()] = path
+            continue
+        if not name or name == ".":
+            continue
+        if name == "..":
+            path = os.path.dirname(path)
+            continue
+        candidate = os.path.join(path, name)
+        n = readlink(os.fsencode(candidate), buf, len(buf))
+        if n < 0:
+            path = candidate
+            continue
+        if n >= len(buf):
+            return None  # never trust a truncated target; caller uses stdlib
+        if candidate in seen:
+            path = seen[candidate] or candidate
+            continue
+        target = os.fsdecode(buf.raw[:n])
+        seen[candidate] = None
+        rest.extend((candidate, None))
+        rest.extend(target.split("/")[::-1])
+        if target.startswith("/"):
+            path = "/"
+    return path
 
 
 def proc_fd_targets() -> Optional[dict[int, str]]:
