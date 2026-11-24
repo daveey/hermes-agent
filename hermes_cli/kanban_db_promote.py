@@ -54,9 +54,15 @@ def promote_task(
         )
         if upd.rowcount != 1:
             return False, f"task {task_id} status changed during promotion"
+        from hermes_cli import kanban_spend_budget as budget
+        # Match the operator courier's explicit window boundary. Keep restricted
+        # history cumulative even after an authorized scope renewal.
+        window = ({"spend_budget": budget.card_limits(conn, task_id, budget.limits())._asdict()}
+                  if budget.limit_window(conn, task_id) == 'next_promote' else {})
         _kb._append_event(conn, task_id, "promoted_manual", {
             "actor": actor, "reason": reason,
             **({"from_status": cur_status} if cur_status != "todo" else {}),
+            **window,
         })
     return True, None
 

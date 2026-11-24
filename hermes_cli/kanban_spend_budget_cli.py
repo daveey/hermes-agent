@@ -6,7 +6,10 @@ the board's limits) record a ``spend_budget_set`` event and need ``--reason``. W
 are fenced from this verb like every other board write, so a looping card cannot exempt itself.
 For a spend-stop episode, an existing budget decision must be read before replacement (``--seen COMMENT_ID``).
 This acknowledgment is checked under the writer lock, survives promotion, and is not a retry instruction:
-keep the first decision unless an explicit reconciliation is warranted. Read-only display is unchanged.
+keep the first decision unless an explicit reconciliation is warranted. Historical spend values are retained.
+An ordinary pending spend stop uses a fresh window starting at promote. Until then
+the printed spend is historical, not deducted from that fresh allowance. Other
+limits include recorded spend in the current window; restricted history never resets.
 """
 from __future__ import annotations
 
@@ -52,7 +55,8 @@ def command(args: argparse.Namespace) -> int:
         lim = ksb.card_limits(conn, tid, ksb.limits())
         override = ksb.card_override(conn, tid)
         spent = ksb.spend(conn, tid)
-    out = {"task_id": tid, "limits": lim._asdict(), "override": override,
+        window = ksb.limit_window(conn, tid)
+    out = {"task_id": tid, "limits": lim._asdict(), "override": override, "window": window,
            "spent": {"runs": spent.runs, "since": spent.since, "tokens": spent.tokens, "excluded": spent.excluded}}
     if getattr(args, "json", False):
         print(json.dumps(out, sort_keys=True))
@@ -64,6 +68,8 @@ def command(args: argparse.Namespace) -> int:
         print(f"{tid}: spend budget {shown}")
     if override is not None and ksb.override_set(override):
         print(f"  override set by {override.get('by')}: {override.get('reason')}")
+    print(f"  {ksb.window_text(window)}")
     skipped = f" ({spent.excluded} owner-refusal runs excluded)" if spent.excluded else ""
-    print(f"  spent: {spent.runs} runs{skipped}, {spent.tokens['cache_read_tokens']} cache-read tokens in this window")
+    label = 'historical spend' if window == 'next_promote' else 'spent'
+    print(f"  {label}: {spent.runs} runs{skipped}, {spent.tokens['cache_read_tokens']} cache-read tokens in this window")
     return 0

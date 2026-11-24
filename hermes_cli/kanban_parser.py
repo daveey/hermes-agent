@@ -670,13 +670,16 @@ _SPECS = [
     _cmd("spend-budget", [
         _TASK_ID,
         _arg("--seen", dest="seen_comment_id", type=int, help="Newest decision comment read; refuse replacing an unread spend-stop budget decision."),
-        _arg("--runs", type=_nonnegative_int, help="This card's spending-run limit (0 = no limit)"),
-        _arg("--cache-read-tokens", type=_nonnegative_int, help="This card's cache-read token limit (0 = no limit)"),
+        _arg("--runs", type=_nonnegative_int, help="Spending-run limit (0 = no limit): fresh window starting at promote "
+             "for an ordinary spend stop; otherwise current window including recorded spend"),
+        _arg("--cache-read-tokens", type=_nonnegative_int, help="Cache-read token limit (0 = no limit): same window as --runs; "
+             "restricted history never resets"),
         _arg("--exempt", action="store_true", help="No spend budget for this card (standing cards)"),
         _arg("--clear", action="store_true", help="Back to the board's kanban.spend_budget_* limits"),
         _reason("Why (required for a change; recorded on the spend_budget_set event)"),
         _json_flag(),
-    ], help="Show or set one card's own spend budget (kanban_spend_budget)"),
+    ], help="Show or set one card's own spend budget: an ordinary spend stop uses a fresh window starting at promote; "
+            "otherwise limits count the current window, including recorded spend (restricted history never resets)"),
     _cmd("archive", [
         _arg("task_ids", nargs="*", help="Task ids to archive (default mode)"),
         _arg("--rm", dest="purge_ids", nargs="+",

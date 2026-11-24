@@ -128,6 +128,18 @@ def _has_override(conn: sqlite3.Connection, task_id: str) -> bool:
     return override_set(card_override(conn, task_id))
 
 
+def limit_window(conn: sqlite3.Connection, task_id: str) -> str:
+    """A pending ordinary stop needs promotion; restricted accounting never resets."""
+    from hermes_cli import kanban_spend_decision as decision
+    return ('next_promote' if decision.pending(conn, task_id)
+            and decision.restricted_floor(conn, task_id) is None else 'current')
+
+
+def window_text(window: str) -> str:
+    return ('this limit applies to a fresh window starting at promote; setting it does not release the stop'
+            if window == 'next_promote' else 'this limit counts the current window, including spend already recorded')
+
+
 def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = None,
                  cache_read_tokens: Optional[int] = None, by: str, reason: str,
                  seen: Optional[int] = None, board: Optional[str] = None) -> dict:
@@ -150,8 +162,10 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
         from hermes_cli.kanban_spend_override_fence import check
         if episode := check(conn, task_id, seen=seen, board=board):
             payload['episode'] = episode
+        window = limit_window(conn, task_id)
         cid = kb.add_comment(conn, task_id, AUTHOR,
-                             f"Spend budget for this card: {_override_text(payload)}, set by {by}: {reason}.", system=True)
+                             f"Spend budget for this card: {_override_text(payload)}, set by {by}: {reason}. "
+                             f"{window_text(window)}.", system=True)
         if episode:
             note = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
             payload['decision_comment'] = {'comment_id': cid, 'author': AUTHOR}
@@ -210,8 +224,8 @@ def _window_start(conn: sqlite3.Connection, task_id: str, cut: int) -> int:
         "SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = 'commented' AND created_at < ? "
         "AND (json_extract(payload, '$.writer_kind') = 'human' OR json_extract(payload, '$.relayed_human') IS NOT NULL)",
         (task_id, cut)).fetchone()[0]
-    # A spend decision applied through the operator courier (``kanban_spend_promote``) opens the new window at the
-    # promotion itself, so its run budget counts exactly the runs after it. A plain manual promote does not.
+    # Ordinary spend-stop promotions (manual or operator courier) explicitly open a new
+    # window. Unrelated promotions and restricted accounting do not renew spending.
     promoted = conn.execute(
         "SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = 'promoted_manual' AND created_at < ? "
         "AND json_valid(payload) AND json_extract(payload, '$.spend_budget.runs') IS NOT NULL",
