@@ -63,6 +63,10 @@ def test_overlapping_requests_share_one_build_begun_after_they_asked(legacy_tree
                                  "scoped_session_ids": ["s1"]}
     assert all(results[i]["active_id"] == "active-2" for i in range(5))
     assert coalesced_build.project_tree._states == {}
+    # Sharers of one build each hold their own result dict: one caller's edit is not another's.
+    assert len({id(results[i]) for i in range(5)}) == 5
+    results[0]["active_id"] = "changed by a caller"
+    assert all(results[i]["active_id"] == "active-2" for i in range(1, 5))
 
 
 def test_a_different_selector_builds_on_its_own(legacy_tree):
@@ -79,9 +83,16 @@ def test_a_different_selector_builds_on_its_own(legacy_tree):
     assert results["slow"]["active_id"] == "active-1"
 
 
-def test_callers_get_their_own_result_dict(legacy_tree):
-    _, _, release_first = legacy_tree
+def test_another_hermes_home_builds_on_its_own(legacy_tree, monkeypatch, tmp_path):
+    import hermes_constants
+
+    builds, first_started, release_first = legacy_tree
+    results = {}
+    slow = threading.Thread(target=lambda: results.setdefault("slow", _tree()))
+    slow.start()
+    assert first_started.wait(10)
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path / "another-home")
+    assert _tree()["active_id"] == "active-2"  # same selector, other home: not parked behind the first
     release_first.set()
-    one = _tree()
-    one["active_id"] = "changed by a caller"
-    assert _tree()["active_id"] == "active-2"
+    slow.join(10)
+    assert results["slow"]["active_id"] == "active-1" and len(builds) == 2

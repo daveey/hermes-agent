@@ -148,3 +148,25 @@ def test_policy_roots_do_not_inherit_a_stale_canonical_answer(homes, monkeypatch
     link.symlink_to(second, target_is_directory=True)
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: link)  # new key: the policy is rebuilt now
     assert server._non_workspace_policy()[1].count(os.path.normcase(os.path.realpath(second))) == 1
+
+
+def test_backfilled_repo_root_is_resolved_fresh(homes, monkeypatch):
+    """The root written back to session rows never comes from the 30 s memo."""
+    from types import SimpleNamespace
+
+    home, _, _ = homes
+    old, new, alias, cwd = home / "repo-old", home / "repo-new", home / "repo-alias", home / "work"
+    for path in (old, new, cwd):
+        path.mkdir()
+    alias.symlink_to(old, target_is_directory=True)
+    monkeypatch.setattr(server, "_canonical_memo", {})
+    assert server._canonical_workspace_path(str(alias)) == os.path.normcase(os.path.realpath(old))
+    alias.unlink()
+    alias.symlink_to(new, target_is_directory=True)  # re-pointed inside the memo's TTL
+    written = []
+    db = SimpleNamespace(distinct_session_cwds=lambda: [{"cwd": str(cwd), "sessions": 1}],
+                         backfill_repo_roots=written.append)
+    monkeypatch.setattr(server.git_probe, "warm_roots", lambda *a: None)
+    monkeypatch.setattr(server.git_probe, "common_repo_root", lambda p: str(alias))
+    server._discover_repos_payload(db, backfill=True, include_cached=False)
+    assert written == [{str(cwd): os.path.normcase(os.path.realpath(new))}]
