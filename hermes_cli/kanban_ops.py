@@ -104,6 +104,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
+    from hermes_cli.kanban_spend_reviewer import wait_for_reviews
+    wait_for_reviews()  # this process exits next; its spend reviews would die mid-judge and waste an attempt
     if getattr(args, "json", False):
         _print_json({
             **{k: getattr(res, k)

@@ -11,24 +11,31 @@ sat for up to 40 h. The reviewer decides at once, outside the worker queue:
   (episode) gets at most one review.
 * **Run.** Every dispatcher tick (``start_due``, from the maintenance sweep, before the worker cap) starts due
   reviews in daemon threads, at most ``MAX_CONCURRENT`` per process, with a ``LEASE_SECONDS`` lease
-  (``spend_review_started``); an expired lease is retried, and after ``MAX_ATTEMPTS`` the stop is escalated.
+  (``spend_review_started``); the judge call is bounded by ``TIMEOUT`` end to end, an expired lease is retried,
+  and after ``MAX_ATTEMPTS`` the stop is escalated. A one-shot ``hermes kanban dispatch`` waits for the reviews
+  it started (``wait_for_reviews``). Turning the reviewer off releases queued and running stops to the usual
+  routing.
 * **Judge.** One subscription-model call reads the card, its stop, the runs and comments of the stopped
   window, and answers ``grant`` (N runs) or ``escalate``.
-* **Grant** only when, checked again by code under the write lock: the stop is still the card's current,
-  ordinary, pending stop, still in triage, with no human comment since and no open parent; N is at most the
-  allowance that just ran out (and ``kanban_spend_promote.MAX_RUNS``); the judge quoted at least
-  ``QUOTE_MIN`` characters verbatim from that window's run summaries or non-system comments as progress; and
-  the card has had fewer than ``kanban.spend_review_max_grants`` (default 2) reviewer grants since the last
-  decision someone else made. The grant is the decision card's promotion (``kanban_spend_promote.apply``):
+* **Queue only** an eligible stop: the reviewer is on, the stop is ordinary (not scope or safety), the card is a
+  home card and not itself a decision card, no closed decision card already disposed of the stop, and the card
+  has had fewer than ``kanban.spend_review_max_grants`` (default 2) reviewer grants since the last decision
+  someone else made. One review per stop, so these hold for the grant too.
+* **Grant** only when code also checks: N is at most the allowance that just ran out (and
+  ``kanban_spend_promote.MAX_RUNS``); the judge quoted at least ``QUOTE_MIN`` characters verbatim from that
+  window's run summaries or non-system comments as progress; and, again under the write lock, the stop is still
+  the card's current, ordinary, pending, undisposed stop, still in triage, with no human comment since and no
+  open parent. The grant is the decision card's promotion (``kanban_spend_promote.apply``):
   status ready, a ``spend_budget_set`` of exactly N runs, a ``promoted_manual`` that opens a fresh window,
   and a comment. An open decision card for the same stop is archived as decided.
 * **Escalate** otherwise (``spend_review_escalated`` plus a comment with the reason): the stop is routed the
   usual way, so the creator chat is woken or a decision card is opened.
 
-Scope and safety stops are never reviewed. ``kanban.spend_review: false`` turns the reviewer off.
+``kanban.spend_review: false`` turns the reviewer off.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
@@ -58,6 +65,7 @@ _TEXT_MAX = 1500
 
 _INFLIGHT: set[tuple[str, str]] = set()
 _LOCK = threading.Lock()
+_THREADS: list = []
 
 
 def settings(cfg: Optional[dict] = None) -> tuple[bool, int]:
@@ -98,8 +106,9 @@ def state(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[str]
 
 
 def holds(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
-    """While a review is queued or running the stop needs no other decision route."""
-    return state(conn, task_id, episode) in (QUEUED, STARTED)
+    """While a review is queued or running the stop needs no other decision route. With the reviewer off, a
+    queued or running review holds nothing: the stop routes as usual."""
+    return state(conn, task_id, episode) in (QUEUED, STARTED) and settings()[0]
 
 
 def episode_of(stop: Optional[dict]) -> Optional[str]:
@@ -125,15 +134,15 @@ def consecutive_grants(conn: sqlite3.Connection, task_id: str) -> int:
     return count
 
 
-def eligible(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
-    """An ordinary stop on a home card that has not been reviewed and is under the grant cap."""
+def eligible(conn: sqlite3.Connection, task_id: str, episode: str, cfg: Optional[tuple[bool, int]] = None) -> bool:
+    """An ordinary, undisposed stop on a home card that has not been reviewed and is under the grant cap."""
     from hermes_cli import kanban_spend_decision as decision
     from hermes_cli.kanban_refusal_receipt import restricted
     from hermes_cli.kanban_wake_check import foreign_copy
-    enabled, max_grants = settings()
+    enabled, max_grants = cfg or settings()
     if not enabled or state(conn, task_id, episode) is not None or foreign_copy(conn, task_id):
         return False
-    if decision.execution_restricted(conn, task_id) or restricted(conn, task_id):
+    if decision.execution_restricted(conn, task_id) or restricted(conn, task_id) or _disposed(conn, task_id, episode):
         return False
     row = conn.execute("SELECT created_by FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None or row[0] == "kanban-spend-budget" or conn.execute(
@@ -142,10 +151,17 @@ def eligible(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
     return consecutive_grants(conn, task_id) < max_grants
 
 
-def queue(conn: sqlite3.Connection, task_id: str, episode: str, *, backlog: bool = False) -> bool:
+def _disposed(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
+    """A closed decision card for this stop is a disposition (``episode_route`` kind ``dismissed``), not release."""
+    from hermes_cli.kanban_spend_decision import episode_route
+    return (episode_route(conn, task_id, episode) or {}).get("kind") == "dismissed"
+
+
+def queue(conn: sqlite3.Connection, task_id: str, episode: str, *, backlog: bool = False,
+          cfg: Optional[tuple[bool, int]] = None) -> bool:
     """Inside the caller's write transaction: queue one review of ``episode`` when eligible."""
     from hermes_cli import kanban_db as kb
-    if not eligible(conn, task_id, episode):
+    if not eligible(conn, task_id, episode, cfg):
         return False
     kb._append_event(conn, task_id, QUEUED, {"episode": episode, "backlog": backlog})
     return True
@@ -162,8 +178,17 @@ def _current_episode(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     return episode_of(decision.pending_episode(conn, task_id))
 
 
-def queue_backlog(conn: sqlite3.Connection, *, now: int, skip: frozenset | set = frozenset()) -> list[str]:
-    """Stops routed to a chat or decision card that nobody decided within ``BACKLOG_AFTER`` seconds."""
+def _notice_at(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[int]:
+    from hermes_cli.kanban_spend_decision import NOTICE
+    row = conn.execute("SELECT MIN(created_at) FROM task_events WHERE task_id = ? AND kind = ? AND json_valid(payload) "
+                       "AND json_extract(payload, '$.episode') = ?", (task_id, NOTICE, episode)).fetchone()
+    return row[0] if row else None
+
+
+def queue_backlog(conn: sqlite3.Connection, *, now: int, cfg: tuple[bool, int],
+                  skip: frozenset | set = frozenset()) -> list[str]:
+    """Stops routed to a chat or decision card that nobody decided within ``BACKLOG_AFTER`` seconds of that
+    stop's own notice. Eligibility is read first, so an ineligible stop never takes the write lock."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_spend_decision import NOTICE
     rows = conn.execute("SELECT DISTINCT t.id FROM tasks t JOIN task_events e ON e.task_id = t.id "
@@ -171,13 +196,12 @@ def queue_backlog(conn: sqlite3.Connection, *, now: int, skip: frozenset | set =
                         (NOTICE, now - BACKLOG_AFTER)).fetchall()
     queued = []
     for (task_id,) in rows:
-        if task_id in skip:
-            continue
-        episode = _current_episode(conn, task_id)
-        if episode is None or state(conn, task_id, episode) is not None:
+        episode = None if task_id in skip else _current_episode(conn, task_id)
+        noticed = _notice_at(conn, task_id, episode) if episode else None
+        if noticed is None or noticed > now - BACKLOG_AFTER or not eligible(conn, task_id, episode, cfg):
             continue
         with kb.write_txn(conn):
-            if _current_episode(conn, task_id) == episode and queue(conn, task_id, episode, backlog=True):
+            if _current_episode(conn, task_id) == episode and queue(conn, task_id, episode, backlog=True, cfg=cfg):
                 queued.append(task_id)
     return queued
 
@@ -204,11 +228,12 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     """Queue the backlog and start every due review this process has room for. Returns started task ids."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_wake_check import foreign_ids
-    if not settings()[0]:
+    cfg = settings()
+    if not cfg[0]:
         return []
     now = int(time.time()) if now is None else int(now)
     skip = foreign_ids(conn)
-    queue_backlog(conn, now=now, skip=skip)
+    queue_backlog(conn, now=now, cfg=cfg, skip=skip)
     db, started = _db_path(conn), []
     for task_id, episode, attempts in _due(conn, now, skip):
         if attempts >= MAX_ATTEMPTS:
@@ -223,17 +248,28 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
         with kb.write_txn(conn):
             kb._append_event(conn, task_id, STARTED, {"episode": episode, "attempt": attempts + 1,
                                                       "deadline": now + LEASE_SECONDS})
-        threading.Thread(target=_run, args=(db, task_id, episode), name=f"spend-review-{task_id}",
-                         daemon=True).start()
+        thread = threading.Thread(target=contextvars.copy_context().run, args=(_run, db, task_id, episode),
+                                  name=f"spend-review-{task_id}", daemon=True)
+        thread.start()
+        _THREADS.append(thread)
         started.append(task_id)
     return started
+
+
+def wait_for_reviews(timeout: float = TIMEOUT + 30) -> None:
+    """A one-shot dispatch process waits for the reviews it started; its exit would kill their threads."""
+    deadline = time.monotonic() + timeout
+    while _THREADS:
+        thread = _THREADS.pop()
+        thread.join(max(0.0, deadline - time.monotonic()))
 
 
 def _run(db: str, task_id: str, episode: str) -> None:
     from pathlib import Path
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_hub_admission import _owner_scope
     try:
-        with kbc.connect_closing(Path(db)) as conn:
+        with _owner_scope(), kbc.connect_closing(Path(db)) as conn:
             review(conn, task_id, episode)
     except Exception:  # health: allow BLE001 -- the lease expires and the next tick retries or escalates
         logger.exception("kanban: spend review of %s failed; the lease will retry it", task_id)
@@ -304,20 +340,29 @@ Answer with JSON only:
 
 
 def judge(ctx: dict) -> Optional[dict]:
-    """One bounded subscription call; None when it is unavailable or the answer is not JSON."""
+    """One subscription call bounded end to end by ``TIMEOUT``, route and credential resolution included.
+    None when it is unavailable, late, routed anywhere but the subscription judge, or not JSON."""
     from agent import auxiliary_client as aux
-    from hermes_cli.kanban_hub_admission import _owner_scope
+    from hermes_cli.kanban_hub_admission import _bounded, _owner_scope
     user = {k: v for k, v in ctx.items() if not k.startswith("_")}
     route: dict = {}
     deadline = time.monotonic() + TIMEOUT
-    with _owner_scope(), aux.aux_stream_deadline(deadline):
-        response = aux.call_llm(
-            task="kanban_spend_review", provider=PROVIDER, model=MODEL, timeout=TIMEOUT, max_tokens=800,
-            temperature=0, route_info=route,
-            messages=[{"role": "system", "content": PROMPT.replace("CAP", str(ctx["_cap"]))},
-                      {"role": "user", "content": json.dumps(user, ensure_ascii=False)}])
-    if route.get("billing_group") not in (None, "subscription"):
-        logger.warning("kanban: spend review route %s is not a subscription; escalating", route)
+
+    def ask():
+        with aux.aux_stream_deadline(deadline):
+            return aux.call_llm(
+                task="kanban_spend_review", provider=PROVIDER, model=MODEL, timeout=TIMEOUT, max_tokens=800,
+                temperature=0, route_info=route,
+                messages=[{"role": "system", "content": PROMPT.replace("CAP", str(ctx["_cap"]))},
+                          {"role": "user", "content": json.dumps(user, ensure_ascii=False)}])
+
+    with _owner_scope():
+        response = _bounded(ask, deadline)
+    if response is None:
+        logger.warning("kanban: spend review judge did not answer within %ss; escalating", TIMEOUT)
+        return None
+    if (route.get("provider"), route.get("model"), route.get("billing_group")) != (PROVIDER, MODEL, "subscription"):
+        logger.warning("kanban: spend review route %s is not the subscription judge; escalating", route)
         return None
     return parse(response.choices[0].message.content)
 
@@ -380,6 +425,8 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
         return "the card waits on a human"
     if decision.execution_restricted(conn, task_id) or decision.execution_refusal(conn, task_id):
         return "the stop is a scope or safety stop"
+    if _disposed(conn, task_id, episode):
+        return "a closed decision card already disposed of the stop"
     after = _event_order(stop)
     for ev in conn.execute("SELECT * FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_valid(payload) "
                            "AND (json_extract(payload, '$.writer_kind') = 'human' "
@@ -424,8 +471,12 @@ def _close_decision_card(conn: sqlite3.Connection, task_id: str, episode: str, r
     route = episode_route(conn, task_id, episode)
     if not route or route.get("kind") != "supervisor":
         return
-    kb.archive_task(conn, route["task_id"], comment=(
-        AUTHOR, f"Decided by the spend reviewer: {task_id} was granted {runs} more run(s) for stop {episode}."))
+    try:
+        kb.archive_task(conn, route["task_id"], comment=(
+            AUTHOR, f"Decided by the spend reviewer: {task_id} was granted {runs} more run(s) for stop {episode}."))
+    except Exception:  # health: allow BLE001 -- the grant stands; the open decision card finds its source promoted
+        logger.warning("kanban: spend reviewer granted %s but could not archive decision card %s",
+                       task_id, route["task_id"], exc_info=True)
 
 
 def escalate(conn: sqlite3.Connection, task_id: str, episode: str, reason: str, *, recommendation: str = "") -> str:
