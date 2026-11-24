@@ -100,8 +100,8 @@ business-row refill and parent ambiguity controls. Tests run through
 salvage, before the rebuilt image can be installed. This independent singleton
 records recovery and the protocol loss report even if the sync anchor or sender
 singleton was unreadable. For a never-enrolled database (no sender table, no journal
-anchor) it is written only when a replay table reported loss; legacy sync-table
-damage is healed by legacy resync and does not hold the board. It has no independent index/refill route and is not a per-operation ledger.
+anchor) it is never written: replay tables exist only after enrollment, and legacy
+sync-table damage is healed by legacy resync, so such a board is not held. It has no independent index/refill route and is not a per-operation ledger.
 Readable prior rebuild reports are retained; unreadable prior history stays loss.
 
 Public sender admission checks the marker, the restore flag and any existing

@@ -491,12 +491,11 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
             except sqlite3.DatabaseError:
                 row = None
             enrolled = row is not None and row[0] is not None
-        # A never-enrolled board has no replay custody to lose: damage to its legacy sync tables is
-        # healed by the ordinary legacy resync, so only replay tables can hold it.
-        prefixes = (('kanban_replay_', 'kanban_sync_', 'kanban_failure_', 'kanban_actionability_')
-                    if enrolled else ('kanban_replay_',))
+        # A never-enrolled board has no replay custody to lose (replay tables exist only after
+        # enrollment); damage to its legacy sync tables is healed by the ordinary legacy resync.
+        prefixes = ('kanban_replay_', 'kanban_sync_', 'kanban_failure_', 'kanban_actionability_')
         mark_rebuilt(dst, {name: asdict(loss) for name, loss in result.tables.items()
-                           if name.startswith(prefixes) and
+                           if enrolled and name.startswith(prefixes) and
                            (loss.unreadable_paths or loss.known_lost or loss.possibly_lost)},
                      enrolled=enrolled)
         dst.execute("COMMIT")
