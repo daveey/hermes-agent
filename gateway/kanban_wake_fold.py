@@ -151,7 +151,14 @@ def _merge(old_cards, new_cards):
             order.append(key)
             merged[key] = dict(card)
         else:
-            merged[key] = _keep_notices(merged[key], card)
+            previous = merged[key]
+            # These kinds report a dependency observation, not a replacement outcome.
+            # A late advisory must not replace a queued completion/review's full body.
+            advisory_kinds = {'parent_held', 'wait_cycle_decision'}
+            if (set(card.get('kinds') or []) and set(card['kinds']) <= advisory_kinds
+                    and {'completed', 'review_requested'}.intersection(previous.get('kinds') or [])):
+                previous, card = card, previous
+            merged[key] = _keep_notices(previous, card)
     return [merged[key] for key in order]
 
 
