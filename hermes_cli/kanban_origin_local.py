@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 
-def observe_local_binding(binding: dict, *, profile: str, now: float) -> dict | None:
+def observe_local_binding(binding: dict, *, profile: str, now: float, home=None) -> dict | None:
     """Never infer an owner from an ID or release a receipt without its marker.
 
     Caller has already matched the trusted local gateway and profile. Shared or
@@ -16,12 +16,19 @@ def observe_local_binding(binding: dict, *, profile: str, now: float) -> dict | 
     from hermes_cli.kanban_origin_ledger import observe_owner_task
     from hermes_cli.profiles import get_active_profile_name
 
+    from pathlib import Path
     owner = binding['owner']
-    home = get_hermes_home().resolve()
+    explicit = home is not None
+    home = Path(home).resolve() if explicit else get_hermes_home().resolve()
     board = owner['board']
+    from hermes_cli.kanban_sync_client import BOARD_ID_RE
+    if not BOARD_ID_RE.fullmatch(board) or owner['profile'] != profile:
+        return None
     expected = home / 'kanban.db' if board == 'default' else home / 'kanban/boards' / board / 'kanban.db'
-    if (profile != get_active_profile_name() or owner['profile'] != profile
-            or kb.kanban_home().resolve() != home or kb.kanban_db_path(board).resolve() != expected):
+    if not expected.resolve().is_relative_to(home):
+        return None
+    if not explicit and (profile != get_active_profile_name()
+                         or kb.kanban_home().resolve() != home or kb.kanban_db_path(board).resolve() != expected):
         return None
     try:
         with closing(_ro(expected)) as conn:

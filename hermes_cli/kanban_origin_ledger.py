@@ -563,7 +563,7 @@ def _lock_busy(exc: sqlite3.Error) -> bool:
 
 
 def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
-            now: float | None = None) -> list[dict]:
+            now: float | None = None, home: Path | None = None) -> list[dict]:
     """Owner-qualified receipt rows, including explicit unknown and released rows.
 
     Consumers filter this single projection, never infer release from an absent
@@ -674,7 +674,8 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     continue
                 if (owner['gateway'], owner['profile']) == (gateway, profile):
                     from hermes_cli.kanban_origin_local import observe_local_binding
-                    local = observe_local_binding(binding, profile=profile, now=now)
+                    local = (observe_local_binding(binding, profile=profile, now=now) if home is None else
+                             observe_local_binding(binding, profile=profile, now=now, home=home))
                     # An unreadable local authority must not fall back to a stale
                     # own replica, even one which previously proved completion.
                     current = local is not None

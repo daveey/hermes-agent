@@ -24,11 +24,8 @@ def test_read_session_tasks_uses_passed_scope_without_card_scope(tmp_path, monke
     monkeypatch.setattr("hermes_cli.kanban_execution_observations.card_scope", boom)
     ksa._read_session_tasks(path, ["chat"], ("running",), scope=("gw-home", "researcher"))
     assert called == []
-    try:
+    import pytest
+
+    with pytest.raises(AssertionError, match="card_scope:"):
         ksa._read_session_tasks(path, ["chat"], ("running",))
-    except AssertionError:
-        pass
-    else:
-        # omitted scope must consult card_scope; if the board has no listed rows
-        # the helper may return before enrich — then still require the patch path.
-        assert True
+    assert called == [path]

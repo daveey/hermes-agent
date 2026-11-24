@@ -752,11 +752,12 @@ def _owner_of(known: list[tuple[str, str, str, bool]], owner: Optional[str],
 
 
 def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str, ...], *,
-                     stale_ok: bool = False) -> list[dict[str, Any]]:
+                     stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
     """Cold start with an unreadable replica: the ledger's rows for that board, all stale (never "no cards")."""
     from hermes_cli.kanban_session_activity import _remote_links
     try:
-        cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
+        if cards is None:
+            cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
     except Exception as exc:  # health: allow BLE001 -- log both-source failure, then preserve the failed-read contract
         _log.warning("kanban chat links: replica and ledger both unreadable for %s (%s)", board, exc)
         raise
@@ -882,11 +883,23 @@ def _replica_scope(
     return replicas, profile
 
 
+def _replica_inputs(replicas, profile, origin_cards, stale_after_s):
+    """Bind all acquisition inputs together; explicit scope never discovers a process-home policy or ledger."""
+    explicit = replicas is not None and profile is not None
+    if explicit and origin_cards is None:
+        origin_cards = []
+    replicas, profile = _replica_scope(replicas, profile)
+    if stale_after_s is None:
+        from hermes_cli.kanban_session_activity import HUB_STALE_AFTER_S
+        stale_after_s = HUB_STALE_AFTER_S if explicit else _stale_after_s()
+    return replicas, profile, origin_cards, stale_after_s
+
+
 def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES,
                   replicas: Optional[list[tuple[str, Path]]] = None, *, now: Optional[float] = None,
                   ledger_fallback: bool = True, unreadable_out: Optional[list[str]] = None,
                   stale_ok: bool = False, origin_cards: Optional[list[dict[str, Any]]] = None,
-                  profile: Optional[str] = None) -> list[dict[str, Any]]:
+                  profile: Optional[str] = None, stale_after_s: Optional[float] = None) -> list[dict[str, Any]]:
     """This gateway's chats' (``session_ids``, one lineage; ``None`` = every chat) unreleased links to cards created
     on OTHER gateways, from every board's replica, shaped like the origin-ledger rows ``session_tasks`` appends.
 
@@ -905,13 +918,18 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
       ledger (``source`` ``ledger-profile-board``) while no readable replica has its row, so the chat keeps it;
     - ``stale_ok`` (the Desktop linked-card strip): the owner labels come from the last ledger projection rather
       than waiting behind a rebuild of it. [daveey] Without it the strip's ``stale_ok`` stopped at this call and
-      ``/api/session-kanban-tasks`` queued on ``_links_lock`` for every board write (3-7 s in a wake burst)."""
+      ``/api/session-kanban-tasks`` queued on ``_links_lock`` for every board write (3-7 s in a wake burst).
+
+    Explicit ``replicas`` plus ``profile`` bind acquisition without consulting process home: omitted
+    ``origin_cards`` means no ledger rows, and omitted ``stale_after_s`` uses ``HUB_STALE_AFTER_S``.
+    Pass the owning home's freshness policy explicitly to override that bound. Legacy omitted scope
+    retains process-home replica/profile, sync policy and ledger resolution.
+    """
     ids = None if session_ids is None else set(str(s) for s in session_ids if s)
     if ids is not None and not ids:
         return []
-    replicas, profile = _replica_scope(replicas, profile)
+    replicas, profile, origin_cards, stale_after = _replica_inputs(replicas, profile, origin_cards, stale_after_s)
     now = time.time() if now is None else now
-    stale_after = _stale_after_s()
     index: Optional[tuple[dict[tuple[str, str], list[tuple[str, str, str, bool]]], list[dict[str, Any]]]] = None
     out: dict[tuple[str, str], dict[str, Any]] = {}
     read_ok: set[str] = set()
@@ -931,7 +949,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             _log.info("kanban chat links: replica %s unreadable (%s); %s", path, exc,
                       "keeping its last rows as stale" if hit else "falling back to the ledger, stale")
             if hit is None:
-                for c in _ledger_fallback(board, gateway, profile, statuses, stale_ok=stale_ok):
+                for c in _ledger_fallback(board, gateway, profile, statuses, stale_ok=stale_ok, cards=origin_cards):
                     if ids is None or c["session"] in ids:
                         out.setdefault((c["session"], c["key"]), c)
                 continue
@@ -993,7 +1011,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 r, board=board, gateway=gateway, key=key, owner=owner, owner_profile=owner_profile, pulled=pulled,
                 stale=stale))
     # One ledger read per call serves the owner labels and the profile-board cards.
-    index = index if index is not None else _profile_board_index(stale_ok)
+    if index is None:
+        index = _profile_board_index(stale_ok) if origin_cards is None else _ledger_index(stale_ok, origin_cards)
     _merge_profile_board(out, _profile_board_cards(index[1], gateway, profile, statuses, replicas, read_ok, ids), ids)
     return list(out.values())
 
