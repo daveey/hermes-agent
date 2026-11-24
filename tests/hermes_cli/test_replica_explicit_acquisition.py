@@ -64,6 +64,19 @@ def test_populated_replica_uses_explicit_freshness_and_owner(tmp_path, threshold
     assert got[0]["synced_at"] == 950
 
 
+def test_populated_explicit_replica_graph_never_discovers_second_shadow(tmp_path, monkeypatch):
+    rep = tmp_path / 'selected.db'
+    _replica(rep, [('t_scoped', 'SCOPED', 'running', OTHER)], [('t_scoped', ME, 's1', 'created', 0)])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('selected replica graph discovered a process-home shadow')
+
+    monkeypatch.setattr('hermes_cli.kanban_sync_client.shadow_path', forbidden)
+    got = links.replica_cards(['s1'], ME, replicas=[('default', rep)], profile='default',
+                              origin_cards=[_ledger_row('t_scoped', 's1')])
+    assert len(got) == 1 and got[0]['title'] == 'SCOPED'
+
+
 def test_omitted_profile_preserves_legacy_policy_and_ledger(monkeypatch):
     calls = []
     monkeypatch.setattr(sync, "sync_config", lambda: calls.append("config") or {})

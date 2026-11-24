@@ -202,13 +202,16 @@ def completion_verdict(task_id, row, event, run, archived, *, bound_event, curre
     return verified, legacy, terminal
 
 
-def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> dict:
+def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
+                       local_only: bool = False) -> dict:
     """Attach owner evidence during the collector's existing read transaction.
 
     The collector must call this on the owner, never on a replica. A completion
     event is evidence of the core lifecycle gate; status alone (including an
     archive) is not. Goal-mode also requires a current, completion-bound
     judge-success receipt; unavailable judges never supply release evidence.
+    Explicit-home callers set local_only: upstream presentation is confined to
+    this connection, never an implicitly discovered process-home shadow.
     """
     if not conn.in_transaction:
         raise ValueError('origin_observation_snapshot_required')
@@ -247,7 +250,10 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
     payload = {k: v for k, v in task.items()
                if k not in ('origin_observation', 'withdrawal_notice', 'withdrawal_recipients', 'ask_notice')}
     from hermes_cli.kanban_session_activity_card_details import _add_blocked_upstream
-    _add_blocked_upstream(conn, {task['id']: payload})
+    if local_only:
+        _add_blocked_upstream(conn, {task['id']: payload}, replica=None)
+    else:
+        _add_blocked_upstream(conn, {task['id']: payload})
     from hermes_cli.kanban_remote_ask import publish as publish_ask
     if (ask := publish_ask(conn, task)) is not None:
         payload['ask_notice'] = ask

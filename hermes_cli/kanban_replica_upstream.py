@@ -17,7 +17,9 @@ def enrich(conn: sqlite3.Connection, rows: list[dict]) -> list[dict]:
 
     # Card ids can occur once per linked chat. Compute once, then fan out to all links.
     cards = {r["id"]: {"status": r["status"]} for r in rows}
-    _add_blocked_upstream(conn, cards)
+    # This connection is already the selected replica snapshot. A process-home
+    # shadow cannot supply evidence for its graph (and may belong to another home).
+    _add_blocked_upstream(conn, cards, replica=None)
     for row in rows:
         stamp = _decoded_request(row.get("blocked_upstream"))
         row.pop("blocked_upstream", None)

@@ -43,6 +43,6 @@ def observe_local_binding(binding: dict, *, profile: str, now: float, home=None)
             if marker not in markers:
                 return None
             task = {**dict(row), **owner, 'id': owner['task_id'], 'origin_bindings': markers}
-            return observe_owner_task(conn, task, now=now)
+            return observe_owner_task(conn, task, now=now, local_only=explicit)
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return None
