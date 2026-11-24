@@ -48,6 +48,7 @@ from tui_gateway import git_probe, stream_segments
 from tui_gateway.checkpoints import (_load_checkpoints_enabled, _resolve_checkpoint_hash,
                                      resolve_checkpoints_enabled as _resolve_checkpoints_enabled)
 from tui_gateway._env import env_float, env_int
+from tui_gateway.rpc_method_lanes import MethodLanes
 from tui_gateway.turn_marker import clear_turn_marker, marker_writer_state, read_turn_marker, record_turn_start
 from tui_gateway.exit_job_receipts import journal_background_jobs_before_exit as _journal_background_jobs_before_exit
 from tui_gateway.contracts import registry as _contracts
@@ -213,6 +214,10 @@ _LONG_HANDLERS = frozenset({
 _rpc_pool_workers = max(2, env_int("HERMES_TUI_RPC_POOL_WORKERS", 8))
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=_rpc_pool_workers, thread_name_prefix="tui-rpc")
 atexit.register(lambda: _pool.shutdown(wait=False, cancel_futures=True))
+# [daveey] No single method runs on more than half the pool (always leaving a worker for the others); the
+# rest of its calls wait in the method's own FIFO. ``HERMES_TUI_RPC_METHOD_CAP=0`` turns the cap off.
+_rpc_method_cap = min(env_int("HERMES_TUI_RPC_METHOD_CAP", _rpc_pool_workers // 2), _rpc_pool_workers - 1)
+_method_lanes = MethodLanes(_rpc_method_cap)
 
 # Exact in-memory session record executing on the current turn thread — unlike a public session id,
 # this object identity cannot be supplied by RPC.

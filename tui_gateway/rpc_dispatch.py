@@ -119,13 +119,16 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
                     if scope_token is not None:
                         ACTIVE_SCOPE.reset(scope_token)
                     end_work(work)
-            future = _pool.submit(lambda: ctx.run(run))
+            # [daveey] Through the per-method cap: a method already on its share of the workers waits in
+            # its own FIFO, so one slow, re-requested method cannot hold every worker. The done hook also
+            # releases cancelled queued futures and calls that could never start; the worker's own finally
+            # would never execute for those.
+            _method_lanes.run(_pool.submit, normalized[1], lambda: ctx.run(run),
+                              lambda: (end_work(work), retirement.release()))
         except BaseException:
             end_work(work)
             retirement.release()
             raise
-        # Also releases cancelled queued futures; the worker's own finally would never execute.
-        future.add_done_callback(lambda _: (end_work(work), retirement.release()))
         return None
     finally:
         reset_transport(token)
