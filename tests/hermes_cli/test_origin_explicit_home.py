@@ -28,7 +28,11 @@ def test_explicit_local_binding_reads_authorized_board(tmp_path, monkeypatch):
     monkeypatch.setattr('hermes_cli.profiles.get_active_profile_name', forbidden)
     monkeypatch.setattr('hermes_cli.kanban_db.kanban_home', forbidden)
     monkeypatch.setattr('hermes_cli.kanban_db.kanban_db_path', forbidden)
-    monkeypatch.setattr(ledger, 'observe_owner_task', lambda conn, task, now: task)
+    def scoped_observer(conn, task, *, now, local_only=False):
+        assert local_only is True
+        return task
+
+    monkeypatch.setattr(ledger, 'observe_owner_task', scoped_observer)
     row = local.observe_local_binding(binding, profile='research', now=100, home=home)
     assert (row['id'], row['status']) == ('t_owned', 'running')
     assert local.observe_local_binding(binding, profile='other', now=100, home=home) is None
