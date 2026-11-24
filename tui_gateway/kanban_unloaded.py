@@ -193,6 +193,23 @@ def live_session_ids() -> set[str]:
     return ids
 
 
+def chat_hosted_here(chat_id: str) -> Optional[bool]:
+    """Prove local presence or absence; an unreadable profile leaves absence unknown."""
+    from tui_gateway import server
+    unavailable = False
+    for profile in server._readopt_wake_profiles():
+        try:
+            with server._profile_db({"profile": profile} if profile else None) as db:
+                if db is None:
+                    unavailable = True
+                elif db.get_session(chat_id) is not None:
+                    return True
+        except Exception:
+            unavailable = True
+            logger.debug("chat hosting: profile %s store unavailable", profile, exc_info=True)
+    return None if unavailable else False
+
+
 @contextlib.contextmanager
 def find_session_db(chat_id: str) -> Iterator[tuple[Any, Optional[str]]]:
     """Yield ``(writable SessionDB, lineage tip id)`` for the store holding ``chat_id``, or ``(None, None)``.

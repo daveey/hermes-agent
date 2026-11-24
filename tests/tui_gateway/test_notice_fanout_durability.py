@@ -14,6 +14,95 @@ from tests.tui_gateway import test_session_outcome_notices as helpers
 db = helpers.db
 
 
+def test_chat_hosted_elsewhere_does_not_hold_the_board_cursor(db, monkeypatch, caplog):
+    foreign = "20261123_100853_foreign"
+    monkeypatch.setattr(helpers.server, "_readopt_wake_profiles", lambda: [None])
+
+    @contextlib.contextmanager
+    def profile_db(session, **kwargs):
+        yield db
+
+    monkeypatch.setattr(helpers.server, "_profile_db", profile_db)
+    original = helpers.ku.find_session_db
+    opened = []
+
+    @contextlib.contextmanager
+    def tracked(chat):
+        opened.append(chat)
+        with original(chat) as result:
+            yield result
+
+    monkeypatch.setattr(helpers.ku, "find_session_db", tracked)
+    nf.card_change_pass()
+    local_tid = helpers._card(done=False)
+    foreign_tid = helpers._card(done=False, chat=foreign)
+    with caplog.at_level("INFO", logger=nf.__name__):
+        rows = nf.card_change_pass()
+        with contextlib.closing(kbc.connect()) as conn:
+            top = conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0]
+        state.forget_memory_for_tests()
+        assert state.get_cursor(str(kb.kanban_db_path().resolve())) == top
+        assert {r["task_id"]: r["skipped"] for r in rows} == {
+            local_tid: None, foreign_tid: "not_hosted_here"}
+        assert foreign not in opened and helpers.CHAT in opened
+        assert helpers.so.get_outcome(helpers.CHAT, db=db)["on"][0]["id"] == local_tid
+        with contextlib.closing(kbc.connect()) as conn:
+            kb.complete_task(conn, foreign_tid, summary="done")
+        nf.card_change_pass()
+    assert sum(foreign in record.message for record in caplog.records) == 1
+
+
+def test_unknown_hosting_keeps_cursor(db, monkeypatch):
+    nf.card_change_pass(session_db=helpers._opener(db))
+    ident = str(kb.kanban_db_path().resolve())
+    before = state.get_cursor(ident)
+    tid = helpers._card(done=False)
+
+    @contextlib.contextmanager
+    def missing(chat):
+        yield None, None
+
+    with monkeypatch.context() as m:
+        m.setattr(helpers.ku, "chat_hosted_here", lambda chat: False)
+        result = nf.card_change_pass(session_db=missing, hosted=lambda chat: None)
+    assert result.incomplete
+    state.forget_memory_for_tests()
+    assert state.get_cursor(ident) == before
+    rows = nf.card_change_pass(session_db=helpers._opener(db))
+    assert [r["task_id"] for r in rows] == [tid]
+    assert state.get_cursor(ident) > before
+
+
+def test_chat_hosted_here_reports_absent_only_when_every_store_opened(db, tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    with contextlib.closing(SessionDB(tmp_path / "second.db")) as second:
+        second.create_session("second-chat", "desktop")
+        monkeypatch.setattr(helpers.server, "_readopt_wake_profiles", lambda: [None, "second"])
+        broken = []
+
+        @contextlib.contextmanager
+        def profile_db(session, **kwargs):
+            if session is None and broken:
+                raise OSError("profile unavailable")
+            yield second if session else db
+
+        monkeypatch.setattr(helpers.server, "_profile_db", profile_db)
+        assert helpers.ku.chat_hosted_here(helpers.CHAT) is True
+        assert helpers.ku.chat_hosted_here("second-chat") is True
+        assert helpers.ku.chat_hosted_here("absent") is False
+        broken.append(True)
+        assert helpers.ku.chat_hosted_here("absent") is None
+        assert helpers.ku.chat_hosted_here("second-chat") is True
+        nf.card_change_pass()
+        tid = helpers._card(done=False, chat="absent")
+        before = state.get_cursor(str(kb.kanban_db_path().resolve()))
+        assert nf.card_change_pass().incomplete
+        state.forget_memory_for_tests()
+        assert state.get_cursor(str(kb.kanban_db_path().resolve())) == before
+        broken.clear()
+        assert [(r["task_id"], r["skipped"]) for r in nf.card_change_pass()] == [(tid, "not_hosted_here")]
+
+
 def test_stale_metadata_cas_loss_keeps_durable_cursor(db, monkeypatch):
     tid = helpers._card(done=False)
     with contextlib.closing(kbc.connect()) as conn:

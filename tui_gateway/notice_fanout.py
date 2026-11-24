@@ -47,6 +47,7 @@ STATUS_EVENT_KINDS = (
     "continued", "continuation_woken", "condition_met",
 )
 MAX_EVENTS_PER_PASS = 2000
+_not_hosted_logged: set[tuple[str, str]] = set()
 _BLOCKED_LINE = re.compile(r"Kanban (t_[0-9A-Za-z_]+) blocked")
 _TASK_ID = re.compile(r"Kanban (t_[0-9A-Za-z_]+)")
 
@@ -54,6 +55,7 @@ _TASK_ID = re.compile(r"Kanban (t_[0-9A-Za-z_]+)")
 def _reset_for_tests() -> None:
     global _remote_memo
     _remote_memo = None
+    _not_hosted_logged.clear()
     from tui_gateway import notice_fanout_state
     notice_fanout_state.reset_for_tests()
 
@@ -227,7 +229,7 @@ def apply_card_change(db: Any, tip: str, chat_id: str, task_id: str, status: str
     return None
 
 
-def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, slug: str, tids: list[str]) -> list[dict]:
+def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, slug: str, tids: list[str], hosted: Callable) -> list[dict]:
     """Every linked chat's share of this pass's changed cards on one board. A chat linked to several changed cards
     is opened once: each card marks its stale notices, then the outcome is refreshed ONCE (it derives from current
     state, so one refresh after all marks equals one per card; a busy hub's shepherd chat was refreshed per card,
@@ -240,9 +242,17 @@ def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, s
             by_chat.setdefault(chat, []).append((tid, status))
     out = []
     for chat, cards in by_chat.items():
+        if hosted(chat) is False:
+            key = (str(_kb.kanban_db_path(slug).resolve()), chat)
+            if key not in _not_hosted_logged:
+                _not_hosted_logged.add(key)
+                logger.info("card-change skipping chat %s on board %s: not_hosted_here", chat, slug)
+            out += [{"board": slug, "task_id": tid, "chat_id": chat, "session_id": None,
+                     "status": status, "skipped": "not_hosted_here"} for tid, status in cards]
+            continue
         with session_db(chat) as (db, tip):
             if db is None:
-                raise RuntimeError("card-change session store unavailable")
+                raise RuntimeError(f"card-change session store unavailable (chat {chat})")
             skipped = chat_skip_reason(db, chat)
             if skipped is None:
                 for tid, status in cards:
@@ -489,7 +499,8 @@ def _board_slugs(kb: Any) -> list[str]:
     return list(unique.values())
 
 
-def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[Iterable[str]] = None) -> FanoutResult:
+def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[Iterable[str]] = None,
+                     hosted: Optional[Callable] = None) -> FanoutResult:
     """Refresh linked chats, returning the legacy row list plus scheduling state.
 
     ``FanoutResult.quiet`` certifies captured work drained; ``incomplete`` and
@@ -500,6 +511,8 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
     from hermes_cli import kanban_db_connect as _kbc
     from tui_gateway import kanban_unloaded as ku
     session_db = session_db or ku.find_session_db
+    if hosted is None:
+        hosted = ku.chat_hosted_here if session_db is ku.find_session_db else lambda chat: None
     done = FanoutResult()
     try:
         boards = list(slugs) if slugs is not None else _board_slugs(_kb)
@@ -515,7 +528,7 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
             with contextlib.closing(_kbc.connect(board=slug)) as conn:
                 from tui_gateway import notice_fanout_state as state
                 tids, cursor = _changed_tasks(conn, ident)
-                done += _fan_out_changes(conn, _kb, session_db, slug, tids)
+                done += _fan_out_changes(conn, _kb, session_db, slug, tids, hosted)
                 if not state.set_cursor(ident, cursor):
                     done.retry()
                 top = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
