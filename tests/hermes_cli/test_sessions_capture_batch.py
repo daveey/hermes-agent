@@ -1,4 +1,5 @@
 """Bounded batch publication keeps fairness, per-view faults and trailing writes."""
+import json
 from types import SimpleNamespace
 
 from hermes_cli.fact_capture import CaptureBudget
@@ -64,3 +65,30 @@ def test_batch_is_bounded_and_failure_does_not_starve_following_views():
     owner._next_capture = 0
     owner.commit(owner.capture(None, CaptureBudget()))
     assert [selector['id'] for _, selector in seen[1]] == [4, 5]
+
+
+def test_batch_trims_long_stamp_selectors_to_request_frame():
+    from hermes_cli.sessions_capture_process import MAX_REQUEST
+    store = FactStore()
+    scope = Scope('batch', 'sessions')
+    seen = []
+
+    def batch(views):
+        seen.append(list(views))
+        return [b'ok'] * len(views)
+
+    owner = SessionsSource(store, SourceId(scope, 'sessions.display', 'test'), [],
+                           lambda *_: b'unexpected', capture_many=batch)
+    owner._watch = SimpleNamespace(check=lambda: None)
+    pad = 'x' * 7000
+    for index in range(3):
+        owner.demand('sessions_stamps', {'profile': 'default', 'ids': f'{pad}-{index}'})
+    owner.commit(owner.capture(None, CaptureBudget()))
+    assert len(seen) == 1
+    assert 1 <= len(seen[0]) < 3
+    wire = json.dumps({'views': seen[0]}, allow_nan=False).encode()
+    assert len(wire) <= MAX_REQUEST
+    selected_ids = [selector['ids'] for _, selector in seen[0]]
+    assert selected_ids == [f'{pad}-{index}' for index in range(len(seen[0]))]
+    remaining = [owner._selectors[key][1]['ids'] for key in owner._dirty]
+    assert remaining == [f'{pad}-{index}' for index in range(len(seen[0]), 3)]

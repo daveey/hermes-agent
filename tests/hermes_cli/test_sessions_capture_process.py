@@ -158,6 +158,91 @@ def test_canonical_worker_keeps_all_seven_annotations(tmp_path, monkeypatch):
     assert set(calls) == set(names)
 
 
+def test_canonical_worker_batch_keeps_all_seven_annotations(tmp_path, monkeypatch):
+    from hermes_cli.web_routers import profiles
+    from hermes_cli.sessions_capture_worker import capture_many
+    from tests.hermes_cli.test_sessions_native_startup import selected
+    from tests.hermes_cli.test_profiles_sidebar_scope import _seed_session
+    home = tmp_path / 'home'
+    home.mkdir()
+    _seed_session(home, 'seven-family-row', source='cli')
+    monkeypatch.setattr(profiles, '_profile_targets', lambda *a: [('default', home)])
+    calls = []
+    names = ('kanban_activity', 'goal_activity', 'cron_activity', 'background_activity',
+             'turn_activity', 'subagent_activity', 'review_wait')
+    for name in names:
+        original = getattr(profiles, 'annotate_' + name)
+        def recorded(rows, *args, _name=name, _original=original, **kwargs):
+            calls.append(_name)
+            return _original(rows, *args, **kwargs)
+        monkeypatch.setattr(profiles, 'annotate_' + name, recorded)
+    payload = json.loads(capture_many([('sessions', selected()), ('sessions_sidebar', {})]))
+    assert payload['results'][0]['body']['sessions'][0]['id'] == 'seven-family-row'
+    assert payload['results'][1]['body']['recents']['sessions']
+    assert set(calls) == set(names)
+
+
+@pytest.mark.parametrize('body', [
+    b'{"results":[]}',
+    b'{"results":[{"body":{"sessions":[]}},"nope"]}',
+    b'{"results":[{"oops":true}]}',
+    b'{"results":[{"body":[]}]}',
+    b'{"results":[{"unavailable":"timeout"}]}',
+    b'{"nope":1}',
+])
+def test_capture_many_malformed_result_is_typed(body):
+    capture = CaptureProcess(command=command(frame(body)))
+    with pytest.raises(CaptureUnavailable) as error:
+        capture.capture_many([('sessions', {})])
+    assert error.value.reason == 'invalid_body'
+    assert capture._child is None
+
+
+def test_capture_many_oversized_response_kills_and_reaps(monkeypatch):
+    from hermes_cli import sessions_capture_process as module
+    original = module.spawn_owned
+    children = []
+    def recorded(*args, **kwargs):
+        child = original(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(module, 'spawn_owned', recorded)
+    capture = CaptureProcess(seconds=.5, command=command(
+        'import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write(b"\\x00\\x40\\x00\\x01"); sys.stdout.buffer.flush()'))
+    with pytest.raises(CaptureUnavailable) as error:
+        capture.capture_many([('sessions', {})])
+    assert error.value.reason == 'response_bytes'
+    assert children and all(child.poll() is not None for child in children)
+    assert capture._child is None
+
+
+def test_capture_many_timeout_kills_and_reaps(monkeypatch):
+    from hermes_cli import sessions_capture_process as module
+    original = module.spawn_owned
+    children = []
+    def recorded(*args, **kwargs):
+        child = original(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(module, 'spawn_owned', recorded)
+    capture = CaptureProcess(seconds=.5, command=command('import time; time.sleep(30)'))
+    started = time.monotonic()
+    with pytest.raises(CaptureUnavailable) as error:
+        capture.capture_many([('sessions', {}), ('sessions_sidebar', {})])
+    assert error.value.reason == 'timeout'
+    assert time.monotonic() - started < 3
+    assert children and all(child.poll() is not None for child in children)
+    assert capture._child is None
+
+
+def test_capture_many_rejects_view_count_without_spawn():
+    capture = CaptureProcess(command=['must-not-spawn'])
+    with pytest.raises(CaptureUnavailable, match='request_views'):
+        capture.capture_many([])
+    with pytest.raises(CaptureUnavailable, match='request_views'):
+        capture.capture_many([('sessions', {})] * 5)
+
+
 def test_cold_twelve_profile_capture_under_parent_gil_contention(tmp_path, monkeypatch):
     import inspect
     import sqlite3
