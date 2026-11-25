@@ -869,7 +869,10 @@ class SessionSchemaMixin:
 
         if cache_path is not None:
             with contextlib.suppress(Exception):  # cache write is best-effort
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                # A registry rename can remove the request's ambient named home while a
+                # reference schema is being parsed. Cache misses must not recreate it.
+                from hermes_constants import mkdir_under_hermes_home
+                mkdir_under_hermes_home(cache_path.parent)
                 fd, tmp = tempfile.mkstemp(dir=str(cache_path.parent), prefix=".schema_columns.")
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump({"schema_hash": schema_hash, "tables": table_columns}, fh)
