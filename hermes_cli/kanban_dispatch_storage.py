@@ -14,8 +14,13 @@ _active: ContextVar[_Budget | None] = ContextVar("kanban_dispatch_write_budget",
 _clock = time.monotonic
 
 
-class DispatchWriteContended(sqlite3.OperationalError):
-    """A dispatcher exhausted its SQLite lock-wait allowance; retry next pass."""
+class DispatchWriteContended(BaseException):
+    """A dispatcher exhausted its SQLite lock-wait allowance; retry next pass.
+
+    Pass-wide cancellation, not a service failure: outside ``Exception`` (like
+    ``asyncio.CancelledError``) so no best-effort ``except Exception`` handler can
+    swallow it and keep working. Only ``run`` consumes it.
+    """
 
 
 @dataclass
@@ -82,7 +87,7 @@ def run(conn, work, *, board):
     with _budget(conn) as budget:
         try:
             result = work()
-        except sqlite3.OperationalError as exc:
+        except (sqlite3.OperationalError, DispatchWriteContended) as exc:
             from hermes_cli.kanban_db_connect import _is_busy_error
             if not budget.preclaim or (not isinstance(exc, DispatchWriteContended) and not _is_busy_error(exc)):
                 raise

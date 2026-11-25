@@ -1896,6 +1896,8 @@ def _write_txn_body(conn, allow_nested, boundary):
     from hermes_cli import kanban_annotation_mutation as annotation_mutation
     from hermes_cli import kanban_sync_status_origin as status_origin
 
+    # [daveey] Dispatch cancellation is a BaseException: a contended COMMIT must still roll back.
+    from hermes_cli.kanban_dispatch_storage import DispatchWriteContended as _DispatchWriteContended
     boundary.arm()
     boundary.execute("BEGIN IMMEDIATE")
     opt_in = bool(boundary.no_retry or boundary.done is not None)
@@ -1919,7 +1921,7 @@ def _write_txn_body(conn, allow_nested, boundary):
         try:
             status_origin.bind(conn, origin_armed)
             boundary.execute("COMMIT")
-        except Exception:
+        except (Exception, _DispatchWriteContended):
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
             boundary.cleanup_failed()
