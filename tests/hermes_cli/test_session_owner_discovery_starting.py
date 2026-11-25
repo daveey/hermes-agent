@@ -8,6 +8,7 @@ on its own budget, and a gateway still starting at the end of it answers a retry
 does not tell the user to stop it. ``absent`` and the refusal verdicts are unchanged.
 """
 from contextlib import asynccontextmanager, contextmanager
+import asyncio
 import os
 import signal
 import subprocess
@@ -182,6 +183,32 @@ def test_the_starting_budget_fits_under_the_desktop_request_deadline():
     assert 0 < sod.OWNER_STARTING_POLL_S <= 1.0
 
 
+def _virtual_write_discovery(monkeypatch):
+    """Exercise real shared reads without charging the executor's queue to fake startup.
+
+    Each caller owns a clock, so twenty sleepers advance one poll each, not twenty
+    polls on one shared clock. Yielding keeps the real shared-future interleaving.
+    Only discovery's asyncio binding changes; offline locking still runs normally.
+    """
+    discover = sod.discover_session_owner
+
+    async def inline_read(read, *args, **kwargs):
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(sod, 'asyncio', SimpleNamespace(**(vars(asyncio) | {'to_thread': inline_read})))
+
+    async def virtual_discover(home):
+        clock = _Clock()
+
+        async def sleep(seconds):
+            await clock.sleep(seconds)
+            await asyncio.sleep(0)
+
+        return await discover(home, clock=clock, sleep=sleep)
+
+    monkeypatch.setattr(sod, 'discover_session_owner', virtual_discover)
+
+
 def _fast_poll(monkeypatch):
     _no_backoff(monkeypatch)
     monkeypatch.setattr(sod, 'OWNER_STARTING_POLL_S', 0.0)
@@ -234,7 +261,9 @@ async def test_a_gateway_still_starting_past_the_budget_answers_retry_not_drain(
     forwarded, and the 503 asks for a retry instead of telling the user to stop the gateway."""
     from hermes_cli import web_server_sessions
 
-    _fast_poll(monkeypatch)
+    _virtual_write_discovery(monkeypatch)
+    _no_backoff(monkeypatch)
+    monkeypatch.setattr(sod, 'OWNER_STARTING_POLL_S', 0.05)
     monkeypatch.setattr(sod, 'OWNER_STARTING_BUDGET_S', 0.3)
     request = _standalone_request(monkeypatch, tmp_path)
     seen = _reads(monkeypatch, [STARTING])
@@ -375,6 +404,7 @@ async def test_concurrent_writes_behind_a_persisting_start_each_answer_the_start
     import asyncio
     from hermes_cli import web_server_sessions
 
+    _virtual_write_discovery(monkeypatch)
     _no_backoff(monkeypatch)
     budget, poll = 0.3, 0.05
     monkeypatch.setattr(sod, 'OWNER_STARTING_BUDGET_S', budget)
@@ -395,6 +425,28 @@ async def test_concurrent_writes_behind_a_persisting_start_each_answer_the_start
     assert len(attempts) == N_WRITES and connects == []  # each tried the lock once; none forwarded
     # Reads are spaced by the poll interval across all writes, so they fit the budget's polls.
     assert sod.OWNER_DISCOVERY_ATTEMPTS < len(seen) <= budget / poll + 4, len(seen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scenario', [
+    test_a_gateway_still_starting_past_the_budget_answers_retry_not_drain,
+    test_concurrent_writes_behind_a_persisting_start_each_answer_the_starting_503,
+])
+@pytest.mark.parametrize('admission_delay', [0.4, 6.1])
+async def test_shortened_starting_budget_does_not_measure_executor_admission(
+        tmp_path, monkeypatch, scenario, admission_delay):
+    """Admission can consume the short startup budget or even the first identify budget."""
+    async def delayed_read(read, *args, **kwargs):
+        ready = asyncio.Event()
+        handle = asyncio.get_running_loop().call_later(admission_delay, ready.set)
+        try:
+            await ready.wait()
+        finally:
+            handle.cancel()
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(sod, 'asyncio', SimpleNamespace(**(vars(asyncio) | {'to_thread': delayed_read})))
+    await scenario(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
