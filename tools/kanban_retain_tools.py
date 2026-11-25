@@ -1,12 +1,18 @@
 """Stop-only own-run lifecycle disposition, gated with the existing Kanban tools."""
 import json
 
+from hermes_cli.kanban_retain import STOP_ON
 from tools.kanban_containment_tools import _schema
 
 SCHEMA = _schema('kanban_retain',
     'End this admitted run in non-executing decision triage. '
     'Does not complete acceptance, renew spend or grant execution. '
     'No synthetic authority or human ask is required. '
+    "A scope stop (reason='scope_stopped') needs stop_on, one of: "
+    + '; '.join(f'{k} ({v})' for k, v in STOP_ON.items()) + '. '
+    'Findings, design changes, review CHANGES, red or pending CI and sandbox refusals are not stops: fix and '
+    'continue, or park the wait with kanban_continue or kanban_schedule. If the acceptance is met, call '
+    'kanban_complete (or kanban_request_review) instead. '
     'Provide an administrative next step, evidence and a release_condition: the concrete thing the releaser should '
     'check, a note and never a gate. Except after a provider safety refusal or a containment hold, the release '
     "itself is `hermes kanban release <card>` on the card's home gateway by a human operator, the card's owning "
@@ -16,6 +22,8 @@ SCHEMA = _schema('kanban_retain',
     {'summary': {'type': 'string', 'minLength': 1,
                  'description': 'Bounded handoff summary, at most 2000 characters.'},
      'reason': {'type': 'string', 'enum': ['decision_pending', 'scope_stopped', 'capability_unavailable']},
+     'stop_on': {'type': 'string', 'enum': list(STOP_ON),
+                 'description': "Required when reason='scope_stopped': which allowed stop this is."},
      'next_step': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
      'release_condition': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
      'evidence': {'type': 'array', 'minItems': 1, 'maxItems': 8,
@@ -29,6 +37,12 @@ def handle(args, **kwargs):
     from hermes_cli import kanban_retain
     from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
     from hermes_cli.kanban_sync_client import HubError
+    try:
+        args = kanban_retain.tool_args(args)
+    except ValueError as exc:  # nothing written: the run goes on (work, park or complete)
+        return json.dumps({'ok': False, 'terminal_for_run': False, 'error': str(exc),
+                           'next_step': 'Continue the work, park a wait with kanban_continue/kanban_schedule, or '
+                                        'complete with kanban_complete when the acceptance is met.'})
     try:
         with kt._board(args.get('board')) as (_, conn):
             from hermes_cli.kanban_db_sync import board_slug_for_path, sync_state

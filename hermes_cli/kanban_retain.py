@@ -12,6 +12,52 @@ from hermes_cli import kanban_retain_transport as transport
 from hermes_cli import kanban_spend_decision as decision
 
 
+# The only reasons a worker may stop a scope (``reason='scope_stopped'``): the release mandate's list
+# (``kanban_release.MANDATE``) plus a stop a human, the owning chat or the creator ordered, and a restriction the
+# board itself reports. A finding, a design change, review CHANGES, red or pending CI and a sandbox refusal are
+# none of these: on 2026-11-24/25 they were 15 of 82 scope stops and a main cause of re-stops after a release.
+# The category travels in the summary (``[stop_on=...] ``) so stops can be counted by it: the Board's retain
+# payload has no field for it. [daveey]
+STOP_ON = {
+    'provider_safety_refusal': 'a provider safety refusal on this work',
+    'needs_david_physically': 'the next step needs David physically (a device in hand, a login only he can do)',
+    'same_error_three_times': 'the same error three times',
+    'run_budget': "the card's run budget is used up",
+    'owner_instruction': ('a human told this card to stop or hand off, or the owning chat or the creator did in a '
+                          'comment after the newest release'),
+    'card_safety_exclusion': 'the next step would cross a safety exclusion written in the card body',
+    'execution_restricted': 'the board reports a safety, containment or unreleased hold on this card',
+}
+NOT_A_STOP = ("Findings, design changes, review CHANGES, red or pending CI and sandbox refusals are work inside the "
+              "round, not stops: fix and continue, or park the wait with kanban_continue or kanban_schedule. "
+              "Agent-written stop rules older than the newest release mandate and earlier runs' stop reasons do "
+              "not count; safety exclusions in the card body and a human's stop instructions do. If the "
+              "acceptance is met, call kanban_complete (or kanban_request_review) instead.")
+_SUMMARY_MAX = 2000
+
+
+def tool_args(args: dict) -> dict:
+    """The ``kanban_retain`` tool's arguments as :func:`retain` takes them, or ValueError. A scope stop must name
+    an allowed ``stop_on``, folded into the summary as ``[stop_on=<category>] ``; other reasons may not carry
+    one. Deterministic, so an identical retry yields the identical frozen request."""
+    args = dict(args)
+    stop_on = args.pop('stop_on', None)
+    if args.get('reason') != 'scope_stopped':
+        if stop_on is not None:
+            raise ValueError("stop_on is only for reason='scope_stopped'")
+        return args
+    if stop_on not in STOP_ON:
+        raise ValueError('A scope stop needs stop_on, one of: ' + ', '.join(STOP_ON) + '. ' + NOT_A_STOP)
+    summary = args.get('summary')
+    if isinstance(summary, str) and summary.strip():
+        tag = f'[stop_on={stop_on}] '
+        tagged = tag + summary.strip().removeprefix(tag.strip()).strip()  # a self-tagged summary is tagged once
+        if len(tagged) > _SUMMARY_MAX:
+            raise ValueError(f'the summary plus its [stop_on=...] tag exceeds {_SUMMARY_MAX} characters; shorten it')
+        args['summary'] = tagged
+    return args
+
+
 def payload(args: dict) -> dict:
     allowed = {'summary', 'reason', 'next_step', 'release_condition', 'evidence', 'needs'}
     if set(args) - allowed or args.get('reason') not in {'scope_stopped', 'decision_pending', 'capability_unavailable'}:

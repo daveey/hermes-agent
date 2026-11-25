@@ -51,6 +51,18 @@ def _command(value, op, wire):
         k in op and op[k] == v for k, v in expected.items())
 
 
+def _sent(args):
+    """What the tool sent for these call arguments (``kanban_retain.tool_args`` folds ``stop_on`` into the
+    summary); a call the tool refused, or one from before ``stop_on`` existed, is compared as written."""
+    from hermes_cli.kanban_retain import tool_args
+    if not isinstance(args, dict):
+        return args
+    try:
+        return tool_args(args)
+    except ValueError:
+        return args
+
+
 def _ordered(*messages):
     return all(a['id'] < b['id'] and a['timestamp'] < b['timestamp']
                for a, b in pairwise(messages))
@@ -94,7 +106,7 @@ def _messages(session, messages, request, run, op, wire):
                     args = _json(fn['arguments'])
                     call_id = entry.get('id')
                     if (call_id and entry.get('call_id', call_id) == call_id
-                            and args == {k: v for k, v in wire['payload'].items() if k != 'version'}):
+                            and _sent(args) == {k: v for k, v in wire['payload'].items() if k != 'version'}):
                         calls.append((message, call_id))
         if message['role'] != 'tool':
             continue

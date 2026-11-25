@@ -49,7 +49,8 @@ MARK = "Released to finish this card's acceptance."
 _HUMAN_LIMITS = ("Narrower run counts, dollar caps and stop-on-finding conditions that agents wrote earlier are "
                  "superseded.")
 _AGENT_LIMITS = ("Narrower run counts, dollar caps and stop-on-finding conditions written by agents earlier are "
-                 "superseded. The card's budget after this release: {budget}.")
+                 "superseded. Stop conditions in a note below do not add to the stop list that follows. The "
+                 "card's budget after this release: {budget}.")
 # Events that can follow a recorded release without moving the card: only then is a triage card "still ours".
 _QUIET = frozenset({"commented", RELEASED, "spend_budget_set", "spend_budget_decision_ready", "scope_renewed",
                     "user_steps_answer", "card_answer_released", "stranded_park_escalated", "parent_held",
@@ -229,6 +230,23 @@ def _release_event(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
                        "LIMIT 1", (tid, RELEASED, stop["id"] if stop else 0)).fetchone()
     payload = _payload(row[1]) if row else {}
     return {**payload, "_id": row[0]} if payload.get("version") == 1 else None
+
+
+def current_mandate(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
+    """The release that governs the card's next run: the ``stop_released`` record newer than the card's newest
+    stop, with its mandate comment's ``body`` and local ``comment_id``; None when the newest stop is unreleased,
+    the card is execution-restricted (as ``kanban_scope_renewal.mandate``) or the comment is gone. Read by the
+    worker context (``kanban_db_context._ctx_release``)."""
+    from hermes_cli.kanban_scope_renewal import _comment
+    from hermes_cli.kanban_spend_decision import execution_restricted
+    record = _release_event(conn, tid)
+    if record is None or execution_restricted(conn, tid):
+        return None
+    ref = record.get("mandate_comment_uid") or record.get("mandate_comment_id")
+    comment = _comment(conn, tid, str(ref)) if ref not in (None, "") else None
+    if comment is None or not (comment.get("body") or "").strip():
+        return None
+    return {**record, "body": comment["body"], "comment_id": comment["id"]}
 
 
 def _untouched_since(conn: sqlite3.Connection, tid: str, record: dict) -> bool:

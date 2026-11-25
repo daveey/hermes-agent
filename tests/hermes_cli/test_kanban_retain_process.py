@@ -33,7 +33,7 @@ with scoped_current_session_id('fixture-retain-process'):
             'started_at':dispatch._process_fingerprint(os.getpid()),'claim_lock':context['claim_lock']}, run_id=context['run_id'])
     result = json.loads(registry.get_entry('kanban_retain').handler(dict(summary='Incomplete stopped scope',
         reason='scope_stopped', next_step='Administrative owner must resolve scope',
-        release_condition='Supported explicit authority', evidence=['synthetic rc0 proof'])))
+        release_condition='Supported explicit authority', evidence=['synthetic rc0 proof'], stop_on='owner_instruction')))
     assert result.get('terminal_for_run') is True, result
     _record_worker_result(context, 0, 'retained without acceptance completion')
     print(json.dumps(result))

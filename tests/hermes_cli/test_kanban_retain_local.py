@@ -24,7 +24,7 @@ def test_registered_retain_ends_exact_run_without_dependency_or_window_reset(boa
     before = budget._window_start(board, tid, 2999999999)
     handler = registry.get_entry('kanban_retain').handler
     with scoped_current_session_id(session):
-        result = json.loads(handler(ARGS))
+        result = json.loads(handler({**ARGS, 'stop_on': 'owner_instruction'}))  # a scope stop names its stop
     assert result['terminal_for_run'] is True and result['dependency_satisfied'] is False
     assert kb.get_task(board, tid).status == 'triage'
     assert board.execute('SELECT outcome FROM task_runs WHERE id=?', (rid,)).fetchone()[0] == 'retained'
@@ -33,7 +33,7 @@ def test_registered_retain_ends_exact_run_without_dependency_or_window_reset(boa
     assert session_called_kanban_terminal([{'role': 'tool', 'name': 'kanban_retain', 'content': json.dumps(result)}])
     assert not session_called_kanban_terminal([{'role': 'tool', 'name': 'kanban_retain', 'content': '{"ok":false}'}])
     with scoped_current_session_id(session):
-        replay = json.loads(handler(ARGS))
+        replay = json.loads(handler({**ARGS, 'stop_on': 'owner_instruction'}))
     assert replay['event_uid'] == result['event_uid']
     assert board.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='decision_retained'", (tid,)).fetchone()[0] == 1
 
