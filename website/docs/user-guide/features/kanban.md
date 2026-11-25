@@ -896,6 +896,20 @@ per card, never inferred from a title, and worker and `delegate_task` shells
 are fenced from the verb like every other board write, so a card cannot
 exempt itself.
 
+#### Unclaimed spend-stop watchdog
+
+A hub script-only cron can run `hermes kanban spend-stop-watch` every ten minutes
+(use `hermes kanban --board <slug> spend-stop-watch` for a specific board).
+This model-free check files one default-assignee card for each home triage stop
+strictly older than 30 minutes with no spend-review state and no episode decision
+route. It never releases the stopped work itself. Watchdog and spend-decision
+cards are excluded. A durable receipt on the stopped card prevents another filing
+for that episode even after the watchdog card is done or archived; a later stop
+gets its own receipt. Admission refusals remain retryable without a receipt.
+The command exits 0 silently when nothing is filed; otherwise it prints
+`filed <new id> for <task id> stop <episode>` per card. Installing the cron is an
+operator deployment step, not a side effect of invoking the command.
+
 #### Workers and systemd cgroups
 
 Workers are fire-and-forget processes that outlive the dispatcher tick, so

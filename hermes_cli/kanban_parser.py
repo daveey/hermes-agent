@@ -707,6 +707,7 @@ _SPECS = [
             "renewal, a spend budget of spent + N runs and the promotion (a card with an open parent waits in "
             "todo). For a human operator, the card's owning chat or a delegate chat; worker shells are fenced. "
             "Safety and containment holds are refused"),
+    _cmd("spend-stop-watch", [], help="File once for each spend stop older than 30 minutes with no review or route"),
     _cmd("spend-budget", [
         _TASK_ID,
         _arg("--seen", dest="seen_comment_id", type=int, help="Newest decision comment read; refuse replacing an unread spend-stop budget decision."),

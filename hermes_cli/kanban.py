@@ -1837,6 +1837,7 @@ _HANDLERS = {
     "owner-chats": lambda a: importlib.import_module("hermes_cli.kanban_owner_chat").command(a),
     "delegate": lambda a: importlib.import_module("hermes_cli.kanban_scope_delegate").command(a),
     "release": lambda a: importlib.import_module("hermes_cli.kanban_release").command(a),
+    "spend-stop-watch": lambda a: importlib.import_module("hermes_cli.kanban_spend_stop_watch").command(a),
     "governors": lambda a: importlib.import_module("hermes_cli.kanban_governors_cli").governors_command(a),
     "why": lambda a: importlib.import_module("hermes_cli.kanban_governors_cli").why_command(a),
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
