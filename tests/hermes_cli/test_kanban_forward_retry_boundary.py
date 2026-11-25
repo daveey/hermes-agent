@@ -71,3 +71,33 @@ def test_retry_reads_real_immutable_history(monkeypatch, tmp_path):
     assert kp._forward_binding_retry("original", {"idempotency_key": "product-key"}, "hub", "default", "s1", CREATOR, "run-2")
     assert not kp._forward_binding_retry("original", {"idempotency_key": "product-key"}, "hub", "default", "s1", CREATOR, "run-1")
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("case", ["sql-null", "json-null", "json-list", "missing-args", "list-args", "string-create"])
+def test_malformed_history_retains_original_transport_and_refusal(monkeypatch, case):
+    result, body = _history()
+    if case == "missing-args":
+        body.pop("args")
+    elif case == "list-args":
+        body["args"] = []
+    elif case == "string-create":
+        body["args"]["create"] = "invalid"
+    raw_result = {"sql-null": None, "json-null": "null", "json-list": "[]"}.get(case, json.dumps(result))
+    monkeypatch.setattr(kp, "_sent_row", lambda rid: ("rejected", raw_result, json.dumps(body)))
+    options = {"idempotency_key": "product-key"}
+    assert not kp._forward_binding_retry("original", options, "hub", "default", "s1", CREATOR, "run-2")
+    monkeypatch.setattr(kp, "hub_carries_options", lambda cli: True)
+    monkeypatch.setattr(kp, "remote_state", lambda rid: "rejected")
+    expected = kp.request_id("w", options, "s1", options)
+    sent = []
+
+    def refuse(argv):
+        sent.append(argv[argv.index("--id") + 1])
+        return 2, "", "request_id_conflict: unchanged immutable refusal"
+
+    monkeypatch.setattr(kp, "hub_runner", refuse)
+    out = kp.create_remote(options, target="hub", self_gw="w", origin_session="s1", origin_profile="default",
+                           cfg={}, origin_gateway="hub", creator=CREATOR, run_uid="run-2")
+    assert sent == [expected]
+    assert out == {"ok": False, "request_id": expected, "rc": 2, "fatal": True,
+                   "error": "request_id_conflict: unchanged immutable refusal"}

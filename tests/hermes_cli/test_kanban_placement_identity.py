@@ -187,10 +187,10 @@ def test_later_run_retry_after_terminal_forward_rejection_gets_own_transport_ide
         states.get(rid), json.dumps({"status": "rejected", "code": "origin_forward_binding_missing", "handoff_complete": False}),
         json.dumps({"coll": "sessions", "action": "origin-forward", "args": {
             "origin": {"gateway": "hub", "profile": "default", "session": "s1"},
-            "creator": creator, "run_uid": stored[rid][0], "create": {"idempotency_key": "product-key"}}})))
+            "creator": creator, "run_uid": stored[rid][0], "create": {"idempotency_key": json.loads(stored[rid][1][0].split("=", 1)[1])}}})))
     creator = {"gateway": "w", "profile": "default", "board": "default", "task_id": "t_0123456789abcdef"}
-    call = lambda run: kp.create_remote(
-        {"title": "B3a", "idempotency_key": "product-key"}, target="hub", self_gw="w", origin_session="s1",
+    call = lambda run, key="product-key": kp.create_remote(
+        {"title": "B3a", "idempotency_key": key}, target="hub", self_gw="w", origin_session="s1",
         origin_profile="default", cfg={}, origin_gateway="hub", creator=creator, run_uid=run)
     first = call("run-1")
     assert first["ok"]
@@ -198,9 +198,19 @@ def test_later_run_retry_after_terminal_forward_rejection_gets_own_transport_ide
     states[first["request_id"]] = "rejected"
     second = call("run-2")
     assert second["ok"] and second["request_id"] != first["request_id"]
+    assert second["retry"] is False  # the rotated transport has not been sent before
+    states[second["request_id"]] = "sent"
+    assert call("run-2")["retry"] is True
     assert call("run-2")["request_id"] == second["request_id"]  # exact retries in that run stay stable
     third = call("run-3")
     assert third["ok"] and third["request_id"] not in (first["request_id"], second["request_id"])
     assert call("run-3")["request_id"] == third["request_id"]
     for retry in (second, third):
         assert ["idempotency_key=" + json.dumps("product-key")] == stored[retry["request_id"]][1]
+    other_first = call("run-1", "other-product-key")
+    assert other_first["ok"]
+    states[other_first["request_id"]] = "rejected"
+    other_second = call("run-2", "other-product-key")
+    assert other_second["ok"] and other_second["retry"] is False
+    assert len({first["request_id"], second["request_id"], other_first["request_id"], other_second["request_id"]}) == 4
+    assert stored[other_second["request_id"]][1] == ['idempotency_key="other-product-key"']
