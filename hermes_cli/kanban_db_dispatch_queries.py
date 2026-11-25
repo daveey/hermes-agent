@@ -39,6 +39,8 @@ def lane_rows(conn: sqlite3.Connection, status: str, *, marked_first: bool = Fal
     ).fetchall()
     from hermes_cli.kanban_containment_connections import drop_held
     from hermes_cli.kanban_governors import dropped  # the rows each filter removes are charged to its governor
+    from hermes_cli.kanban_home_transfer import frozen
+    rows = [row for row in rows if not frozen(conn, row["id"])]
     rows = dropped(rows, drop_held(conn, rows), "containment")
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     from hermes_cli.kanban_lanes import drop_paused

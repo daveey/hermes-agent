@@ -581,8 +581,11 @@ def _daily_limit_reason(conn, pol: Policy, lane_name: str, opts: dict) -> Option
 def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -> bool:
     """Release a gate-held card to ``ready`` (``todo`` while a parent is open). False when it is not held."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_home_transfer import frozen
 
     with kb.write_txn(conn, allow_nested=True):
+        if frozen(conn, task_id):
+            return False
         row = conn.execute(f"SELECT tenant FROM tasks WHERE id = ? AND {HELD}", (task_id,)).fetchone()
         if row is None:
             return False

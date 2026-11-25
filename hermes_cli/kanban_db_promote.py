@@ -7,6 +7,9 @@ from typing import Callable, Optional
 
 def _promotion_status(conn: sqlite3.Connection, task_id: str, *, admission=None) -> tuple[Optional[str], Optional[str]]:
     from hermes_cli.kanban_spend_decision import execution_refusal, pending
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        return None, "home transfer owns this card; promotion deferred"
     if admission is None:
         refusal = execution_refusal(conn, task_id)
     else:

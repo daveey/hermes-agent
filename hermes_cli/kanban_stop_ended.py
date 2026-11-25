@@ -107,6 +107,9 @@ def _eligible(conn, state, snap):
                     (snap['task_id'], *CONFLICTING)).fetchone():
         raise StopRefused('stop_ended_conflicting_hold', 'existing stop custody is kept, never merged or replaced')
     from hermes_cli.kanban_containment_guard import pending
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, snap['task_id']):
+        raise StopRefused('stop_ended_conflicting_hold', 'home transfer owns this card')
     if pending(conn, snap['task_id']):
         raise StopRefused('stop_ended_conflicting_hold', 'pending containment transport owns this card')
 

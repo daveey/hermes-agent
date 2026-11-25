@@ -227,9 +227,14 @@ def resume_local(conn: sqlite3.Connection, *, target: dict, episode: str, actor_
     """
     from hermes_cli import kanban_db as kb
     target = identity(target)
+    from hermes_cli.kanban_home_transfer import frozen as home_frozen
+    if home_frozen(conn, target["task_id"]):
+        raise ContainmentRefused("home transfer owns this card; containment resume deferred")
     install_local(conn)
     tid = target["task_id"]
     with kb.write_txn(conn):
+        if home_frozen(conn, tid):
+            raise ContainmentRefused("home transfer owns this card; containment resume deferred")
         _local(conn)
         _actor(conn, actor_task, actor_run_uid)
         events = _events(conn, tid)

@@ -89,6 +89,9 @@ def _probe(conn, task_id, verdict, actor):
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli.kanban_quota_episode import _outstanding, episode
     from hermes_cli.kanban_wake_check import foreign_copy
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        raise ReleaseRefused("home transfer owns this card; quota probe deferred")
     state = episode(conn, task_id) if kb.get_task(conn, task_id) and not foreign_copy(conn, task_id) else None
     if not state:
         return None
@@ -97,6 +100,8 @@ def _probe(conn, task_id, verdict, actor):
     if found and all(v["state"] == "headroom" for v in found.values()):
         return found
     with write_txn(conn):
+        if frozen(conn, task_id):
+            raise ReleaseRefused("home transfer owns this card; quota probe deferred")
         kb._append_event(conn, task_id, REFUSED_KIND, {
             "actor": actor, "run_id": state["run_id"], "episode_id": state["episode_id"],
             "until": max(wall["until"] for wall in held), "verdicts": found}, run_id=state["run_id"])
@@ -133,9 +138,14 @@ def release(conn, task_id: str, *, reason: str, actor: str, probe=None) -> dict:
     marker = worker_lineage()
     if marker:
         raise ReleaseRefused(f"operator-only: refused under worker lineage ({marker})")
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        raise ReleaseRefused("home transfer owns this card; quota release deferred")
     verdicts = _probe(conn, task_id, probe, actor) if probe is not None else None
     reason = (reason or "").strip() or "operator release"
     with write_txn(conn):
+        if frozen(conn, task_id):
+            raise ReleaseRefused("home transfer owns this card; quota release deferred")
         task = kb.get_task(conn, task_id)
         if task is None:
             raise ReleaseRefused(f"unknown task {task_id}")

@@ -389,6 +389,7 @@ def sweep_agent_owned_blocks(conn: sqlite3.Connection, *, now: Optional[int] = N
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db import _json_dict
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli.kanban_home_transfer import frozen
 
     # Pending writes can retain a worker's copy after its run ends. Execution
     # transitions belong to that worker; maintenance belongs to the creator.
@@ -401,7 +402,7 @@ def sweep_agent_owned_blocks(conn: sqlite3.Connection, *, now: Optional[int] = N
     ).fetchall()
     for row in rows:
         tid = row["id"]
-        if tid in copies:
+        if tid in copies or frozen(conn, tid):
             continue
         ev = conn.execute(
             "SELECT id, payload, created_at FROM task_events WHERE task_id = ? "
@@ -423,6 +424,8 @@ def sweep_agent_owned_blocks(conn: sqlite3.Connection, *, now: Optional[int] = N
                     "gone; then finish, schedule with a wake_check, route as assignment, or give a "
                     "real human_request.")
         with kb.write_txn(conn):
+            if frozen(conn, tid):
+                continue
             changed = conn.execute(
                 "UPDATE tasks SET status = 'triage', block_kind = 'transient' "
                 "WHERE id = ? AND status = 'blocked' AND human_request IS NULL", (tid,)).rowcount
@@ -528,6 +531,7 @@ def sweep_standing_asks(conn: sqlite3.Connection) -> list[str]:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db import _json_dict
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli.kanban_home_transfer import frozen
 
     # Retaining a foreign copy for its host-local ask probe does not grant policy
     # authority: event-id dedup is local, so only the card's home may recheck it.
@@ -538,7 +542,7 @@ def sweep_standing_asks(conn: sqlite3.Connection) -> list[str]:
         "AND current_run_id IS NULL").fetchall()
     for row in rows:
         tid = row["id"]
-        if tid in copies:
+        if tid in copies or frozen(conn, tid):
             continue
         request = _json_dict(row["human_request"])
         if not request:
@@ -559,6 +563,8 @@ def sweep_standing_asks(conn: sqlite3.Connection) -> list[str]:
                for _, p in prior):
             continue
         with kb.write_txn(conn):
+            if frozen(conn, tid):
+                continue
             changed = conn.execute(
                 "UPDATE tasks SET status = 'triage', block_kind = 'transient', human_request = NULL "
                 "WHERE id = ? AND status = 'blocked' AND human_request IS NOT NULL AND current_run_id IS NULL",

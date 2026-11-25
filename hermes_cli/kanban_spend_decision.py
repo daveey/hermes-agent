@@ -31,6 +31,9 @@ def _notice_repair(conn, task_id: str) -> bool:
     """Read-only need check; never authorizes a repair outside its transaction."""
     from hermes_cli.kanban_hold_effective import current, previous
     from hermes_cli.kanban_hold_notices import destinations
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        return False
     hold = current(conn, task_id)
     if hold is None:
         return False

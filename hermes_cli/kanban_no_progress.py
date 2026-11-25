@@ -325,13 +325,16 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
     from hermes_cli.kanban_wake_check import foreign_copy
 
     lim = limit() if budget is None else int(budget)
-    if foreign_copy(conn, task_id):
+    from hermes_cli.kanban_home_transfer import frozen
+    if foreign_copy(conn, task_id) or frozen(conn, task_id):
         return None  # a worker-node copy: its home board owns the decision
     now = int(time.time()) if now is None else int(now)
     if decide(conn, task_id, budget=lim, as_of=now + 1) is None:
         return None  # cheap read on every tick; the write lock is taken only for a card over budget
     with kb.write_txn(conn):
         # Decide again under the lock, with a cutoff taken now: progress recorded since the read above must win.
+        if frozen(conn, task_id):
+            return None
         now = max(now, int(time.time()))
         verdict = decide(conn, task_id, budget=lim, as_of=now + 1)
         if verdict is None:

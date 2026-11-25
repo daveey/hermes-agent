@@ -278,7 +278,10 @@ def renew_local(conn: sqlite3.Connection, task_id: str, *, episode: str, comment
                 actor: Actor) -> dict:
     """Validate and append in one write transaction on a board with no canonical Board. Status is untouched."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_home_transfer import frozen
     with kb.write_txn(conn):
+        if frozen(conn, task_id):
+            raise RenewalRefused("home_transfer", "home transfer owns this card; renewal deferred")
         payload = prepare(conn, task_id, episode=episode, comment_id=comment_id, reason=reason, actor=actor)
         kb._append_event(conn, task_id, EVENT, payload)
     return payload

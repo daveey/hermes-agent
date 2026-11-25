@@ -68,6 +68,7 @@ def release_due(conn, *, foreign=()):
     """
     from hermes_cli import kanban_lanes as lanes
     from hermes_cli import kanban_containment_connections as containment
+    from hermes_cli.kanban_home_transfer import frozen
 
     pol = lanes.enforced()
     if pol is None:
@@ -75,7 +76,7 @@ def release_due(conn, *, foreign=()):
     count = 0
     for row in conn.execute(f"SELECT * FROM tasks WHERE {lanes.HELD} ORDER BY created_at, id").fetchall():
         tid = row["id"]
-        if tid in foreign or containment.held(conn, tid):
+        if tid in foreign or frozen(conn, tid) or containment.held(conn, tid):
             continue
         event = conn.execute(
             "SELECT payload FROM task_events WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",

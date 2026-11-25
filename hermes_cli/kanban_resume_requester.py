@@ -147,6 +147,7 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_resume_exec as rx
     from hermes_cli.kanban_wake_check import foreign_ids, own_gateway
+    from hermes_cli.kanban_home_transfer import frozen
 
     # A worker-node copy observes the same park with a different local event id.
     # Only the home owns recovery; local idempotency cannot arbitrate across replicas.
@@ -158,7 +159,7 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
     made: list[str] = []
     for row in _candidates(conn):
         target = row["id"]
-        if target in copies or row["created_by"] == CREATED_BY or rx.exhaustion_refusal(conn, target):
+        if target in copies or frozen(conn, target) or row["created_by"] == CREATED_BY or rx.exhaustion_refusal(conn, target):
             continue
         park_id = rx._park_event_id(conn, target)
         if _event_for_park(conn, target, park_id) or len(rx._resume_events(conn, target)) >= rx.MAX_RESUMES:
@@ -174,26 +175,28 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
                 continue
             from hermes_cli.kanban_model_neutral import routing_view
             route = routing_view(task)
-            rec = kb.create_task(
-                conn, title=f"Recover {target}: {'goal unachievable' if goal else 'continuation budget exhausted'}"[:200],
-                body=(_goal_body if goal else _body)(target, row["title"] or "", park_id), assignee=assignee,
-                model_override=route.model_override, provider_override=route.provider_override,
-                requires=['terminal', 'file', 'kanban'] if goal else None,
-                created_by=CREATED_BY, workspace_kind="scratch", tenant=row["tenant"],
-                idempotency_key=_key(target, history.park_identity(conn, target) or park_id),
-                creator_task_id=target, runs_on=runs_on,
-            )
+            with kb.write_txn(conn):
+                if frozen(conn, target):
+                    continue
+                rec = kb.create_task(
+                    conn, title=f"Recover {target}: {'goal unachievable' if goal else 'continuation budget exhausted'}"[:200],
+                    body=(_goal_body if goal else _body)(target, row["title"] or "", park_id), assignee=assignee,
+                    model_override=route.model_override, provider_override=route.provider_override,
+                    requires=['terminal', 'file', 'kanban'] if goal else None,
+                    created_by=CREATED_BY, workspace_kind="scratch", tenant=row["tenant"],
+                    idempotency_key=_key(target, history.park_identity(conn, target) or park_id),
+                    creator_task_id=target, runs_on=runs_on,
+                )
+                payload = {"recovery_task_id": rec, "park_event_id": park_id}
+                park_uid = _park_uid(conn, target, park_id)
+                if park_uid:
+                    payload["park_event_uid"] = park_uid
+                    identity = history.park_identity(conn, target)
+                    if identity:
+                        payload["park_identity"] = identity
+                kb._append_event(conn, target, EVENT, payload)
         except (sqlite3.Error, ValueError):
             logger.exception("kanban: recovery card for %s failed", target)
             continue
-        payload = {"recovery_task_id": rec, "park_event_id": park_id}
-        park_uid = _park_uid(conn, target, park_id)
-        if park_uid:
-            payload["park_event_uid"] = park_uid
-            identity = history.park_identity(conn, target)
-            if identity:
-                payload["park_identity"] = identity
-        with kb.write_txn(conn):
-            kb._append_event(conn, target, EVENT, payload)
         made.append(rec)
     return made

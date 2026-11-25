@@ -428,12 +428,15 @@ def _eligible(conn: sqlite3.Connection, tid: str) -> tuple[str, Optional[dict], 
     from hermes_cli import kanban_spend_decision as ksd
     from hermes_cli.kanban_containment_guard import pending as contained
     from hermes_cli.kanban_refusal_receipt import restricted as safety_restricted
+    from hermes_cli.kanban_home_transfer import frozen
     row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
     if row is None:
         raise _Refusal("no_such_task", f"no card {tid} on this board; release it on its home gateway")
     status = row[0]
     if safety_restricted(conn, tid):
         raise _Refusal("safety_restricted", ksd.execution_refusal(conn, tid) or "Provider safety restriction retained")
+    if frozen(conn, tid):
+        raise _Refusal("home_transfer", "home transfer owns this card; release deferred")
     if contained(conn, tid):
         raise _Refusal("containment_hold", CONTAINMENT)
     recorded = _release_event(conn, tid)
@@ -762,6 +765,9 @@ def _decide(conn: sqlite3.Connection, s) -> str:
 
     def decided(c: sqlite3.Connection) -> Optional[str]:
         """Inside the deciding transaction: the fences once more, then the durable record."""
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(c, s.tid):
+            return "home transfer owns this card; release deferred"
         if s.precondition and (why := s.precondition(c)):
             stale.append(str(why))
             return str(why)

@@ -168,8 +168,9 @@ def eligible(conn: sqlite3.Connection, task_id: str, episode: str, cfg: Optional
     from hermes_cli.kanban_refusal_receipt import restricted
     from hermes_cli.kanban_wake_check import foreign_copy
     from hermes_cli import kanban_spend_caused_review as caused
+    from hermes_cli.kanban_home_transfer import frozen
     enabled, max_grants = cfg or settings()
-    if not enabled or state(conn, task_id, episode) is not None or foreign_copy(conn, task_id):
+    if not enabled or frozen(conn, task_id) or state(conn, task_id, episode) is not None or foreign_copy(conn, task_id):
         return False
     if restricted(conn, task_id) or _disposed(conn, task_id, episode):
         return False
@@ -268,16 +269,18 @@ def _episode_or_none(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 
 def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]:
     from hermes_cli import kanban_spend_review_request as journal
+    from hermes_cli.kanban_home_transfer import frozen as home_frozen
     # Only requests whose review is not known to have ended: the journal keeps every request for good, so
     # reading all of it here would grow each dispatcher tick with history.
     frozen = set(journal.open_keys(conn))
     rows = conn.execute("SELECT DISTINCT e.task_id FROM task_events e JOIN tasks t ON t.id = e.task_id "
                         "WHERE e.kind = ? AND t.status = 'triage'", (QUEUED,)).fetchall()
-    candidates = {(task_id, _episode_or_none(conn, task_id)) for (task_id,) in rows if task_id not in skip}
+    candidates = {(task_id, _episode_or_none(conn, task_id)) for (task_id,) in rows
+                  if task_id not in skip and not home_frozen(conn, task_id)}
     candidates.update(frozen)
     due, ended = [], []
     for task_id, episode in sorted(candidates, key=str):
-        if task_id in skip or episode is None:
+        if task_id in skip or home_frozen(conn, task_id) or episode is None:
             continue
         try:
             from hermes_cli import kanban_spend_caused_review as caused
@@ -312,6 +315,7 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     """Queue the backlog and start every due review this process has room for. Returns started task ids."""
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_spend_review_request as journal
+    from hermes_cli.kanban_home_transfer import frozen
     cfg = settings()
     if not cfg[0]:
         return []
@@ -368,6 +372,10 @@ def _start_reserved(conn, db: str, task_id: str, episode: str, attempts: int, no
 
     try:
         with kb.write_txn(conn):
+            if frozen(conn, task_id):
+                with _LOCK:
+                    _INFLIGHT.discard((db, task_id))
+                continue
             kb._append_event(conn, task_id, STARTED, {"episode": episode, "attempt": attempts + 1,
                                                       "deadline": now + LEASE_SECONDS})
         thread = threading.Thread(target=contextvars.copy_context().run, args=(target,),
@@ -545,6 +553,9 @@ def check_grant(verdict: dict, ctx: dict) -> tuple[Optional[int], str]:
 
 def review(conn: sqlite3.Connection, task_id: str, episode: str) -> str:
     """Judge one stop and apply the verdict. Returns ``granted``, ``escalated`` or ``moot``."""
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        return "moot"
     from hermes_cli import kanban_spend_review_request as journal
     if journal.get(conn, task_id, episode):
         from hermes_cli.kanban_spend_caused_review import review as reconcile
@@ -595,6 +606,9 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
     from hermes_cli.kanban_continuation import HUMAN_BLOCK_KINDS
     from hermes_cli.kanban_sync_divergence import _event_order
     from hermes_cli.kanban_wake_check import foreign_copy
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        return "home transfer owns this card; spend grant deferred"
     row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
     try:
         stop = decision.strict_episode(conn, task_id)
@@ -691,7 +705,8 @@ def escalate(conn: sqlite3.Connection, task_id: str, episode: str, reason: str, 
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_spend_decision as decision
     with kb.write_txn(conn):
-        if _current_episode(conn, task_id) != episode or state(conn, task_id, episode) not in (QUEUED, STARTED):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(conn, task_id) or _current_episode(conn, task_id) != episode or state(conn, task_id, episode) not in (QUEUED, STARTED):
             return "moot"
         kb._append_event(conn, task_id, ESCALATED, {"episode": episode, "reason": _clip(reason, 600),
                                                     "recommendation": _clip(recommendation, 600)})

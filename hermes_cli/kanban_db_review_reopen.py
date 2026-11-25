@@ -16,8 +16,11 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
     Preserves ``consecutive_failures`` and the block loop counter (review is
     not a block; only :func:`complete_task` clears them)."""
     from hermes_cli import kanban_db as _kb
+    from hermes_cli.kanban_home_transfer import frozen
     now = int(time.time())
     with _kb.write_txn(conn):
+        if frozen(conn, task_id):
+            return False
         task = _kb.get_task(conn, task_id)
         if task is None or task.status != "review":
             return False

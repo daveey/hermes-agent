@@ -106,10 +106,15 @@ def release(conn, task_id, *, supervisor, supervisor_board, precondition):
     from hermes_cli.kanban_db_dispatch import check_respawn_guard
     from hermes_cli.kanban_wake_check import foreign_copy
 
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        raise ValueError("home transfer owns this card; hold release deferred")
     tip = _event_tip(conn, task_id)
     if check_respawn_guard(conn, task_id) != "active_pr":
         raise ValueError("hold release requires active_pr hold")
     with write_txn(conn):
+        if frozen(conn, task_id):
+            raise ValueError("home transfer owns this card; hold release deferred")
         error = precondition(conn)
         if error:
             raise ValueError(error)

@@ -17,6 +17,10 @@ def hold(conn, task_id, result, *, lane, dry_run):
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_model_tier import load_tier_config
+    from hermes_cli.kanban_home_transfer import frozen
+
+    if frozen(conn, task_id):
+        return True
 
     try:
         task = kb.get_task(conn, task_id)
@@ -41,6 +45,8 @@ def hold(conn, task_id, result, *, lane, dry_run):
     result.respawn_guarded.append((task_id, REASON))
     if not dry_run:
         with kb.write_txn(conn):
+            if frozen(conn, task_id):
+                return True
             seen = [kb._json_dict(r[0]) for r in conn.execute(
                 "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (task_id, EVENT))]
             if payload not in seen:
@@ -53,12 +59,15 @@ def record_refusal(conn, task_id, exc, result, *, lane):
     import time
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_wake_check import foreign_copy
+    from hermes_cli.kanban_home_transfer import frozen
 
-    if lane not in ('ready', 'review') or foreign_copy(conn, task_id):
+    if lane not in ('ready', 'review') or foreign_copy(conn, task_id) or frozen(conn, task_id):
         return  # never end a running source; its owner/finalizer retains custody
     now = int(time.time())
     error = str(exc)[:500]
     with kb.write_txn(conn):
+        if frozen(conn, task_id):
+            return
         task = kb.get_task(conn, task_id)
         if task is None or task.status != lane or task.claim_lock or foreign_copy(conn, task_id):
             return

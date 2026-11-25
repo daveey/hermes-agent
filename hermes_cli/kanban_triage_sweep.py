@@ -79,6 +79,15 @@ def triage_reasons(conn: sqlite3.Connection, task_id: str, limit: int = 3) -> li
 
 
 def _cap(conn: sqlite3.Connection, row, now: int) -> str:
+    """Fence the source and child publication in the same writer transaction."""
+    from hermes_cli.kanban_home_transfer import frozen
+    with _kb.write_txn(conn):
+        if frozen(conn, row["id"]):
+            return ""
+        return _publish_cap(conn, row, now)
+
+
+def _publish_cap(conn: sqlite3.Connection, row, now: int) -> str:
     """Leave the card in triage and give it a producer: one board-supervisor card per card per day,
     named by a ``triage_sweep_capped`` event and a comment. Returns the supervisor card id."""
     tid = row["id"]
@@ -99,7 +108,7 @@ def _cap(conn: sqlite3.Connection, row, now: int) -> str:
         assignee=_supervisor_profile(), created_by="triage-sweep", workspace_kind="scratch",
         idempotency_key=f"triage-sweep-cap:{tid}:{day}", tenant=row["tenant"],
     )
-    with _kb.write_txn(conn):
+    with _kb.write_txn(conn, allow_nested=True):
         _kb._append_event(conn, tid, "triage_sweep_capped", {
             "supervisor_task_id": sup_id, "cap": TRIAGE_SWEEP_CAP, "window": TRIAGE_SWEEP_CAP_WINDOW,
             "reasons": reasons,
@@ -202,8 +211,9 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
     from hermes_cli.kanban_wake_check import foreign_ids
 
     skipped = foreign_ids(conn) if skip is None else skip
+    from hermes_cli.kanban_home_transfer import frozen
     stranded = [card for card in stranded_contained(conn, now=now)
-                if card["id"] not in skipped and not conn.execute(
+                if card["id"] not in skipped and not frozen(conn, card["id"]) and not conn.execute(
                     "SELECT 1 FROM tasks WHERE idempotency_key = ?",
                     (f"containment-strand:{card['id']}:{card['episode']}",)).fetchone()]
     if not stranded:
@@ -234,14 +244,17 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
             f"close it. Record what you did as a comment on {tid}."
         )
         try:
-            sup_id = _kb.create_task(
-                conn, title=forwarded_title(f"Contained card stranded: {card['title']}"[:200],
-                                            f"Contained card stranded: {tid}"), body=body,
-                assignee=_supervisor_profile(), created_by="triage-sweep", workspace_kind="scratch",
-                idempotency_key=key, tenant=card["tenant"])
-            _kb.add_comment(conn, tid, "triage-sweep",
-                            f"Containment episode {episode} is stranded (authority {shown['authority']['id']} is "
-                            f"{shown['authority']['status']}) and no chat owns this card. Supervisor card {sup_id} owns it.")
+            with _kb.write_txn(conn):
+                if frozen(conn, tid):
+                    continue
+                sup_id = _kb.create_task(
+                    conn, title=forwarded_title(f"Contained card stranded: {card['title']}"[:200],
+                                                f"Contained card stranded: {tid}"), body=body,
+                    assignee=_supervisor_profile(), created_by="triage-sweep", workspace_kind="scratch",
+                    idempotency_key=key, tenant=card["tenant"])
+                _kb.add_comment(conn, tid, "triage-sweep",
+                                f"Containment episode {episode} is stranded (authority {shown['authority']['id']} is "
+                                f"{shown['authority']['status']}) and no chat owns this card. Supervisor card {sup_id} owns it.")
             created.append(sup_id)
         except Exception:
             logger.exception("kanban: containment strand escalation failed for %s", tid)
@@ -263,7 +276,8 @@ def awaiting_stale_sweep(conn: sqlite3.Connection, task_id: str) -> bool:
     from hermes_cli.kanban_goal_recovery import current_park
     from hermes_cli.kanban_resume_requester import open_recovery_card
     from hermes_cli.kanban_spend_decision import pending as spend_decision_pending
-    return not (spend_decision_pending(conn, task_id) or containment_held(conn, task_id)
+    from hermes_cli.kanban_home_transfer import frozen
+    return not (frozen(conn, task_id) or spend_decision_pending(conn, task_id) or containment_held(conn, task_id)
                 or open_recovery_card(conn, task_id) or current_park(conn, task_id))
 
 
@@ -313,11 +327,12 @@ def sweep_stale_triage(
 
 
 def _sweep_stale_card(conn, row, copies, now, older_than, default_assignee, swept):
+    from hermes_cli.kanban_home_transfer import frozen
     from hermes_cli.kanban_spend_decision import pending as spend_decision_pending
     from hermes_cli.kanban_containment_connections import held as containment_held
     from hermes_cli.kanban_resume_requester import open_recovery_card
     from hermes_cli.kanban_goal_recovery import current_park
-    if row["id"] in copies or containment_held(conn, row["id"]):
+    if row["id"] in copies or frozen(conn, row["id"]) or containment_held(conn, row["id"]):
         return
     if spend_decision_pending(conn, row["id"]):
         return
@@ -341,7 +356,7 @@ def _sweep_stale_card(conn, row, copies, now, older_than, default_assignee, swep
     if _TRIAGE_BRIEF.strip() not in body:
         body += _TRIAGE_BRIEF
     with _kb.write_txn(conn):
-        if spend_decision_pending(conn, row["id"]) or containment_held(conn, row["id"]):
+        if frozen(conn, row["id"]) or spend_decision_pending(conn, row["id"]) or containment_held(conn, row["id"]):
             return
         cur = conn.execute(
             "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",

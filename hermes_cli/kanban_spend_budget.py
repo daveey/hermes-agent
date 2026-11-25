@@ -476,12 +476,15 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
     from hermes_cli.kanban_wake_check import foreign_copy
 
     from hermes_cli import kanban_spend_decision as decision
+    from hermes_cli.kanban_home_transfer import frozen
 
-    if foreign_copy(conn, task_id):
+    if foreign_copy(conn, task_id) or frozen(conn, task_id):
         return None  # a worker-node copy: its home board owns the decision
     now = int(time.time()) if now is None else int(now)
     if decision.pending(conn, task_id):
         with kb.write_txn(conn):
+            if frozen(conn, task_id):
+                return None
             if decision.pending(conn, task_id):
                 cur = conn.execute("UPDATE tasks SET status='triage' WHERE id=? AND status IN ('ready','review') "
                              "AND current_run_id IS NULL AND " + _UNCLAIMED, (task_id, now))
@@ -501,6 +504,8 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
     with kb.write_txn(conn):
         # Decide again under the lock, with a cutoff taken now: a hand-off or an override recorded since the read
         # above must win.
+        if frozen(conn, task_id):
+            return None
         now = max(now, int(time.time()))
         lim = card_limits(conn, task_id, board)
         override = _has_override(conn, task_id)

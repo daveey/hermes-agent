@@ -714,6 +714,7 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
     from hermes_cli import kanban_wake_check as kwc
     from hermes_cli.kanban_blocker_own_wait import probe_elsewhere
     from hermes_cli.kanban_blocker_rows import foreign_among
+    from hermes_cli.kanban_home_transfer import frozen
 
     # Retained executor copies own host-local wake probes, not shared-wall policy writes.
     states = blocker_states(conn, now=now, oldest_out=oldest_out)
@@ -724,7 +725,7 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
             continue
         by_task, by_run = st.cleared_by
         for tid, asserted in sorted(st.behind.items()):
-            if tid in foreign or asserted > st.cleared_at or tid == by_task:
+            if tid in foreign or frozen(conn, tid) or asserted > st.cleared_at or tid == by_task:
                 continue
             row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
             if row is None or row["status"] not in ("blocked", "scheduled", "ready", "review"):
@@ -743,6 +744,8 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
             if row["status"] in ("ready", "review") or own_wait:
                 # Retire the historical hold, not an independent park's probe/backstop.
                 with kb.write_txn(conn):
+                    if frozen(conn, tid):
+                        continue
                     kb._append_event(conn, tid, CLEARED_EVENT, payload)
                 continue
             # ``woke`` marks a real lane change for repark accounting (``kanban_awaiting.prior_same_premise``):
@@ -752,6 +755,8 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
                 if not kb.unblock_task(conn, tid):
                     continue
                 with kb.write_txn(conn):
+                    if frozen(conn, tid):
+                        continue
                     kb._append_event(conn, tid, CLEARED_EVENT, payload)
             else:
                 with kb.write_txn(conn):
@@ -761,6 +766,8 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
                    f"{by_task}'s wake_check exited 0" if st.cleared_via == CONDITION_MET_EVENT
                    else f"{by_task} run {by_run} ended without hitting it")
             with kb.write_txn(conn):
+                if frozen(conn, tid):
+                    continue
                 kb._insert_comment(
                     conn, tid, "dispatcher",
                     f"shared blocker `{st.blocker_id}` cleared: {how}, so this card was woken automatically.",

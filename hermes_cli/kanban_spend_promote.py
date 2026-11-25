@@ -101,6 +101,9 @@ def scope_refusal(conn: sqlite3.Connection, target: str, requester: Optional[str
     from hermes_cli import kanban_spend_decision as ksd
     from hermes_cli.kanban_continuation import HUMAN_BLOCK_KINDS
     from hermes_cli.kanban_operator_call import COMMENT_MARK
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, target):
+        return "home transfer owns this card; spend promotion deferred"
     if refusal := ksd.execution_refusal(conn, target):
         return refusal
     row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()

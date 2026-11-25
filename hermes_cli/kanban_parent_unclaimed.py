@@ -360,7 +360,8 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     from hermes_cli import kanban_host_counts as khc
     from hermes_cli import kanban_queue_position as kqp
     from hermes_cli import kanban_label_backlog as klb
-    if _already_posted(conn, task_id, waiting_on, wait_key, kind):
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id) or _already_posted(conn, task_id, waiting_on, wait_key, kind):
         return False  # before the queue place: every tick asks again for each long-ready card [daveey]
     place = _place(conn, waiting_on)
     extra = _host_hold_only_if_local(extra, place)
@@ -378,7 +379,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     pool_hint = "" if guard else _pool_sentence(place, observed["observed_at"])  # outside the queue clause (#1821)
     checkpoint = last_checkpoint.notice_fields(conn, waiting_on)  # same lookup supplies fields and evidence [daveey]
     with kb.write_txn(conn):
-        if _already_posted(conn, task_id, waiting_on, wait_key, kind):
+        if frozen(conn, task_id) or _already_posted(conn, task_id, waiting_on, wait_key, kind):
             return False
         still = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (waiting_on,)).fetchone()
         if still is None or still["status"] != "ready" or still["claim_lock"]:

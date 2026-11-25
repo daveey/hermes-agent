@@ -435,7 +435,10 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
 
     tid = row["id"]
     desk_chat = f"{desk[0].gateway}/{desk[0].profile}/{desk[0].session}" if desk is not None else None
+    from hermes_cli.kanban_home_transfer import frozen
     with kb.write_txn(conn):
+        if frozen(conn, tid):
+            return False
         fresh = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
         if fresh is None:
             return False
@@ -573,7 +576,10 @@ def _refile(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: 
     from hermes_cli.kanban_ask_resolved import store_request
     from hermes_cli.kanban_human_request import NONHUMAN_KINDS
     tid = row["id"]
+    from hermes_cli.kanban_home_transfer import frozen
     with kb.write_txn(conn):
+        if frozen(conn, tid):
+            return False
         fresh = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
         fresh = dict(fresh) if fresh is not None else None
         if (fresh is None or fresh["status"] not in PARKED or _leased(fresh, now)
@@ -636,6 +642,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
     from hermes_cli import kanban_containment_connections as containment
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli.kanban_home_transfer import frozen
 
     park_s, idle_s, desk_ref, interval, defer_s = settings(cfg)
     now = int(now if now is not None else time.time())
@@ -650,7 +657,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
     with Liveness(now=now, idle=idle_s) as liveness:
         for row in rows:
             tid = row["id"]
-            if tid in copies:
+            if tid in copies or frozen(conn, tid):
                 continue
             entry = park_entry(conn, tid)
             start = entry["created_at"] if entry else int(row.get("created_at") or 0)

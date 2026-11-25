@@ -37,13 +37,14 @@ def prepare(conn, failure_limit=None):
     """
     from hermes_cli.kanban_block_routing import recovery_held
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli.kanban_home_transfer import frozen
     limit = kb.DEFAULT_FAILURE_LIMIT if failure_limit is None else failure_limit
     copies = foreign_ids(conn)
     prepared = {}
     for row in conn.execute("SELECT id, status, consecutive_failures, max_retries FROM tasks "
                             "WHERE status IN ('todo','blocked')").fetchall():
         tid = row["id"]
-        if tid in copies or recovery_held(conn, row, limit) or kb.unsatisfied_parents(conn, tid):
+        if tid in copies or frozen(conn, tid) or recovery_held(conn, row, limit) or kb.unsatisfied_parents(conn, tid):
             continue
         try:
             _park(conn, tid)

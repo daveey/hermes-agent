@@ -60,6 +60,9 @@ def resume(conn, task_id: str, *, reason: str, actor: str) -> dict:
     marker = worker_lineage()
     if marker:
         raise ResumeRefused(f"operator-only: refused under worker lineage ({marker})")
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        raise ResumeRefused("home transfer owns this card; resume deferred")
     reason = (reason or "").strip()
     if not reason:
         raise ResumeRefused("resume requires --reason")
@@ -71,6 +74,8 @@ def resume(conn, task_id: str, *, reason: str, actor: str) -> dict:
     if guard != "active_pr" and not (guard is None and observed(conn, task_id)):
         raise ResumeRefused(f"resume requires an active_pr hold (guard: {guard or 'none'})")
     with write_txn(conn):
+        if frozen(conn, task_id):
+            raise ResumeRefused("home transfer owns this card; resume deferred")
         task = kb.get_task(conn, task_id)
         if (task is None or task.status != "ready" or task.current_run_id is not None
                 or task.claim_lock or task.claim_expires):

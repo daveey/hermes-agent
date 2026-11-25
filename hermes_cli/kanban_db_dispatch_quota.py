@@ -60,6 +60,9 @@ def clear_quota_error(conn: sqlite3.Connection, task_id: str, err: str) -> None:
     from hermes_cli import kanban_db as _kb
 
     with _kb.write_txn(conn, allow_nested=True):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(conn, task_id):
+            return
         cur = conn.execute(
             "UPDATE tasks SET last_failure_error = NULL WHERE id = ? AND last_failure_error = ?",
             (task_id, err),
@@ -92,6 +95,7 @@ def release_recovered_quota_blocks(conn: sqlite3.Connection) -> list[str]:
     # A retained executor copy may own a local probe, not this maintenance decision.
     # Only the card's home releases it; replica-local dedup cannot fence another gateway.
     copies = foreign_ids(conn)
+    from hermes_cli.kanban_home_transfer import frozen
     released: list[str] = []
     rows = conn.execute(
         "SELECT id FROM tasks WHERE status IN ('blocked', 'triage') "
@@ -99,7 +103,7 @@ def release_recovered_quota_blocks(conn: sqlite3.Connection) -> list[str]:
     ).fetchall()
     for row in rows:
         task_id = row["id"]
-        if task_id in copies:
+        if task_id in copies or frozen(conn, task_id):
             continue
         from hermes_cli.kanban_block_routing import latest_block_reason
 
