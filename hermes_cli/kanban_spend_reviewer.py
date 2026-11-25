@@ -58,7 +58,7 @@ TIMEOUT = 90
 LEASE_SECONDS = 300
 MAX_ATTEMPTS = 2
 MAX_CONCURRENT = 3
-BACKLOG_AFTER = 1800
+BACKLOG_AFTER = 300
 DEFAULT_MAX_GRANTS = 2
 QUOTE_MIN = 30
 _TEXT_MAX = 1500
@@ -68,8 +68,7 @@ _LOCK = threading.Lock()
 _THREADS: list = []
 
 
-def settings(cfg: Optional[dict] = None) -> tuple[bool, int]:
-    """``kanban.spend_review`` (default on) and ``kanban.spend_review_max_grants`` (default 2)."""
+def _config(cfg: Optional[dict]) -> dict:
     if cfg is None:
         try:
             from hermes_cli.config import load_config
@@ -78,6 +77,18 @@ def settings(cfg: Optional[dict] = None) -> tuple[bool, int]:
             logger.warning("kanban: spend reviewer could not read config; using defaults", exc_info=True)
             cfg = {}
     section = (cfg or {}).get("kanban") or {}
+    return section if isinstance(section, dict) else {}
+
+
+def review_after_seconds(cfg: Optional[dict] = None) -> int:
+    """Delay before reviewing an already-routed stop; invalid values use five minutes."""
+    raw = _config(cfg).get("spend_review_after_seconds", BACKLOG_AFTER)
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else BACKLOG_AFTER
+
+
+def settings(cfg: Optional[dict] = None) -> tuple[bool, int]:
+    """Reviewer enablement and consecutive-grant cap (keeps the existing caller contract)."""
+    section = _config(cfg)
     enabled = section.get("spend_review", True) is not False
     raw = section.get("spend_review_max_grants", DEFAULT_MAX_GRANTS)
     grants = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else DEFAULT_MAX_GRANTS
@@ -194,14 +205,15 @@ def queue_backlog(conn: sqlite3.Connection, *, now: int, cfg: tuple[bool, int],
     stop's own notice. Eligibility is read first, so an ineligible stop never takes the write lock."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_spend_decision import NOTICE
+    delay = review_after_seconds()
     rows = conn.execute("SELECT DISTINCT t.id FROM tasks t JOIN task_events e ON e.task_id = t.id "
                         "WHERE t.status = 'triage' AND e.kind = ? AND e.created_at <= ?",
-                        (NOTICE, now - BACKLOG_AFTER)).fetchall()
+                        (NOTICE, now - delay)).fetchall()
     queued = []
     for (task_id,) in rows:
         episode = None if task_id in skip else _current_episode(conn, task_id)
         noticed = _notice_at(conn, task_id, episode) if episode else None
-        if noticed is None or noticed > now - BACKLOG_AFTER or not eligible(conn, task_id, episode, cfg):
+        if noticed is None or noticed > now - delay or not eligible(conn, task_id, episode, cfg):
             continue
         with kb.write_txn(conn):
             if _current_episode(conn, task_id) == episode and queue(conn, task_id, episode, backlog=True, cfg=cfg):

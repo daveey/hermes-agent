@@ -747,7 +747,9 @@ decided. A grant promotes the card into a fresh window of exactly N runs
 `promoted_manual`) and archives an open decision card for that stop. Anything
 else escalates (`spend_review_escalated` and a comment), and the stop is then
 routed to the creator chat or a decision card as before. A stop already routed
-there but undecided after 30 minutes gets the same single review. Scope and
+there but undecided after five minutes gets the same single review. The delay
+is configurable as `kanban.spend_review_after_seconds` (default 300; a nonnegative
+integer). New ordinary stops still queue immediately. Scope and
 safety stops are never reviewed; `kanban.spend_review: false` turns the
 reviewer off.
 
