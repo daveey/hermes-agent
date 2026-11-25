@@ -285,7 +285,7 @@ def _cached_status(cache_file: Path, identity: dict, now: float) -> Optional[dic
 def _write_cache(cache_file: Path, identity: dict, now: float, result: dict) -> None:
     try:
         from utils import atomic_json_write
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        # atomic_json_write creates parents without reviving a renamed/deleted profile.
         atomic_json_write(cache_file, {"identity": identity, "ts": now, "status": result})
     except OSError as exc:
         logger.debug("Could not cache source check: %s", exc)

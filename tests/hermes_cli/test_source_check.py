@@ -111,6 +111,42 @@ def installation(tmp_path, monkeypatch):
     thread.join()
 
 
+@pytest.mark.parametrize("retirement", ["rename", "delete"])
+def test_late_source_cache_write_does_not_recreate_a_retired_profile(tmp_path, monkeypatch, retirement):
+    from hermes_cli import source_check
+
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "gamma"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("{}")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    # The banner worker captured this path before its network check; retirement wins
+    # before the worker gets to publish. No timing or external request is needed.
+    cache_file = profile / "source-checks" / "status.json"
+    if retirement == "rename":
+        profile.rename(profile.with_name("delta"))
+    else:
+        shutil.rmtree(profile)
+    source_check._write_cache(cache_file, {"source": "fixture"}, 1.0, {"supported": True})
+    assert not profile.exists(), "late update-check cache recreated the retired profile"
+    if retirement == "rename":
+        assert (profile.with_name("delta") / "config.yaml").is_file()
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_source_cache_write_creates_cache_under_a_live_home(tmp_path, monkeypatch, named):
+    from hermes_cli import source_check
+
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / "gamma" if named else root
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    cache_file = home / "source-checks" / "status.json"
+    identity, status = {"source": "fixture"}, {"supported": True}
+    source_check._write_cache(cache_file, identity, 1.0, status)
+    assert json.loads(cache_file.read_text()) == {"identity": identity, "ts": 1.0, "status": status}
+
+
 def test_target_worktree_owns_admission_and_fork_comparison(installation, monkeypatch):
     from hermes_cli.source_check import check_for_updates
 
