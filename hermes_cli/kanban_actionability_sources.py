@@ -38,7 +38,13 @@ class Reader:
 
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
-        self.tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        # Fresh snapshot reads, not a schema-cookie cache: aggregate inside SQLite
+        # rather than hand the GIL back once per table/column on every card.
+        if getattr(conn, 'text_factory', None) is str:
+            self.tables = set(json.loads(conn.execute(
+                "SELECT json_group_array(name) FROM sqlite_master WHERE type='table'").fetchone()[0]))
+        else:
+            self.tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.schema = {}
         self.event_columns = self.columns('task_events')
         self.events_complete = {'task_id', 'kind', 'payload', 'created_at', 'id'} <= self.event_columns
@@ -56,7 +62,11 @@ class Reader:
 
     def columns(self, table: str) -> set[str]:
         if table not in self.schema:
-            self.schema[table] = {r[0] for r in self.conn.execute('SELECT name FROM pragma_table_info(?)', (table,))}
+            if getattr(self.conn, 'text_factory', None) is str:
+                from hermes_cli.kanban_table_columns import table_columns
+                self.schema[table] = set(table_columns(self.conn, table))
+            else:
+                self.schema[table] = {r[0] for r in self.conn.execute('SELECT name FROM pragma_table_info(?)', (table,))}
         return self.schema[table]
 
     def rows(self, sql: str, params=()) -> list[dict]:
