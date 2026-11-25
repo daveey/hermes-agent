@@ -59,6 +59,24 @@ def parsed_from(conn: sqlite3.Connection, real: str) -> Optional[list]:
     return None if header is None else [header] + schema_rows(conn)
 
 
+_OWN_PATH = type(Path())  # this platform's concrete class, never a subclass with its own text
+
+
+def reader_key(path: Any) -> str:
+    """``str(Path(path).absolute())``, the kept reader's key, without building a path to get it.
+
+    ``absolute()`` returns an absolute path unchanged and ``Path(p)`` gives a path its own text
+    back, so for an absolute path of the platform's own class ``str(path)`` is that expression.
+    The sync loop asks with such paths on every wait tick, for every board, and the expression
+    ran twice per question. Anything else (a ``str``, a relative path, a subclass) still takes
+    the expression on every call: the working directory is read each time and nothing is kept
+    between calls. Only the spelling of the key is decided here; ``_conn`` stats it every read.
+    """
+    if type(path) is _OWN_PATH and path.is_absolute():
+        return str(path)
+    return str(Path(path).absolute())
+
+
 class BoardWatch:
     """One long-lived read-only connection per board file, for the sync loop's cheap questions.
 
@@ -81,12 +99,12 @@ class BoardWatch:
         self._gen = 0
         self._answers: dict[str, dict[str, tuple[Any, Any]]] = {}  # path -> tag -> (data_version, answer)
 
-    def _conn(self, path: Path) -> Optional[tuple[sqlite3.Connection, int]]:
+    def _conn(self, key: str) -> Optional[tuple[sqlite3.Connection, int]]:
         # Keep the requested spelling (including symlink/.. semantics). stat
         # follows the current target on every read; inode changes reopen it.
         # Aliases may own separate readers, bounded by MAX, instead of walking
         # every path component twice per unchanged query with realpath.
-        key = str(Path(path).absolute())
+        # *key* is ``reader_key(path)``, built once per read by the caller.
         try:
             st = os.stat(key)
         except OSError:
@@ -208,9 +226,9 @@ class BoardWatch:
         runs under the watch lock on a connection other readers share. A SQLite error drops the reader and
         every answer for the path; any other exception propagates and stores nothing."""
         with self._lock:
-            key = str(Path(path).absolute())
+            key = reader_key(path)
             try:
-                got = self._conn(path)
+                got = self._conn(key)
                 if got is None:
                     return None
                 conn, gen = got
