@@ -26,7 +26,7 @@ it('opens exactly the owner-qualified board/card set, snapshots input and clears
   expect(navigate).toHaveBeenCalledWith('/kanban')
 
   const rest = vi.fn(async (path: string, opts: unknown) => {
-    expect(opts).toMatchObject({ connectionId: 'owner-a' })
+    expect(opts).toEqual({ connectionId: 'owner-a', profile: null })
     const board = new URL(path, 'https://example.com').searchParams.get('board')
 
     return { columns: [{ name: 'ready', tasks: ['same', 'other', 'injected'].map(id => ({ id, title: `${board}/${id}`, status: 'ready' })) }] }

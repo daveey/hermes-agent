@@ -55,7 +55,7 @@ export function CardSetBoard({ rest }: { rest: Rest }) {
       if (!request) { return [] }
 
       return Promise.all([...new Set(request.cards.map(card => card.board))].map(async board => {
-        const snapshot = await rest<KanbanBoard>(`/board?board=${encodeURIComponent(board)}`, { connectionId: request.connectionId, profile: 'default' })
+        const snapshot = await rest<KanbanBoard>(`/board?board=${encodeURIComponent(board)}`, { connectionId: request.connectionId, profile: null })
         const ids = new Set(request.cards.filter(card => card.board === board).map(card => card.id))
 
         return { board, columns: snapshot.columns.map(column => ({ ...column, tasks: column.tasks.filter(card => ids.has(card.id)) })) }
@@ -75,6 +75,6 @@ export function CardSetBoard({ rest }: { rest: Rest }) {
           {column.tasks.map(card => <button className="block text-left" key={card.id} onClick={() => setTask({ board: board.board, taskId: card.id, owner: { board: board.board, gateway: request.connectionId, profile: 'default' } })} type="button">{card.title}</button>)}
         </div> : null)}
       </section>)}
-    {task && <BoardTaskDrawer board={task.board} columns={data?.flatMap(board => board.columns.map(column => column.name)) ?? []} onChange={setTask} task={task} />}
+    {task && <BoardTaskDrawer board={task.board} columns={data?.find(board => board.board === task.board)?.columns.map(column => column.name) ?? []} onChange={setTask} task={task} />}
   </div>
 }

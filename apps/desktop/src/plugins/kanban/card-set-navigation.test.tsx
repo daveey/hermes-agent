@@ -15,8 +15,8 @@ import { $newTaskLane } from './ui'
 
 vi.mock('./api', async original => ({ ...await original<typeof API>(), bindApi: () => () => {} }))
 vi.mock('./board', () => ({ KanbanBoardPage: () => <div>ordinary board</div> }))
-vi.mock('./board-task-drawer', () => ({ BoardTaskDrawer: ({ task }: { task: { taskId: string; owner?: { gateway: string } } }) =>
-  <div data-testid="drawer">{task.owner?.gateway}/{task.taskId}</div> }))
+vi.mock('./board-task-drawer', () => ({ BoardTaskDrawer: ({ task, columns }: { task: { board: string; taskId: string; owner?: { gateway: string; board: string; profile: string } }; columns: string[] }) =>
+  <div data-board={task.board} data-columns={JSON.stringify(columns)} data-owner={JSON.stringify(task.owner)} data-testid="drawer">{task.owner?.gateway}/{task.taskId}</div> }))
 
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 const disposers: (() => void)[] = []
@@ -60,6 +60,27 @@ it.each(['open', 'new'] as const)('ordinary %s intent leaves the mounted card-se
   })
   expect(screen.getByText('ordinary board')).toBeTruthy()
   expect($cardSet.get()).toBeNull()
+})
+
+it('routes the drawer to its exact owner and only that board’s status columns', async () => {
+  setup()
+
+  const rest = vi.fn(async (path: string) => {
+    const board = new URL(path, 'https://example.com').searchParams.get('board')
+
+    return { columns: [
+      { name: 'ready', tasks: [{ id: 'one', title: `${board}/selected`, status: 'ready' }] },
+      { name: board === 'alpha' ? 'blocked' : 'review', tasks: [] }
+    ] }
+  })
+
+  act(() => $cardSet.set({ connectionId: 'owner-a', cards: [{ board: 'alpha', id: 'one' }, { board: 'beta', id: 'one' }] }))
+  render(<QueryClientProvider client={client}><CardSetBoard rest={rest as never} /></QueryClientProvider>)
+  fireEvent.click(await screen.findByText('beta/selected'))
+  const drawer = screen.getByTestId('drawer')
+  expect(drawer.getAttribute('data-board')).toBe('beta')
+  expect(JSON.parse(drawer.getAttribute('data-owner')!)).toEqual({ board: 'beta', gateway: 'owner-a', profile: 'default' })
+  expect(JSON.parse(drawer.getAttribute('data-columns')!)).toEqual(['ready', 'review'])
 })
 
 it('replacing the selection closes the prior owner drawer before the next card is opened', async () => {
