@@ -1,4 +1,10 @@
-"""Immediate review of an ordinary spend stop, so a stopped card never waits for an idle chat. [daveey]
+"""Immediate ordinary-stop review and delayed canonical caused-stop review. [daveey]
+
+Scope/capability stops use ``kanban_spend_caused_review`` after the configured
+notice delay. Safety stops are excluded. Caused verdicts never use local grant
+or renewal: only the Board spend_review operation can settle them, with exact
+authenticated receipt readback. Lifecycle projection remains normal sync's job.
+The ordinary-stop behavior described below is unchanged.
 
 Before this, a spend stop (``kanban_spend_budget.hold``) asked the creator chat to decide, or opened a
 decision card when no chat was live. Over 2026-11-17..24 the hub saw 488 stops: chats took a median 3.8 min
@@ -52,7 +58,8 @@ QUEUED = "spend_review_queued"
 STARTED = "spend_review_started"
 GRANTED = "spend_review_granted"
 ESCALATED = "spend_review_escalated"
-KINDS = (QUEUED, STARTED, GRANTED, ESCALATED)
+SETTLED = "spend_review_settled"
+KINDS = (QUEUED, STARTED, GRANTED, ESCALATED, SETTLED)
 AUTHOR = "kanban-spend-reviewer"
 TIMEOUT = 90
 LEASE_SECONDS = 300
@@ -119,6 +126,11 @@ def state(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[str]
 def holds(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
     """While a review is queued or running the stop needs no other decision route. With the reviewer off, a
     queued or running review holds nothing: the stop routes as usual."""
+    from hermes_cli.kanban_spend_caused_review import effective_cause
+    from hermes_cli.kanban_spend_decision import pending_episode
+    stop = pending_episode(conn, task_id)
+    if stop and effective_cause(conn, task_id, stop) == "safety_refusal":
+        return False
     return state(conn, task_id, episode) in (QUEUED, STARTED) and settings()[0]
 
 
@@ -150,16 +162,21 @@ def eligible(conn: sqlite3.Connection, task_id: str, episode: str, cfg: Optional
     from hermes_cli import kanban_spend_decision as decision
     from hermes_cli.kanban_refusal_receipt import restricted
     from hermes_cli.kanban_wake_check import foreign_copy
+    from hermes_cli import kanban_spend_caused_review as caused
     enabled, max_grants = cfg or settings()
     if not enabled or state(conn, task_id, episode) is not None or foreign_copy(conn, task_id):
         return False
-    if decision.execution_restricted(conn, task_id) or restricted(conn, task_id) or _disposed(conn, task_id, episode):
+    if restricted(conn, task_id) or _disposed(conn, task_id, episode):
         return False
     stop = decision.pending_episode(conn, task_id)
     if stop is None or episode_of(stop) != episode or _human_after_stop(conn, task_id, stop):
         return False
-    if _payload(stop.get("payload")).get("cause"):
-        return False  # e.g. capability_unavailable: more runs meet the same wall, so there is no budget to judge
+    cause = caused.effective_cause(conn, task_id, stop)
+    if cause in caused.CAUSES:
+        if caused.fenced(conn, task_id) or caused.grant_count(conn, task_id) >= min(max_grants, 2):
+            return False
+    elif cause or decision.execution_restricted(conn, task_id):
+        return False
     row = conn.execute("SELECT created_by FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None or row[0] == "kanban-spend-budget" or conn.execute(
             "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'administrative_decision'", (task_id,)).fetchone():
@@ -174,11 +191,18 @@ def _disposed(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
 
 
 def queue(conn: sqlite3.Connection, task_id: str, episode: str, *, backlog: bool = False,
-          cfg: Optional[tuple[bool, int]] = None) -> bool:
+          cfg: Optional[tuple[bool, int]] = None, now: Optional[int] = None) -> bool:
     """Inside the caller's write transaction: queue one review of ``episode`` when eligible."""
     from hermes_cli import kanban_db as kb
     if not eligible(conn, task_id, episode, cfg):
         return False
+    from hermes_cli import kanban_spend_caused_review as caused
+    from hermes_cli.kanban_spend_decision import pending_episode
+    if caused.effective_cause(conn, task_id, pending_episode(conn, task_id)) in caused.CAUSES:
+        noticed = _notice_at(conn, task_id, episode)
+        clock = int(time.time()) if now is None else now
+        if not backlog or noticed is None or noticed > clock - review_after_seconds():
+            return False  # caused stops first receive the ordinary owner route and delay
     kb._append_event(conn, task_id, QUEUED, {"episode": episode, "backlog": backlog})
     return True
 
@@ -215,22 +239,33 @@ def queue_backlog(conn: sqlite3.Connection, *, now: int, cfg: tuple[bool, int],
     for (task_id,) in rows:
         episode = None if task_id in skip else _current_episode(conn, task_id)
         noticed = _notice_at(conn, task_id, episode) if episode else None
-        if noticed is None or noticed > now - delay or not eligible(conn, task_id, episode, cfg):
+        if episode is None or noticed is None or noticed > now - delay or not eligible(conn, task_id, episode, cfg):
             continue
         with kb.write_txn(conn):
-            if _current_episode(conn, task_id) == episode and queue(conn, task_id, episode, backlog=True, cfg=cfg):
+            if _current_episode(conn, task_id) == episode and queue(conn, task_id, episode, backlog=True, cfg=cfg, now=now):
                 queued.append(task_id)
     return queued
 
 
 def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]:
+    from hermes_cli import kanban_spend_review_request as journal
+    frozen = journal.requests(conn)
     rows = conn.execute("SELECT DISTINCT e.task_id FROM task_events e JOIN tasks t ON t.id = e.task_id "
                         "WHERE e.kind = ? AND t.status = 'triage'", (QUEUED,)).fetchall()
+    candidates = {(task_id, _current_episode(conn, task_id)) for (task_id,) in rows}
+    candidates.update((r["wire"]["task"], r["wire"]["episode"]) for r in frozen)
     due = []
-    for (task_id,) in rows:
-        episode = _current_episode(conn, task_id)
+    for task_id, episode in sorted(candidates, key=str):
         if task_id in skip or episode is None:
             continue
+        from hermes_cli import kanban_spend_caused_review as caused
+        from hermes_cli.kanban_spend_decision import pending_episode
+        stop = pending_episode(conn, task_id)
+        cause = caused.effective_cause(conn, task_id, stop) if stop else None
+        if cause and not journal.get(conn, task_id, episode):
+            noticed = _notice_at(conn, task_id, episode)
+            if cause not in caused.CAUSES or noticed is None or noticed > now - review_after_seconds():
+                continue  # an annotation cannot inherit an ordinary stop's immediate start
         events = _review_events(conn, task_id, episode)
         if not events or events[-1]["kind"] not in (QUEUED, STARTED):
             continue
@@ -245,6 +280,7 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     """Queue the backlog and start every due review this process has room for. Returns started task ids."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli import kanban_spend_review_request as journal
     cfg = settings()
     if not cfg[0]:
         return []
@@ -254,7 +290,7 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     _THREADS[:] = [t for t in _THREADS if t.is_alive()]  # a long-lived dispatcher keeps only running reviews
     db, started = _db_path(conn), []
     for task_id, episode, attempts in _due(conn, now, skip):
-        if attempts >= MAX_ATTEMPTS:
+        if attempts >= MAX_ATTEMPTS and not journal.get(conn, task_id, episode):
             escalate(conn, task_id, episode, f"the spend reviewer did not finish after {attempts} attempts")
             continue
         with _LOCK:
@@ -328,10 +364,11 @@ def context(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[di
     corpus = [r["summary"] for r in runs] + [c["body"] for c in comments
                                                if c["in_window"] and c["author"] not in _SYSTEM_AUTHORS]
     allowance = int((payload.get("limits") or {}).get("runs") or 0)
-    return {"task_id": task_id, "title": task.title, "body": _clip(task.body, 4000),
+    from hermes_cli.kanban_spend_caused_review import enrich
+    return enrich(conn, task_id, stop, {"task_id": task_id, "title": task.title, "body": _clip(task.body, 4000),
             "stop": {"limit": payload.get("limit"), "runs_spent": payload.get("runs"), "allowance": allowance,
                      "reason": payload.get("reason")},
-            "runs": runs, "comments": comments, "_corpus": _norm("\n".join(corpus)), "_cap": _cap(allowance)}
+            "runs": runs, "comments": comments, "_corpus": _norm("\n".join(corpus)), "_cap": _cap(allowance)})
 
 
 def _cap(allowance: int) -> int:
@@ -362,6 +399,8 @@ def judge(ctx: dict) -> Optional[dict]:
     None when it is unavailable, late, routed outside subscription billing, or not JSON."""
     from agent import auxiliary_client as aux
     from hermes_cli.kanban_hub_admission import _bounded, _owner_scope
+    from hermes_cli.kanban_spend_caused_review import PROMPT as CAUSED_PROMPT
+    prompt = CAUSED_PROMPT if ctx.get("cause") else PROMPT
     user = {k: v for k, v in ctx.items() if not k.startswith("_")}
     route: dict = {}
     deadline = time.monotonic() + TIMEOUT
@@ -371,7 +410,7 @@ def judge(ctx: dict) -> Optional[dict]:
             return aux.call_llm(
                 task="kanban_spend_review", model="class:standard", timeout=TIMEOUT, max_tokens=800,
                 temperature=0, route_info=route,
-                messages=[{"role": "system", "content": PROMPT.replace("CAP", str(ctx["_cap"]))},
+                messages=[{"role": "system", "content": prompt.replace("CAP", str(ctx["_cap"]))},
                           {"role": "user", "content": json.dumps(user, ensure_ascii=False)}])
 
     with _owner_scope():
@@ -388,7 +427,7 @@ def judge(ctx: dict) -> Optional[dict]:
 def parse(content: Any) -> Optional[dict]:
     match = re.search(r"\{[\s\S]*\}", str(content or ""))
     data = _payload(match.group(0)) if match else {}
-    return data if data.get("decision") in ("grant", "escalate") else None
+    return data if data.get("decision") in ("grant", "escalate", "release", "wait_on", "archive") else None
 
 
 def check_grant(verdict: dict, ctx: dict) -> tuple[Optional[int], str]:
@@ -406,9 +445,15 @@ def check_grant(verdict: dict, ctx: dict) -> tuple[Optional[int], str]:
 
 def review(conn: sqlite3.Connection, task_id: str, episode: str) -> str:
     """Judge one stop and apply the verdict. Returns ``granted``, ``escalated`` or ``moot``."""
+    from hermes_cli import kanban_spend_review_request as journal
+    if journal.get(conn, task_id, episode):
+        from hermes_cli.kanban_spend_caused_review import review as reconcile
+        return reconcile(conn, task_id, episode, None, None)
     ctx = context(conn, task_id, episode)
     if ctx is None or state(conn, task_id, episode) != STARTED:
         return "moot"
+    if ctx.get("cause") == "safety_refusal":
+        return escalate(conn, task_id, episode, "safety stops are excluded from spend review")
     try:
         verdict = judge(ctx)
     except Exception as exc:  # health: allow BLE001 -- an unavailable judge escalates, never grants
@@ -416,6 +461,9 @@ def review(conn: sqlite3.Connection, task_id: str, episode: str) -> str:
         verdict = None
     if verdict is None:
         return escalate(conn, task_id, episode, "the reviewer model was unavailable")
+    if ctx.get("cause"):
+        from hermes_cli.kanban_spend_caused_review import review as caused_review
+        return caused_review(conn, task_id, episode, verdict, ctx)
     if verdict["decision"] == "grant":
         runs, why = check_grant(verdict, ctx)
         if runs is not None:
@@ -459,7 +507,8 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
         return "the consecutive reviewer grant cap was reached"
     if row[1] or row[2] in HUMAN_BLOCK_KINDS:
         return "the card waits on a human"
-    if decision.execution_restricted(conn, task_id) or decision.execution_refusal(conn, task_id):
+    from hermes_cli.kanban_spend_caused_review import effective_cause
+    if effective_cause(conn, task_id, stop) or decision.execution_restricted(conn, task_id) or decision.execution_refusal(conn, task_id):
         return "the stop is a scope or safety stop"
     if _disposed(conn, task_id, episode):
         return "a closed decision card already disposed of the stop"
