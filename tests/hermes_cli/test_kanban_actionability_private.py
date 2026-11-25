@@ -156,6 +156,10 @@ def test_verified_capability_release_requires_exact_episode_and_later_decision()
                 ev('released', 3, 'stop_released', version=True, episode='capability')):
         assert held('ready', [stop, bad, go], verified_releases=verified) == 'restriction_unattributable'
     assert held('ready', [stop, release, dict(go, ord=2)], verified_releases=verified) == 'stop_undecided'
+    # A decision between the stop and its release does not decide the released stop.
+    assert held('ready', [stop, dict(go, ord=3), dict(release, ord=4)], verified_releases=verified) == 'stop_undecided'
+    future = ev('released', 3, 'stop_released', version=2, episode='capability')
+    assert held('ready', [stop, future, go], verified_releases=verified) == 'restriction_unattributable'
     for cause in ('safety_refusal', 'unknown', 'decision_pending', 'scope_stopped'):
         other = ev('capability', 2, 'spend_budget_triaged', cause=cause)
         assert held('ready', [other, release, go], verified_releases=verified) is not None
@@ -189,8 +193,16 @@ def test_capability_release_then_scope_renewal_history_keeps_each_stop_on_its_ow
     assert held('ready', done, verified_cover=cover, verified_releases=releases - {'rel3'}) == 'restriction_unattributable'
 
 
-@pytest.mark.parametrize('origin', ['home', 'foreign', None, ''])
-def test_local_synced_capability_release_requires_home_envelope(tmp_path, origin):
+@pytest.mark.parametrize('synced,created_on,origin,clear', [
+    (True, 'home', 'home', True), (True, 'home', 'foreign', False), (True, 'home', None, False),
+    (True, 'home', '', False),
+    # A synced card with no home names no gateway whose envelope (or missing envelope) could release it.
+    (True, None, None, False), (True, '', '', False), (True, None, 'home', False),
+    # An unsynced board's own writer stamps no envelope; an enveloped row there is not a local write.
+    (False, 'home', None, True), (False, None, '', True), (False, 'home', 'home', False),
+    (False, 'home', 'foreign', False),
+])
+def test_local_capability_release_requires_its_boards_own_provenance(tmp_path, synced, created_on, origin, clear):
     from hermes_cli import kanban_actionability_sources as sources
     with connect(tmp_path / 'kanban.db') as conn:
         from hermes_cli.kanban_db_sync import apply_sync_schema_steps
@@ -203,10 +215,10 @@ def test_local_synced_capability_release_requires_home_envelope(tmp_path, origin
         conn.execute("UPDATE task_events SET uid='released',origin_gateway=? WHERE task_id=? AND kind='stop_released'", (origin, tid))
         kb._append_event(conn, tid, 'promoted_manual', {})
         reader = sources.Reader(conn)
-        reader.synced = True
-        task = {'id': tid, 'status': 'ready', 'created_on': 'home'}
+        reader.synced = synced
+        task = {'id': tid, 'status': 'ready', 'created_on': created_on}
         reason = sources._private_reason(conn, task, reader)
-        assert reason == (None if origin == 'home' else 'restriction_unattributable')
+        assert reason == (None if clear else 'restriction_unattributable')
 
 
 @pytest.mark.parametrize('origin', ['home', 'foreign', None, ''])
@@ -222,6 +234,20 @@ def test_board_capability_release_uses_attested_home_not_actor(origin):
     else:
         with pytest.raises(PrivateHold, match='restriction_unattributable'):
             source.observe(hub, 'default', 't_root')
+
+
+@pytest.mark.parametrize('created_on', [None, ''])
+def test_board_capability_release_needs_a_named_home(created_on):
+    hub = Hub()
+    hub.data['t_root']['task']['created_on'] = created_on
+    release = ev('released', 3, 'stop_released', version=1, episode='capability')
+    hub.data['t_root']['events'] += [
+        ev('capability', 2, 'spend_budget_triaged', cause='capability_unavailable'),
+        release if created_on is None else dict(release, origin_gateway=created_on),
+        ev('go', 4, 'promoted_manual')]
+    # A card with no home matches no envelope: a missing origin_gateway is not provenance.
+    with pytest.raises(PrivateHold, match='restriction_unattributable'):
+        source.observe(hub, 'default', 't_root')
 
 
 def test_lane_gated_triage_is_lane_capacity_not_an_owner_decision(tmp_path):
