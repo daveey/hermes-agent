@@ -323,8 +323,10 @@ async function sendWithResumeDown(options: SubmitTextOptions) {
 }
 
 interface FirstAttempt {
-  /** What the first attempt's prompt.submit does (it throws). */
-  submit?: () => never
+  /** What the attempt's n-th prompt.submit does (it throws). */
+  submit?: (n: number) => never
+  /** What the attempt's session.resume answers (default: it times out). */
+  resume?: () => unknown
   /** The user switches chats right after the journal entry is written: the submit never leaves. */
   driftOnJournalWrite?: boolean
 }
@@ -335,18 +337,28 @@ const ownerRefusal = () =>
     data: { reason: 'SESSION_NOT_OWNED' }
   })
 
-/** A first attempt into the chat's live runtime that ends as `first` says, leaving its journal
- *  entry; `retry` then sends the same words again (the composer's restored draft, same identity)
- *  after the runtime binding is lost and the hub stops answering resumes. */
-async function failFirstAttempt(first: FirstAttempt) {
+const submitTimeout = () => new Error('request timed out after 1800s: prompt.submit')
+
+/** One chat and one composer send (same identity every time). `attempt` sends it into the chat's live
+ *  runtime and lets it end as the spec says, leaving its journal entry; `retry` sends it again after the
+ *  runtime binding is lost and the hub stops answering resumes, so that retry's notice must say what is
+ *  known about the earlier attempts. */
+async function chatWithRetainedSend() {
   const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
   const busyRef: MutableRefObject<boolean> = { current: false }
   const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
   const runtimeIdByStoredSessionIdRef = { current: new Map([[STORED_SESSION_ID, RUNTIME_SESSION_ID]]) }
+  let spec: FirstAttempt = {}
+  let submits = 0
 
   const requestGateway = vi.fn(async (method: string) => {
-    if (method === 'prompt.submit' && first.submit) {
-      first.submit()
+    if (method === 'prompt.submit' && spec.submit) {
+      submits += 1
+      spec.submit(submits)
+    }
+
+    if (method === 'session.resume' && spec.resume) {
+      return spec.resume() as never
     }
 
     throw resumeTimeout()
@@ -358,7 +370,7 @@ async function failFirstAttempt(first: FirstAttempt) {
   vi.spyOn(storage, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
     setItem.call(this, key, value)
 
-    if (first.driftOnJournalWrite && key.startsWith(ENTRY_PREFIX)) {
+    if (spec.driftOnJournalWrite && key.startsWith(ENTRY_PREFIX)) {
       selectedStoredSessionIdRef.current = 'another-chat'
     }
   })
@@ -377,18 +389,30 @@ async function failFirstAttempt(first: FirstAttempt) {
     />
   )
 
-  expect(await prompt!.submitText(TEXT, COMPOSER_SEND)).toBe(false)
-  expect(requestGateway.mock.calls.some(([method]) => method === 'prompt.submit')).toBe(!first.driftOnJournalWrite)
+  const backInTheChat = (bound: boolean) => {
+    spec = {}
+    // A drift abort leaves the view it left to clear its own busy flag.
+    selectedStoredSessionIdRef.current = STORED_SESSION_ID
+    busyRef.current = false
+    activeSessionIdRef.current = bound ? RUNTIME_SESSION_ID : null
+    runtimeIdByStoredSessionIdRef.current.clear()
+
+    if (bound) { runtimeIdByStoredSessionIdRef.current.set(STORED_SESSION_ID, RUNTIME_SESSION_ID) }
+  }
 
   return {
+    attempt: async (next: FirstAttempt) => {
+      backInTheChat(true)
+      spec = next
+      submits = 0
+      const sentBefore = requestGateway.mock.calls.filter(([method]) => method === 'prompt.submit').length
+      expect(await prompt!.submitText(TEXT, COMPOSER_SEND)).toBe(false)
+      const sent = requestGateway.mock.calls.filter(([method]) => method === 'prompt.submit').length - sentBefore
+      expect(sent > 0).toBe(!next.driftOnJournalWrite)
+    },
     journalOutcomes: () => Object.values(storedJournal()).map(entry => entry.outcome ?? 'unknown'),
     retry: async () => {
-      first.driftOnJournalWrite = false
-      // Back in the chat: a drift abort leaves the view it left to clear its own busy flag.
-      selectedStoredSessionIdRef.current = STORED_SESSION_ID
-      busyRef.current = false
-      activeSessionIdRef.current = null
-      runtimeIdByStoredSessionIdRef.current.clear()
+      backInTheChat(false)
       clearNotifications()
       const resumesBefore = resumeCalls(requestGateway)
       const accepted = await prompt!.submitText(TEXT, COMPOSER_SEND)
@@ -546,21 +570,38 @@ describe('the notice says where the words are', () => {
     expect(errorNotices().map(notice => notice.title)).toEqual(titles)
   })
 
-  it.each<[string, FirstAttempt, string, string]>([
+  const unconfirmed = `${copy.promptSendUnconfirmed} ${copy.promptBackInComposer}`
+
+  it.each<[string, FirstAttempt[], string, string]>([
     // The first attempt reaches the backend and its answer never comes back.
-    ['is unknown: the retry cannot say it was not sent', { submit: () => { throw new Error('request timed out after 1800s: prompt.submit') } },
-      'unknown', `${copy.promptSendUnconfirmed} ${copy.promptBackInComposer}`],
+    ['is unknown: the retry cannot say it was not sent', [{ submit: () => { throw submitTimeout() } }],
+      'unknown', unconfirmed],
     // The owner answered that it admitted nothing (another window holds the chat).
-    ['was a definite refusal: the retry says it was not sent', { submit: () => { throw ownerRefusal() } },
+    ['was a definite refusal: the retry says it was not sent', [{ submit: () => { throw ownerRefusal() } }],
       'refused', NOT_SENT_BACK_IN_COMPOSER],
     // The user switched chats after the journal entry was written and before the submit left.
-    ['was aborted before the send: the retry says it was not sent', { driftOnJournalWrite: true },
-      'aborted', NOT_SENT_BACK_IN_COMPOSER]
-  ])('a retry of a send whose earlier attempt %s', async (_label, first, outcome, notice) => {
-    const { journalOutcomes, retry } = await failFirstAttempt(first)
+    ['was aborted before the send: the retry says it was not sent', [{ driftOnJournalWrite: true }],
+      'aborted', NOT_SENT_BACK_IN_COMPOSER],
+    // Attempt 1 may have been admitted; attempt 2 aborting before it sent cannot make that "not sent".
+    ['was unknown, then a retry aborted before sending: still unconfirmed',
+      [{ submit: () => { throw submitTimeout() } }, { driftOnJournalWrite: true }], 'unknown', unconfirmed],
+    // Nor can a later definite refusal of a retry: the owner may hold attempt 1 under another state.
+    ['was unknown, then a retry was refused: still unconfirmed',
+      [{ submit: () => { throw submitTimeout() } }, { submit: () => { throw ownerRefusal() } }], 'unknown', unconfirmed],
+    // Inside one attempt: the submit timed out (maybe admitted), the timeout recovery resumed the chat
+    // and resubmitted, and that resubmit was refused. The first submit is still unaccounted for.
+    ['timed out, was resubmitted by the timeout recovery and then refused: unconfirmed',
+      [{ submit: n => { throw n === 1 ? submitTimeout() : ownerRefusal() }, resume: () => ({ session_id: 'rt-recovered' }) }],
+      'unknown', unconfirmed]
+  ])('a retry of a send whose earlier attempt %s', async (_label, attempts, outcome, notice) => {
+    const chat = await chatWithRetainedSend()
 
-    expect(journalOutcomes()).toEqual([outcome])
-    expect(await retry()).toBe(false)
+    for (const spec of attempts) {
+      await chat.attempt(spec)
+    }
+
+    expect(chat.journalOutcomes()).toEqual([outcome])
+    expect(await chat.retry()).toBe(false)
     expect(errorNotices().map(n => n.title)).toEqual([notice])
   })
 })

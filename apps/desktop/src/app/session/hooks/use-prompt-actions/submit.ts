@@ -69,7 +69,13 @@ import {
   noteSubmissionIdRefused,
   submissionIdentityEpoch
 } from './submission-identity-support'
-import { sendUnconfirmed, submissionAborted, submissionFailed, writeInFlightSubmission } from './submission-outcome'
+import {
+  noteUnansweredReplays,
+  sendUnconfirmed,
+  submissionAborted,
+  submissionFailed,
+  writeInFlightSubmission
+} from './submission-outcome'
 import { submitAcrossGatewayRestart } from './submit-across-restart'
 import {
   acquireSubmitInFlight,
@@ -1239,7 +1245,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           const { result, sessionId: receiptSessionId } = await withSessionNotFoundResume<SubmitReceipt>(
             sessionId,
             recoverStoredSessionId,
-            liveId =>
+            noteUnansweredReplays(liveId =>
               withSessionBusyRetry(async () => {
                 // Recovery can re-enter this callback within the same submit.
                 // An identityless write cannot be deduplicated after a lost ACK.
@@ -1322,7 +1328,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
                   return await sendIdentityless()
                 }
-              }),
+              }), isDefiniteSubmitRefusal, () => { restartReplayUncertain = true }),
             {
               requestGateway,
               driftReason: sessionDriftReason,

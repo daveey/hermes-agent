@@ -29,6 +29,8 @@ export interface PreparedSubmission {
   legacyAttempted?: boolean
   /** How the last attempt ended when it did not land (submission-outcome.ts); absent = unknown. */
   outcome?: 'aborted' | 'refused' | 'unknown'
+  /** An earlier attempt's outcome was unknown: no later abort or refusal makes this send "not sent". */
+  earlierUnknown?: boolean
 }
 
 // Admitted entries whose durable removal failed (ENOSPC/EIO): journal key -> spent submission id.

@@ -202,6 +202,51 @@ describe('a refused identityless send', () => {
     const setItem = storage.setItem
     let resetWrites = 0
 
+    // Only the reset of `legacyAttempted` after the refusal fails to save.
+    vi.spyOn(storage, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+      const saved = JSON.parse(value)
+
+      if (legacySends(submits) === 1 && saved?.legacyAttempted === false && saved.outcome === undefined) {
+        resetWrites += 1
+        throw storageError
+      }
+
+      return setItem.call(this, key, value)
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const requestGateway = refusingGateway(refusal, submits)
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+    expect(await handle!.submitText('take me over', { submission_id: 'refused-unsaved' })).toBe(false)
+    expect(legacySends(submits)).toBe(1)
+    expect(resetWrites).toBe(1)
+
+    const errors = handle!.state().messages.flatMap(m => (m.error ? [m.error] : []))
+    expect(errors.at(-1)).toContain('active in another Hermes window')
+    expect(errors.join('\n')).not.toContain('journal is full')
+    expect($notifications.get().map(n => n.message).join('\n')).not.toContain('journal is full')
+    expect(warn).toHaveBeenCalledWith('[prepared-submission-reset]', storageError)
+    expect(warn).not.toHaveBeenCalledWith('[prepared-submission-outcome]', storageError)
+  })
+
+
+  it('a refused legacy send whose reset and outcome saves both fail still surfaces the 4090 refusal', async () => {
+    const submits: Array<Record<string, unknown>> = []
+    clearNotifications()
+
+    const refusal = new JsonRpcGatewayError('This chat is active in another Hermes window/terminal.', {
+      code: 4090,
+      data: { reason: 'SESSION_NOT_OWNED' }
+    })
+
+    const storageError = new Error('QuotaExceededError: the journal is full')
+    const storage = pageStorage()
+    const setItem = storage.setItem
+    let resetWrites = 0
+
     // Every save after the refusal fails: the reset of `legacyAttempted`, then the refusal outcome
     // (submission-outcome.ts) that is recorded on the same entry.
     vi.spyOn(storage, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
