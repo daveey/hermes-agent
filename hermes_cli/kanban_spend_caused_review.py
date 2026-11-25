@@ -238,7 +238,16 @@ def review(conn, task_id, episode, verdict, ctx):
             return "pending"
         return reviewer.escalate(conn, task_id, episode, f"caused-stop review not confirmed: {exc}")
     if receipt["verdict"] == "escalate":
-        return reviewer.escalate(conn, task_id, episode, receipt["reason"])
+        result = reviewer.escalate(conn, task_id, episode, receipt["reason"])
+        if result == "moot":
+            # The confirmed receipt is terminal for its own episode even when a newer stop made escalating it
+            # moot; otherwise the frozen request stays STARTED and is due forever. Record settlement only: the
+            # newer episode's hold, routing and budget are untouched.
+            with kb.write_txn(conn):
+                if reviewer.state(conn, task_id, episode) in (reviewer.QUEUED, reviewer.STARTED):
+                    kb._append_event(conn, task_id, reviewer.SETTLED, {"episode": episode,
+                                     "receipt_uid": receipt["request_uid"], "verdict": receipt["verdict"]})
+        return result
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, reviewer.SETTLED, {"episode": episode,
                          "receipt_uid": receipt["request_uid"], "verdict": receipt["verdict"]})

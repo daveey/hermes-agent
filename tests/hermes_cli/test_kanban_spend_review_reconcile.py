@@ -170,6 +170,45 @@ def test_frozen_recovery_survives_judge_attempt_cap(kanban_home, spend_reviewer,
         assert len(calls) == 1
 
 
+@pytest.mark.parametrize("verdict", ["release", "escalate"])
+def test_confirmed_receipt_retires_after_episode_replacement(kanban_home, spend_reviewer, board, monkeypatch, verdict):
+    """A confirmed frozen receipt is terminal for its episode even when escalating that old episode is moot."""
+    hub, calls = board
+    real_ops = hub.ops
+    def lost_reply(board_id, ops):
+        real_ops(board_id, ops)
+        raise OSError("reply lost after commit")
+    hub.ops = lost_reply
+    monkeypatch.setattr(reviewer, "judge", lambda ctx: {
+        "decision": verdict, "reason": "original decision", "remaining_quote": helpers.QUOTE})
+    with kbc.connect_closing() as conn:
+        tid, ep = started(conn)
+        assert reviewer.review(conn, tid, ep) == "pending"
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "spend_budget_triaged", {"cause": "scope_stopped", "reason": "new episode"})
+        new_ep = reviewer._current_episode(conn, tid)
+        assert new_ep is not None and new_ep != ep
+        hub.ops = real_ops
+        monkeypatch.setattr(reviewer, "judge", lambda ctx: pytest.fail("second model call"))
+        before = conn.execute("SELECT max(id) FROM task_events WHERE task_id=?", (tid,)).fetchone()[0]
+        result = reviewer.review(conn, tid, ep)
+        assert result == ("settled" if verdict == "release" else "moot")
+        assert len(calls) == 1
+        assert reviewer.state(conn, tid, ep) == reviewer.SETTLED
+        settled = [json.loads(r[0]) for r in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (tid, reviewer.SETTLED))]
+        assert settled == [{"episode": ep, "receipt_uid": calls[0]["event_uid"], "verdict": verdict}]
+        assert not any(t == tid and e == ep for t, e, _ in reviewer._due(conn, 9999999999, set()))
+        # The newer stop's hold is untouched: no grant, escalation or release; the card stays in triage.
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=? AND id>?", (tid, before))]
+        assert kinds == [reviewer.SETTLED]
+        assert reviewer.state(conn, tid, new_ep) is None
+        assert kb.get_task(conn, tid).status == "triage"
+        # Retired: a further pass neither reads nor writes the Board again.
+        assert reviewer.review(conn, tid, ep) == "moot"
+        assert len(calls) == 1
+
+
 def test_target_contract_excludes_run_only_names():
     verdict = {"decision": "wait_on", "reason": "wait", "target": "t_other"}
     ctx = {"task_id": "t_source", "evidence": ["run mentioned t_other"], "target_evidence": []}
