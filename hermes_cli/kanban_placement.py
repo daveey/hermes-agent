@@ -1308,6 +1308,13 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     transport_args = {**args, "idempotency_key": transport_key} if transport_key else args
     rid = request_id(self_gw, transport_args, origin_session or "", options)
     prior = remote_state(rid)
+    if foreign_origin and prior in FAILED_STATES:
+        # A forwarded envelope carries the creating run's uid, and a terminally failed request is immutable, so a
+        # later run's retry of the same product key would only collide (request_id_conflict). Give that run its own
+        # transport identity. The product idempotency_key still travels in ``options``, so the receiver dedupes.
+        rid = request_id(self_gw, {**transport_args, "idempotency_key": f"{transport_args.get('idempotency_key') or rid}:run:{run_uid}"},
+                         origin_session or "", options)
+        prior = remote_state(rid)
     if prior in ("queued", "sent", "done") and not options.get("idempotency_key") and not foreign_origin:
         # Content-addressed retries need no send. Explicit keys must let the courier compare
         # the complete envelope: the same key can also name changed or formerly dropped metadata.

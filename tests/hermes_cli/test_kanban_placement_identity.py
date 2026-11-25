@@ -165,3 +165,33 @@ def test_forwarder_transport_identity_survives_pre_receipt_crash(mac, monkeypatc
         assert forwarder.run() == "parked"
         assert kb.get_task(conn, child).status == "scheduled"
     assert len(mac["calls"]) == 1
+
+
+def test_later_run_retry_after_terminal_forward_rejection_gets_own_transport_identity(monkeypatch):
+    """The forwarded envelope carries the creating run's uid: a rejected request is immutable, so the next run's
+    retry of the same product key must not reuse its ID (request_id_conflict), yet keeps the product key."""
+    stored, states = {}, {}
+
+    def courier(argv):
+        rid = argv[argv.index("--id") + 1]
+        envelope = (argv[argv.index("--creator-run") + 1], [a for a in argv if a.startswith("idempotency_key=")])
+        if rid in stored and stored[rid] != envelope:
+            return 2, "", "request_id_conflict: request id already used for a different envelope"
+        stored[rid] = envelope
+        return 0, rid, ""
+
+    monkeypatch.setattr(kp, "hub_carries_options", lambda cli: True)
+    monkeypatch.setattr(kp, "hub_runner", courier)
+    monkeypatch.setattr(kp, "remote_state", lambda rid: states.get(rid))
+    creator = {"gateway": "w", "profile": "default", "board": "default", "task_id": "t_0123456789abcdef"}
+    call = lambda run: kp.create_remote(
+        {"title": "B3a", "idempotency_key": "product-key"}, target="hub", self_gw="w", origin_session="s1",
+        origin_profile="default", cfg={}, origin_gateway="hub", creator=creator, run_uid=run)
+    first = call("run-1")
+    assert first["ok"]
+    assert not call("run-2")["ok"]  # not terminal yet: unchanged immutable-envelope refusal
+    states[first["request_id"]] = "rejected"
+    second = call("run-2")
+    assert second["ok"] and second["request_id"] != first["request_id"]
+    assert call("run-2")["request_id"] == second["request_id"]  # exact retries in that run stay stable
+    assert ["idempotency_key=" + json.dumps("product-key")] == stored[second["request_id"]][1]
