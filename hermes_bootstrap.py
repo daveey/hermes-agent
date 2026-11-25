@@ -607,6 +607,17 @@ def _pin_launcher_home() -> None:
 
 _pin_launcher_home()
 
+# Snapshot diagnostics need only stdlib, but must retain the recovery, boot-pin
+# and attestation boundaries above. Do not prepare or activate a dependency
+# environment just to read saved dispatcher evidence. All other argv and every
+# missing/stale/fenced snapshot continue through the original bootstrap below.
+if sys.argv[1:3] == ["kanban", "why"] and "--json" in sys.argv[3:] and "--live" not in sys.argv[3:]:
+    from hermes_cli import _startup_fast
+
+    _startup_fast.normalize_hermes_home_env()
+    if _startup_fast.try_fast_readonly(sys.argv[1:]):
+        raise SystemExit(0)
+
 _legacy_post_swap = _legacy_post_swap_invocation(sys.argv[1:])
 if _legacy_post_swap is not None:
     # This continuation exists precisely because the replacement tree may not
