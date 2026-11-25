@@ -444,13 +444,14 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
     While another thread holds the shared connection past ``_RO_SHARED_WAIT_S``, the body gets a private read-only
     connection instead (closed afterwards; the shared entry is untouched), so concurrent dashboard readers never fail
     with "cached reader is borrowed" (hub errors.log, 2026-11-21)."""
-    from hermes_cli.kanban_reader_lifecycle import cached_entry, try_borrow
+    from hermes_cli.kanban_reader_lifecycle import borrow_warm, cached_entry, try_borrow
 
     started = time.monotonic()
-    key, entry = cached_entry(path, busy_budget)
+    warm = borrow_warm(path)
+    key, entry = warm if warm is not None else cached_entry(path, busy_budget)
     conn, _ident, lock, _shm = entry
     remaining = busy_budget - (time.monotonic() - started)
-    if not try_borrow(lock, min(remaining, _RO_SHARED_WAIT_S)):
+    if warm is None and not try_borrow(lock, min(remaining, _RO_SHARED_WAIT_S)):
         # Never more than the shared reader's own SQLite busy timeout, whatever budget the caller passed.
         with _private_ro(path, min(busy_budget - (time.monotonic() - started), _RO_BUSY_TIMEOUT_S)) as private:
             yield private

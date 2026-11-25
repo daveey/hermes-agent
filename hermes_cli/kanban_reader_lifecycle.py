@@ -27,6 +27,50 @@ def cached_entry(path, busy_budget=0.5):
     return retry_open(lambda remaining: _cached_entry_once(path, remaining), busy_budget)
 
 
+def borrow_warm(path):
+    """Return an already-borrowed, attested live entry, or None for ordinary admission.
+
+    No open/close occurs here. Retained tracking custody excludes raw offline access;
+    the borrower lock prevents recovery from closing this connection underneath us.
+    Check siblings too: matching our own SHM is not enough to clear a poisoned or
+    mixed-generation process. All uncertain cases retain lifecycle/recovery admission.
+    """
+    from hermes_cli import kanban_generation as gen, kanban_session_activity as activity
+    from hermes_cli.kanban_lockguard import shm_identity
+
+    key = str(path)
+    with activity._RO_CACHE_LOCK:
+        entry = activity._RO_CACHE.get(key)
+    if entry is None or not entry[2].acquire(blocking=False):
+        return None
+    keep = False
+    try:
+        conn = entry[0]
+        tracked = getattr(conn, "_hermes_tracked_path", None)
+        canonical = getattr(conn, "_hermes_generation_path", None)
+        if tracked is None or tracked != canonical:
+            return None
+        # Snapshot handles before current identity, as recover() does. A first
+        # open must not be compared against a pre-open missing SHM observation.
+        handles = gen._handles(canonical)
+        current = shm_identity(path)
+        st = os.stat(path)
+        with gen._lock:
+            live = conn in gen._connections and canonical not in gen._poisoned
+        if (not live or conn.in_transaction or (st.st_dev, st.st_ino) != entry[1]
+                or current != entry[3] or any(c._hermes_generation_shm is not None
+                    and c._hermes_generation_shm != current for c in handles)):
+            return None
+        with activity._RO_CACHE_LOCK:
+            keep = activity._RO_CACHE.get(key) is entry
+        return (key, entry) if keep else None
+    except (OSError, sqlite3.Error):
+        return None
+    finally:
+        if not keep:
+            entry[2].release()
+
+
 def is_shared_reader(path, conn) -> bool:
     """Whether this borrowed connection has retained custody (not a private fallback)."""
     from hermes_cli import kanban_session_activity as activity
