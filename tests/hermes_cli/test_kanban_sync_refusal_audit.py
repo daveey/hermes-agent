@@ -86,6 +86,10 @@ def test_existing_retain_audit_composes_without_double_counting(case):
     assert not audit.report(live, shadow, hub, 'default')['clean']
 
 
+def test_missing_decision_episode_is_not_a_policy_refusal_exemption():
+    assert 'missing_decision_episode' not in audit.POLICY_REFUSALS
+
+
 @pytest.mark.parametrize('fault', ['missing','applied','reason','detail','id','gateway','board','authority','identity','version'])
 def test_unknown_or_conflicting_receipt_is_not_audited(case, fault):
     (live, shadow), hub, proof, _calls = case

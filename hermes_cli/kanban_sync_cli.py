@@ -122,7 +122,7 @@ def _diff(args: argparse.Namespace) -> int:
         if refresh_error is not None:
             report.update(clean=False, unavailable=True, refresh_error=refresh_error)
         elif pulled.busy:
-            report.update(clean=False, refresh_skipped="a sync round holds the board; compared against its replica as it stands")
+            report["refresh_skipped"] = "a sync round holds the board; compared against its replica as it stands"
         else:
             from hermes_cli import kanban_history_residue_board as history
             if report['rejected_ops']:

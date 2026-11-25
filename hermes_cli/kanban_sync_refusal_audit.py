@@ -15,7 +15,7 @@ from hermes_cli import kanban_history_residue_cut as cut
 from hermes_cli import kanban_history_residue_http as transport
 from hermes_cli.kanban_history_residue_source import _require, strict_object
 
-POLICY_REFUSALS = frozenset({'containment_hold', 'spend_decision_pending', 'missing_decision_episode'})
+POLICY_REFUSALS = frozenset({'containment_hold', 'spend_decision_pending'})
 MAX_OPS = 20
 
 
