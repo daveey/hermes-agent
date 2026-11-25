@@ -1,0 +1,87 @@
+name: Origin transport (pinned hermes-hub courier)
+
+# tests/origin_transport/ composes this core with hermes-hub's exact courier client
+# (client/hermes_hub.py). It skips without --courier-client, so the Python slices never
+# exercise it; before this workflow only hermes-hub's own core-observation job passed the
+# option, and a core change that broke forwarding (33922f7e, 2026-11-23) stayed green here.
+#
+# hermes-hub is private, so its checkout needs a read-only deploy key. ci.yaml runs
+# PR-controlled code and must not receive secrets (its SECURITY note), so this lane is its
+# own workflow, like docker.yml's publish jobs: the key is a secret of the `hermes-hub-read`
+# environment, resolved only on main pushes and manual dispatches. For that reason it is not
+# part of the required "All required checks pass" gate.
+#
+# Bump the hermes-hub ref when the courier client changes; it is the exact client bytes
+# this core is proven against. tests/ci/test_origin_transport_ci.py pins this shape.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Every main push keeps its own run, so a red one names its own commit.
+  group: origin-transport-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  composed:
+    name: Origin forwarding through the pinned hermes-hub courier
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
+    environment: hermes-hub-read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+
+      - name: Require the hermes-hub read key
+        # Without it the checkout below would fail on an opaque auth error, or a later edit
+        # could turn it into a skip; name the missing provisioning instead.
+        env:
+          KEY_PRESENT: ${{ secrets.HERMES_HUB_READ_KEY != '' }}
+        run: |
+          if [ "$KEY_PRESENT" != true ]; then
+            echo "::error::HERMES_HUB_READ_KEY is not set on the hermes-hub-read environment (read-only deploy key on daveey/hermes-hub)"
+            exit 1
+          fi
+
+      - name: Checkout the pinned hermes-hub courier
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
+        with:
+          repository: daveey/hermes-hub
+          # hermes-hub main 2026-11-24 (client 1.9.x), the client its core-observation job proves.
+          ref: f9554a2aea9748512fec16a27a86a09041021271
+          path: .composed-hub
+          fetch-depth: 1
+          # Repository-scoped read-only deploy key, never a user/account token.
+          ssh-key: ${{ secrets.HERMES_HUB_READ_KEY }}
+          persist-credentials: false
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Run tests/origin_transport/ with the courier client
+        # Direct pytest, not scripts/run_tests.sh: the canonical runner starts each file from
+        # `env -i`, which would drop the canary env below (hermes-hub client-cli.yml sets the same).
+        env:
+          COURIER: ${{ github.workspace }}/.composed-hub/client/hermes_hub.py
+          HERMES_KANBAN_DB: /tmp/not-the-owner-board.db
+          HERMES_KANBAN_HOME: /tmp/not-the-owner-home
+          HERMES_DELEGATED_CHILD_CONTEXT: /tmp/not-the-owner-home
+          HERMES_DELEGATED_CHILD_OWNER: worker-must-not-own-the-suite
+          HERMES_SESSION_ID: worker-session-must-not-be-the-origin
+        shell: bash
+        run: |
+          scripts/run-in-hermes-env python -m pytest -q -p no:cacheprovider tests/origin_transport/ \
+            --courier-client="$COURIER" -rA --junitxml="$RUNNER_TEMP/origin-transport.xml"
+
+      - name: Fail on any skip or an empty run
+        if: ${{ !cancelled() }}
+        run: python3 scripts/ci/check_origin_transport_junit.py "$RUNNER_TEMP/origin-transport.xml"
