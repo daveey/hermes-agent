@@ -827,6 +827,9 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
     from hermes_cli.kanban_sync_apply_budget import apply_page, service_pushes
     changed: dict[str, str] = {}  # status changes applied, for the parks that name those cards
     discard_replica_writes(conn, hub, board)  # a replica's outbox is never sent: its ops would mask the feed
+    from hermes_cli.kanban_home_feed import drain as drain_home_feed
+    if max_pages is None or max_pages > 0:
+        changed.update(drain_home_feed(conn, board=board, observers=observers))
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
     while True:
         if max_pages is not None and pages >= max_pages:

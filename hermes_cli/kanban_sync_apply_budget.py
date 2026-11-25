@@ -107,7 +107,9 @@ def apply_page(conn, changes, *, new_cursor, **kwargs):
     from hermes_cli import kanban_containment_replica as containment
     # Establish conservative holds for every certified receipt before any prefix
     # can publish readiness. Releases remain held until their event is applied.
-    containment.prepare_apply(conn, changes)
+    from hermes_cli import kanban_home_feed as home_feed
+    containment.prepare_apply(conn, [ch for ch in changes if not home_feed.blocked(conn, ch)]
+                              if home_feed.active(conn) else changes)
     return _apply_page(conn, changes, new_cursor=new_cursor, **kwargs)
 
 
@@ -118,7 +120,7 @@ def _apply_page(conn, changes, *, new_cursor, **kwargs):
     # A feed is strictly ordered; snapshots/repair sequences use the atomic API.
     ordered = all(a.seq < b.seq for a, b in pairwise(changes))
     result = sync.ApplyResult(cursor=new_cursor)
-    offset, size = 0, MAX_ROWS
+    offset, size = 0, 1 if kwargs.get('home_replay_id') is not None else MAX_ROWS
     while offset < len(changes) or (not changes and offset == 0):
         service_pushes()
         batch = changes[offset:offset + size]
@@ -137,6 +139,7 @@ def _apply_page(conn, changes, *, new_cursor, **kwargs):
         finally:
             _LIMIT.reset(token)
         result.applied += applied.applied
+        result.deferred += applied.deferred
         result.skipped += applied.skipped
         result.skipped_echo += applied.skipped_echo
         result.status_changed.update(applied.status_changed)

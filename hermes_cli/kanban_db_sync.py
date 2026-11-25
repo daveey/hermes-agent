@@ -1333,6 +1333,7 @@ class ApplyResult:
     # A cooperative home manifest is inert history, not a newly originating
     # task/event. SQL admission/certification remains active in this mode.
     historical_import: bool = False
+    deferred: int = 0  # durable source-feed custody, not a dropped/skipped row
 
 
 def _repair_revision(conn: sqlite3.Connection) -> Optional[int]:
@@ -1352,6 +1353,7 @@ def apply_remote_changes(
     observers: bool = True, local_pending_wins: bool = False,
     keep: Optional[Callable[[sqlite3.Connection, RemoteChange], bool]] = None,
     allow_nested: bool = False,
+    home_replay_id: Optional[int] = None,
 ) -> ApplyResult:
     """Apply one feed page in ONE transaction, then fire local observers.
 
@@ -1373,7 +1375,10 @@ def apply_remote_changes(
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     from hermes_cli import kanban_containment_replica as containment
     from hermes_cli.kanban_sync_apply_budget import check_budget, transaction_budget
-    containment.prepare_apply(conn, changes)
+    from hermes_cli import kanban_home_feed as home_feed
+    home_active = home_feed.active(conn)
+    containment.prepare_apply(conn, [ch for ch in changes if not home_feed.blocked(conn, ch)]
+                              if home_active else changes)
     with page_writer(conn, (*SYNCED_TABLES, "kanban_sync_outbox", "kanban_sync_state"),
                      cache=bool(changes) and keep is None, allow_nested=allow_nested), transaction_budget(conn):
         result.revision_before = _repair_revision(conn)
@@ -1381,17 +1386,24 @@ def apply_remote_changes(
         # overwrite locally held custody after the detach transaction commits.
         if board_mode(conn) == "off":
             raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
-        if changes:
+        deferred_path = home_active or home_feed.active(conn)
+        if changes or home_replay_id is not None:
             conn.execute("UPDATE kanban_sync_state SET applying = 1")
             own = _state(conn)["gateway_id"]
+            applied_page = home_feed.replay(conn, own, result, _apply_one, home_replay_id) if home_replay_id is not None else []
             for change in changes:
                 check_budget()
                 if keep is not None and not keep(conn, change):
                     result.skipped += 1
                     continue
-                with containment.projection(conn, change):
-                    _apply_one(conn, change, own, result)
-            retained = containment.restore_page(conn, changes)
+                if deferred_path:
+                    if home_feed.run(conn, change, own, result, _apply_one):
+                        applied_page.append(change)
+                else:
+                    with containment.projection(conn, change):
+                        _apply_one(conn, change, own, result)
+                    applied_page.append(change)
+            retained = containment.restore_page(conn, applied_page)
             result.hooks = [hook for hook in result.hooks if hook[1] not in retained]
             if result.left_terminal or result.reopened:  # a wake never reopens a done card [daveey]
                 from hermes_cli.kanban_terminal_guard import enforce_after_apply
