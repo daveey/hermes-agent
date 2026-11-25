@@ -276,6 +276,17 @@ def test_bindings_subs_and_unqualified_link_prove_nothing(home):
         assert proven_foreign_chats(conn, [parent, other]) == frozenset()
 
 
+@pytest.mark.parametrize("gateway,profile,expected", [
+    ("macbook", None, {REF}),
+    ("", "default", frozenset()),
+])
+def test_foreign_proof_normalizes_only_legacy_profile(home, gateway, profile, expected):
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="legacy proof")
+        _raw_link(conn, parent, gateway, profile, MAC)
+        assert proven_foreign_chats(conn, [parent]) == expected
+
+
 def test_foreign_non_hash_rows_are_not_lifted(home):
     """Proof lifts only the unknown-hash suppression: a foreign ``cron_`` id stays a machine session."""
     with kbc.connect_closing() as conn:
