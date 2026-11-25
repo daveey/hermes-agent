@@ -51,7 +51,8 @@ _AGENT_LIMITS = ("Narrower run counts, dollar caps and stop-on-finding condition
                  "superseded. The card's budget after this release: {budget}.")
 # Events that can follow a recorded release without moving the card: only then is a triage card "still ours".
 _QUIET = frozenset({"commented", RELEASED, "spend_budget_set", "spend_budget_decision_ready", "scope_renewed",
-                    "user_steps_answer", "card_answer_released", "stranded_park_escalated", "parent_held"})
+                    "user_steps_answer", "card_answer_released", "stranded_park_escalated", "parent_held",
+                    "hold_creator_notified"})
 ESCALATED = "stranded_park_escalated"  # kanban_stranded_park.EVENT: the home's own record of the ask it filed
 REFILED = "stranded_park_refiled"  # the same record for an ask the sweep re-filed; no second desk notice
 MANDATE = (MARK + " Budget: {runs} more runs. {limits} Stop only on: a provider safety refusal; a step that needs "

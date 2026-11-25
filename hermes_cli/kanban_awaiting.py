@@ -1283,7 +1283,11 @@ def card_probe(awaiting: Optional[dict]) -> Optional[str]:
 
 def escalated_owner(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     """The owner card when this card's latest event is a re-park escalation."""
-    row = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? AND kind != 'parent_held' ORDER BY id DESC LIMIT 1",
+    row = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? "
+                       "AND kind NOT IN ('parent_held','hold_creator_notified') "
+                       "AND NOT (kind='commented' AND COALESCE(CASE WHEN json_valid(payload) "
+                       "THEN json_extract(payload,'$.author') END,'')='kanban-decision-notice') "
+                       "ORDER BY id DESC LIMIT 1",
                        (task_id,)).fetchone()
     if not row or row[0] != ESCALATED_EVENT:
         return None
@@ -1295,7 +1299,11 @@ def escalated_owner(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 
 def escalated_fired(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     """``fired_reparks`` of this card's latest event when it is a fire-cap escalation, else None."""
-    row = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? AND kind != 'parent_held' ORDER BY id DESC LIMIT 1",
+    row = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? "
+                       "AND kind NOT IN ('parent_held','hold_creator_notified') "
+                       "AND NOT (kind='commented' AND COALESCE(CASE WHEN json_valid(payload) "
+                       "THEN json_extract(payload,'$.author') END,'')='kanban-decision-notice') "
+                       "ORDER BY id DESC LIMIT 1",
                        (task_id,)).fetchone()
     if not row or row[0] != ESCALATED_EVENT:
         return None

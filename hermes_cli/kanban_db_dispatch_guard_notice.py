@@ -30,9 +30,9 @@ def _current_guard_hold(
     from hermes_cli import kanban_db as _kb
 
     comment_filter = (
-        "NOT (kind = 'commented' AND json_extract(payload, '$.author') = 'kanban-dispatcher')"
+        "NOT (kind = 'commented' AND json_extract(payload, '$.author') IN ('kanban-dispatcher','kanban-decision-notice'))"
         if include_replies else "kind != 'commented'"
-    ) + " AND kind NOT IN ('dispatch_skipped', 'parent_held')"  # advisory publication does not change a guard
+    ) + " AND kind NOT IN ('dispatch_skipped', 'parent_held', 'hold_creator_notified')"  # advisory, not a guard change
     events = sorted(
         (stamp, row[0], row[1], row[2])
         for row in conn.execute(

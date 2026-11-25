@@ -1,5 +1,6 @@
 """Held-parent publication is deduplicated and cannot invalidate a durable release."""
 import json
+import pytest
 
 from hermes_cli import kanban_db as kb
 from tests.hermes_cli import test_kanban_release as helpers
@@ -79,7 +80,37 @@ def test_parent_notice_preserves_release_crash_resume(board, monkeypatch):
     assert helpers.records(board, child) == 1 and helpers.mandates(board, child) == 1
 
 
-def test_notice_keeps_guard_escalation_and_fallback_park_clocks(board):
+def test_creator_parent_notice_preserves_release_crash_resume(board, monkeypatch):
+    from hermes_cli import kanban_parent_held as held
+    grandparent = helpers.spend_stopped(board)
+    parent = helpers.spend_stopped(board)
+    kb.link_tasks(board, grandparent, parent)
+    child = kb.create_task(board, title='creator-owned child', assignee='default', creator_task_id=parent)
+    kb.link_tasks(board, parent, child)
+    real = kb.block_task
+    monkeypatch.setattr(kb, 'block_task', lambda *a, **kw: False)
+    assert helpers.run(board, parent)['refusal'] == 'dependency_wait_refused'
+    held.sweep(board)
+    assert board.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='hold_creator_notified'",
+                         (parent,)).fetchone()
+    monkeypatch.setattr(kb, 'block_task', real)
+    out = helpers.run(board, parent)
+    assert out['outcome'] == 'waiting_on_parents' and out['resumed'], out
+    assert helpers.records(board, parent) == 1 and helpers.mandates(board, parent) == 1
+    assert kb.parent_states(board, parent) == [(grandparent, 'triage')]
+
+
+def append_advisory(board, tid, advisory):
+    if advisory == 'hold_creator_notified':
+        from hermes_cli.kanban_hold_notices import creator
+        source = kb.create_task(board, title='notice source', assignee='default', creator_task_id=tid)
+        creator(board, source, 'clock-proof', 'Parent requires disposition; grants no scope.')
+    else:
+        kb._append_event(board, tid, advisory, {})
+
+
+@pytest.mark.parametrize('advisory', ['parent_held', 'hold_creator_notified'])
+def test_notice_keeps_guard_escalation_and_fallback_park_clocks(board, advisory):
     from hermes_cli import kanban_db_dispatch_guard_notice as guard
     from hermes_cli import kanban_awaiting as awaiting, kanban_continuation as continuation
     tid = kb.create_task(board, title='guard clock', assignee='default')
@@ -87,7 +118,7 @@ def test_notice_keeps_guard_escalation_and_fallback_park_clocks(board):
         kb._append_event(board, tid, 'respawn_guarded', {'reason': 'active_pr'})
     started = guard.guard_hold_started_at(board, tid)
     with kb.write_txn(board):
-        kb._append_event(board, tid, 'parent_held', {})
+        append_advisory(board, tid, advisory)
     assert guard.guard_hold_started_at(board, tid) == started
     assert guard.guard_hold_reason(board, tid) == 'active_pr'
     with kb.write_txn(board):
@@ -95,8 +126,8 @@ def test_notice_keeps_guard_escalation_and_fallback_park_clocks(board):
                          {'owner_task_id': 'owner', 'awaiting': {'fired_reparks': 4}})
     parked = continuation.park_state(board, tid)['parked_at']
     with kb.write_txn(board):
-        kb._append_event(board, tid, 'parent_held', {})
-        board.execute("UPDATE task_events SET created_at=created_at+1000 WHERE task_id=? AND kind='parent_held'", (tid,))
+        append_advisory(board, tid, advisory)
+        board.execute("UPDATE task_events SET created_at=created_at+1000 WHERE task_id=? AND kind IN (?, 'commented')", (tid, advisory))
     assert awaiting.escalated_owner(board, tid) == 'owner'
     assert awaiting.escalated_fired(board, tid) == 4
     assert continuation.park_state(board, tid)['parked_at'] == parked
@@ -106,13 +137,14 @@ def test_notice_keeps_guard_escalation_and_fallback_park_clocks(board):
     assert guard.guard_hold_started_at(board, tid) is None
 
 
-def test_notice_does_not_postpone_stale_triage(board):
+@pytest.mark.parametrize('advisory', ['parent_held', 'hold_creator_notified'])
+def test_notice_does_not_postpone_stale_triage(board, advisory):
     from hermes_cli.kanban_triage_sweep import sweep_stale_triage
     tid = kb.create_task(board, title='old triage', assignee='default', triage=True)
     with kb.write_txn(board):
         board.execute('UPDATE task_events SET created_at=100 WHERE task_id=?', (tid,))
-        kb._append_event(board, tid, 'parent_held', {})
-        board.execute("UPDATE task_events SET created_at=9999 WHERE task_id=? AND kind='parent_held'", (tid,))
+        append_advisory(board, tid, advisory)
+        board.execute("UPDATE task_events SET created_at=9999 WHERE task_id=? AND kind IN (?, 'commented')", (tid, advisory))
     assert tid in sweep_stale_triage(board, older_than=100, now=10000)
 
 
