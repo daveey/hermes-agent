@@ -135,3 +135,27 @@ def test_cli_sync_reconcile_runs_against_the_service(live, svc, kanban_home, mon
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["queued"] == {"tasks": 1, "task_events": 1} and out["clean"] is True
     assert tid in svc.board(BOARD)["rows"]["tasks"]
+
+
+def test_reconcile_missing_stop_then_decide_ready_card(live, svc, kanban_home):
+    from hermes_cli import kanban_spend_decision as decision
+    tid = kb.create_task(live, title="Ready but held on Board", assignee="worker")
+    with kb.write_txn(live):
+        kb._append_event(live, tid, decision.EVENT, {"cause": "capability_unavailable"})
+        kb._append_event(live, tid, "promoted", {})
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    stop = decision.pending_episode(live, tid)
+    assert stop is not None
+    uid = stop["uid"]
+    _without_capture(live, "DELETE FROM task_events WHERE uid=?", (uid,))
+    assert not decision.pending(live, tid)
+    report = ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+    assert report["restored"] == {"task_events": 1}
+    with ksc.open_shadow(BOARD, ME) as replica:
+        assert decision.pending(replica, tid) and decision.pending(live, tid)
+        assert decision.pending_episode(live, tid)["uid"] == uid
+    assert kb.promote_task(live, tid, actor="operator", reason="Prerequisite delivered; bounded scope")[0]
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+    with ksc.open_shadow(BOARD, ME) as replica:
+        assert not decision.pending(replica, tid) and not decision.pending(live, tid)

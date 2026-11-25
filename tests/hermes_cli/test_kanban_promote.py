@@ -9,6 +9,7 @@ Direct-SQL setup is used to construct that state deterministically.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -109,5 +110,51 @@ def test_cli_promote_bulk_ids_promotes_all(kanban_home, capsys):
     with kbc.connect() as conn:
         for c in children:
             assert kb.get_task(conn, c).status == "ready"
+
+
+def test_cli_decides_ready_stop_after_plain_promotions(kanban_home, capsys):
+    from hermes_cli import kanban_spend_decision as decision
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Ready with an undecided capability stop")
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, decision.EVENT, {"cause": "capability_unavailable"})
+            for _ in range(3):
+                kb._append_event(conn, tid, "promoted", {})
+        assert decision.pending(conn, tid)
+    args = _promote_ns(tid, reason=["Prerequisite now done; original bounded scope"], as_json=True)
+    assert kb_cli._cmd_promote(args) == 0
+    assert json.loads(capsys.readouterr().out)["promoted"] is True
+    with kbc.connect_closing() as conn:
+        assert not decision.pending(conn, tid)
+        events = kb.list_events(conn, tid)
+        manual = [e for e in events if e.kind == "promoted_manual"]
+        assert len(manual) == 1
+        assert manual[0].payload["from_status"] == "ready"
+    # An ordinary ready card cannot be re-promoted to mint another spend decision.
+    assert kb_cli._cmd_promote(args) == 1
+
+
+@pytest.mark.parametrize("cause", ["safety_refusal", "scope_stopped"])
+def test_ready_decision_does_not_clear_execution_restriction(conn, cause):
+    from hermes_cli import kanban_spend_decision as decision
+    tid = kb.create_task(conn, title="Restricted ready copy")
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, decision.EVENT, {"cause": cause})
+    for dry in (True, False):
+        assert not kb.promote_task(conn, tid, actor="operator", dry_run=dry)[0]
+    assert decision.pending(conn, tid)
+    assert not any(e.kind == "promoted_manual" for e in kb.list_events(conn, tid))
+
+
+def test_ready_decision_cannot_bypass_open_parent(conn):
+    from hermes_cli import kanban_spend_decision as decision
+    tid, (parent,) = _stuck_todo(conn, parents_done=False)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        kb._append_event(conn, tid, decision.EVENT, {"cause": "capability_unavailable"})
+    for dry in (True, False):
+        ok, why = kb.promote_task(conn, tid, actor="operator", dry_run=dry)
+        assert not ok and parent in why
+    assert decision.pending(conn, tid)
 
 

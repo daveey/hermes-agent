@@ -10,10 +10,14 @@ def promote_task(
     dry_run: bool = False,
     precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None,
 ) -> tuple[bool, Optional[str]]:
-    """Promote todo/blocked/triage, or a scheduled spend stop, after caller and parent checks.
+    """Promote todo/blocked/triage, or decide a scheduled/ready spend stop, after caller and parent checks.
 
     System callers omit the precondition. Manual boundaries check unread comments
     under the write lock; dry runs validate without writing anything.
+    Plain automatic promotions do not decide a spend episode. A ready card can
+    therefore still need this explicit decision. If the home lost the stop row,
+    first recover history with ``kanban sync reconcile``; never infer clearance
+    from ready status or replace the local reducer with replica-only evidence.
     """
     from hermes_cli.kanban_spend_decision import execution_refusal
     if refusal := execution_refusal(conn, task_id):
@@ -22,10 +26,10 @@ def promote_task(
     if cur_status is None:
         return False, f"task {task_id} not found"
     from hermes_cli.kanban_spend_decision import pending
-    if cur_status not in _kb._PROMOTABLE_STATUSES and not (cur_status == "scheduled" and pending(conn, task_id)):
+    if cur_status not in _kb._PROMOTABLE_STATUSES and not (cur_status in ("scheduled", "ready") and pending(conn, task_id)):
         return False, (
             f"task {task_id} is {cur_status!r}; promote only applies to "
-            f"'todo', 'blocked' or 'triage'"
+            f"'todo', 'blocked' or 'triage', or 'scheduled'/'ready' with a pending spend decision"
         )
     # No override: claim_task re-checks parents regardless of who promoted the card.
     unsatisfied = [pid for pid, st in _kb.parent_states(conn, task_id) if st not in ("done", "archived")]
@@ -45,12 +49,12 @@ def promote_task(
             return False, refusal
         if precondition and (refusal := precondition(conn)):
             return False, refusal
-        # A scheduled exception authorizes only an unresolved spend decision, rechecked under the writer lock.
-        if cur_status == "scheduled" and not pending(conn, task_id):
+        # Ready/scheduled exceptions authorize only a pending decision, rechecked under the writer lock.
+        if cur_status in ("scheduled", "ready") and not pending(conn, task_id):
             return False, f"task {task_id} spend decision changed during promotion"
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status IN ('todo', 'blocked', 'triage', 'scheduled') AND status = ?", (task_id, cur_status),
+            "WHERE id = ? AND status IN ('todo', 'blocked', 'triage', 'scheduled', 'ready') AND status = ?", (task_id, cur_status),
         )
         if upd.rowcount != 1:
             return False, f"task {task_id} status changed during promotion"

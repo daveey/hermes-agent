@@ -169,26 +169,28 @@ def test_manual_decision_clears_hold_and_later_triage_can_sweep(kanban_home):
         assert tid in sweep.sweep_stale_triage(conn, now=int(time.time()) + 7200)
 
 
+@pytest.mark.parametrize("status", ["scheduled", "ready"])
 @pytest.mark.parametrize("held", [False, True])
-def test_scheduled_spend_decision_can_be_promoted(kanban_home, held):
+def test_scheduled_spend_decision_can_be_promoted(kanban_home, held, status):
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title="Scheduled decision", assignee="default")
+        tid = kb.create_task(conn, title="Stranded decision", assignee="default")
         with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
             if held:
                 kb._append_event(conn, tid, budget.EVENT, {"reason": "spent"})
+                kb._append_event(conn, tid, "promoted", {})
         before = len(helpers._events(conn, tid, "promoted_manual"))
         assert kb.promote_task(conn, tid, actor="operator", reason="bounded rescope", dry_run=True)[0] == held
-        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kb.get_task(conn, tid).status == status
         assert len(helpers._events(conn, tid, "promoted_manual")) == before
         ok, _ = kb.promote_task(conn, tid, actor="operator", reason="bounded rescope")
         assert ok == held
         if not held:
-            assert kb.get_task(conn, tid).status == "scheduled"
+            assert kb.get_task(conn, tid).status == status
             return
         assert kb.get_task(conn, tid).status == "ready"
         assert not decision.pending(conn, tid)
-        assert helpers._events(conn, tid, "promoted_manual")[-1].payload["from_status"] == "scheduled"
+        assert helpers._events(conn, tid, "promoted_manual")[-1].payload["from_status"] == status
         # The ordinary scheduled-unblock path is usable again after the recorded decision.
         assert kb.schedule_task(conn, tid, reason="short cooldown", clock_only=True,
                                 awaiting={"kind": "clock", "why": "cooldown"})
@@ -196,12 +198,13 @@ def test_scheduled_spend_decision_can_be_promoted(kanban_home, held):
         assert kb.get_task(conn, tid).status == "ready"
 
 
+@pytest.mark.parametrize("status", ["scheduled", "ready"])
 @pytest.mark.parametrize("changed", ["decision", "running", "triage"])
-def test_scheduled_promotion_rechecks_under_writer(kanban_home, changed):
+def test_scheduled_promotion_rechecks_under_writer(kanban_home, changed, status):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="Promotion race", assignee="default")
         with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
             kb._append_event(conn, tid, budget.EVENT, {})
         def racing(c):
             if changed == "decision":
@@ -210,7 +213,7 @@ def test_scheduled_promotion_rechecks_under_writer(kanban_home, changed):
                 c.execute("UPDATE tasks SET status=? WHERE id=?", (changed, tid))
         ok, why = kb.promote_task(conn, tid, actor="operator", precondition=racing)
         assert not ok and why and "changed during promotion" in why
-        assert kb.get_task(conn, tid).status == ("scheduled" if changed == "decision" else changed)
+        assert kb.get_task(conn, tid).status == (status if changed == "decision" else changed)
         assert len(helpers._events(conn, tid, "promoted_manual")) == int(changed == "decision")
 
 
