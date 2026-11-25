@@ -4,12 +4,13 @@ The monitor fixture is byte-identical to the deployed module at diagnosis:
 SHA256 f031ad086270daf6222a54a1c974b5a9e8acb440c207675b75af1b0bc0f5ccbc.
 Only its subprocess transport is adapted to the configured SQLite/HTTP fixtures.
 """
-from contextlib import ExitStack, contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from importlib.machinery import SourceFileLoader
 import importlib.util
 import io
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -84,15 +85,29 @@ def test_competing_sync_cannot_take_refresh_to_audit_gap(configured, monkeypatch
         assert kw.get('diagnostic') is True
         yield None, client.Pulled(), False
     monkeypatch.setattr(client, '_pulled_replica', pulled)
-    competitor = ExitStack()
-    attempts = []
+    attempts, threads, errors = [], [], []
+    release = threading.Event()
+    ready = threading.Event()
+    def locked_round(*a, **kw):
+        attempts.append('acquired')
+        ready.set()
+        assert release.wait(10), 'test did not release competing sync'
+    monkeypatch.setattr(client, '_sync_board_locked', locked_round)
     def compete():
-        try:
-            competitor.enter_context(board_sync_lock(paths[0]))
-        except SyncRoundBusy:
-            attempts.append('blocked')
-        else:
-            attempts.append('acquired')
+        ready.clear()
+        def sync_round():
+            try:
+                client.sync_board('default', paths[0], hub, 'home')
+            except SyncRoundBusy:
+                attempts.append('blocked')
+                ready.set()
+            except BaseException as exc:
+                errors.append(exc)
+                ready.set()
+        thread = threading.Thread(target=sync_round)
+        threads.append(thread)
+        thread.start()
+        assert ready.wait(5), 'competing sync did not reach lock boundary'
     original_diff = client.diff
     original_changes = hub.changes
     def diff(*a, **kw):
@@ -130,6 +145,10 @@ def test_competing_sync_cannot_take_refresh_to_audit_gap(configured, monkeypatch
         if fault != 'race':
             assert list(live.iterdump()) == before
     finally:
-        competitor.close()
+        release.set()
+        for thread in threads:
+            thread.join(5)
+            assert not thread.is_alive()
+    assert errors == []
     with board_sync_lock(paths[0]):
         pass  # caller completion releases the normal fence
