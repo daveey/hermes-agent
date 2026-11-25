@@ -1,4 +1,5 @@
 """Exercise actual parser/CLI paths: a persisted receipt alone never makes a diff clean."""
+from contextlib import contextmanager
 import argparse
 import json
 
@@ -32,12 +33,14 @@ def test_real_parser_observe_then_cut_diff(configured, capsys):
 def test_cli_cannot_hide_refresh_failure_with_saved_custody(configured, capsys, monkeypatch, fault):
     _paths, _hub, _calls, state, _connect = configured
     board.observe_board('default','op-original','Keep history')
-    if fault in ('busy','more'):
-        monkeypatch.setattr(cli.ksc, '_pull_replica', lambda *a, **k: cli.ksc.Pulled(**{fault: True}))
-    if fault == 'offline':
-        def offline(*a, **kw):
-            raise OSError('offline fixture')
-        monkeypatch.setattr(cli.ksc, '_pull_replica', offline)
+    if fault in ('busy','more','offline'):
+        from hermes_cli import kanban_sync_diagnostic as diagnostic
+        @contextmanager
+        def refresh_fault(*a, **kw):
+            if fault == 'offline':
+                raise OSError('offline fixture')
+            yield cli.ksc.Pulled(**{fault: True})
+        monkeypatch.setattr(diagnostic, 'fresh_cut', refresh_fault)
     if fault == 'stale': state['proof']['current']['observed_head'] = 99
     if fault == 'wrong-parent': state['proof']['current']['parent']['title'] = 'other'
     assert cli.cmd_sync(args('diff','--json')) == 1

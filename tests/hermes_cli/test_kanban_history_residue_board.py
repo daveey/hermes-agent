@@ -1,4 +1,5 @@
 """Configured entry points compose real SQLite custody, local fences and cut reports."""
+from contextlib import contextmanager
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -70,6 +71,15 @@ def configured(stores, tmp_path, monkeypatch):
         response = state.get('proof')
         return json.dumps(response if 'current=1' in path else response['receipt'] if response else None).encode()
 
+    @contextmanager
+    def pulled(*args, **kw):
+        assert kw == {'diagnostic': True}
+        with pytest.raises(SyncRoundBusy):
+            with board_sync_lock(paths[0]):
+                pass  # composed diagnostic already owns the normal fence
+        yield None, client.Pulled(), False
+
+    monkeypatch.setattr(client, '_pulled_replica', pulled)
     monkeypatch.setattr(client, '_pull_replica', pull)
     monkeypatch.setattr(board.transport, '_request', request)
     yield paths, hub, calls, state, connect

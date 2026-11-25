@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import sqlite3
 import time
@@ -97,62 +98,35 @@ def _diff(args: argparse.Namespace) -> int:
     slug = _board(args)
     ident = ksc.load_identity()
     started = time.monotonic()
-    # Refresh first, before opening the replica. Only when no sync round holds the board (one replica puller per
-    # board per host); a busy round's replica is compared as it stands. A diagnostic: it never rebuilds the replica
-    # (a Resync is reported as refresh_error) and never transfers attachments (t_01a1d41c2612ebc0).
-    refresh_error = None
-    pulled = ksc.Pulled()
-    try:
-        from hermes_cli.kanban_sync_diagnostic import refresh
-        refresh_hub = ksc.Hub(ident)
+    # One normal sync fence spans refresh, comparison and both read-only audits.
+    # Never rebuild/transfer attachments; never hold SQLite reservations over HTTP.
+    with ExitStack() as stack:
+        from hermes_cli.kanban_sync_diagnostic import fresh_cut
+        hub = ksc.Hub(ident)
+        stack.callback(hub.close)
+        refresh_error = None
+        pulled = ksc.Pulled()
         try:
-            pulled = refresh(slug, refresh_hub, ident.gateway, _path(slug))
-        finally:
-            refresh_hub.close()
-    except (ksc.HubError, ksc.Resync, OSError) as exc:
-        refresh_error = str(exc)
-    else:
+            pulled = stack.enter_context(fresh_cut(slug, hub, ident.gateway, _path(slug)))
+        except (ksc.HubError, ksc.Resync, OSError) as exc:
+            refresh_error = str(exc)
         if pulled.more:
             refresh_error = (f"the replica is still behind the feed head after {ksc.PULL_PAGE_BUDGET} pages; the "
                              "sync loop is catching up, rerun later")
-    live = kbc.connect(_path(slug))
-    shadow = ksc.open_shadow(slug, ident.gateway)
-    try:
+        live = kbc.connect(_path(slug))
+        stack.callback(live.close)
+        shadow = ksc.open_shadow(slug, ident.gateway)
+        stack.callback(shadow.close)
         report = ksc.diff(live, shadow, ident.gateway)
         if refresh_error is not None:
             report.update(clean=False, unavailable=True, refresh_error=refresh_error)
         elif pulled.busy:
-            report["refresh_skipped"] = "a sync round holds the board; compared against its replica as it stands"
+            # Busy is unknown, not drift or a fresh clean cut. The unchanged
+            # monitor breaks its dirty streak on unavailable rather than filing.
+            report.update(clean=False, unavailable=True,
+                          refresh_skipped="a sync round holds the board; compared against its replica as it stands")
         else:
-            from hermes_cli import kanban_history_residue_board as history
-            if report['rejected_ops']:
-                from hermes_cli import kanban_sync_refusal_audit as refusal
-                from hermes_cli.kanban_sync_guard import board_sync_lock
-                hub = ksc.Hub(ident)
-                try:
-                    with board_sync_lock(_path(slug)):
-                        report = refusal.report(live, shadow, hub, slug, started=started)
-                except (ValueError, OSError, sqlite3.Error, ksc.HubError, ksc.Resync, SyncRoundBusy) as exc:
-                    report.update(clean=False, server_refusal_audit_error=str(exc))
-                finally:
-                    hub.close()
-            proven = set(report.get('audited_server_refusals', [])) | set(report['audited_retain_rejections'])
-            # An unconfirmed history intent must not turn a server-receipted
-            # refusal into unknown custody; it is retained unchanged, not used.
-            if history.ledger_path(slug).exists() and report['rejected_ops'] > len(proven):
-                hub = ksc.Hub(ident)
-                try:
-                    audit = history.audit_diff(live, shadow, hub, slug, pulled=pulled, started=started)
-                    report = {**audit['diff'], 'history_audit_head': audit['head']}
-                    if getattr(args, 'history_evidence', False):
-                        report['history_audit_evidence'] = audit
-                except (ValueError, OSError, sqlite3.Error, ksc.HubError, ksc.Resync, SyncRoundBusy) as exc:
-                    report.update(clean=False, history_audit_error=str(exc))
-                finally:
-                    hub.close()
-    finally:
-        live.close()
-        shadow.close()
+            report = _audit_diff(args, live, shadow, hub, slug, pulled, started, report)
     report = {"board": slug, **report}
     if not args.json:
         for key in ("missing_in_shadow", "extra_in_shadow"):
@@ -161,6 +135,28 @@ def _diff(args: argparse.Namespace) -> int:
         report["field_mismatch"] = f"{len(mismatch)} {dict(list(mismatch.items())[:10])}" if mismatch else 0
     _print(report, args.json)
     return 0 if report["clean"] else 1
+
+
+def _audit_diff(args, live, shadow, hub, slug, pulled, started, report):
+    """Compose audits under the caller's continuous normal synchronization fence."""
+    from hermes_cli import kanban_history_residue_board as history
+    if report['rejected_ops']:
+        from hermes_cli import kanban_sync_refusal_audit as refusal
+        try:
+            report = refusal.report(live, shadow, hub, slug, started=started)
+        except (ValueError, OSError, sqlite3.Error, ksc.HubError, ksc.Resync, SyncRoundBusy) as exc:
+            report.update(clean=False, server_refusal_audit_error=str(exc))
+    proven = set(report.get('audited_server_refusals', [])) | set(report['audited_retain_rejections'])
+    # Never union cached proofs; history revalidates the mixed set under its CAS.
+    if history.ledger_path(slug).exists() and report['rejected_ops'] > len(proven):
+        try:
+            audit = history._audit_diff_locked(live, shadow, hub, slug, pulled=pulled, started=started)
+            report = {**audit['diff'], 'history_audit_head': audit['head']}
+            if getattr(args, 'history_evidence', False):
+                report['history_audit_evidence'] = audit
+        except (ValueError, OSError, sqlite3.Error, ksc.HubError, ksc.Resync, SyncRoundBusy) as exc:
+            report.update(clean=False, history_audit_error=str(exc))
+    return report
 
 
 def _run(args: argparse.Namespace) -> int:

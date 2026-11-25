@@ -384,9 +384,9 @@ def test_sync_diff_compares_the_replica_as_is_while_a_round_holds_the_board(live
     with board_sync_lock(kanban_home / "kanban.db"):
         kanban_sync_cli._diff(argparse.Namespace(board=BOARD, json=True))
     report = json.loads(capsys.readouterr().out)
-    assert "refresh_skipped" in report and not report.get("unavailable")
-    # A busy sample of a zero-drift board stays clean: busy is not drift (review of #4387).
-    assert report["clean"] is True and not report["rejected_ops"]
+    assert "refresh_skipped" in report and report.get("unavailable") is True
+    # Busy is unknown, not fresh clean or dirty: the unchanged monitor ignores it.
+    assert report["clean"] is False and not report["rejected_ops"]
     assert _replica_state()[0] == before
 
 

@@ -47,7 +47,15 @@ def audit_diff(live, shadow, hub, board, *, pulled, started):
     from hermes_cli.kanban_sync_guard import board_sync_lock
     paths = _paths(live, shadow, board)
     _require(not pulled.busy and not pulled.more, 'diagnostic_refresh_incomplete')
-    with board_sync_lock(paths[0]), closing(_ledger(board)) as ledger:
+    with board_sync_lock(paths[0]):
+        return _audit_diff_locked(live, shadow, hub, board, pulled=pulled, started=started)
+
+
+def _audit_diff_locked(live, shadow, hub, board, *, pulled, started):
+    """Internal composition: caller retains the ordinary board sync fence."""
+    _paths(live, shadow, board)
+    _require(not pulled.busy and not pulled.more, 'diagnostic_refresh_incomplete')
+    with closing(_ledger(board)) as ledger:
         identity = transport.scope(hub, board)
         rows = ledger.execute(f'SELECT op_id FROM {custody.INTENTS} WHERE endpoint=? AND board=? AND gateway=? '
                               'ORDER BY op_id LIMIT ?', (*identity, cut.MAX_OPS + 1)).fetchall()
