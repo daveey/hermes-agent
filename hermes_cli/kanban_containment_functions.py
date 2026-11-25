@@ -4,15 +4,40 @@ from __future__ import annotations
 import sqlite3
 import weakref
 from collections.abc import Callable
+from contextvars import ContextVar
+
+
+# Strings only: never retain an exception traceback (and its connection).
+_INNER: ContextVar[tuple[str, str, str] | None] = ContextVar("containment_udf_error", default=None)
+
+
+def clear_error() -> None:
+    """Start a sync board round without a diagnostic from an earlier round."""
+    _INNER.set(None)
+
+
+def error_suffix(exc: BaseException) -> str:
+    """Consume callback evidence only for SQLite's opaque UDF error."""
+    inner = _INNER.get()
+    clear_error()
+    if inner is None or "user-defined function raised exception" not in str(exc):
+        return ""
+    kind, message, name = inner
+    return f"; inner: {kind}: {message} in {name}"
 
 
 class _Function:
-    def __init__(self, conn: sqlite3.Connection, callback: Callable) -> None:
+    def __init__(self, conn: sqlite3.Connection, callback: Callable, name: str) -> None:
         self.conn = conn
         self.callback = callback
+        self.name = name
 
     def __call__(self, *args):
-        return self.callback(*args)
+        try:
+            return self.callback(*args)
+        except BaseException as exc:
+            _INNER.set((type(exc).__name__, str(exc).replace("\n", "\\n").replace("\r", "\\r")[:2048], self.name))
+            raise
 
 
 # sqlite3.Connection itself is not weak-referenceable. SQLite owns the callable
@@ -32,6 +57,6 @@ def register(conn: sqlite3.Connection, name: str, arity: int, callback: Callable
     if function is not None:
         function.callback = callback
         return
-    function = _Function(conn, callback)
+    function = _Function(conn, callback, name)
     conn.create_function(name, arity, function)
     _FUNCTIONS[key] = function

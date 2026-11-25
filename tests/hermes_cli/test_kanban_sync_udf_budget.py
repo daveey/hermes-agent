@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
+
+from hermes_cli import kanban_containment_functions as functions
+from hermes_cli import kanban_sync_client as client
 
 import pytest
 
@@ -130,3 +134,51 @@ def test_page_halves_after_containment_udf_interrupt(conn, monkeypatch):
     assert not conn.in_transaction
     assert conn.execute("SELECT count(*) FROM tasks WHERE id LIKE 't_udfpage%'").fetchone()[0] == 39
     assert conn.execute("SELECT status FROM tasks WHERE id=?", (task,)).fetchone()[0] == "todo"
+
+
+def test_round_warning_names_inner_trigger_exception(conn, tmp_path, monkeypatch, caplog):
+    task = seed(conn)
+    original = ValueError("containment diagnostic fixture")
+
+    def broken():
+        raise original
+
+    functions.register(conn, "kanban_containment_diagnostic", 0, broken)
+    conn.execute("CREATE TRIGGER diagnostic_update BEFORE UPDATE ON tasks "
+                 "BEGIN SELECT kanban_containment_diagnostic(); END")
+    monkeypatch.setattr(client, "publish_pickup_if_changed", lambda hub: None)
+    from hermes_cli import kanban_source_clones
+    monkeypatch.setattr(kanban_source_clones, "attest_if_due", lambda hub: None)
+
+    def round_(*args):
+        conn.execute("UPDATE tasks SET title='changed' WHERE id=?", (task,))
+
+    monkeypatch.setattr(client, "sync_board", round_)
+    hub = SimpleNamespace(ident=SimpleNamespace(gateway="fixture"))
+    with caplog.at_level("WARNING", logger=client.__name__):
+        result = client.sync_all_once(hub, boards=[("diagnostic", tmp_path / "board.db")])
+    assert result[0].error == "OperationalError: user-defined function raised exception"
+    assert "inner: ValueError: containment diagnostic fixture in kanban_containment_diagnostic" in caplog.text
+    # A different, non-UDF failure must not reuse the callback diagnostic.
+    caplog.clear()
+
+    def other(*args):
+        raise sqlite3.OperationalError("unrelated failure")
+
+    monkeypatch.setattr(client, "sync_board", other)
+    client.sync_all_once(hub, boards=[("diagnostic", tmp_path / "board.db")])
+    assert "inner:" not in caplog.text
+    caplog.clear()
+
+    def opaque(*args):
+        raise sqlite3.OperationalError("user-defined function raised exception")
+
+    monkeypatch.setattr(client, "sync_board", opaque)
+    client.sync_all_once(hub, boards=[("diagnostic", tmp_path / "board.db")])
+    assert "inner:" not in caplog.text
+    # The wrapper itself must re-raise the original exception, not a replacement.
+    callback = functions._FUNCTIONS[(id(conn), "kanban_containment_diagnostic", 0)]
+    with pytest.raises(ValueError) as caught:
+        callback()
+    assert caught.value is original
+    functions.clear_error()
