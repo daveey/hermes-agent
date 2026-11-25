@@ -252,7 +252,7 @@ def describe(conn: sqlite3.Connection, tid: str, *, now: int | None = None, read
 
 
 def _private_reason(conn, task, reader) -> str | None:
-    """Local-order hold. A missing event column is not a hold; scope digests stay unverified."""
+    """Local-order diagnostic hold, with the execution reader's mandate-digest verification."""
     if not reader.events_complete:
         return None
     from hermes_cli.kanban_actionability_private import DECISIONS, PRIVATE, held
@@ -267,8 +267,14 @@ def _private_reason(conn, task, reader) -> str | None:
     private = [row for row in rows if row['kind'] in PRIVATE]
     if not private or any(not reader.uid(row) for row in private):
         return None  # Unattributed (synced, UIDless) history stays UNKNOWN, not a positive hold classification.
-    events = [{'uid': str(row['id']), 'kind': row['kind'], 'ord': row['id'], 'payload': row['payload']} for row in rows]
-    return held(task['status'], events)
+    from hermes_cli.kanban_actionability_evidence import Rows
+    from hermes_cli.kanban_scope_renewal import covered, key
+    events = [{'uid': key(row), 'kind': row['kind'], 'ord': row['id'], 'payload': row['payload']} for row in rows]
+    try:
+        verified = covered(Rows(conn), task['id'])
+    except EVIDENCE_ERRORS:
+        verified = frozenset()  # Missing mandate evidence cannot resolve a scope hold.
+    return held(task['status'], events, verified_cover=verified)
 
 
 def _lane_gate_at(conn, tid, reader) -> int | None:
