@@ -18,8 +18,9 @@ def class_config():
             'deep': [route('anthropic', 'deep', 'subscription')]}}}
 
 
-@pytest.mark.parametrize('level', ['carbon', 'standard', 'deep'])
-def test_real_kanban_policy_bootstrap_stages_selected_class(tmp_path, monkeypatch, class_config, level):
+@pytest.mark.parametrize('level,legacy', [('carbon', False), ('standard', False),
+                                         ('deep', False), ('carbon', True)])
+def test_real_kanban_policy_bootstrap_stages_selected_class(tmp_path, monkeypatch, class_config, level, legacy):
     from gateway.session_contract import SessionActor
     from gateway.session_kanban import build_kanban_policy
     from gateway.session_managed_worker import _bootstrap
@@ -53,7 +54,9 @@ def test_real_kanban_policy_bootstrap_stages_selected_class(tmp_path, monkeypatc
     config = class_config
     config.update(auxiliary={}, fallback_model=None, fallback_providers=[])
     # This is the real failed launch shape: no synthetic profile-default replacement.
-    config['model'] = {'default': 'profile-default', 'provider': 'openrouter'}
+    config['model'] = ({'model': 'class:standard', 'provider': 'auto'} if legacy else
+                       {'default': 'profile-default', 'provider': 'openrouter'})
+    profile_model = {**config['model'], 'provider': 'auto'}
     actor = SessionActor('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
     authority = SimpleNamespace(profile_id=str(tmp_path), runner=None)
     connection = SimpleNamespace(authority=authority, actor=actor, native_owner=True)
@@ -61,7 +64,7 @@ def test_real_kanban_policy_bootstrap_stages_selected_class(tmp_path, monkeypatc
         run_id=task.current_run_id, claim_lock=task.claim_lock), config)
     assert not private
     assert policy.model == 'class:' + level
-    assert json.loads(policy.config_json)['model']['default'] == 'profile-default'
+    assert json.loads(policy.config_json)['model'] == profile_model
     live = SimpleNamespace(source=SimpleNamespace(user_id='u', chat_id='c'), route='kanban-test')
     authority.sessions = {'sid': live}
     ref = SimpleNamespace(session_id='sid')
@@ -69,7 +72,7 @@ def test_real_kanban_policy_bootstrap_stages_selected_class(tmp_path, monkeypatc
                  pid=1, birth=0, secret='synthetic-scope', epoch=1)
     frame = _bootstrap(authority, ref, {'payload': {'text': 'hello', 'finite': True}}, policy, scope)
     assert frame['policy']['model'] == 'class:' + level
-    assert json.loads(frame['policy']['config_json'])['model']['default'] == 'profile-default'
+    assert json.loads(frame['policy']['config_json'])['model'] == profile_model
     material = resolve_credentials(authority, scope)
     expected = {'GEMINI_API_KEY', 'GOOGLE_API_KEY'} if level == 'carbon' else {'ANTHROPIC_API_KEY'}
     assert set(material['environment']) == expected
