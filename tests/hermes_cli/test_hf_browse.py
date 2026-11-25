@@ -25,11 +25,47 @@ GIB = 1 << 30
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     (tmp_path / ".hermes").mkdir()
-    from hermes_cli import web_server
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+    with imported_dashboard_lifecycles():
+        from hermes_cli import web_server
+        test_client = TestClient(web_server.app)
+        try:
+            test_client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+            yield test_client
+        finally:
+            test_client.close()
 
-    test_client = TestClient(web_server.app)
-    test_client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
-    return test_client
+
+def test_client_drains_its_dashboard_import_mount(tmp_path, monkeypatch):
+    import builtins
+    from types import SimpleNamespace
+    from hermes_cli.fact_plugin_mount import PluginLifecycles
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+    with imported_dashboard_lifecycles():
+        from hermes_cli import web_server
+    registry = PluginLifecycles()
+    monkeypatch.setattr(web_server.app.state, 'fact_plugin_lifecycles', registry)
+    closed = []
+    module = SimpleNamespace(start_legacy=lambda: SimpleNamespace(close=lambda: closed.append('closed')))
+    real_import = builtins.__import__
+
+    def mounting_import(name, globals=None, locals=None, fromlist=(), level=0):
+        result = real_import(name, globals, locals, fromlist, level)
+        if name == 'hermes_cli' and 'web_server' in fromlist:
+            registry.start(tmp_path / 'fixture-plugin.py', module)
+        return result
+
+    monkeypatch.setattr(builtins, '__import__', mounting_import)
+    fixture = client.__wrapped__(tmp_path, monkeypatch)
+    try:
+        http = next(fixture)
+        fixture.close()
+        assert http.is_closed
+        assert closed == ['closed']
+        assert registry._handles == {}
+    finally:
+        fixture.close()
+        registry.close()
 
 
 def _budget(vram_gib, ram_gib=64):

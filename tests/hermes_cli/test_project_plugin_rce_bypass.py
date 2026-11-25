@@ -37,8 +37,39 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli import web_server
+from tests._fixtures.board_mount import imported_dashboard_lifecycles
+
+# Collection imports the dashboard without ever entering its ASGI lifespan.
+# Retire its mounts now, before function fixtures publish different homes.
+with imported_dashboard_lifecycles():
+    from hermes_cli import web_server
 import hermes_cli.web_server_dashboard as _web_server_dashboard
+
+
+def test_collection_import_drains_its_dashboard_mount(tmp_path, monkeypatch):
+    import builtins
+    import runpy
+    from types import SimpleNamespace
+    from hermes_cli.fact_plugin_mount import PluginLifecycles
+    registry = PluginLifecycles()
+    monkeypatch.setattr(web_server.app.state, 'fact_plugin_lifecycles', registry)
+    closed = []
+    module = SimpleNamespace(start_legacy=lambda: SimpleNamespace(close=lambda: closed.append('closed')))
+    real_import = builtins.__import__
+
+    def mounting_import(name, globals=None, locals=None, fromlist=(), level=0):
+        result = real_import(name, globals, locals, fromlist, level)
+        if name == 'hermes_cli' and 'web_server' in fromlist:
+            registry.start(tmp_path / 'fixture-plugin.py', module)
+        return result
+
+    monkeypatch.setattr(builtins, '__import__', mounting_import)
+    try:
+        runpy.run_path(__file__)
+        assert closed == ['closed']
+        assert registry._handles == {}
+    finally:
+        registry.close()
 
 
 @pytest.fixture(autouse=True)
