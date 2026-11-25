@@ -215,7 +215,16 @@ def _parks(kb, conn):
     return owner, tids
 
 
-def test_scheduled_owner_record_publishes_its_park(owner_board):
+def test_scheduled_owner_record_publishes_its_park(owner_board, monkeypatch):
+    import time
+    from hermes_cli import kanban_timed_park
+
+    # Scheduling computes its cap before the run ends. Force distinct clocks:
+    # publication must preserve the actual wake, not recompute it at run end.
+    scheduled_at = int(time.time()) - 60
+    scheduled_payload = kanban_timed_park.scheduled_payload
+    monkeypatch.setattr(kanban_timed_park, "scheduled_payload",
+                        lambda reason: scheduled_payload(reason, now=scheduled_at))
     kb, conn = owner_board
     owner, tids = _parks(kb, conn)
     rows = {k: _observe(conn, tid) for k, tid in tids.items()}
@@ -230,7 +239,8 @@ def test_scheduled_owner_record_publishes_its_park(owner_board):
     assert rows["probe"]["wake_check"] == "python3 check_flag.py" and rows["probe"]["awaiting"]["inferred"] is True
     assert "wake_check" not in rows["clock"] and rows["clock"]["awaiting"]["why"] == "weekly quota resets"
     # SCHEDULED_UNTIL far out is clamped to the 14-day park maximum (kanban_timed_park.scheduled_until).
-    assert rows["clock"]["park"]["wake_at"] - rows["clock"]["park"]["ended_at"] == 14 * 24 * 3600
+    assert rows["clock"]["park"]["ended_at"] > scheduled_at
+    assert rows["clock"]["park"]["wake_at"] == scheduled_at + 14 * 24 * 3600
     assert rows["clock"] == _observe(conn, tids["clock"])  # an unchanged park publishes an identical record
 
 
