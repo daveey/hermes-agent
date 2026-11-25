@@ -348,11 +348,11 @@ def _sidebar_singleflight_cache(func):
     @functools.wraps(func)
     def wrapped(*args, **kwargs):
         ttl = _SIDEBAR_CACHE_TTL_SECONDS
-        if ttl <= 0:
-            return func(*args, **kwargs)
-
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
+        if ttl <= 0 or bound.arguments.get("list_slices") is True:
+            return func(*args, **kwargs)
+
         key = tuple(bound.arguments.items())
         cached = _lookup(key)
         if cached is not miss:
@@ -583,7 +583,8 @@ sessions_router.add_api_route(
 @_la.accounted("route/profiles.sessions.sidebar")
 def get_profiles_sessions_sidebar(
     recents_profile: str = "all", recents_limit: int = 20, recents_exclude: str | None = None,
-    cron_limit: int = 50, messaging_limit: int = 100, messaging_exclude: str | None = None):
+    cron_limit: int = 50, messaging_limit: int = 100, messaging_exclude: str | None = None,
+    list_slices: bool = False):
     """Batched sidebar session slices (recents / cron / messaging) — one profile-DB open per
     refresh instead of three ``/api/profiles/sessions`` calls. Same row projection and 300s
     active heuristic as the per-slice endpoint; all slices use ``min_messages=1`` /
@@ -595,6 +596,13 @@ def get_profiles_sessions_sidebar(
 
     See #42651, #65710, #70629.
     """
+    if list_slices:
+        from hermes_cli.profile_session_list_slices import read_list_slices
+        return read_list_slices(
+            get_profiles_sessions, one_annotation_snapshot, profile=recents_profile,
+            recents_limit=min(max(recents_limit, 1), 500), cron_limit=min(max(cron_limit, 1), 500),
+            messaging_limit=min(max(messaging_limit, 1), 500),
+            recents_exclude=recents_exclude, messaging_exclude=messaging_exclude)
     targets = _profile_targets("GET /api/profiles/sessions/sidebar")
 
     recents_scope = (recents_profile or "all").strip() or "all"

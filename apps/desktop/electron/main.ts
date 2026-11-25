@@ -4,6 +4,7 @@ import type { GatewayEndpoint } from './local-gateway'
 import { configurePythonGatewayTicketClient, createLocalGatewayDials, createStaleGatewayRestarter, ensureLocalGateway, formatGatewayRestartLog, gatewayOwnerProfile, localGatewayDial, nativeGatewayHttpHeaders, redialLocalGateway, runGatewayEnsure, runGatewayOwnerRestart } from './local-gateway'
 import { closeGatewayTicketBridges, createGatewayTicketResolver } from './local-gateway-python'
 import { createPluginWsUrlHandler } from './plugin-ws-url'
+import { fetchSidebarPrimaryListBatch } from './sidebar-primary-list-batch'
 const localGatewayDials = createLocalGatewayDials()
 configurePythonGatewayTicketClient(createGatewayTicketResolver(
   async () => ensureRuntime(await resolveHermesBackend([]), () => undefined), resolveHermesCwd))
@@ -7365,6 +7366,7 @@ async function freshGatewayWsUrl(profile, webContentsId, opts: { inheritsPrimary
 
   if (connection.gatewayEndpoint) {
     const dialProfile = opts.inheritsPrimary ? connection.profile : String(profile ?? '')
+
     return localGatewayDial({ ensure, forget: () => forgetLocalGatewayDescriptor(dialProfile), launchHome: HERMES_HOME,
       prepare: (baseUrl, ticket) => localGatewayDials.prepare(baseUrl, ticket, webContentsId), profile: dialProfile })
   }
@@ -15297,10 +15299,7 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
     )
   }
 
-  // Batched sidebar slices. With no remote profiles the local batched endpoint
-  // (one DB open per profile) serves it directly — take the fast path. When
-  // remotes exist, a concrete local profile still reads the primary's batched
-  // route once; otherwise fan the slices out to /api/profiles/sessions.
+  // Native sidebar for concrete local scope; exact request-local list batches for merged scopes.
   if (method === 'GET' && pathname === '/api/profiles/sessions/sidebar') {
     const remoteProfiles = configuredRemoteProfileNames()
 
@@ -15321,7 +15320,12 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
     const ownerTag = primaryRowsOwnerTag(registryConnectionId, readDesktopConnectionsRegistry().primary)
 
     const readSlice = sp => fetchProfilesSessionSlice(sp, remoteProfiles, registrySources, ownerTag, registryConnectionId)
-    const fanOut = () => fanOutSidebarSessionSlices(searchParams, readSlice)
+
+    const fanOut = () => fetchSidebarPrimaryListBatch(searchParams, {
+      fetch: path => fetchJsonForProfile(null, path), ownerTag,
+      merge: (sp, base) => mergeRemoteProfileSessions(sp, remoteProfiles, registrySources, ownerTag, registryConnectionId, base),
+      fallback: () => fanOutSidebarSessionSlices(searchParams, readSlice)
+    })
 
     // [daveey] A concrete local profile: one batched primary read, the slices only on its failure.
     return fetchSidebarSessionsBatchedOrSliced(searchParams, {
@@ -15458,11 +15462,8 @@ async function remoteOwnerProfileForSession(sessionId: string) {
   return owner
 }
 
-// Resolve one /api/profiles/sessions slice with remote profiles spliced in —
-// the same branch logic as the GET /api/profiles/sessions intercept, but always
-// returns data (never `undefined`) so a batched caller can compose slices. A
-// specific local profile reads from the local primary; a remote-override profile
-// reads from its remote; 'all' merges every remote into the primary aggregate.
+// Resolve one slice: local primary, profile override, or all-gateway merge.
+// Always returns data so batched callers can compose slices.
 async function fetchProfilesSessionSlice(
   searchParams,
   remoteProfiles,
@@ -15495,15 +15496,16 @@ async function fetchProfilesSessionSlice(
 async function mergeRemoteProfileSessions(
   searchParams,
   remoteProfiles,
-  registrySourcesOverride = null,
+  registrySourcesOverride: RegistrySessionSource[] | null = null,
   ownerTag: null | string = null,
-  pinned = null
+  pinned = null,
+  primaryBase: unknown = undefined
 ) {
   const limit = Math.max(1, Number(searchParams.get('limit')) || 20)
   const offset = Math.max(0, Number(searchParams.get('offset')) || 0)
   const order = searchParams.get('order') === 'created' ? 'started_at' : 'last_active'
 
-  const base = (await fetchPrimaryProfileSessions(searchParams, fetchJsonForProfile, { prefixForMerge: true, ownerTag })) as any
+  const base = (primaryBase ?? await fetchPrimaryProfileSessions(searchParams, fetchJsonForProfile, { prefixForMerge: true, ownerTag })) as any
 
   if (pinned) {
     await tagPrimaryAggregateRows(base, () => ensureBackend(null, { passive: true }), pinned)
