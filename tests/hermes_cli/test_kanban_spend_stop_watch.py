@@ -217,3 +217,34 @@ def test_notice_route_of_another_episode_or_a_closed_decision_card_does_not_coun
             conn.execute("UPDATE tasks SET status='done' WHERE id=?", (closed,))
         _notice(conn, tid, ep, {'kind': 'supervisor', 'task_id': closed})
         assert len(watchdog.watch(conn, now=NOW)) == 1
+
+
+MALFORMED = [1, True, ['scope_stopped'], {'safety_refusal': True}]
+MALFORMED_IDS = ['int', 'bool', 'list', 'dict']
+
+
+def _malformed(conn, cause):
+    """A triage stop whose cause is not a string: the validator refuses to interpret it."""
+    tid = kb.create_task(conn, title='Malformed stop', assignee='default')
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+        kb._append_event(conn, tid, decision.EVENT, {'cause': cause})
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (NOW - 7200, tid))
+    with pytest.raises(ValueError, match='cause'):
+        decision.pending_episode(conn, tid)
+    return tid
+
+
+@pytest.mark.parametrize('cause', MALFORMED, ids=MALFORMED_IDS)
+def test_malformed_cause_is_isolated_and_healthy_neighbor_is_filed(kanban_home, caplog, cause):
+    with kbc.connect_closing() as conn:
+        bad = _malformed(conn, cause)
+        good, ep = stop(conn)
+        assert [c['id'] for c in watchdog.stale_stops(conn, now=NOW)] == [good]
+        new_id, = watchdog.watch(conn, now=NOW)
+        assert kb.get_task(conn, new_id).idempotency_key == f'spend-stop-watch:{good}:{ep}'
+        assert kb.get_task(conn, bad).status == 'triage'  # the malformed hold is retained, never released
+        assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=?",
+                                (bad, watchdog.FILED)).fetchone()
+        assert bad in caplog.text
+        assert not conn.in_transaction

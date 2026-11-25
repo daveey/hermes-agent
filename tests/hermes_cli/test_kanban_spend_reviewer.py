@@ -454,6 +454,31 @@ def test_the_backlog_ages_each_stop_by_its_own_notice(kanban_home, spend_reviewe
         assert reviewer.state(conn, tid, episode) is None
 
 
+@pytest.mark.parametrize("cause", [1, True, ["scope_stopped"], {"safety_refusal": True}],
+                         ids=["int", "bool", "list", "dict"])
+def test_malformed_cause_does_not_block_healthy_reviews(kanban_home, spend_reviewer, inline, monkeypatch, caplog,
+                                                       cause):
+    # Three stopped cards per case: borrow the shared run clock so later tests keep their past-run budget.
+    monkeypatch.setitem(helpers._CLOCK, "t", 0)
+    with kbc.connect_closing() as conn:
+        bad, bad_episode = _stopped(conn)  # queued and noticed, then its stop cause is corrupted
+        with kb.write_txn(conn):
+            kb._append_event(conn, bad, decision.EVENT, {"cause": cause})
+        with pytest.raises(ValueError, match="cause"):
+            decision.pending_episode(conn, bad)
+        good, good_episode = _stopped(conn)
+        routed, routed_episode = _routed_with_reviewer_off(conn, monkeypatch)
+        now = int(time.time()) + reviewer.review_after_seconds() + 5
+        assert reviewer.queue_backlog(conn, now=now, cfg=(True, 2)) == [routed]
+        assert sorted(reviewer.start_due(conn, now=now)) == sorted([good, routed])
+        for tid, episode in ((good, good_episode), (routed, routed_episode)):
+            assert reviewer.state(conn, tid, episode) == reviewer.ESCALATED  # judge unavailable: owner route
+        assert kb.get_task(conn, bad).status == "triage"
+        assert reviewer.state(conn, bad, bad_episode) == reviewer.QUEUED  # no lease, grant or release
+        assert bad in caplog.text
+        assert not conn.in_transaction
+
+
 def test_a_grant_is_refused_once_the_reviewer_is_turned_off(kanban_home, spend_reviewer, inline, monkeypatch):
     with kbc.connect_closing() as conn:
         tid, episode = _stopped(conn)

@@ -239,14 +239,25 @@ def queue_backlog(conn: sqlite3.Connection, *, now: int, cfg: tuple[bool, int],
                         (NOTICE, now - delay)).fetchall()
     queued = []
     for (task_id,) in rows:
-        episode = None if task_id in skip else _current_episode(conn, task_id)
-        noticed = _notice_at(conn, task_id, episode) if episode else None
-        if episode is None or noticed is None or noticed > now - delay or not eligible(conn, task_id, episode, cfg):
-            continue
-        with kb.write_txn(conn):
-            if _current_episode(conn, task_id) == episode and queue(conn, task_id, episode, backlog=True, cfg=cfg, now=now):
-                queued.append(task_id)
+        try:
+            episode = None if task_id in skip else _current_episode(conn, task_id)
+            noticed = _notice_at(conn, task_id, episode) if episode else None
+            if episode is None or noticed is None or noticed > now - delay or not eligible(conn, task_id, episode, cfg):
+                continue
+            with kb.write_txn(conn):
+                if _current_episode(conn, task_id) == episode and queue(conn, task_id, episode, backlog=True, cfg=cfg, now=now):
+                    queued.append(task_id)
+        except Exception:  # health: allow BLE001 -- per-card boundary; rollback retains this hold, siblings proceed
+            logger.exception("kanban: spend review backlog skipped %s; hold retained", task_id)
     return queued
+
+
+def _episode_or_none(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    try:
+        return _current_episode(conn, task_id)
+    except Exception:  # health: allow BLE001 -- an unreadable stop is never started; its hold is retained
+        logger.exception("kanban: spend review skipped %s; hold retained", task_id)
+        return None
 
 
 def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]:
@@ -254,21 +265,25 @@ def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]
     frozen = journal.requests(conn)
     rows = conn.execute("SELECT DISTINCT e.task_id FROM task_events e JOIN tasks t ON t.id = e.task_id "
                         "WHERE e.kind = ? AND t.status = 'triage'", (QUEUED,)).fetchall()
-    candidates = {(task_id, _current_episode(conn, task_id)) for (task_id,) in rows}
+    candidates = {(task_id, _episode_or_none(conn, task_id)) for (task_id,) in rows if task_id not in skip}
     candidates.update((r["wire"]["task"], r["wire"]["episode"]) for r in frozen)
     due = []
     for task_id, episode in sorted(candidates, key=str):
         if task_id in skip or episode is None:
             continue
-        from hermes_cli import kanban_spend_caused_review as caused
-        from hermes_cli.kanban_spend_decision import pending_episode
-        stop = pending_episode(conn, task_id)
-        cause = caused.effective_cause(conn, task_id, stop) if stop else None
-        if cause in caused.CAUSES and not journal.get(conn, task_id, episode):
-            noticed = _notice_at(conn, task_id, episode)
-            if noticed is None or noticed > now - review_after_seconds():
-                continue  # an annotation cannot inherit an ordinary stop's immediate start
-        events = _review_events(conn, task_id, episode)
+        try:
+            from hermes_cli import kanban_spend_caused_review as caused
+            from hermes_cli.kanban_spend_decision import pending_episode
+            stop = pending_episode(conn, task_id)
+            cause = caused.effective_cause(conn, task_id, stop) if stop else None
+            if cause in caused.CAUSES and not journal.get(conn, task_id, episode):
+                noticed = _notice_at(conn, task_id, episode)
+                if noticed is None or noticed > now - review_after_seconds():
+                    continue  # an annotation cannot inherit an ordinary stop's immediate start
+            events = _review_events(conn, task_id, episode)
+        except Exception:  # health: allow BLE001 -- per-card boundary; this hold is retained, siblings proceed
+            logger.exception("kanban: spend review skipped %s; hold retained", task_id)
+            continue
         if not events or events[-1]["kind"] not in (QUEUED, STARTED):
             continue
         last = events[-1]
@@ -294,15 +309,19 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     for task_id, episode, attempts in _due(conn, now, skip):
         from hermes_cli.kanban_spend_caused_review import CAUSES, effective_cause
         from hermes_cli.kanban_spend_decision import pending_episode
-        stop = pending_episode(conn, task_id)
-        cause = effective_cause(conn, task_id, stop) if stop else None
-        if cause and cause not in CAUSES and not journal.get(conn, task_id, episode):
-            # Exclusions retire custody, never retry work. Frozen Board requests
-            # still reconcile their exact receipt instead of losing custody.
-            escalate(conn, task_id, episode, f"{cause} stops are excluded from spend review; hold retained")
-            continue
-        if attempts >= MAX_ATTEMPTS and not journal.get(conn, task_id, episode):
-            escalate(conn, task_id, episode, f"the spend reviewer did not finish after {attempts} attempts")
+        try:
+            stop = pending_episode(conn, task_id)
+            cause = effective_cause(conn, task_id, stop) if stop else None
+            if cause and cause not in CAUSES and not journal.get(conn, task_id, episode):
+                # Exclusions retire custody, never retry work. Frozen Board requests
+                # still reconcile their exact receipt instead of losing custody.
+                escalate(conn, task_id, episode, f"{cause} stops are excluded from spend review; hold retained")
+                continue
+            if attempts >= MAX_ATTEMPTS and not journal.get(conn, task_id, episode):
+                escalate(conn, task_id, episode, f"the spend reviewer did not finish after {attempts} attempts")
+                continue
+        except Exception:  # health: allow BLE001 -- per-card boundary; this hold is retained, siblings proceed
+            logger.exception("kanban: spend review not started for %s; hold retained", task_id)
             continue
         with _LOCK:
             if len(_INFLIGHT) >= MAX_CONCURRENT:

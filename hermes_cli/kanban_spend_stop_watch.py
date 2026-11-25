@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sqlite3
 import time
 from typing import cast
@@ -14,6 +15,7 @@ from hermes_cli.kanban_wake_check import foreign_ids
 
 AUTHOR = "spend-stop-watch"
 FILED = "spend_stop_watch_filed"
+logger = logging.getLogger(__name__)
 
 
 def stale_stops(conn: sqlite3.Connection, *, now: float, older_than: int = 1800) -> list[dict]:
@@ -24,16 +26,20 @@ def stale_stops(conn: sqlite3.Connection, *, now: float, older_than: int = 1800)
         tid = row['id']
         if tid in copies or row['created_by'] in (AUTHOR, 'kanban-spend-budget'):
             continue
-        stop = decision.pending_episode(conn, tid)
-        if stop is None or stop['created_at'] >= now - older_than:
-            continue
-        episode = cast(str, reviewer.episode_of(stop))
-        if (reviewer.holds(conn, tid, episode)
-                or reviewer.state(conn, tid, episode) in (reviewer.GRANTED, reviewer.SETTLED)
-                or _routed(conn, tid, episode)):
-            continue
-        if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
-                        "AND json_extract(payload,'$.episode')=?", (tid, FILED, episode)).fetchone():
+        try:
+            stop = decision.pending_episode(conn, tid)
+            if stop is None or stop['created_at'] >= now - older_than:
+                continue
+            episode = cast(str, reviewer.episode_of(stop))
+            if (reviewer.holds(conn, tid, episode)
+                    or reviewer.state(conn, tid, episode) in (reviewer.GRANTED, reviewer.SETTLED)
+                    or _routed(conn, tid, episode)):
+                continue
+            if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
+                            "AND json_extract(payload,'$.episode')=?", (tid, FILED, episode)).fetchone():
+                continue
+        except Exception:  # health: allow BLE001 -- per-card boundary; an unreadable stop keeps its hold
+            logger.exception("spend stop watch skipped %s; hold retained", tid)
             continue
         result.append({**dict(row), 'episode': episode, 'stop': stop})
     return result
