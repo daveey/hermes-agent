@@ -350,7 +350,10 @@ def _describe(conn, tid, *, now, reader):
     if source and not any((stop, facts['containment'], facts['pending_command'])):
         from hermes_cli.kanban_actionability_creation import validated_intent
         parent_ids = [r[0] for r in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (tid,))]
-        intent = validated_intent(task, source, parent_ids=parent_ids)
+        # A park's clock is its own (the wake, the block's review): an edge changed during the park moves
+        # no deadline, and the landing after the wake or unblock freezes the dependency wait.
+        parked = task['status'] in ('scheduled', 'blocked')
+        intent = validated_intent(task, source, parent_ids=None if parked else parent_ids)
         if intent:
             facts['deadline_at'] = intent['deadline_at']
         elif 'actionability_intent' in source['data']:
