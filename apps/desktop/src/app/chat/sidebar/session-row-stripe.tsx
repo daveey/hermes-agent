@@ -29,16 +29,23 @@ import { externalClockOnly, sessionExternalStripeTip, unknownExternalCloud } fro
 // [daveey] Every red edge (with its reasons) also goes to the session's own gateway, where the agent can read it.
 // Both reporters cap their in-flight POSTs: a wake/stall commits every row's paint at once (74 in one tick), and
 // unbounded they all time out together on a briefly half-open link.
-const sendStripeReason = boundDiagnosticSender(reportSessionStripeRemote)
-const sendCommittedStripe = boundDiagnosticSender(reportSessionCommittedStripeRemote)
+// Each reporter has a budget per connection: a half-open gateway cannot delay healthy gateways or local rows.
+const sendStripeReason = boundDiagnosticSender(
+  reportSessionStripeRemote,
+  undefined,
+  undefined,
+  row => row.connection_id
+)
+
+const sendCommittedStripe = boundDiagnosticSender(
+  reportSessionCommittedStripeRemote,
+  undefined,
+  undefined,
+  row => row.connection_id
+)
 
 setStripeReasonReporter((row, stripe, previous, reasons) =>
-  sendStripeReason(
-    { connection_id: row.connection_id, id: row.id, profile: row.profile },
-    stripe,
-    previous,
-    reasons
-  )
+  sendStripeReason({ connection_id: row.connection_id, id: row.id, profile: row.profile }, stripe, previous, reasons)
 )
 
 // [daveey] Every committed paint of a row with a canonical envelope (any stripe, not red only) is reported with the

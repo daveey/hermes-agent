@@ -8,21 +8,36 @@
 export function boundDiagnosticSender<A extends unknown[], R>(
   send: (...args: A) => Promise<R>,
   limit = 4,
-  maxQueued = 512
+  maxQueued = 512,
+  keyOf: (...args: A) => unknown = () => undefined
 ): (...args: A) => Promise<R> {
-  let active = 0
-  const waiting: { reject: (e: unknown) => void; run: () => void }[] = []
-
-  const pump = () => {
-    while (active < limit && waiting.length) {
-      waiting.shift()!.run()
-    }
-  }
+  // A half-open gateway must not hold another connection's diagnostics behind its timeouts.
+  const budgets = new Map<unknown, { active: number; waiting: { reject: (e: unknown) => void; run: () => void }[] }>()
 
   return (...args: A) =>
     new Promise<R>((resolve, reject) => {
+      const key = keyOf(...args)
+      let budget = budgets.get(key)
+
+      if (!budget) {
+        budget = { active: 0, waiting: [] }
+        budgets.set(key, budget)
+      }
+
+      const state = budget
+
+      const pump = () => {
+        while (state.active < limit && state.waiting.length) {
+          state.waiting.shift()!.run()
+        }
+
+        if (state.active === 0 && state.waiting.length === 0) {
+          budgets.delete(key)
+        }
+      }
+
       const run = () => {
-        active += 1
+        state.active += 1
         let p: Promise<R>
 
         try {
@@ -32,15 +47,15 @@ export function boundDiagnosticSender<A extends unknown[], R>(
         }
 
         void p.then(resolve, reject).finally(() => {
-          active -= 1
+          state.active -= 1
           pump()
         })
       }
 
-      waiting.push({ reject, run })
+      state.waiting.push({ reject, run })
 
-      if (waiting.length > maxQueued) {
-        waiting.shift()!.reject(new Error('diagnostic queue full'))
+      if (state.waiting.length > maxQueued) {
+        state.waiting.shift()!.reject(new Error('diagnostic queue full'))
       }
 
       pump()
