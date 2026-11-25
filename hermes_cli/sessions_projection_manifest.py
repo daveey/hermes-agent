@@ -404,6 +404,8 @@ SELECTORS: dict[str, tuple[SelectorParam, ...]] = {
         SelectorParam("cron_limit", "integer", 50, validated="clamped 1..500"),
         SelectorParam("messaging_limit", "integer", 100, validated="clamped 1..500"),
         SelectorParam("messaging_exclude", "string|null", None, validated="csv"),
+        SelectorParam("list_slices", "boolean", False,
+                      validated="True requests exact list envelopes; native facts may return ordinary sidebar"),
     ),
 }
 SELECTOR_ROUTES = {"sessions": "/api/profiles/sessions", "sessions_stamps": "/api/profiles/sessions/stamps",
@@ -528,6 +530,19 @@ def response_violations(value: Mapping[str, Any], endpoint: str,
     explicit boolean full=True authorizes the full list projection.
     """
     fields = RESPONSES[endpoint]
+    if endpoint == "sessions_sidebar" and "list_slices_version" in value:
+        if selector.get("list_slices") is not True:
+            return ["list slices require explicit list_slices=True"]
+        envelope = (FieldSpec("list_slices_version", "const:1", ALWAYS, "read_list_slices"),)
+        errors = shape_violations({key: item for key, item in value.items()
+                                   if key not in ("recents", "cron", "messaging")}, envelope)
+        for key in ("recents", "cron", "messaging"):
+            part = value.get(key)
+            if not isinstance(part, dict):
+                errors.append(f"{key}: missing or invalid list envelope")
+            else:
+                errors.extend(f"{key}: {error}" for error in response_violations(part, "sessions", {}))
+        return errors
     if endpoint == "sessions":
         full = selector.get("full", False)
         if not isinstance(full, bool):

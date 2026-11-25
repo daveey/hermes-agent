@@ -77,6 +77,12 @@ def test_real_http_lists_match_and_sql_write_without_notification_is_fresh(clien
     assert response.status_code == 200, response.text
     batch = response.json()
     assert batch["list_slices_version"] == 1
+    from hermes_cli.sessions_projection_manifest import response_violations
+
+    assert response_violations(batch, "sessions_sidebar", {"list_slices": True}) == []
+    assert response_violations(batch, "sessions_sidebar", {})
+    assert response_violations(dict(batch, list_slices_version=2), "sessions_sidebar", {"list_slices": True})
+    assert response_violations(dict(batch, recents={}), "sessions_sidebar", {"list_slices": True})
     for key, filters in (("recents", {"exclude_sources": "cron,telegram"}),
                          ("cron", {"source": "cron"}),
                          ("messaging", {"exclude_sources": "cli,cron"})):
