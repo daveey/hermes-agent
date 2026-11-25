@@ -115,8 +115,11 @@ def validate(verdict, ctx):
         target = verdict.get("target")
         if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,200}", target):
             raise ValueError("invalid target")
+        # Same boundary as Board spend_review.ts names(): one sentence-ending "." or ":" is prose, a longer
+        # coordinate (t_x.2, t_x:child, t_x-old, gw:t_x) is another name.
         if target == ctx["task_id"] or not any(re.search(
-                r"(?<![A-Za-z0-9._:-])" + re.escape(target) + r"(?![A-Za-z0-9._:-])", text)
+                r"(?<![A-Za-z0-9._:-])" + re.escape(target)
+                + r"(?=\Z|[^A-Za-z0-9._:-]|[.:](?:\Z|[^A-Za-z0-9._:-]))", text)
                 for text in ctx.get("target_evidence", [])):
             raise ValueError("target is not named in stop evidence")
         fields["target"] = target

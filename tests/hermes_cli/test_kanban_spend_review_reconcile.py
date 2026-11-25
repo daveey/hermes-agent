@@ -177,3 +177,19 @@ def test_target_contract_excludes_run_only_names():
         caused.validate(verdict, ctx)
     ctx["target_evidence"] = ["stop names t_other"]
     assert caused.validate(verdict, ctx)["target"] == "t_other"
+
+
+@pytest.mark.parametrize("text,named", [
+    ("This card duplicates the finished card t_other.", True), ("Superseded by t_other: nothing remains.", True),
+    ("Already delivered (see t_other).", True), ("Duplicate of t_other.2 only.", False),
+    ("Duplicate of t_other-old.", False), ("Duplicate of t_other:child.", False), ("Duplicate of t_other..", False),
+    ("Duplicate of gw:t_other.", False)])
+def test_target_named_at_sentence_end_matches_board_boundary(text, named):
+    """Same cases as Board spend-review.test.ts: sentence punctuation is prose, a longer coordinate is not."""
+    verdict = {"decision": "archive", "reason": "duplicate", "target": "t_other"}
+    ctx = {"task_id": "t_source", "evidence": [text], "target_evidence": [text]}
+    if named:
+        assert caused.validate(verdict, ctx)["target"] == "t_other"
+    else:
+        with pytest.raises(ValueError, match="not named"):
+            caused.validate(verdict, ctx)
