@@ -43,7 +43,10 @@ def test_unverifiable_checkpoint_cannot_certify_green(db, tmp_path, monkeypatch,
 @pytest.mark.parametrize('code,expected', [(0, 'done'), (3, 'unresolved')])
 def test_structured_receipt_outranks_stale_checkpoint(db, receipts, tmp_path, monkeypatch, code, expected):
     status.turn(db)
-    status.receipt(receipts, exit_code=code)
+    # This is a current-generation completion. Filesystem mtime rounding must
+    # not accidentally put it before the request and test old-failure recovery.
+    since = db._read_one("SELECT MAX(timestamp) AS at FROM messages WHERE role = 'user'")["at"]
+    status.receipt(receipts, exit_code=code, at=since + 1)
     checkpoint(tmp_path, monkeypatch, [entry()])
     monkeypatch.setattr(processes.process_registry, '_detached_host_fate',
                         lambda *args: pytest.fail('completion is authoritative'))
