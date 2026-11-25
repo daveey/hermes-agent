@@ -142,6 +142,79 @@ def test_page_strict_schema(runtime, update):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('failure', [KeyError, ZeroDivisionError])
+def test_unexpected_inventory_failure_is_sanitized_and_recoverable(runtime, monkeypatch, failure):
+    hooks, workers = [], []
+    monkeypatch.setattr(threading, 'excepthook', hooks.append)
+    async def scenario():
+        server, control, params = await start(runtime)
+        try:
+            summary = (await ask(runtime, params))['result']
+            original = runtime[2]._inventory_modules
+            def broken(**kwargs):
+                workers.append(threading.current_thread())
+                raise failure('PRIVATE_INVENTORY_EXCEPTION_SENTINEL')
+            monkeypatch.setattr(runtime[2], '_inventory_modules', broken)
+            raw = json.dumps({'protocol': 1, 'verb': 'code-provenance',
+                              'id': 1, 'params': params}).encode() + b'\n'
+            reply = json.loads(await asyncio.to_thread(private_control_query, runtime[0], raw))
+            assert len(workers) == 1
+            await asyncio.to_thread(workers[0].join, 2)
+            assert not workers[0].is_alive()
+            assert reply == {'protocol': 1, 'id': 1, 'ok': True,
+                             'result': pc._error('capture_failed')}
+            assert 'snapshot_id' not in reply['result']
+            assert not hooks
+            assert 'PRIVATE_INVENTORY_EXCEPTION_SENTINEL' not in json.dumps(reply)
+            assert next(iter(control._snapshots.values()))['token'] == summary['snapshot_id']
+            page = (await ask(runtime, page_params(summary)))['result']
+            assert page['complete'] and page['snapshot_id'] == summary['snapshot_id']
+            assert not pc._FLIGHT.locked()
+            monkeypatch.setattr(runtime[2], '_inventory_modules', original)
+            fresh = (await ask(runtime, params))['result']
+            assert fresh['complete'] and fresh['snapshot_id'] != summary['snapshot_id']
+            assert not hooks
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_late_unexpected_failure_keeps_flight_until_worker_exit(runtime, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    hooks, workers = [], []
+    monkeypatch.setattr(threading, 'excepthook', hooks.append)
+    async def scenario():
+        server, control, params = await start(runtime)
+        try:
+            summary = (await ask(runtime, params))['result']
+            original = runtime[2]._inventory_modules
+            def blocked(**kwargs):
+                workers.append(threading.current_thread())
+                entered.set()
+                assert release.wait(8)
+                raise KeyError('PRIVATE_LATE_EXCEPTION_SENTINEL')
+            monkeypatch.setattr(runtime[2], '_inventory_modules', blocked)
+            pending = asyncio.create_task(ask(runtime, params))
+            assert await asyncio.to_thread(entered.wait, 2)
+            assert (await pending)['result'] == pc._error('capture_timeout')
+            assert (await ask(runtime, params))['result'] == pc._error('capture_busy')
+            assert (await ask(runtime, page_params(summary)))['result']['complete']
+            assert pc._FLIGHT.locked()
+            release.set()
+            await asyncio.to_thread(workers[0].join, 2)
+            assert not workers[0].is_alive() and not hooks
+            assert not pc._FLIGHT.locked()
+            assert next(iter(control._snapshots.values()))['token'] == summary['snapshot_id']
+            monkeypatch.setattr(runtime[2], '_inventory_modules', original)
+            assert (await ask(runtime, params))['result']['complete']
+        finally:
+            release.set()
+            for worker in workers:
+                await asyncio.to_thread(worker.join, 2)
+            await server.stop()
+    asyncio.run(scenario())
+
+
 def test_missing_ledger_is_error_and_never_installs(runtime, monkeypatch):
     monkeypatch.setattr(ca, '_installed', None)
     async def scenario():
