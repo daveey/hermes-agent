@@ -1,6 +1,8 @@
 """``hermes kanban release``: one step from a spend/scope stop to a card that can finish. [daveey]"""
 import json
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_release as release
 from hermes_cli import kanban_spend_budget as budget
@@ -36,9 +38,11 @@ def status(board, tid):
 
 
 def written(board, tid):
-    """Everything a release writes on a card: comments and events, as counts."""
+    """Everything a release writes on a card: comments and events, as counts. A read-first refusal's own
+    ``release_unread_shown`` receipt (what it printed to which session) is not a write of the release."""
     return (board.execute('SELECT COUNT(*) FROM task_comments WHERE task_id=?', (tid,)).fetchone()[0],
-            board.execute('SELECT COUNT(*) FROM task_events WHERE task_id=?', (tid,)).fetchone()[0])
+            board.execute('SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind != ?',
+                          (tid, release.SHOWN)).fetchone()[0])
 
 
 def spent_runs(board, tid, n):
@@ -874,3 +878,176 @@ def test_an_agent_release_written_before_attribution_reads_as_unknown_not_agent(
     human = spend_stopped(board)
     run(board, human)
     assert newest_budget(board, human)['cache_read_writer_kind'] == 'human'
+
+
+# ---- leftovers: --seen is stateful; spend-budget keeps a person's limit ----
+
+def shown_events(board, tid):
+    return [json.loads(r[0]) for r in board.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind=? ORDER BY id", (tid, release.SHOWN))]
+
+
+def test_a_correct_first_guess_of_seen_is_refused_and_prints_the_comment(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Hold this until Friday.', writer_kind='human')
+    before = written(board, tid)
+    out = as_owner(board, tid, seen=said)  # the exact newest id, never printed to this caller
+    assert out['refusal'] == 'budget_decision_unread' and out['unread'] == [said]
+    assert 'Hold this until Friday.' in out['message'] and 'was not printed to this session' in out['message']
+    assert written(board, tid) == before and status(board, tid) == 'triage'
+    (record,) = shown_events(board, tid)
+    assert record['session'] == scope.CHAT and record['comment_ids'] == [said] and record['verb'] == 'release'
+    assert record['actor_kind'] == 'agent' and isinstance(record['time'], int)
+    assert as_owner(board, tid, seen=said)['outcome'] == 'released'  # now it was printed to this session
+
+
+def test_a_refusal_then_a_rerun_with_the_printed_id_releases(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Only the docs fix, please.', writer_kind='human')
+    out = as_owner(board, tid)
+    assert out['refusal'] == 'budget_decision_unread' and f'--seen {said}' in out['message']
+    assert as_owner(board, tid, seen=said)['outcome'] == 'released'
+
+
+def test_another_sessions_refusal_does_not_count(board, monkeypatch):
+    from hermes_cli import kanban_scope_delegate as delegates
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    delegates.grant(board, session=TRIAGE, reason='triage chat may unblock cards', writer=scope.HUMAN)
+    said = kb.add_comment(board, tid, 'default', 'Wait for my review.', writer_kind='human')
+    assert as_triage(board, tid)['refusal'] == 'budget_decision_unread'  # printed to the triage chat
+    assert [e['session'] for e in shown_events(board, tid)] == [TRIAGE]
+    out = as_owner(board, tid, seen=said)  # the owning chat never saw it
+    assert out['refusal'] == 'budget_decision_unread' and 'Wait for my review.' in out['message']
+    assert status(board, tid) == 'triage'
+    assert as_owner(board, tid, seen=said)['outcome'] == 'released'
+
+
+def test_a_shown_record_another_gateway_pushed_does_not_count(board, monkeypatch):
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Hold.', writer_kind='human')
+    with kb.write_txn(board):
+        kb._append_event(board, tid, release.SHOWN, {'version': 1, 'session': scope.CHAT, 'comment_ids': [said]})
+        if 'origin_gateway' not in {r[1] for r in board.execute('PRAGMA table_info(task_events)')}:
+            board.execute('ALTER TABLE task_events ADD COLUMN origin_gateway TEXT')
+        board.execute('UPDATE task_events SET origin_gateway=? WHERE task_id=? AND kind=?',
+                      ('worker-9', tid, release.SHOWN))
+    assert as_owner(board, tid, seen=said)['refusal'] == 'budget_decision_unread'
+
+
+def test_a_caller_without_a_session_cannot_satisfy_seen(board):
+    tid = spend_stopped(board)
+    said = kb.add_comment(board, tid, 'default', 'Hold.', writer_kind='human')
+    nobody = ('agent', None, 'runner:systemd:x.service')
+    for seen in (None, said, said):
+        try:
+            release.read_first(board, tid, decision.pending_episode(board, tid), nobody, seen, None)
+        except release.Refusal as exc:
+            assert exc.code == 'budget_decision_unread' and 'no session id' in str(exc)
+        else:
+            raise AssertionError('a session-less agent passed --seen')
+
+
+def spend_budget(board, monkeypatch, tid, *flags, writer=scope.AGENT):
+    """``hermes kanban spend-budget`` as ``writer``: ``(exit code, stderr)``."""
+    import argparse
+    import contextlib
+    import io
+    from hermes_cli import kanban_spend_budget_cli as cli
+    monkeypatch.setattr('hermes_cli.kanban_comment_writer.cli_comment_writer', lambda **kw: writer)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('task_id')
+    parser.add_argument('--seen', dest='seen_comment_id', type=int)
+    parser.add_argument('--runs', type=int)
+    parser.add_argument('--cache-read-tokens', type=int)
+    parser.add_argument('--exempt', action='store_true')
+    parser.add_argument('--clear', action='store_true')
+    parser.add_argument('--reason')
+    parser.add_argument('--json', action='store_true')
+    err, out = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+        rc = cli.command(parser.parse_args([tid, *flags]))
+    return rc, err.getvalue()
+
+
+def with_person_budget(board, *, stop=False):
+    """A card whose budget a person set (runs 3, 5M cache-read tokens); ``stop``: then spend-stopped."""
+    tid = kb.create_task(board, title='Budgeted work', assignee='default')
+    budget.set_override(board, tid, runs=3, cache_read_tokens=5_000_000, by='david', reason='small and cheap',
+                        writer_kind='human')
+    if stop:
+        with kb.write_txn(board):
+            board.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+            kb._append_event(board, tid, decision.EVENT, {'reason': 'Spend budget: 3 runs'})
+    return tid
+
+
+def test_an_agent_restating_a_persons_budget_keeps_its_attribution_and_a_release_keeps_the_limit(board, monkeypatch):
+    tid = with_person_budget(board, stop=True)
+    scope.link(board, tid)
+    rc, err = spend_budget(board, monkeypatch, tid, '--runs', '3', '--cache-read-tokens', '5000000',
+                           '--reason', 'restating')
+    assert rc == 0, err
+    restated = newest_budget(board, tid)
+    assert restated['writer_kind'] == 'agent' and restated['cache_read_writer_kind'] == 'human'
+    assert restated['runs_writer_kind'] == 'human' and budget.cache_attribution(restated) == 'human'
+    shown = as_owner(board, tid)
+    out = as_owner(board, tid, seen=max(shown['unread']))
+    assert out['outcome'] == 'released', out
+    assert budget.card_limits(board, tid, budget.limits()).cache_read_tokens == 5_000_000  # the person's cap stays
+
+
+def test_an_agent_tightening_a_persons_limit_keeps_its_attribution(board, monkeypatch):
+    tid = kb.create_task(board, title='Budgeted work', assignee='default')
+    budget.set_override(board, tid, runs=20, cache_read_tokens=5_000_000, by='david', reason='cheap')
+    rc, err = spend_budget(board, monkeypatch, tid, '--runs', '10', '--cache-read-tokens', '1000000',
+                           '--reason', 'narrower')
+    assert rc == 0, err
+    tightened = newest_budget(board, tid)
+    assert tightened['cache_read_writer_kind'] == 'unknown' and tightened['runs_writer_kind'] == 'unknown'
+    # ... so lifting it again is still a person's limit being lifted
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'lift')
+    assert rc == 4 and 'budget_decision_unread' in err and newest_budget(board, tid) == tightened
+
+
+@pytest.mark.parametrize('flags', [('--cache-read-tokens', '0', '--runs', '3'),
+                                   ('--cache-read-tokens', '9000000', '--runs', '3'),
+                                   ('--runs', '3'),  # the cache-read field falls back to the larger board limit
+                                   ('--runs', '30', '--cache-read-tokens', '5000000'),
+                                   ('--exempt',), ('--clear',)])
+def test_an_agent_lifting_a_persons_limit_must_read_first(board, monkeypatch, flags):
+    tid = with_person_budget(board)
+    person = newest_budget(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Keep it cheap.', writer_kind='human')
+    rc, err = spend_budget(board, monkeypatch, tid, *flags, '--seen', str(said), '--reason', 'lift')  # a guess
+    assert rc == 4 and 'budget_decision_unread' in err and 'Keep it cheap.' in err
+    assert 'small and cheap' in err  # the person's own budget comment is printed
+    assert newest_budget(board, tid) == person
+    newest = max(shown_events(board, tid)[-1]['comment_ids'])
+    assert f'--seen {newest}' in err
+    rc, err = spend_budget(board, monkeypatch, tid, *flags, '--seen', str(newest), '--reason', 'lift',
+                           writer=('agent', 'another-session', '1:HERMES_SESSION_ID'))
+    assert rc == 4 and newest_budget(board, tid) == person  # another session's refusal does not count
+    rc, err = spend_budget(board, monkeypatch, tid, *flags, '--seen', str(newest), '--reason', 'lift')
+    assert rc == 0, err
+    assert newest_budget(board, tid)['writer_kind'] == 'agent'
+
+
+def test_a_human_spend_budget_is_unchanged(board, monkeypatch):
+    tid = with_person_budget(board)
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'standing', writer=scope.HUMAN)
+    assert rc == 0, err
+    lifted = newest_budget(board, tid)
+    assert lifted['writer_kind'] == 'human' and 'cache_read_writer_kind' not in lifted
+    assert 'runs_writer_kind' not in lifted and not shown_events(board, tid)
+
+
+def test_an_agent_replacing_an_agents_limit_needs_no_read(board, monkeypatch):
+    tid = kb.create_task(board, title='Budgeted work', assignee='default')
+    budget.set_override(board, tid, runs=3, cache_read_tokens=5_000_000, by='bot', reason='x', writer_kind='agent')
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'standing')
+    assert rc == 0, err
+    assert budget.card_limits(board, tid, budget.limits()) == budget.Limits(0, 0)

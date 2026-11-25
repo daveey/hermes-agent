@@ -59,6 +59,61 @@ def _spent_already(conn, tid: str, runs, cache) -> str:
             "so this would trip the budget at once. Use --exempt for no limit; to stop the card, block or archive it.")
 
 
+_PERSON_NOTE = "Spend budget for this card:"  # the start of the comment set_override writes with each override
+
+
+def _person_note(conn, tid: str, event: dict):
+    """The ``{id, who, time, body}`` of the comment ``set_override`` wrote with override ``event``, else None.
+    Both are written in one transaction: the decision comment it names, or the newest budget comment by the
+    budget writer no later than the event."""
+    from datetime import UTC, datetime
+    payload = json.loads(event.get("payload") or "{}")
+    named = (payload.get("decision_comment") or {}).get("comment_id") if isinstance(payload, dict) else None
+    row = None
+    if isinstance(named, int):
+        row = conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND id=?",
+                           (tid, named)).fetchone()
+    if row is None:
+        row = conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND author=? "
+                           "AND body LIKE ? AND created_at <= ? ORDER BY id DESC LIMIT 1",
+                           (tid, ksb.AUTHOR, _PERSON_NOTE + "%", int(event.get("created_at") or 0) + 1)).fetchone()
+    if row is None:
+        return None
+    return {"id": int(row[0]), "who": f"{row[1]} (the limit being changed)", "body": str(row[3] or "")[:600],
+            "time": datetime.fromtimestamp(int(row[2] or 0), UTC).isoformat()}
+
+
+def _agent_gate(conn, tid: str, writer: tuple, runs, cache, seen, board, args):
+    """For a non-human caller: ``(seen for the budget fence, carried attribution fields)``, or a refusal text.
+
+    Restating or tightening a limit a person may have set keeps that limit's attribution (``agent_change``), so
+    the restatement cannot make it look agent-set for a later release. Raising or removing one (a larger value,
+    0, or ``--clear`` back to a larger board limit) follows ``kanban_release.read_first``: the refusal prints the
+    override's own comment, human comments since it and any budget decision, and records them as shown to this
+    session; ``--seen`` is then the newest id it printed, on a rerun from the same session."""
+    from hermes_cli import kanban_release as kr
+    loosened, carried = ksb.agent_change(ksb.card_override(conn, tid), runs, cache, ksb.limits())
+    if not loosened:
+        return seen, carried
+    row = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                       (tid, ksb.OVERRIDE_EVENT)).fetchone()
+    anchor = dict(row)
+    note = _person_note(conn, tid, anchor)
+    if note is None:
+        return (f"kanban spend-budget: {tid}: refused: the {' and '.join(loosened)} limit may be a person's and its "
+                "budget comment is not readable here; a human runs `hermes kanban spend-budget`")
+    flags = ("--exempt" if args.exempt else "--clear" if args.clear else
+             " ".join(f"--{name} {value}" for name, value in (("runs", runs), ("cache-read-tokens", cache))
+                      if value is not None))
+    rerun = f"hermes kanban {'--board ' + board + ' ' if board else ''}spend-budget {tid} {flags} --reason ..."
+    try:
+        seen = kr.read_first(conn, tid, anchor, writer, seen, board, verb="spend-budget", extra=[note], rerun=rerun)
+    except kr.Refusal as exc:
+        return (f"kanban spend-budget: {tid}: refused: {exc.code}: raising or removing a {' and '.join(loosened)} "
+                f"limit a person may have set needs a read first. {exc}")
+    return seen, carried  # the limits it keeps or tightens keep their attribution; a lifted one is this writer's
+
+
 def command(args: argparse.Namespace) -> int:
     tid = args.task_id
     runs, cache = args.runs, args.cache_read_tokens
@@ -76,12 +131,19 @@ def command(args: argparse.Namespace) -> int:
         if changing and (refusal := _spent_already(conn, tid, runs, cache)):
             return _err(refusal, 2)
         if changing:
+            from hermes_cli.kanban_comment_writer import cli_comment_writer
             from hermes_cli.kanban_release_comments import UNREAD_EXIT, UnreadComments
+            writer = cli_comment_writer()
+            seen, board = getattr(args, 'seen_comment_id', None), getattr(args, 'board', None)
+            carried: dict = {}
+            if writer[0] != "human":
+                gate = _agent_gate(conn, tid, writer, runs, cache, seen, board, args)
+                if isinstance(gate, str):
+                    return _err(gate, UNREAD_EXIT)
+                seen, carried = gate
             try:
-                from hermes_cli.kanban_comment_writer import cli_comment_writer
                 ksb.set_override(conn, tid, runs=runs, cache_read_tokens=cache, by=_actor(), reason=args.reason,
-                                 seen=getattr(args, 'seen_comment_id', None), board=getattr(args, 'board', None),
-                                 writer_kind=cli_comment_writer()[0])
+                                 seen=seen, board=board, writer_kind=writer[0], **carried)
             except UnreadComments as exc:
                 return _err(str(exc), UNREAD_EXIT)
         lim = ksb.card_limits(conn, tid, ksb.limits())

@@ -163,23 +163,51 @@ def submit(network, monkeypatch):
     return request
 
 
-@pytest.mark.parametrize("network", [False], indirect=True)
-def test_forwarding_to_a_never_synced_owner_creates_nothing(network, monkeypatch):
-    """Creation authority (kanban_create_authority.require): a never-synced owner cannot hold the origin chat's
-    ``created`` link, so nothing could ever renew the card's scope. The create is refused whole, every time."""
+def _owner_create(network, monkeypatch):
+    """The origin-create the macbook courier forwards to the hub owner for one submitted placement."""
     courier, dbs, service, host, runner, _, _ = network
     request = submit(network, monkeypatch)
     with host("macbook"):
         courier.journal_request(dbs["macbook"], request)
         courier.advance_origin_forward(dbs["macbook"], {}, request, runner, service)
         child = service.deliver(dbs["macbook"], "macbook")[0]
-    child = service.requests[child["id"]]
+    return service.requests[child["id"]]
+
+
+@pytest.mark.parametrize("network", [False], indirect=True)
+def test_a_rejected_owner_create_stops_the_senders_retries(network, monkeypatch):
+    """The owner's terminal ``rejected`` (reported to the Board as the request's result) ends the forwarding
+    obligation on the sender: it answers ``rejected`` with the owner's reason and queues nothing again."""
+    courier, dbs, service, host, runner, _, _ = network
+    child = _owner_create(network, monkeypatch)
+    request = next(r for r in service.requests.values() if r["action"] == "origin-forward")
+    with host("hub"):
+        courier.journal_request(dbs["hub"], child)
+        status, creation = courier.advance_origin_create(dbs["hub"], {}, child, runner, service)
+    assert status == "rejected", creation
+    service.requests[child["id"]] = {**child, "state": status, "result": creation}  # the owner's POST .../result
+    with host("macbook"):
+        sent = dbs["macbook"].execute("SELECT count(*) FROM sent").fetchone()[0]
+        for _ in range(3):
+            status, result = courier.advance_origin_forward(dbs["macbook"], {}, request, runner, service)
+            assert status == "rejected" and result["code"] == "origin_forward_downstream_failed", result
+            assert result["downstream"]["code"] == "scope_authority_missing" and result["handoff_complete"] is False
+        assert dbs["macbook"].execute("SELECT count(*) FROM sent").fetchone()[0] == sent
+
+
+@pytest.mark.parametrize("network", [False], indirect=True)
+def test_forwarding_to_a_never_synced_owner_creates_nothing(network, monkeypatch):
+    """Creation authority (kanban_create_authority.require): a never-synced owner cannot hold the origin chat's
+    ``created`` link, so nothing could ever renew the card's scope. The create is refused whole, every time, and
+    terminally: ``rejected`` with the reason, never a ``pending`` the sender would retry forever."""
+    courier, dbs, service, host, runner, _, _ = network
+    child = _owner_create(network, monkeypatch)
     with host("hub"):
         courier.journal_request(dbs["hub"], child)
         for _ in range(2):
             status, creation = courier.advance_origin_create(dbs["hub"], {}, child, runner, service)
-            assert status == "pending" and not creation.get("created"), creation
-            assert creation["handoff_complete"] is False
+            assert status == "rejected" and not creation.get("created"), creation
+            assert creation["code"] == "scope_authority_missing" and creation["handoff_complete"] is False
         with kanban_db_connect.connect_closing() as board:
             assert board.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
             assert board.execute("SELECT count(*) FROM kanban_notify_subs").fetchone()[0] == 0

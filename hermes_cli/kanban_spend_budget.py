@@ -147,6 +147,50 @@ def carried(prior: Optional[dict], writer_kind: str = "agent") -> dict:
     return out
 
 
+def runs_attribution(data: Optional[dict]) -> Optional[str]:
+    """Who set an override's run limit: ``runs_writer_kind`` when a later writer only carried (or tightened) it,
+    otherwise the event's writer; None when the event records nothing (read as possibly a person's)."""
+    data = data or {}
+    return data.get("runs_writer_kind") or data.get("writer_kind")
+
+
+def _ceiling(value: Optional[int], board: int) -> Optional[int]:
+    """The limit a field leaves in force: the board's for None, None (no limit) for 0."""
+    limit = board if value is None else value
+    return None if not limit else limit
+
+
+def looser(old: Any, new: Any, board: int) -> bool:
+    """Whether replacing per-card limit ``old`` by ``new`` (None = the board's, 0 = no limit) allows more."""
+    before, after = _ceiling(_limit_value(old), board), _ceiling(_limit_value(new), board)
+    return before is not None and (after is None or after > before)
+
+
+def agent_change(prior: Optional[dict], runs: Optional[int], cache_read_tokens: Optional[int],
+                 board: Limits) -> tuple[list[str], dict]:
+    """``(loosened, carried)`` for a non-human writer replacing the card's override ``prior`` by these limits.
+
+    ``loosened`` names each limit a person may have set (attributed ``human``, ``unknown`` or nothing) that the
+    change would raise or remove: ``hermes kanban spend-budget`` lets an agent do that only after the read-first
+    discipline of ``kanban_release.read_first``. ``carried`` is the attribution of every such limit the change
+    keeps or tightens (``cache_read_writer_kind`` / ``runs_writer_kind``): restating a person's limit, or
+    narrowing it, never makes it look agent-set, so a later agent release or spend-budget still keeps it."""
+    if not override_set(prior):
+        return [], {}
+    loosened, carried = [], {}
+    for name, attribution, field, new, limit in (
+            ("cache_read_tokens", cache_attribution(prior), "cache_read_writer_kind", cache_read_tokens,
+             board.cache_read_tokens),
+            ("runs", runs_attribution(prior), "runs_writer_kind", runs, board.runs)):
+        if attribution == "agent":
+            continue
+        if looser(prior.get(name), new, limit):
+            loosened.append(name)
+        else:
+            carried[field] = attribution or "unknown"
+    return loosened, carried
+
+
 def override_set(data: Optional[dict]) -> bool:
     """Whether an override payload sets any limit (a cleared or malformed one does not)."""
     return any(_limit_value((data or {}).get(key)) is not None for key in ("runs", "cache_read_tokens"))
@@ -171,7 +215,8 @@ def window_text(window: str) -> str:
 def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = None,
                  cache_read_tokens: Optional[int] = None, by: str, reason: str,
                  seen: Optional[int] = None, board: Optional[str] = None,
-                 writer_kind: Optional[str] = None, cache_read_writer_kind: Optional[str] = None) -> dict:
+                 writer_kind: Optional[str] = None, cache_read_writer_kind: Optional[str] = None,
+                 runs_writer_kind: Optional[str] = None) -> dict:
     """Give ``task_id`` its own limits (0 = no limit; None = the board's), recorded as a ``spend_budget_set``
     event and a comment naming ``by`` and ``reason``. Both None clears the override. Replacing a spend-stop
     decision requires ``seen`` to acknowledge its comment, checked atomically even after promotion.
@@ -193,6 +238,8 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
         # The cache-read limit was carried over from an earlier override, not chosen by this writer: it keeps
         # the attribution it had (cache_attribution), so a kept limit never starts to look agent-set.
         payload["cache_read_writer_kind"] = cache_read_writer_kind
+    if runs_writer_kind in ("human", "agent", "unknown"):
+        payload["runs_writer_kind"] = runs_writer_kind  # the same, for a run limit an agent restated or tightened
     with kb.write_txn(conn):
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
             raise ValueError(f"unknown task {task_id}")

@@ -243,9 +243,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
             except Exception as e:
                 if tool_name in {"kanban_create", "kanban_origin_adopt"} and (
                         kw.get("origin_intent") is not None or kw.get("selfwork_intent") is not None):
-                    from hermes_cli.kanban_origin import OriginError
-                    if isinstance(e, OriginError):
-                        return tool_error(str(e), code=e.code, handoff_complete=False)
+                    from hermes_cli.kanban_origin_owner import origin_refusal
+                    if (refused := origin_refusal(e, origin=kw.get("origin_intent") is not None)) is not None:
+                        return refused
 
                 from hermes_cli.kanban_capabilities import CapabilityMismatchError
                 from hermes_cli.kanban_assignment_routing import AssignmentRoutingError

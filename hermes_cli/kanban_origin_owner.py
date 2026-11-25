@@ -106,6 +106,25 @@ def receive(request: dict, *, selfwork_context=None, selfwork_exception=None) ->
     return _dispatch_owner_tool('kanban_create', args, intent, selfwork_context, selfwork_exception)
 
 
+def origin_refusal(exc, *, origin: bool = True):
+    """The tool error a courier-dispatched ``kanban_create``/``kanban_origin_adopt`` returns for ``exc``, else None.
+
+    An origin error stays a handoff that is not complete. With an origin intent (``origin``; not a bare self-work
+    create, whose receiver keeps its own pending rule), a create refused for want of renewable scope authority
+    (``kanban_create_authority.CreateAuthorityRefused``: e.g. a never-synced owner board, which cannot hold the
+    origin chat's ``created`` link) is definitive and wrote nothing (its transaction rolled back): ``created:
+    False`` makes :func:`_dispatch_result` answer a terminal ``rejected`` with the reason, so the sender stops
+    instead of retrying an endless ``pending / origin_dispatch_pending``."""
+    from hermes_cli.kanban_create_authority import CreateAuthorityRefused
+    from hermes_cli.kanban_origin import OriginError
+    from tools.registry import tool_error
+    if isinstance(exc, OriginError):
+        return tool_error(str(exc), code=exc.code, handoff_complete=False)
+    if origin and isinstance(exc, CreateAuthorityRefused):
+        return tool_error(str(exc), code=exc.code, created=False, handoff_complete=False)
+    return None
+
+
 def _dispatch_result(raw_result):
     try:
         result = json.loads(raw_result) if isinstance(raw_result, str) else None

@@ -43,6 +43,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 DEFAULT_RUNS = 10
 RELEASED = "stop_released"  # the durable record of one release; payload version 1
+SHOWN = "release_unread_shown"  # what a read-first refusal printed to which agent session; payload version 1
 STAMP = "release_target"  # human_request field only the stranded-park brief sets
 MARK = "Released to finish this card's acceptance."
 _HUMAN_LIMITS = ("Narrower run counts, dollar caps and stop-on-finding conditions that agents wrote earlier are "
@@ -52,7 +53,7 @@ _AGENT_LIMITS = ("Narrower run counts, dollar caps and stop-on-finding condition
 # Events that can follow a recorded release without moving the card: only then is a triage card "still ours".
 _QUIET = frozenset({"commented", RELEASED, "spend_budget_set", "spend_budget_decision_ready", "scope_renewed",
                     "user_steps_answer", "card_answer_released", "stranded_park_escalated", "parent_held",
-                    "hold_creator_notified"})
+                    "hold_creator_notified", SHOWN})
 ESCALATED = "stranded_park_escalated"  # kanban_stranded_park.EVENT: the home's own record of the ask it filed
 REFILED = "stranded_park_refiled"  # the same record for an ask the sweep re-filed; no second desk notice
 MANDATE = (MARK + " Budget: {runs} more runs. {limits} Stop only on: a provider safety refusal; a step that needs "
@@ -330,6 +331,9 @@ class _Refusal(Exception):
         self.code, self.more = code, more
 
 
+Refusal = _Refusal  # what :func:`read_first` raises for another verb's caller (``hermes kanban spend-budget``)
+
+
 def _eligible(conn: sqlite3.Connection, tid: str) -> tuple[str, Optional[dict], bool]:
     """``(status, recorded release, resume)`` for a card ``release`` may act on, else :class:`_Refusal`.
     ``resume``: the decision is recorded but the card never left triage (the park or promotion failed)."""
@@ -390,21 +394,22 @@ def _open_parents(conn: sqlite3.Connection, tid: str) -> list[str]:
     return [pid for pid, st in states if st not in ("done", "archived")]
 
 
-def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple, board: Optional[str]) -> list[dict]:
+def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple, board: Optional[str],
+                  verb: str = "release", extra: Sequence[dict] = ()) -> list[dict]:
     """What an agent caller must have read: human comments after the stop, a budget decision recorded after it,
-    and other sessions' recent comments (promote's rule). Each ``{id, who, time, body}``; ``id`` None is a
-    comment whose text has not synced here, which nothing can acknowledge."""
+    and other sessions' recent comments (promote's rule), plus ``extra`` items the caller names. Each ``{id, who,
+    time, body}``; ``id`` None is a comment whose text has not synced here, which nothing can acknowledge."""
     from datetime import UTC, datetime
     from hermes_cli import kanban_release_comments as unread
     from hermes_cli import kanban_spend_override_fence as fence
-    items: dict = {}
+    items: dict = {item["id"]: dict(item) for item in extra}
     for cid in _unread_human(conn, tid, stop, None):
         row = conn.execute("SELECT author, created_at, body FROM task_comments WHERE id=?", (cid,)).fetchone()
         if row is not None:
             items[cid] = {"id": cid, "who": f"{row[0]} (human)", "body": str(row[2] or "")[:600],
                           "time": datetime.fromtimestamp(int(row[1] or 0), UTC).isoformat()}
     checks = (lambda: fence.check(conn, tid, seen=None, board=board),
-              lambda: unread.check(conn, tid, session=writer[1], seen=None, verb="release", board=board))
+              lambda: unread.check(conn, tid, session=writer[1], seen=None, verb=verb, board=board))
     for check in checks:
         try:
             check()
@@ -415,31 +420,70 @@ def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple,
     return sorted(items.values(), key=lambda item: (item["id"] is None, item["id"] or 0))
 
 
-def _read_first(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple, seen: Optional[int],
-                board: Optional[str]) -> Optional[int]:
+def _shown(conn: sqlite3.Connection, tid: str, session: Optional[str], cid: int) -> bool:
+    """A read-first refusal of this board printed comment ``cid`` to agent ``session`` (a ``release_unread_shown``
+    event). Only this board's own events count (:func:`own_events`): a row another gateway pushed proves nothing
+    about what this caller was shown. A caller with no session has no identity to match, so never matches."""
+    if not session:
+        return False
+    return any(e["payload"].get("session") == session and cid in (e["payload"].get("comment_ids") or [])
+               for e in own_events(conn, tid, (SHOWN,)))
+
+
+def _record_shown(conn: sqlite3.Connection, tid: str, writer: tuple, ids: Sequence[int], verb: str) -> None:
+    """Record what a read-first refusal printed: the agent session, the comment ids, the time."""
+    import time
+    from hermes_cli import kanban_db as kb
+    if not ids:
+        return
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, SHOWN, {"version": 1, "verb": verb, "actor_kind": writer[0],
+                                            "session": writer[1] or None, "comment_ids": sorted(set(ids)),
+                                            "time": int(time.time())})
+
+
+def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], writer: tuple, seen: Optional[int],
+               board: Optional[str], *, verb: str = "release", extra: Sequence[dict] = (),
+               rerun: str = "") -> Optional[int]:
     """Read before acting. Returns the ``seen`` id the budget fence gets, or :class:`_Refusal`.
 
     An agent authority does not decide over a person's words or a budget decision it has not been shown: the
-    refusal prints them, and ``--seen`` is accepted only as the id of the newest item it printed. A guess, a
-    larger number, or ``--seen`` when nothing needs reading is refused. A human proceeds and acknowledges what
+    refusal prints them (human comments after ``anchor``, the budget fence's decision, other sessions' recent
+    comments and ``extra``) and records a ``release_unread_shown`` event naming the caller's session and the ids
+    it printed. ``--seen`` is accepted only as the id of the newest unread item AND only when such an event of
+    this board shows that id was printed to the same session: a correct first guess, another session's refusal,
+    a larger number, or ``--seen`` when nothing needs reading is refused. A human proceeds and acknowledges what
     is on the card now, read before the mandate is written."""
     if writer[0] == "human":
         return conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id=?", (tid,)).fetchone()[0]
-    items = _unread_items(conn, tid, stop, writer, board)
+    items = _unread_items(conn, tid, anchor, writer, board, verb, extra)
     if not items:
         if seen is not None:
             raise _Refusal("seen_not_needed", f"nothing on {tid} needs --seen; rerun without it")
         return None
     ids = [item["id"] for item in items if item["id"] is not None]
     newest = max(ids) if len(ids) == len(items) else None
-    if newest is not None and seen == newest:
+    if newest is not None and seen == newest and _shown(conn, tid, writer[1], newest):
         return seen
     shown = "\n".join(f"Comment {item['id']} | {item['who']} | {item['time']}\n{item['body']}" for item in items)
-    how = (f"After reading: `hermes kanban release {tid} --seen {newest}`" if newest is not None else
+    command = rerun or f"hermes kanban {verb} {tid}"
+    how = (f"After reading: `{command} --seen {newest}`" if newest is not None else
            "A comment's text has not synced here; wait for the sync and rerun")
-    wrong = f" (--seen {seen} is not the newest of them)" if seen is not None else ""
-    raise _Refusal("budget_decision_unread", f"read these before releasing {tid}{wrong}:\n{shown}\n{how}",
-                   unread=ids)
+    if newest is not None and not writer[1]:
+        how = ("This caller has no session id (HERMES_SESSION_ID), so no refusal can be recorded as shown to it; "
+               "a human operator, the owning chat or a delegate chat must do this")
+    wrong = ""
+    if seen is not None:
+        wrong = (f" (--seen {seen} is not the newest of them)" if seen != newest else
+                 f" (--seen {seen} was not printed to this session by an earlier refusal; it is now)")
+    _record_shown(conn, tid, writer, ids, verb)
+    doing = {"release": "releasing", "spend-budget": "changing the spend budget of"}.get(verb, verb)
+    raise _Refusal("budget_decision_unread", f"read these before {doing} {tid}{wrong}:\n{shown}\n{how}", unread=ids)
+
+
+def _read_first(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple, seen: Optional[int],
+                board: Optional[str]) -> Optional[int]:
+    return read_first(conn, tid, stop, writer, seen, board)
 
 
 def _resume(conn: sqlite3.Connection, out: dict, tid: str, by: str, recorded: dict, parents: list[str]) -> dict:

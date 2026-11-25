@@ -979,7 +979,11 @@ def test_an_escalation_whose_origin_was_overwritten_is_not_this_boards_evidence(
             conn.execute("UPDATE task_events SET origin_gateway='worker-9' WHERE task_id=? AND kind=?",
                          (tid, stranded.EVENT))
         assert not _offer_ok(conn, tid)
-        assert _sweep(conn, now=_later(3.2), cfg={}) == [] and not _refiles(conn, tid) and not _offer_ok(conn, tid)
+        # Not re-filed: no trustworthy local record that this board filed it. The overwritten event is not this
+        # board's escalation either, so it does not silence the backstop: the card is escalated afresh as any
+        # unowned stop, with this board's own record of the offer.
+        assert _sweep(conn, now=_later(3.2), cfg={}) == [tid] and not _refiles(conn, tid) and _offer_ok(conn, tid)
+        assert len(_events(conn, tid, stranded.EVENT)) == 2
 
 
 def test_a_card_that_stopped_again_under_its_old_ask_is_escalated_for_the_new_stop(kanban_home, own_gateway):
@@ -1017,3 +1021,97 @@ def test_an_ask_that_can_offer_nothing_now_is_not_refiled(kanban_home, own_gatew
                          "WHERE task_id=? AND kind=?", (tid, stranded.EVENT))
         before = _row(conn, tid)[2]
         assert _sweep(conn, now=_later(3.2), cfg={}) == [] and _row(conn, tid)[2] == before
+
+
+# --- leftovers: pre-stamp asks, rehomed cards, and only this board's own escalation counts ---------------------
+
+def _set_origin(conn, tid, kind, origin):
+    with kb.write_txn(conn):
+        if "origin_gateway" not in {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}:
+            conn.execute("ALTER TABLE task_events ADD COLUMN origin_gateway TEXT")
+        conn.execute("UPDATE task_events SET origin_gateway=? WHERE task_id=? AND kind=?", (origin, tid, kind))
+
+
+def _unstamp(conn, tid):
+    """The shape a core before release stamps filed: neither the ask nor its filing record carries an offer."""
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_events SET payload=json_remove(payload,'$.release_target','$.ask_sha256') "
+                     "WHERE task_id=? AND kind=?", (tid, stranded.EVENT))
+    _restamp(conn, tid, lambda ask: ask.pop("release_target"))
+
+
+def test_an_unstamped_ask_filed_before_stamps_existed_is_refiled_once(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        _unstamp(conn, tid)
+        assert card_is_open_human_ask(*_row(conn, tid)) and not _offer_ok(conn, tid)
+        assert _sweep(conn, now=_later(3.2), cfg={}) == [tid] and _offer_ok(conn, tid)
+        (refiled,) = _refiles(conn, tid)
+        assert refiled["release_target"] == json.loads(_row(conn, tid)[2])["release_target"]
+        assert refiled["request"] is True and len(_events(conn, tid, stranded.EVENT)) == 1
+        assert _sweep(conn, now=_later(3.4), cfg={}) == [] and len(_refiles(conn, tid)) == 1
+        _answer(conn, tid, "unblock")
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_an_agent_written_unstamped_ask_with_no_filing_record_is_never_refiled(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        ask = {"action": "Approve the vendor swap so I can continue.", "why_human": "Only you can approve spend.",
+               "interaction": "approval", "scope": "Agent ask", "evidence": "quote attached"}
+        with kb.write_txn(conn):
+            store_request(conn, tid, ask)
+            conn.execute("UPDATE tasks SET block_kind='needs_input' WHERE id=?", (tid,))
+        assert card_is_open_human_ask(*_row(conn, tid))
+        for hours in (3, 3.2, 3.4):
+            assert _sweep(conn, now=_later(hours), cfg={}) == []
+        assert json.loads(_row(conn, tid)[2]) == ask
+        assert not _refiles(conn, tid) and not _events(conn, tid, stranded.EVENT)
+
+
+@pytest.mark.parametrize("shape", ["stamped", "unstamped"])
+def test_a_card_rehomed_after_its_ask_is_refiled_once_by_the_new_home(kanban_home, own_gateway, shape):
+    """The Board's ``rehomed`` event attests the old home, so the old home's filing record is evidence."""
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        if shape == "unstamped":
+            _unstamp(conn, tid)
+        _set_origin(conn, tid, stranded.EVENT, "old-home")  # filed there, before the card moved
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "rehomed", {"from": "old-home", "to": OWN})
+        _set_origin(conn, tid, "rehomed", "server")
+        assert not _offer_ok(conn, tid)
+        assert _sweep(conn, now=_later(3.2), cfg={}) == [tid] and _offer_ok(conn, tid)
+        assert len(_refiles(conn, tid)) == 1 and len(_events(conn, tid, stranded.EVENT)) == 1
+        assert _sweep(conn, now=_later(3.4), cfg={}) == [] and len(_refiles(conn, tid)) == 1
+        _answer(conn, tid, "unblock")
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+@pytest.mark.parametrize("marker", ["peer", "elsewhere", "missing"])
+def test_a_rehome_the_board_did_not_attest_is_no_filing_evidence(kanban_home, own_gateway, marker):
+    with kbc.connect_closing() as conn:
+        tid = _spend_stopped_on_dead_chat(conn, kanban_home)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        _set_origin(conn, tid, stranded.EVENT, "old-home")
+        if marker != "missing":
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, "rehomed",
+                                 {"from": "old-home", "to": OWN if marker == "peer" else "worker-3"})
+            _set_origin(conn, tid, "rehomed", "worker-9" if marker == "peer" else "server")
+        _sweep(conn, now=_later(3.2), cfg={})
+        assert not _refiles(conn, tid)
+
+
+@pytest.mark.parametrize("origin", [None, "worker-9"])
+def test_only_this_boards_own_escalation_withholds_another_in_the_episode(kanban_home, own_gateway, origin):
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn)
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        with kb.write_txn(conn):
+            store_request(conn, tid, None)  # the ask is gone; the card is still parked in the same episode
+        _set_origin(conn, tid, stranded.EVENT, origin)
+        assert _sweep(conn, now=_later(3.2), cfg={}) == ([] if origin is None else [tid])
+        assert len(_events(conn, tid, stranded.EVENT)) == (1 if origin is None else 2)

@@ -475,16 +475,74 @@ def _dead_offer(conn: sqlite3.Connection, row: dict) -> bool:
     return kanban_release.dead_offer(conn, row["id"], ask)
 
 
-def _filed_here(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> bool:
-    """This board's own record that it filed an ask for the card in the current park episode: an own-origin
-    escalation event with ``request`` after the park entry. The only evidence a re-file accepts. A stamp on
-    the ask column proves nothing (any gateway can write it), and an event whose origin a foreign write
-    replaced is no longer ours: there is no local-only copy of the original to check, so that shape is not
-    re-filed."""
+def _unstamped_offer(conn: sqlite3.Connection, row: dict, filing: Optional[dict]) -> bool:
+    """An open ask with no release stamp on a card a release can be offered for now, whose filing record has no
+    stamp either: an ask a sweep filed before stamps existed. Its Unblock button can never release the card."""
+    from hermes_cli import kanban_release
+    from hermes_cli.kanban_open_asks import card_is_open_human_ask
+    if filing is None or filing.get(kanban_release.STAMP):
+        return False
+    try:
+        ask = json.loads(row.get("human_request") or "null")
+    except (TypeError, ValueError):
+        return False
+    return (isinstance(ask, dict) and not ask.get(kanban_release.STAMP)
+            and card_is_open_human_ask(row["status"], row.get("block_kind"), row.get("human_request"))
+            and kanban_release.offer(conn, row["id"]) is not None)
+
+
+def _repairable(conn: sqlite3.Connection, row: dict, entry: Optional[dict]) -> bool:
+    """The ask on ``row`` has a dead Unblock button a re-file can repair: a sweep filed it in this park episode
+    (:func:`_filing`), it is not re-filed yet, and either its stamp cannot be honoured now (``dead_offer``) or it
+    was filed unstamped (:func:`_unstamped_offer`)."""
+    filing = _filing(conn, row["id"], entry)
+    return (filing is not None and not _refiled(conn, row["id"], entry)
+            and (_dead_offer(conn, row) or _unstamped_offer(conn, row, filing)))
+
+
+def _filing(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> Optional[dict]:
+    """The payload of the filing record a re-file may rely on for the current park episode, else None.
+
+    1. This board's own escalation event with ``request`` after the park entry (``kanban_release.own_events``).
+    2. A card rehomed here after its ask: the Board's own ``rehomed`` event (origin ``server``, ``to`` this
+       gateway, ``from`` another) attests that ``from`` was the card's home, so an escalation with ``request``
+       that ``from`` filed in this episode before the rehome is a sweep's filing too. The new home re-files it
+       once (``_refiled``) for the current episode.
+
+    A stamp on the ask column proves nothing (any gateway can write it). An event whose origin a foreign write
+    replaced, with no Board rehome naming that origin as the card's earlier home, is not evidence either: no
+    local record of the original origin survives, so that shape stays unrepaired."""
     from hermes_cli import kanban_release
     floor = entry["id"] if entry else 0
-    return any(e["id"] > floor and e["payload"].get("request") is True
-               for e in kanban_release.own_events(conn, task_id, (EVENT,)))
+    for e in kanban_release.own_events(conn, task_id, (EVENT,)):
+        if e["id"] > floor and e["payload"].get("request") is True:
+            return e["payload"]
+    return _rehomed_filing(conn, task_id, floor)
+
+
+def _rehomed_filing(conn: sqlite3.Connection, task_id: str, floor: int) -> Optional[dict]:
+    from hermes_cli.kanban_db_sync import sync_state
+    from hermes_cli.kanban_origin import gateway_names
+    from hermes_cli.kanban_sync_divergence import _event_order
+    if "origin_gateway" not in {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}:
+        return None
+    own = {gateway_names()[0], str((sync_state(conn) or {}).get("gateway_id") or "")} - {""}
+    events = [dict(r) for r in conn.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND kind IN (?, 'rehomed') AND id > ?", (task_id, EVENT, floor))]
+    homes = []
+    for e in events:
+        data = _payload(e["payload"])
+        if (e["kind"] == "rehomed" and e.get("origin_gateway") == "server" and data.get("to") in own
+                and isinstance(data.get("from"), str) and data["from"] and data["from"] not in own):
+            homes.append((data["from"], _event_order(e)))
+    best = None
+    for e in events:
+        data = _payload(e["payload"])
+        if (e["kind"] == EVENT and data.get("request") is True
+                and any(e.get("origin_gateway") == old and _event_order(e) < moved for old, moved in homes)):
+            if best is None or _event_order(e) > best[0]:
+                best = (_event_order(e), data)
+    return best[1] if best else None
 
 
 def _refiled(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> bool:
@@ -505,11 +563,12 @@ def _record(filed: dict) -> dict:
 def _refile(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int) -> bool:
     """Replace an ask whose release button is dead with this sweep's own brief and record the offer.
 
-    Only where this board filed an ask for the card in this park episode (``_filed_here``) and has not re-filed
-    it yet (``_refiled``): the ask an earlier core filed without recording the offer, or one whose stored text
-    was changed afterwards. The ask is rewritten from the brief, so stored text this board never wrote gains
-    nothing, and at most once per park episode however often the column is rewritten. The record is a
-    ``stranded_park_refiled`` event, not a second escalation: the desk chat was told once."""
+    Only where a sweep filed the ask in this park episode (``_filing``: this board, or the home a Board rehome
+    names) and it is not re-filed yet (``_refiled``): an ask an earlier core filed without recording the offer
+    or unstamped, one whose stored text was changed afterwards, or one the card's earlier home filed. The ask is
+    rewritten from the brief, so stored text this board never wrote gains nothing, and at most once per park
+    episode however often the column is rewritten. The record is a ``stranded_park_refiled`` event, not a second
+    escalation: the desk chat was told once."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_ask_resolved import store_request
     from hermes_cli.kanban_human_request import NONHUMAN_KINDS
@@ -517,15 +576,15 @@ def _refile(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: 
     with kb.write_txn(conn):
         fresh = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
         fresh = dict(fresh) if fresh is not None else None
-        if (fresh is None or fresh["status"] not in PARKED or _leased(fresh, now) or not _dead_offer(conn, fresh)
-                or not _filed_here(conn, tid, entry) or _refiled(conn, tid, entry)):
+        if (fresh is None or fresh["status"] not in PARKED or _leased(fresh, now)
+                or not _repairable(conn, fresh, entry)):
             return False
         kind = fresh.get("block_kind")
         if kind in NONHUMAN_KINDS:  # as _escalate: a human ask cannot sit under a dependency/transient/time kind
             kind = "needs_input"
             conn.execute("UPDATE tasks SET block_kind = ? WHERE id = ?", (kind, tid))
-        filed = _request(conn, fresh, entry, age, "The earlier ask's release offer was not recorded on this board "
-                         "or its text was changed", kind)
+        filed = _request(conn, fresh, entry, age, "The earlier ask's release offer was not recorded on this board, "
+                         "its text was changed, or the card moved here from the home that filed it", kind)
         store_request(conn, tid, filed)
         kb._append_event(conn, tid, REFILED, {
             "episode_start": entry["created_at"] if entry else int(fresh.get("created_at") or 0),
@@ -542,8 +601,12 @@ def _gated(conn: sqlite3.Connection, row: dict) -> dict:
 
 
 def _escalated(conn: sqlite3.Connection, task_id: str, entry: Optional[dict]) -> bool:
-    return conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND id > ? LIMIT 1",
-                        (task_id, EVENT, entry["id"] if entry else 0)).fetchone() is not None
+    """This board already escalated the card in the current park episode. Only its own events count
+    (``kanban_release.own_events``): an escalation event another gateway pushed, or one whose origin a foreign
+    write replaced, says nothing about what this board asked, and must not silence the backstop for the episode."""
+    from hermes_cli import kanban_release
+    floor = entry["id"] if entry else 0
+    return any(e["id"] > floor for e in kanban_release.own_events(conn, task_id, (EVENT,)))
 
 
 # board key -> ``now`` of the last sweep that did work in this process (``sweep_stranded_parks`` throttle).
@@ -592,7 +655,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
             entry = park_entry(conn, tid)
             start = entry["created_at"] if entry else int(row.get("created_at") or 0)
             age = now - start
-            if _filed_here(conn, tid, entry) and not _refiled(conn, tid, entry) and _dead_offer(conn, row):
+            if _repairable(conn, row, entry):
                 # This board filed the ask in this episode and its release button cannot work: repair it, once.
                 try:
                     if _refile(conn, row, entry, now=now, age=age):
