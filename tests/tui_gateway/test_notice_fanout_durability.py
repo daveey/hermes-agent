@@ -105,6 +105,53 @@ def test_chat_hosted_here_reports_absent_only_when_every_store_opened(db, monkey
         assert [(r["task_id"], r["skipped"]) for r in nf.card_change_pass()] == [(tid, "not_hosted_here")]
 
 
+def test_real_unopenable_profile_store_leaves_hosting_unknown(db, monkeypatch):
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+    from tui_gateway.kanban_chat_hosting import profile_roster
+
+    monkeypatch.setattr(helpers.server, "_get_db", lambda: db)
+    broken_path = Path(get_hermes_home()) / "profiles" / "broken" / "state.db"
+    broken_path.parent.mkdir(parents=True)
+    broken_path.write_text("not a SQLite database")
+    assert profile_roster() == ([None, "broken"], True)
+    with helpers.server._profile_db({"profile": "broken"}) as unavailable:
+        assert unavailable is None
+
+    assert helpers.ku.chat_hosted_here("absent-chat") is None
+    assert helpers.ku.chat_hosted_here(helpers.CHAT) is True
+
+
+def test_real_unopenable_profile_store_retains_cursor_until_recovery(db, monkeypatch):
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+
+    monkeypatch.setattr(helpers.server, "_get_db", lambda: db)
+    broken_path = Path(get_hermes_home()) / "profiles" / "broken" / "state.db"
+    broken_path.parent.mkdir(parents=True)
+    broken_path.write_text("not a SQLite database")
+    nf.card_change_pass()
+    ident = str(kb.kanban_db_path().resolve())
+    before = state.get_cursor(ident)
+    tid = helpers._card(done=False, chat="absent-chat")
+
+    result = nf.card_change_pass()
+    assert result.incomplete
+    assert not any(row.get("skipped") == "not_hosted_here" for row in result)
+    state.forget_memory_for_tests()
+    assert state.get_cursor(ident) == before
+
+    broken_path.unlink()
+    with contextlib.closing(SessionDB(broken_path)):
+        assert helpers.ku.chat_hosted_here("absent-chat") is False
+        result = nf.card_change_pass()
+    assert not result.incomplete
+    assert [(row["task_id"], row["skipped"]) for row in result] == [(tid, "not_hosted_here")]
+    state.forget_memory_for_tests()
+    assert state.get_cursor(ident) > before
+
+
 @pytest.mark.parametrize("with_file", [False, True])
 def test_nonprofile_file_does_not_make_hosting_unknown(db, monkeypatch, with_file):
     from pathlib import Path
