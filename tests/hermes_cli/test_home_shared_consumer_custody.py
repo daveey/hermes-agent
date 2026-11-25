@@ -254,18 +254,21 @@ def test_existing_review_wire_is_not_enriched_or_replaced(consumer_board):
     assert journal.freeze(c, 'board', 'worker-a3', wire) == first
 
 
-@pytest.mark.parametrize('verdict', ['release', 'escalate', 'refused'])
+@pytest.mark.parametrize('verdict', ['release', 'wait_on', 'escalate', 'refused'])
 @pytest.mark.parametrize('phase', ['prepared', 'pending', 'ordinary'])
 def test_caused_review_late_settlement_preserves_custody(consumer_board, monkeypatch, verdict, phase):
     c = consumer_board
     ep, wire = seed_request(c)
+    parent = card(c, 't_wait_parent', 'ready')
+    with kb.write_txn(c):
+        c.execute("UPDATE tasks SET assignee='default' WHERE id IN (?,?)", ('t_A', parent))
     journal.freeze(c, 'board', 'worker-a3', wire)
     before = [tuple(r) for r in c.execute('SELECT * FROM task_events WHERE task_id=?', ('t_A',))]
     def canonical(*args, **kwargs):
         freeze(c, 't_A', phase)
         if verdict == 'refused':
             raise caused.Refused('canonical refusal')
-        return dict(verdict=verdict, reason='confirmed', request_uid=wire['event_uid'])
+        return dict(verdict=verdict, reason='confirmed', request_uid=wire['event_uid'], target=parent)
     monkeypatch.setattr(caused, 'canonical', canonical)
     result = caused.review(c, 't_A', ep, None, None)
     if phase != 'ordinary':
@@ -274,6 +277,15 @@ def test_caused_review_late_settlement_preserves_custody(consumer_board, monkeyp
         assert reviewer.state(c, 't_A', ep) == reviewer.STARTED
     else:
         assert result in ('settled', 'escalated')
+        if verdict == 'wait_on':
+            import json
+            row = c.execute('SELECT payload,created_at FROM task_events WHERE task_id=? AND kind=?',
+                            ('t_A', reviewer.SETTLED)).fetchone()
+            data = json.loads(row[0])
+            assert (data['status'], data['parent']) == ('todo', parent)
+            assert data['actionability_intent']['deadline_at'] == row[1] + 86400
+            assert data['actionability_intent']['execution_authority'] is False
+            assert data['actionability_parent_ids'] == [parent]
 
 
 @pytest.mark.parametrize('seam', ['metadata', 'retry'])
