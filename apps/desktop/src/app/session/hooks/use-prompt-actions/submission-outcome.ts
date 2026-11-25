@@ -19,7 +19,10 @@ export function sendUnconfirmed(retained: PreparedSubmission | undefined): boole
  *  attempt of the same send journaled under `key` that ended unknown (or never recorded an end) stays
  *  counted: `earlierUnknown` keeps every later outcome `unknown`. */
 export async function writeInFlightSubmission(key: string, entry: PreparedSubmission): Promise<void> {
-  const earlier = await readPreparedSubmission(key).catch(() => undefined)
+  // A journal that cannot be read falls back to what this window holds: the retained entry it adopted
+  // carries the outcome recorded for the earlier attempts (a fresh send carries none).
+  const earlier = await readPreparedSubmission(key).catch(() =>
+    entry.earlierUnknown || entry.outcome === 'unknown' ? entry : undefined)
 
   if (earlier?.id === entry.id && (earlier.earlierUnknown || sendUnconfirmed(earlier))) {
     entry.earlierUnknown = true
