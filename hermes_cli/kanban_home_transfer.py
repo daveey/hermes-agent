@@ -17,6 +17,21 @@ from hermes_cli import kanban_home_finalized as finalized
 _SOURCE = re.compile(r"worker-[a-z0-9-]{1,24}\Z")
 _NONCE = re.compile(r"[A-Za-z0-9._:-]{16,128}\Z")
 _TABLE = "kanban_home_prepared1"
+_RESTRICTIVE_APPENDS = ("containment_sync_quarantine", "containment_sync_quarantine_tasks")
+
+
+def _restrictive_appends(conn: sqlite3.Connection) -> None:
+    """Allow new holds, keep prior observations even under implicit REPLACE."""
+    for table in _RESTRICTIVE_APPENDS:
+        name = f'home_prepared1_{table}_insert'
+        conn.execute(f'DROP TRIGGER IF EXISTS {name}')
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            continue
+        identity = ('uid=NEW.uid' if table == 'containment_sync_quarantine'
+                    else 'task_id=NEW.task_id AND receipt_uid=NEW.receipt_uid')
+        conn.execute(f'CREATE TRIGGER {name} BEFORE INSERT ON {table} '
+                     f'WHEN EXISTS(SELECT 1 FROM {table} WHERE {identity}) '
+                     'BEGIN SELECT RAISE(IGNORE); END')
 
 
 def _install(conn: sqlite3.Connection) -> None:
@@ -56,6 +71,11 @@ def _install(conn: sqlite3.Connection) -> None:
     # apply still defers the protected event without touching prepared custody.
     for action in ('insert', 'update', 'delete'):
         conn.execute(f'DROP TRIGGER IF EXISTS home_prepared1_containment_canonical_receipts_{action}')
+    # Quarantine INSERTs only add restrictions (including dependency closure).
+    # Certification precedes feed deferral, so both new holds and existing-row
+    # INSERT OR IGNORE must work. Keep UPDATE/DELETE and immutable/REPLACE guards:
+    # this conveys no task mutation or operator-release authority.
+    _restrictive_appends(conn)
     # Include local-only task custody (wake/ask probes, subscriptions, private
     # restriction records), not just the rows sent by sync. Discover task_id
     # tables from this board's real schema, retaining guards across sync detach.
@@ -68,6 +88,8 @@ def _install(conn: sqlite3.Connection) -> None:
     for table in ("tasks", "task_links", *sorted(related)):
         quoted = '"' + table.replace('"', '""') + '"'
         for action in ("INSERT", "UPDATE", "DELETE"):
+            if action == "INSERT" and table in _RESTRICTIVE_APPENDS:
+                continue
             refs = ["NEW"] if action == "INSERT" else ["OLD"] if action == "DELETE" else ["OLD", "NEW"]
             if table == "tasks":
                 ids = [f"{ref}.id" for ref in refs]

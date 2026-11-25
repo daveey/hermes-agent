@@ -26,6 +26,10 @@ from tests.hermes_cli import test_home_probe_writer_custody as writer_cases
 from tests.hermes_cli import test_home_shared_consumer_custody as consumer_cases
 from tests.hermes_cli import test_home_shared_consumer_io as consumer_io
 from tests.hermes_cli import test_home_certification_finalization as certification
+from tests.hermes_cli import test_home_quarantine_custody as quarantine_cases
+
+test_conflicting_protected_row_preserves_healthy_peer = quarantine_cases.test_conflicting_protected_row_preserves_healthy_peer
+test_quarantine_closure_races_preserve_custody = quarantine_cases.test_quarantine_closure_races_preserve_custody
 
 # Existing cache tables and exact-scope persisted malformed receipts must be in
 # the first gate, not masked by post-prepare DDL or an earlier scope refusal.
