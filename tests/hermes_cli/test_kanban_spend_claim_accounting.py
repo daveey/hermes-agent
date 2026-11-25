@@ -58,8 +58,56 @@ def test_config_outage_refuses_claim_without_escaping(kanban_home, monkeypatch, 
         monkeypatch.setattr("hermes_cli.config.load_config", down)
         claim = kb.claim_task if lane == "ready" else kb.claim_review_task
         assert claim(conn, tid) is None
+        from hermes_cli import kanban_db_sync as sync
+        refusal = sync.pop_claim_deferral(tid)
+        assert refusal == "spend_policy_unavailable"
+        assert refusal.origin == sync.ORIGIN_LOCAL
         assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == lane
         assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("lane", ["ready", "review"])
+@pytest.mark.parametrize("pending", [False, True])
+def test_foreign_spend_refusal_is_local_before_board_lease(kanban_home, github, monkeypatch, lane, pending):
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_spend_decision as decision
+    from hermes_cli.kanban_dispatch_verdict import claim_refused
+    from types import SimpleNamespace
+
+    with kbc.connect_closing() as conn:
+        tid = helpers.owner(conn)
+        sync.apply_sync_schema_steps(conn)
+        github[0]["state"] = "CLOSED"
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status=?, created_on='dead-worker' WHERE id=?", (lane, tid))
+        if pending:
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, "spend_budget_triaged", {"cause": "capability_unavailable"})
+                kb._append_event(conn, tid, "triage_swept", {"assignee": "worker"})
+        assert decision.pending(conn, tid) == pending
+
+        def unexpected_lease(*args, **kwargs):
+            pytest.fail("a retained/exhausted task must not request a Board lease")
+
+        monkeypatch.setattr(sync, "claim_gate", unexpected_lease)
+        claim = kb.claim_task if lane == "ready" else kb.claim_review_task
+        before = conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0]
+        assert claim(conn, tid) is None
+        refusal = sync.pop_claim_deferral(tid)
+        assert refusal is not None
+        assert refusal == ("decision_pending" if pending else "spend_budget_exhausted")
+        assert refusal.origin == sync.ORIGIN_LOCAL
+        result = SimpleNamespace(claim_deferred=[], quiet_deferred=[], capsule_refused=[])
+        claim_refused(result, tid, refusal)
+        assert result.claim_deferred == [(tid, refusal)]
+        from hermes_cli.kanban_db_dispatch_stuck import stuck_warning
+        warning = stuck_warning(6, [kb.DispatchResult(claim_deferred=[(tid, refusal)])])
+        assert "before the Board lease" in warning
+        assert "Board lease refused" not in warning
+        assert "owning chat" in warning
+        assert sync.pop_claim_deferral(tid) is None
+        assert kb.get_task(conn, tid).status == lane
+        assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == before
 
 
 def test_transaction_rechecks_override_and_publication_identity(kanban_home, github):

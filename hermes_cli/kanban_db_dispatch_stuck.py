@@ -165,6 +165,12 @@ def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
            for res in results):
         return (msg + " Local updater admission hold blocks claims before the Board lease; "
                 "inspect core-update/holds/hermes-sync and its updater owner.")
+    spend_holds = {"decision_pending", "spend_budget_exhausted", "spend_policy_unavailable"}
+    if any(res is not None and any(reason in spend_holds for _, reason in res.claim_deferred)
+           for res in results):
+        return (msg + " Local spend/decision admission refused claims before the Board lease; "
+                "inspect the retained decision and its owning chat, budget evidence or policy availability. "
+                "Other holds are listed above; do not reset leases or release a decision merely to start work.")
     if repin:
         # No pool worker can run these (Board ``no_eligible_worker``); each card carries the repin command.
         msg += f" Not a stall, waiting for a manual repin: {', '.join(repin)}."
