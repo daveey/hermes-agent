@@ -20,6 +20,7 @@ import {
   setSelectedStoredSessionId,
   setSessions
 } from '@/store/session'
+import { pageStorage } from '@/test/page-storage'
 
 import { useSessionActions } from '../use-session-actions'
 import { resumeFailedToastId } from '../use-session-actions/resume-latches'
@@ -351,8 +352,10 @@ async function failFirstAttempt(first: FirstAttempt) {
     throw resumeTimeout()
   })
 
-  const setItem = Storage.prototype.setItem
-  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+  // The page's live storage: on Node 26 the setup's in-memory stand-in is not a Storage instance.
+  const storage = pageStorage()
+  const setItem = storage.setItem
+  vi.spyOn(storage, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
     setItem.call(this, key, value)
 
     if (first.driftOnJournalWrite && key.startsWith(ENTRY_PREFIX)) {
