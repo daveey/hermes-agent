@@ -1377,3 +1377,46 @@ def test_ws_events_for_archived_board_does_not_recreate_it(tmp_path, monkeypatch
         "/api/plugins/kanban/events?token=secret-xyz&board=alive"
     ) as ws:
         assert ws is not None
+
+
+@pytest.mark.parametrize("bulk_case", ["test_bulk_status_ready", "test_bulk_status_running_rejected", "test_bulk_archive"])
+def test_bulk_board_after_imported_dashboard(kanban_home, tmp_path, monkeypatch, bulk_case):
+    """A previous bare app's mount must not serve the next bulk test's home.
+
+    The historical host-origin websocket case imported web_server before these
+    three tests; its own TestClient did not own web_server.app's lifecycle.
+    Exercise each original bulk oracle after that real native mount is drained.
+    """
+    from hermes_cli.fact_plugin_mount import lifecycles
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HERMES_FACTS_BOARD", "1")
+    runtime = None
+    registry = None
+    api_path = None
+    from types import SimpleNamespace
+    imported_app = FastAPI()
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", SimpleNamespace(app=imported_app))
+    try:
+        with imported_dashboard_lifecycles():
+            registry = lifecycles(imported_app)
+            _load_plugin_router()
+            api = sys.modules["hermes_dashboard_plugin_kanban_test"]
+            api_path = Path(api.__file__).resolve()
+            assert api_path not in registry._handles
+            registry.start(api_path, api)
+            runtime = registry._handles[api_path]
+        next_home = tmp_path / "next-bulk-home"
+        next_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(next_home))
+        kb.init_db()
+        app = FastAPI()
+        app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+        with TestClient(app) as next_client:
+            globals()[bulk_case](next_client)
+        assert runtime._drained
+    finally:
+        # Failure cleanup must not leak the removed-custody mutation's runtime.
+        if registry is not None and api_path is not None:
+            registry.stop(api_path)
