@@ -60,3 +60,27 @@ def test_bounds_head_line_and_packed_total(tmp_path, monkeypatch):
     monkeypatch.setattr(disk, 'MAX_PACKED_REFS', 10000)
     assert disk.disk_identity(tmp_path, time.monotonic() + 2)['error'] == 'ValueError'
     assert disk.disk_identity(tmp_path, time.monotonic() - 1) == {'sha': None, 'error': 'TimeoutError'}
+
+
+@pytest.mark.parametrize('ref', ['outside', 'refs/../outside', r'refs/heads\other'])
+def test_invalid_ref_cannot_read_an_existing_valid_sha(tmp_path, ref):
+    git = tmp_path / '.git'
+    git.mkdir()
+    (git / 'refs').mkdir()
+    (git / 'HEAD').write_text('ref: ' + ref)
+    (git / ref).parent.mkdir(parents=True, exist_ok=True)
+    (git / ref).write_text('a' * 40)
+    with pytest.raises(ValueError, match='git_ref_invalid'):
+        disk._head(tmp_path, time.monotonic() + 2)
+
+
+def test_metadata_read_checks_size_and_post_syscall_deadline(tmp_path, monkeypatch):
+    path = tmp_path / 'HEAD'
+    path.write_bytes(b'a' * (disk.MAX_METADATA + 1))
+    with pytest.raises(ValueError, match='git_metadata_too_large'):
+        disk._read(path, time.monotonic() + 2)
+    path.write_text('a' * 40)
+    ticks = iter((0, 10))
+    monkeypatch.setattr(disk.time, 'monotonic', lambda: next(ticks))
+    with pytest.raises(TimeoutError, match='disk_identity_deadline'):
+        disk._read(path, 5)
