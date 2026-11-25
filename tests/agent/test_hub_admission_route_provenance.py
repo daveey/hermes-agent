@@ -4,7 +4,7 @@ Review t_01a1ceabf1ca19c8 (blocker 1): the judge fixture filled ``route_info['bi
 itself, hiding whether production ``call_llm`` reports it. These tests drive the real
 ``agent.auxiliary_client.call_llm`` (class routing, managed subscription fence, native Anthropic
 SDK) and fake only the HTTP transport, so a verdict is honoured only when the router itself proves
-the exact pinned subscription route — and an unmanaged host never sends at all.
+a configured subscription route — and an unmanaged host never sends at all.
 """
 import json
 
@@ -51,13 +51,11 @@ def wire(monkeypatch):
 @pytest.fixture
 def managed(routing_home, streaming_route, tmp_path, monkeypatch):
     routing_home["model_routing"]["enforce_subscription_only"] = True
+    routing_home["auxiliary"] = {"hub_admission": {"model": "class:deep"}}
     atomic_config_write(tmp_path / "config.yaml", routing_home)
     skill = tmp_path / "skills" / "devops" / "hub-admission-test" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text(RUBRIC, encoding="utf-8")
-    route = routing_home["model_routing"]["routes"]["deep"][0]
-    monkeypatch.setattr(judge, "PROVIDER", route["provider"])
-    monkeypatch.setattr(judge, "MODEL", route["model"])
     return routing_home
 
 
@@ -65,10 +63,10 @@ def test_real_router_reports_subscription_provenance(managed, wire):
     sent, _ = wire
     route = {}
     from agent import auxiliary_client as aux
-    aux.call_llm(task="hub_admission", provider=judge.PROVIDER, model=judge.MODEL, max_tokens=64,
+    aux.call_llm(task="hub_admission", max_tokens=64,
                  temperature=0, route_info=route, messages=[{"role": "user", "content": "x"}])
     assert (route.get("provider"), route.get("model"), route.get("billing_group")) == (
-        judge.PROVIDER, judge.MODEL, "subscription")
+        "anthropic", "anthropic-deep", "subscription")
     assert sent[0][0]["authorization"].startswith("Bearer sk-ant-oat")
 
 
@@ -77,7 +75,7 @@ def test_real_router_admit_is_honoured(managed, wire):
     verdict = judge.admit({"title": QUOTE, "body": "Signed-in browser work"})
     assert (verdict.admit, verdict.need, verdict.evidence) == (True, "hub_chrome", QUOTE)
     assert verdict.why != "admission unavailable"
-    assert len(sent) == 1 and sent[0][1]["model"] == judge.MODEL
+    assert len(sent) == 1 and sent[0][1]["model"] == verdict.model == "anthropic-deep"
 
 
 def test_real_router_without_subscription_fence_never_sends(routing_home, streaming_route, tmp_path,
@@ -85,16 +83,14 @@ def test_real_router_without_subscription_fence_never_sends(routing_home, stream
     """An unmanaged host (no enforce_subscription_only) would route through the legacy resolver,
     which reports no billing group and may fall back to another model: deny without sending."""
     sent, _ = wire
-    route = routing_home["model_routing"]["routes"]["deep"][0]
-    monkeypatch.setattr(judge, "PROVIDER", route["provider"])
-    monkeypatch.setattr(judge, "MODEL", route["model"])
+
     verdict = judge.admit({"title": QUOTE, "body": ""})
     assert verdict.admit is False and verdict.why == "admission unavailable"
     assert sent == []
 
 
 def test_real_router_paid_only_route_is_denied(managed, wire, tmp_path):
-    """No fallback model: a pin the subscription fence cannot serve is refused before any send."""
+    """A configured class the subscription fence cannot serve is refused before any send."""
     sent, _ = wire
     managed["model_routing"]["routes"]["deep"][0]["billing"] = "paid"
     atomic_config_write(tmp_path / "config.yaml", managed)

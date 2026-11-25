@@ -54,8 +54,6 @@ GRANTED = "spend_review_granted"
 ESCALATED = "spend_review_escalated"
 KINDS = (QUEUED, STARTED, GRANTED, ESCALATED)
 AUTHOR = "kanban-spend-reviewer"
-PROVIDER = "anthropic"
-MODEL = "claude-sonnet-5-5"
 TIMEOUT = 90
 LEASE_SECONDS = 300
 MAX_ATTEMPTS = 2
@@ -347,7 +345,7 @@ Answer with JSON only:
 
 def judge(ctx: dict) -> Optional[dict]:
     """One subscription call bounded end to end by ``TIMEOUT``, route and credential resolution included.
-    None when it is unavailable, late, routed anywhere but the subscription judge, or not JSON."""
+    None when it is unavailable, late, routed outside subscription billing, or not JSON."""
     from agent import auxiliary_client as aux
     from hermes_cli.kanban_hub_admission import _bounded, _owner_scope
     user = {k: v for k, v in ctx.items() if not k.startswith("_")}
@@ -357,7 +355,7 @@ def judge(ctx: dict) -> Optional[dict]:
     def ask():
         with aux.aux_stream_deadline(deadline):
             return aux.call_llm(
-                task="kanban_spend_review", provider=PROVIDER, model=MODEL, timeout=TIMEOUT, max_tokens=800,
+                task="kanban_spend_review", timeout=TIMEOUT, max_tokens=800,
                 temperature=0, route_info=route,
                 messages=[{"role": "system", "content": PROMPT.replace("CAP", str(ctx["_cap"]))},
                           {"role": "user", "content": json.dumps(user, ensure_ascii=False)}])
@@ -367,7 +365,7 @@ def judge(ctx: dict) -> Optional[dict]:
     if response is None:
         logger.warning("kanban: spend review judge did not answer within %ss; escalating", TIMEOUT)
         return None
-    if (route.get("provider"), route.get("model"), route.get("billing_group")) != (PROVIDER, MODEL, "subscription"):
+    if route.get("billing_group") != "subscription":
         logger.warning("kanban: spend review route %s is not the subscription judge; escalating", route)
         return None
     return parse(response.choices[0].message.content)

@@ -963,7 +963,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "existing hub worktree with unpushed commits, a hermes-hub command acting with the "
                 "hub's key, or live gateway state hub-admin cannot reach). Board admin key and "
                 "instance-role SSM steps are not hub needs: run them with hub-admin on a "
-                "capability:hub-write worker. A Sonnet admission judge "
+                "capability:hub-write worker. A subscription admission judge "
                 "reads it with the card; without admission a hub card goes to the worker pool (pool "
                 "workers have hub ssh + hub-admin) and an explicit hub pin is refused.")),
         "force_hub": _prop("boolean", (

@@ -2,6 +2,7 @@
 waiting for an idle chat or a queued decision card, and only verifiable progress buys more runs."""
 from __future__ import annotations
 
+import json
 import time
 import types
 
@@ -237,15 +238,17 @@ def test_an_ineligible_stalled_stop_never_takes_the_write_lock(kanban_home, spen
 
 
 @pytest.mark.parametrize("route, ok", [
-    ({"provider": reviewer.PROVIDER, "model": reviewer.MODEL, "billing_group": "subscription"}, True),
-    ({"provider": reviewer.PROVIDER, "model": reviewer.MODEL}, False),  # no billing evidence
-    ({"provider": "openrouter", "model": reviewer.MODEL, "billing_group": "subscription"}, False),
-    ({"provider": reviewer.PROVIDER, "model": reviewer.MODEL, "billing_group": "metered"}, False),
+    ({"provider": "anthropic", "model": "claude-opus-5-5", "billing_group": "subscription"}, True),
+    ({"provider": "openai-codex", "model": "gpt-6.1-sol", "billing_group": "subscription"}, True),
+    ({"provider": "anthropic", "model": "claude-opus-5-5"}, False),  # no billing evidence
+    ({"provider": "openai-codex", "model": "gpt-6.1-sol", "billing_group": "metered"}, False),
 ])
 def test_the_judge_answers_only_through_the_subscription_route(monkeypatch, route, ok):
     from agent import auxiliary_client as aux
 
     def call_llm(**kw):
+        assert "model" not in kw and "provider" not in kw
+        assert kw["task"] == "kanban_spend_review"
         kw["route_info"].update(route)
         message = types.SimpleNamespace(content='{"decision": "escalate", "reason": "same wait"}')
         return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
@@ -253,6 +256,33 @@ def test_the_judge_answers_only_through_the_subscription_route(monkeypatch, rout
     monkeypatch.setattr(aux, "call_llm", call_llm)
     verdict = reviewer.judge({"_cap": 3, "_corpus": "", "title": "t"})
     assert (verdict == {"decision": "escalate", "reason": "same wait"}) is ok
+
+
+@pytest.mark.parametrize("failure", ["paid", "missing-billing", "unavailable", "timeout", "non-json"])
+def test_real_judge_failure_escalates_without_a_grant(kanban_home, monkeypatch, failure):
+    from agent import auxiliary_client as aux
+    monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (True, 2))
+
+    def call_llm(**kwargs):
+        if failure == "unavailable":
+            raise RuntimeError("no eligible route")
+        if failure == "timeout":
+            raise TimeoutError("deadline")
+        kwargs["route_info"].update(provider="openai-codex", model="gpt-6.1-sol")
+        if failure != "missing-billing":
+            kwargs["route_info"]["billing_group"] = "paid" if failure == "paid" else "subscription"
+        content = "not json" if failure == "non-json" else json.dumps(_grant())
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))])
+
+    monkeypatch.setattr(aux, "call_llm", call_llm)
+    with kbc.connect_closing() as conn:
+        tid, episode = _stopped(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, reviewer.STARTED, {"episode": episode})
+        assert reviewer.review(conn, tid, episode) == "escalated"
+        assert kb.get_task(conn, tid).status == "triage"
+        assert reviewer.GRANTED not in _kinds(conn, tid)
+        assert reviewer.state(conn, tid, episode) == reviewer.ESCALATED
 
 
 def test_a_hung_judge_is_abandoned_at_the_deadline(monkeypatch):

@@ -38,8 +38,8 @@ def test_valid_admission(judge):
     assert verdict.admit is True
     assert verdict.need == "hub_chrome"
     assert len(verdict.skill_sha) == 64
-    assert calls[0]["provider"] == "anthropic"
-    assert calls[0]["model"] == "claude-sonnet-5-5"
+    assert "provider" not in calls[0] and "model" not in calls[0]
+    assert calls[0]["task"] == "hub_admission"
     assert calls[0]["timeout"] == 30
     assert "Judge the card." in calls[0]["messages"][0]["content"]
 
@@ -135,7 +135,7 @@ def test_cache_payload_is_revalidated(judge):
 
 
 @pytest.mark.parametrize("route", [
-    {"provider": "openrouter"}, {"model": "claude-opus-5-5"}, {"billing_group": "paid"},
+    {"billing_group": "paid"}, {"billing_group": None},
 ])
 def test_other_route_is_denied(judge, monkeypatch, route):
     gate, _, _, _ = judge
@@ -151,6 +151,27 @@ def test_other_route_is_denied(judge, monkeypatch, route):
     verdict = gate.admit({"title": "Use signed-in Chrome"})
     assert not verdict.admit
     assert verdict.why == "admission unavailable"
+
+
+@pytest.mark.parametrize("provider,model", [
+    ("anthropic", "claude-opus-5-5"), ("openai-codex", "gpt-6.1-sol"),
+])
+def test_any_subscription_model_is_accepted_and_recorded(judge, monkeypatch, provider, model):
+    gate, _, _, _ = judge
+    from agent import auxiliary_client as aux
+    fake = aux.call_llm
+
+    def routed(**kwargs):
+        response = fake(**kwargs)
+        kwargs["route_info"].update(provider=provider, model=model)
+        return response
+
+    monkeypatch.setattr(aux, "call_llm", routed)
+    fields = {"title": "Use signed-in Chrome"}
+    verdict = gate.admit(fields)
+    assert verdict.admit and verdict.model == model
+    cached = gate.admit(fields)
+    assert cached.admit and cached.cached and cached.model == model
 
 
 def test_reason_is_evidence_and_cache_input(judge):

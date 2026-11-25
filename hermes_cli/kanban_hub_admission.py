@@ -1,4 +1,4 @@
-"""Evidence-checked hub admission, using an exact subscription-only judge."""
+"""Evidence-checked hub admission, using a routed subscription-only judge."""
 from __future__ import annotations
 
 import contextlib
@@ -14,8 +14,6 @@ from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
 _log = logging.getLogger(__name__)
-MODEL = "claude-sonnet-5-5"
-PROVIDER = "anthropic"
 TIMEOUT = 30
 # The hub-admission-test rubric's allowlist. Board admin key and instance-role SSM are not on it: hub-admin from
 # a capability:hub-write worker reaches both, so a verdict naming either is invalid (deny).
@@ -28,7 +26,7 @@ class Verdict:
     need: str | None = None
     evidence: str = ""
     why: str = "admission unavailable"
-    model: str = MODEL
+    model: str = ""
     skill_sha: str = ""
     cached: bool = False
     forced: bool = False
@@ -196,7 +194,7 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
         cached = _cache(key)
         if cached is not None:
             payload = {k: getattr(cached, k) for k in ("admit", "need", "evidence", "why")}
-            return replace(_parse(json.dumps(payload), card_fields, hub_reason, sha), cached=True)
+            return replace(_parse(json.dumps(payload), card_fields, hub_reason, sha), cached=True, model=cached.model)
         route = {}
         deadline = time.monotonic() + TIMEOUT
         with _owner_scope():
@@ -204,12 +202,12 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
         if response is None:
             _log.warning("hub admission unavailable: the judge did not answer within %ss", TIMEOUT)
             return Verdict(skill_sha=sha)
-        if (route.get("provider"), route.get("model"), route.get("billing_group")) != (
-                PROVIDER, MODEL, "subscription"):
+        if route.get("billing_group") != "subscription":
             _log.warning("hub admission unavailable: route %s/%s/%s is not the subscription judge",
                          route.get("provider"), route.get("model"), route.get("billing_group"))
             return Verdict(skill_sha=sha)
-        verdict = _parse(response.choices[0].message.content, card_fields, hub_reason, sha)
+        verdict = replace(_parse(response.choices[0].message.content, card_fields, hub_reason, sha),
+                          model=route.get("model") or "")
         _cache(key, verdict)
         return verdict
     except Exception as exc:  # health: allow BLE001 -- a judge outage must deny placement, never fall back
@@ -243,7 +241,7 @@ def _owner_scope():
 def _ask(aux, body, card_fields, hub_reason, route, deadline):
     with aux.aux_stream_deadline(deadline):
         return aux.call_llm(
-            task="hub_admission", provider=PROVIDER, model=MODEL, timeout=TIMEOUT,
+            task="hub_admission", timeout=TIMEOUT,
             max_tokens=1024, temperature=0, route_info=route,
             messages=[{"role": "system", "content": body}, {"role": "user", "content": json.dumps({
                 "title": card_fields.get("title") or "", "body": card_fields.get("body") or "",

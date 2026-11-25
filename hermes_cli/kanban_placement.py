@@ -45,7 +45,7 @@ Markers do not keep a card on the hub by themselves: they only decide whether th
 (:mod:`hermes_cli.kanban_hub_admission`, skill ``hub-admission-test``) is consulted. Every hub-bound
 outcome (a routeless hub keeping a card local for a marker or for no route, an explicit ``hub`` pin
 from any gateway, ``runs_on=[machine:hub]``, a move there, a capability owner routed there) needs an
-evidenced admit from a pinned Sonnet judge (:mod:`hermes_cli.kanban_hub_admission_placement`). A denied
+evidenced admit from a subscription judge (:mod:`hermes_cli.kanban_hub_admission_placement`). A denied
 automatic card is enrolled in the worker pool with ``requires: [hub:write]`` (Board label
 ``capability:hub-write``); a denied explicit pin is refused. Structural limits (``needs``, host workspace,
 non-default board, uncarried options, assignee) are unchanged and never call the judge, and non-hub
