@@ -30,8 +30,9 @@ def active(conn) -> bool:
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_home_prepared1'").fetchone():
         return False
     from hermes_cli.kanban_home_abort import predicate
+    from hermes_cli.kanban_home_finalized import predicate as finalized
     return bool(conn.execute('SELECT 1 FROM kanban_home_prepared1 p WHERE NOT EXISTS '
-                             '(SELECT 1 FROM kanban_home_finalized1 f WHERE f.task_id=p.task_id AND f.nonce=p.nonce) '
+                             f'(SELECT 1 FROM kanban_home_finalized1 f WHERE {finalized()}) '
                              f'AND NOT EXISTS(SELECT 1 FROM kanban_home_aborted1 a WHERE {predicate("p")}) LIMIT 1').fetchone())
 
 
@@ -54,8 +55,9 @@ def blocked(conn, change) -> bool:
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_home_prepared1'").fetchone():
         return False
     from hermes_cli.kanban_home_abort import aborted
+    from hermes_cli.kanban_home_finalized import predicate as finalized
     return any(conn.execute('SELECT 1 FROM kanban_home_prepared1 p WHERE task_id=? AND NOT EXISTS '
-                            '(SELECT 1 FROM kanban_home_finalized1 f WHERE f.task_id=p.task_id AND f.nonce=p.nonce)',
+                            f'(SELECT 1 FROM kanban_home_finalized1 f WHERE {finalized()})',
                             (tid,)).fetchone() and not aborted(conn, tid) and frozen(conn, tid)
                for tid in ids if isinstance(tid, str))
 

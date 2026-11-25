@@ -12,6 +12,7 @@ import re
 import sqlite3
 
 from hermes_cli import kanban_home_abort as abort
+from hermes_cli import kanban_home_finalized as finalized
 
 _SOURCE = re.compile(r"worker-[a-z0-9-]{1,24}\Z")
 _NONCE = re.compile(r"[A-Za-z0-9._:-]{16,128}\Z")
@@ -45,6 +46,16 @@ def _install(conn: sqlite3.Connection) -> None:
             AND json_type(NEW.receipt,'$.expected_version') IS 'integer')
         BEGIN SELECT RAISE(ABORT, 'home finalization scope mismatch'); END""")
     abort.install(conn)
+    valid = finalized.predicate('p', 'NEW')
+    conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_finalized1_manifest
+        BEFORE INSERT ON kanban_home_finalized1
+        WHEN NOT EXISTS(SELECT 1 FROM {_TABLE} p WHERE {valid})
+        BEGIN SELECT RAISE(ABORT, 'home finalization manifest invalid'); END""")
+    # This append-only cache contains authenticated transport proof, not task
+    # effects. Its own cache-write/immutability guards remain installed. Native
+    # apply still defers the protected event without touching prepared custody.
+    for action in ('insert', 'update', 'delete'):
+        conn.execute(f'DROP TRIGGER IF EXISTS home_prepared1_containment_canonical_receipts_{action}')
     # Include local-only task custody (wake/ask probes, subscriptions, private
     # restriction records), not just the rows sent by sync. Discover task_id
     # tables from this board's real schema, retaining guards across sync detach.
@@ -52,7 +63,7 @@ def _install(conn: sqlite3.Connection) -> None:
     for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
         quoted = '"' + table.replace('"', '""') + '"'
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({quoted})")}
-        if "task_id" in columns and table not in (_TABLE, "kanban_home_finalized1", "kanban_home_aborted1"):
+        if "task_id" in columns and table not in (_TABLE, "kanban_home_finalized1", "kanban_home_aborted1", "containment_canonical_receipts"):
             related[table] = columns
     for table in ("tasks", "task_links", *sorted(related)):
         quoted = '"' + table.replace('"', '""') + '"'
@@ -96,10 +107,12 @@ def _install(conn: sqlite3.Connection) -> None:
                         tests.append(f"task_id IN (SELECT {old_id} FROM {quoted} WHERE {' OR '.join(conflicts)})")
             cond = " OR ".join(tests)
             trigger = '"home_prepared1_' + table.replace('"', '""') + '_' + action.lower() + '"'
+            # Replace old presence-only release checks on dormant stores.
+            conn.execute(f'DROP TRIGGER IF EXISTS {trigger}')
+            valid = finalized.predicate(_TABLE)
             conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger}
                 BEFORE {action} ON {quoted} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE ({cond})
-                    AND NOT EXISTS(SELECT 1 FROM kanban_home_finalized1 f
-                                   WHERE f.task_id={_TABLE}.task_id AND f.nonce={_TABLE}.nonce)
+                    AND NOT EXISTS(SELECT 1 FROM kanban_home_finalized1 f WHERE {valid})
                     AND NOT EXISTS(SELECT 1 FROM kanban_home_aborted1 a WHERE {abort.predicate()}))
                 BEGIN SELECT RAISE(ABORT, 'home transfer prepared'); END""")
     # Upgrade the earlier task+nonce-only guard on existing dormant stores.
@@ -203,7 +216,9 @@ def frozen(conn: sqlite3.Connection, task_id: str) -> bool:
         return False
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_home_finalized1'").fetchone():
         return True
-    final = conn.execute("SELECT nonce,receipt FROM kanban_home_finalized1 WHERE task_id=?", (task_id,)).fetchone()
+    valid = finalized.predicate()
+    final = conn.execute(f"SELECT f.nonce,f.receipt FROM kanban_home_finalized1 f JOIN {_TABLE} p "
+                         f"ON p.task_id=f.task_id WHERE p.task_id=? AND {valid}", (task_id,)).fetchone()
     if not final:
         return True
     try:
