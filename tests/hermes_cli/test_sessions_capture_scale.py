@@ -4,6 +4,7 @@ import time
 
 from hermes_cli.sessions_capture_process import CaptureProcess, CaptureUnavailable
 from hermes_state import SessionDB
+from tests.hermes_state.test_recency_cold_index import prepare
 from tests.hermes_state import test_recency_hot_rows as helpers
 from tests.hermes_cli.test_sessions_native_startup import selected
 
@@ -20,6 +21,7 @@ def test_first_30k_twelve_home_capture_finishes_in_unchanged_budget(tmp_path, mo
         db = SessionDB(db_path=target / 'state.db')
         try:
             helpers._seed(db, 2500, prefix=f'p{number}-')
+            prepare(db)
         finally:
             db.close()
     from hermes_cli import sessions_capture_process as module

@@ -825,9 +825,6 @@ CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
--- Opt-in predicate keeps this index out of existing readers' implicit tie ordering.
-CREATE INDEX IF NOT EXISTS idx_messages_recency_candidates ON messages(timestamp, session_id)
-    WHERE (timestamp+0 IS NULL OR timestamp+0 IS NOT NULL);
 -- Partial index for the Insights assistant tool-call scan
 -- (agent/insights.py _get_tool_usage / _get_skill_usage): those queries filter
 -- messages by role='assistant' AND tool_calls IS NOT NULL, a small fraction of
