@@ -223,6 +223,75 @@ def synced(tmp_path, monkeypatch):
         ksa._reset_cache_for_tests()
 
 
+@pytest.mark.parametrize("status", ["blocked", "triage", "ready", "scheduled"])
+def test_links_only_owner_work_overrides_idle_done(synced, status):
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+    import hermes_state_outcome as outcome
+    from hermes_cli import kanban_session_activity as activity
+    from tests.hermes_cli.test_kanban_session_outcome_tasks import HUMAN_REQUEST
+
+    tid = kb.create_task(synced, title="Owner needs a decision", assignee="default", created_by="kanban-drift")
+    sid = owner.session_id("kanban-drift")
+    assert not synced.execute("SELECT 1 FROM kanban_notify_subs WHERE task_id=?", (tid,)).fetchone()
+    assert synced.execute("SELECT session_id FROM tasks WHERE id=?", (tid,)).fetchone()[0] != sid
+    db = SessionDB(db_path=get_hermes_home() / "state.db")
+    try:
+        assert outcome.get_outcome(sid, db=db)["kind"] == "done"
+        with kb.write_txn(synced):
+            synced.execute("UPDATE tasks SET status=?, block_kind='needs_input', human_request=? WHERE id=?",
+                           (status, json.dumps(HUMAN_REQUEST), tid))
+        rows = activity.annotate_kanban_activity([{"id": sid}])
+        human = status in ("blocked", "triage")
+        assert rows[0].get("kanban_blocked", 0) == int(human)
+        assert [i["ref"].split("/")[-1] for i in rows[0].get("needs_you", [])] == ([tid] if human else [])
+        cards = activity.session_outcome_tasks([sid])
+        assert [c["id"] for c in cards] == [tid]
+        decisions, _waits = outcome._read_card_items([sid])
+        assert [c["card_id"] for c in decisions] == ([tid] if human else [])
+        refreshed = outcome.refresh_outcome(sid, "card_change", db=db)
+        assert refreshed["kind"] == ("decision" if human else "waiting")
+        assert refreshed["status"]["presentation"]["stripe"] == ("stuck" if human else "waiting")
+        assert cards[0]["via"] == "created"
+        if status == "scheduled":
+            assert rows[0]["kanban_parked"] == 1
+        assert not synced.execute("SELECT 1 FROM kanban_notify_subs WHERE task_id=?", (tid,)).fetchone()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("column,value", [("released", 1), ("chat_gateway", "elsewhere"),
+                                         ("chat_profile", "other"), ("kind", "subscribed")])
+def test_noncreating_or_foreign_links_do_not_claim_local_work(synced, column, value):
+    from hermes_cli import kanban_session_activity as activity
+    tid = kb.create_task(synced, title="Not this owner", assignee="default", created_by="kanban-drift")
+    sid = owner.session_id("kanban-drift")
+    with kb.write_txn(synced):
+        synced.execute(f"UPDATE task_chat_links SET {column}=? WHERE task_id=?", (value, tid))
+    assert activity._counts_on(synced) == {}
+    assert activity.session_outcome_tasks([sid]) == []
+
+
+def test_created_link_dedup_precedence_and_no_wake_subscription(synced):
+    from hermes_cli import kanban_session_activity as activity
+    tid = kb.create_task(synced, title="Scheduled owner", assignee="default", created_by="kanban-drift")
+    sid = owner.session_id("kanban-drift")
+    with kb.write_txn(synced):
+        synced.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+    assert activity._counts_on(synced) == {sid: 1}
+    assert activity._parked_on(synced)[0] == {sid: 1}
+    assert activity._parked_pairs(synced) == {(sid, tid)}
+    assert activity._parked_pairs(synced, created_links=False) == set()
+    with kb.write_txn(synced):
+        synced.execute("INSERT INTO kanban_notify_subs (task_id,platform,chat_id,thread_id,created_at) "
+                       "VALUES (?,'tui',?,'',0)", (tid, sid))
+    assert activity._counts_on(synced) == {sid: 1}
+    assert activity.session_outcome_tasks([sid])[0]["via"] == "created"
+    with kb.write_txn(synced):
+        synced.execute("UPDATE tasks SET session_id=? WHERE id=?", (sid, tid))
+    assert activity._counts_on(synced) == {sid: 1}
+
+
 def test_link_reconcile_keeps_the_owner_chat_as_owner(synced):
     from hermes_cli import kanban_chat_links as links
     tid = kb.create_task(synced, title="Drift", assignee="default", created_by="kanban-drift")

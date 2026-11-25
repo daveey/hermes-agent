@@ -58,6 +58,14 @@ def select_listed_local_task_set(conn: sqlite3.Connection, ids: Iterable[str], s
             f"WHERE t.session_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", args):
         found[row["id"]] = {**dict(row), "via": "created"}
         pairs[(row["session_id"], row["id"])] = "created"
+    from hermes_cli.kanban_local_chat_ownership import created_rows
+    for row in created_rows(
+            conn, f"{select}, {run_start} AS current_run_started_at, l.chat_session AS _member_session",
+            f"l.chat_session IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", args):
+        info = dict(row)
+        sid = info.pop("_member_session")
+        found.setdefault(row["id"], {**info, "via": "created"})
+        pairs[(sid, row["id"])] = "created"
     try:
         for row in conn.execute(
                 f"SELECT {select}, {run_start} AS current_run_started_at, s.chat_id AS _member_session "

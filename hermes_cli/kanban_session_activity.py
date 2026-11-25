@@ -54,6 +54,7 @@ from hermes_cli.kanban_links_tickets import StartTickets as _StartTickets
 from hermes_cli import kanban_links_narrow as _links_narrow, kanban_external_activity as _external_activity
 from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
 from hermes_cli.kanban_table_columns import table_columns  # one result row per probe, not one per column
+from hermes_cli.kanban_local_chat_ownership import created_rows as _created_chat_rows
 from hermes_cli.kanban_open_asks import card_is_open_human_ask
 from hermes_cli.kanban_activity_projection import WAITING_ON_CAP
 import contextlib
@@ -225,6 +226,7 @@ def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STAT
             f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}", params))
     except sqlite3.Error:  # board predates notify subscriptions
         pass
+    rows.extend(_created_chat_rows(conn, f"l.chat_session, t.id, {request}", match, params))
     pairs = {(str(sid), str(tid)) for sid, tid, _ in rows}
     if tasks is not None:
         tasks.update({str(tid): {"id": str(tid), "human_request": request} for _, tid, request in rows})
@@ -276,6 +278,8 @@ def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]
                 params))
     except sqlite3.Error:  # board predates notify subscriptions
         pass
+    pairs.update((str(sid), str(tid)) for sid, tid in
+                 _created_chat_rows(conn, "l.chat_session, t.id", match, params))
     if not pairs:
         return {}, {}
     info: dict[str, tuple[str, bool]] = {
@@ -325,22 +329,7 @@ def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]
     return parked, held
 
 
-def _parked_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
-    """(session, task) for every parked card (scheduled/blocked/triage) a session created or shepherds."""
-    if "session_id" not in table_columns(conn, "tasks"):
-        return set()
-    parked = f"(t.status IN ('scheduled', 'blocked', 'triage') AND {_not_watch(conn)})"  # watch: kanban_watch
-    pairs: set[tuple[str, str]] = {
-        (str(sid), str(tid)) for sid, tid in conn.execute(
-            f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL AND session_id != '' AND {parked}")}
-    try:
-        pairs.update(
-            (str(sid), str(tid)) for sid, tid in conn.execute(
-                f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {parked}"))
-    except sqlite3.Error:  # board predates notify subscriptions
-        pass
-    return pairs
+from hermes_cli.kanban_local_chat_ownership import parked_pairs as _parked_pairs
 
 
 def _read_stalled(path: Path, now: float | None = None) -> dict[str, int]:
@@ -1600,7 +1589,7 @@ def parked_waits(now: float | None = None) -> list[dict[str, Any]]:
         except sqlite3.Error:
             continue
         try:
-            pairs = _parked_pairs(conn)
+            pairs = _parked_pairs(conn, created_links=False)  # display ownership does not opt into owner wakes
             info = _local_wait_info(conn, {tid for _, tid in pairs}, now=now) if pairs else {}
             titles: dict[str, str] = {}
             ids = list(info)
