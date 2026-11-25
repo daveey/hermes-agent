@@ -181,7 +181,15 @@ def _clocked(conn: sqlite3.Connection, pairs) -> bool:
 
 
 def _board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict[str, dict[str, Any]]:
-    """One board's ``session_external`` map: the stored one while the board is unchanged, else a read of it."""
+    """Recheck the change signal after waiting for any overlapping capture of this board."""
+    from hermes_cli.kanban_external_refresh import board_refresh
+
+    with board_refresh(path):
+        return _read_board_external(path, open_ro, parked_pairs, signature, wall)
+
+
+def _read_board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict[str, dict[str, Any]]:
+    """One board's stored contribution while unchanged, otherwise one short-lived read."""
     key = str(path)
     sig = signature(path) if signature is not None else None
     if sig is not None:
