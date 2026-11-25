@@ -78,6 +78,21 @@ def test_ineligible_carbon_is_not_a_pin(field):
         pin_policy(MODEL, "gemini", cfg)
 
 
+def test_concrete_carbon_pin_resolves_and_verifies(tmp_path):
+    from agent.model_routing import resolve_model_route
+    from agent.model_routing_managed import verify_selected_route
+
+    cfg = carbon_config()
+    pin = resolve_model_route(MODEL, "gemini", config=cfg)
+    assert (pin["provider"], pin["model"]) == ("gemini", MODEL)
+    level, restricted = pin_policy(pin["model"], pin["provider"], cfg)
+    result = resolve_model_route("class:" + level, config=restricted,
+                                 state_path=tmp_path / "routes.db", session_id="picker-pin")
+    assert (result["provider"], result["model"]) == ("gemini", MODEL)
+    assert result["metadata"]["requested_class"] == "carbon"
+    verify_selected_route(result["model"], result["provider"], result["metadata"], cfg)
+
+
 def test_picker_keeps_carbon_on_its_provider_only():
     rows = [{"slug": slug, "models": [MODEL], "featured_models": [MODEL], "total_models": 1}
             for slug in ("gemini", "anthropic", "openai-codex", "openai")]

@@ -44,8 +44,11 @@ def test_carbon_cannot_be_ordinary_capacity_or_fallback(tmp_path, level, allow_m
     excluded = [(r["provider"], r["model"]) for r in policy["routes"][level] if r != paid]
     with pytest.raises(ModelRoutingError, match="eligible"):
         resolve_model_route("class:" + level, excluded=excluded, **args)
+    # An explicit pin may select carbon, but never an ordinary-only registration.
+    del policy["routes"]["carbon"]
+    policy["enforce_subscription_only"] = True
     with pytest.raises(ModelRoutingError):
-        resolve_model_route("gemini-4-carbon", "gemini", config=carbon_config())
+        resolve_model_route("gemini-4-carbon", "gemini", **args)
 
 
 @pytest.mark.parametrize("key", ["eligible", "funding_verified"])
