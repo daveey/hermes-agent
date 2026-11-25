@@ -51,12 +51,11 @@ def read_answer(path: Path, task_id: str, *, now: float | None = None) -> dict |
     inheriting its old tick's hold. No schema initialization or integrity scans.
     """
     started = time.monotonic()
-    now = time.time() if now is None else now
     try:
         doc = json.loads(path.with_name(path.name + SUFFIX).read_text(encoding="utf-8-sig"))
         if not isinstance(doc, dict) or doc.get("version") != VERSION:
             return None
-        age = now - float(doc.get("tick_at") or 0)
+        age = (time.time() if now is None else now) - float(doc.get("tick_at") or 0)
         if not 0 <= age <= freshness_bound(doc):
             return None
         saved = doc.get("cards", {}).get(task_id)
@@ -70,6 +69,10 @@ def read_answer(path: Path, task_id: str, *, now: float | None = None) -> dict |
         finally:
             conn.close()
         if row is None or row[0] != saved.get("status"):
+            return None
+        # Status I/O may have crossed expiry; never return the pre-I/O age.
+        age = (time.time() if now is None else now) - float(doc.get("tick_at") or 0)
+        if not 0 <= age <= freshness_bound(doc):
             return None
         recorded = {**saved, "task_id": task_id, "board": doc.get("board"), "tick_at": doc["tick_at"],
                     "age_s": round(age, 1), "freshness_bound_s": freshness_bound(doc),

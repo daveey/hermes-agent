@@ -923,14 +923,13 @@ def snapshot(conn: Any, *, now: Optional[float] = None) -> dict[str, Any]:
     ``available`` False = no tick recorded one here yet; ``stale`` True = the newest is older than
     :data:`STALE_SECONDS`. Neither reads as "nothing is held": a consumer must show them as unknown.
     """
-    now = time.time() if now is None else now
     doc = _read(snapshot_path(conn))
     board = _board(conn)
     if doc is None:
         return {"version": VERSION, "board": board, "available": False, "stale": True, "age_s": None,
                 "governors": _all_governors([]), "globals": None, "cards": {}, "idle_total": None,
                 "charged_total": None}
-    age = now - float(doc.get("tick_at") or 0)
+    age = (time.time() if now is None else now) - float(doc.get("tick_at") or 0)
     return {**doc, "available": True, "age_s": round(age, 1), "freshness_bound_s": freshness_bound(doc),
             "stale": not 0 <= age <= freshness_bound(doc),
             "governors": _all_governors(doc.get("governors") or [])}
@@ -947,12 +946,11 @@ def _all_governors(rows: list) -> list[dict[str, Any]]:
 def card(conn: Any, task_id: str, *, now: Optional[float] = None) -> Optional[dict[str, Any]]:
     """One card's recorded first stop and overlaps (``age_s`` = how old that tick is), or None when the last
     recorded tick did not charge it (not idle then, past :data:`MAX_CARDS`, or no snapshot)."""
-    now = time.time() if now is None else now
     doc = _read(snapshot_path(conn))
     found = (doc.get("cards") or {}).get(task_id) if doc else None
     if doc is None or not isinstance(found, dict):
         return None
-    age = now - float(doc.get("tick_at") or 0)
+    age = (time.time() if now is None else now) - float(doc.get("tick_at") or 0)
     known = _BY_ID.get(found.get("governor"))
     return {**found, "task_id": task_id, "board": doc.get("board"), "tick_at": doc.get("tick_at"),
             "age_s": round(age, 1), "freshness_bound_s": freshness_bound(doc),
