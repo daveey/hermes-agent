@@ -411,13 +411,15 @@ def _open_session_db_at_path(db_path: Path, *, read_only: bool):
     )
 
     def _open_probed():
-        identity = _file_identity(db_path)  # before connecting: a swap during the open never matches
+        identity = _file_identity(db_path)  # before connecting, and again after: a swap during the open
         db = SessionDB(db_path=db_path, read_only=True)
         try:
             conn = getattr(db, "_conn", None)
             if conn is not None:
                 probes = _session_db_read_probe_statements()
-                key = _probe_key(conn, identity, probes)
+                # The connection may have opened a file that replaced the stat'd one; only an identity unchanged
+                # across the connect proves which file this connection reads. Otherwise probe, as before.
+                key = _probe_key(conn, identity, probes) if _file_identity(db_path) == identity else None
                 with _PROBED_LOCK:
                     probed = key is not None and key in _PROBED_STORES
                 if not probed:

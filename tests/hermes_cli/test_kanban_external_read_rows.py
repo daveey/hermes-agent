@@ -183,6 +183,12 @@ def test_wait_rows_probe_the_newest_park_event_through_the_kind_index(monkeypatc
     plan = " | ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params))
     # Not idx_events_task (task_id, created_at), which walked every event of each card.
     assert "idx_events_kind_task_id" in plan and "idx_events_task " not in plan + " ", plan
+    kph = ",".join("?" for _ in kwi.PARK_EVENT_KINDS)
+    old_plan = " | ".join(r[3] for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT e.task_id, e.kind, e.payload, e.created_at FROM task_events e WHERE e.id IN ("
+        "SELECT MAX(id) FROM task_events WHERE task_id IN (SELECT value FROM json_each(?)) "
+        f"AND kind IN ({kph}) GROUP BY task_id)", (json.dumps(_ids(conn)), *kwi.PARK_EVENT_KINDS)))
+    assert "idx_events_task " in old_plan + " " and "idx_events_kind_task_id" not in old_plan, old_plan
 
 
 def test_a_board_without_task_events_keeps_status_only_rows():
@@ -252,6 +258,13 @@ def test_card_states_keep_only_scheduled_cards(kanban_home, gh, clock):
         counted = Counting(conn)
         got = kew.card_states(counted, [a, other, "missing", b], now=time.time())
         assert set(got) == {a, b}
+        more = [park(conn, 9110 + i) for i in range(8)]
+        tick(conn, gh, clock)
+        wide = Counting(conn)
+        got = kew.card_states(wide, [a, other, "missing", b, *more], now=time.time())
+        assert set(got) == {a, b, *more}
+        # 2 vs 10 scheduled cards: the same rows handed out (the old statuses read was one row per card).
+        assert wide.rows == counted.rows and wide.statements == counted.statements, (counted.rows, wide.rows)
 
 
 def test_read_rows_is_fetchall_in_one_statement_and_one_row():
@@ -273,3 +286,26 @@ def test_read_rows_is_fetchall_in_one_statement_and_one_row():
     assert read_rows(conn, "SELECT a FROM v WHERE 0", (), 1) == []
     with pytest.raises(sqlite3.Error):
         read_rows(conn, sql, params, 2)  # a wrong width fails at prepare, never a silent reshape
+
+
+def test_read_rows_carries_hard_doubles_bit_exactly_on_this_sqlite():
+    """``printf('%!.26g')`` is only as exact as the SQLite build's printf (Apple's 3.51.0 was 1 ULP off): fail here,
+    not as a silently drifted timestamp, if this interpreter's SQLite loses a bit."""
+    import random
+    import struct
+
+    from hermes_state_page_pack import read_rows
+
+    rng = random.Random(20261125)
+    doubles = [5e-324, 2.2250738585072014e-308, 2.225073858507201e-308, float(2**53 + 1), 2.0**53 + 2, 0.1 + 0.2,
+               1 / 3, 1.7976931348623157e308, -1e-310, 1_700_000_000.123456789, 9007199254740993.0, 1e23, 5e-310]
+    while len(doubles) < 2000:
+        (x,) = struct.unpack("<d", rng.getrandbits(64).to_bytes(8, "little"))
+        if x == x and x not in (float("inf"), float("-inf")) and not (x == 0 and str(x).startswith("-")):
+            doubles.append(x)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE d (i INTEGER, x REAL)")
+    conn.executemany("INSERT INTO d VALUES (?, ?)", enumerate(doubles))
+    got = read_rows(conn, "SELECT x FROM d ORDER BY i", (), 1)
+    lost = [(x, y) for (y,), x in zip(got, doubles) if struct.pack("<d", x) != struct.pack("<d", y)]
+    assert not lost, (sqlite3.sqlite_version, lost[:5])

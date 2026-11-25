@@ -50,8 +50,10 @@ def read_rows(conn, sql, params, width):
     """``conn.execute(sql, params).fetchall()`` as tuples in ONE statement and one handed-out row. [daveey]
 
     For a reader whose ``width`` result columns are known: no prepare-only probe for their names, the columns are
-    renamed by position (a wrong ``width`` fails at prepare). Same transport as ``read_page``: SQLite types, row
-    order and binary64 values are preserved."""
+    renamed by position (a wrong ``width`` fails at prepare). Same transport as ``read_page``: SQLite types and row
+    order are preserved; REAL travels as ``printf('%!.26g')`` text, whose round trip is exact only as far as the
+    SQLite build's printf is (this runtime's is; Apple's system SQLite 3.51.0 was 1 ULP off on some doubles, and
+    -0.0 arrives as 0.0). ``test_kanban_external_read_rows`` guards this interpreter's SQLite."""
     cols = [f"_pack_c{i}" for i in range(width)]
     packed = conn.execute(
         f"WITH _packed_rows({','.join(cols)}) AS MATERIALIZED ({sql}) "

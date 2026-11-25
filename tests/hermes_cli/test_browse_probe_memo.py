@@ -118,3 +118,30 @@ def test_a_failed_probe_is_not_remembered(tmp_path, probes, monkeypatch):
         with pytest.raises(HTTPException):
             _browse(path)
     assert probes.runs == 2 and not getattr(wss, "_PROBED_STORES", set())
+
+
+def test_a_store_swapped_in_during_the_open_is_probed(tmp_path, probes, monkeypatch):
+    """The stat before the connect saw the cached store; the connect opened the one that replaced it."""
+    path = _store(tmp_path / "profiles" / "scribe" / "state.db")
+    _browse(path)
+    other = _store(tmp_path / "profiles" / "other" / "state.db")
+    with closing(sqlite3.connect(path)) as a, closing(sqlite3.connect(other)) as b:
+        cookie = a.execute("PRAGMA schema_version").fetchone()[0]
+        # Same cookie: only the identity can tell the two stores apart.
+        assert b.execute("PRAGMA schema_version").fetchone()[0] == cookie
+    real = wss._file_identity
+    calls = []
+
+    def swapping(p):
+        seen = real(p)
+        if not calls:  # the pre-connect stat: then the swap, before SessionDB connects
+            os.replace(other, path)
+            for suffix in ("-wal", "-shm"):
+                if os.path.exists(f"{path}{suffix}"):
+                    os.remove(f"{path}{suffix}")
+        calls.append(seen)
+        return seen
+
+    monkeypatch.setattr(wss, "_file_identity", swapping)
+    assert _browse(path) == ["kept"]
+    assert probes.runs == 2  # the swapped-in store was probed, not taken for the cached one
