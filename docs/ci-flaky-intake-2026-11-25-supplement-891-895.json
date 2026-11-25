@@ -1,0 +1,260 @@
+{
+  "intake_dispositions": [
+    {
+      "disposition": "existing_exact_test_owner_source_qualification_pending",
+      "first_attempt_cause": "unknown for these occurrences; original logs and actual source revision must be qualified",
+      "occurrence_ids": [
+        892
+      ],
+      "owner_task": "t_01a2117deceffea3",
+      "repair_claimed": false,
+      "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+    },
+    {
+      "disposition": "existing_exact_test_owner_source_qualification_pending",
+      "first_attempt_cause": "unknown for these occurrences; original logs and actual source revision must be qualified",
+      "occurrence_ids": [
+        891
+      ],
+      "owner_task": "t_01a2117e043cbca0",
+      "repair_claimed": false,
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+    },
+    {
+      "disposition": "existing_exact_test_owner_source_qualification_pending",
+      "first_attempt_cause": "unknown for these occurrences; original logs and actual source revision must be qualified",
+      "occurrence_ids": [
+        893,
+        894,
+        895
+      ],
+      "owner_task": "t_01a2117deceffea3",
+      "repair_claimed": false,
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    }
+  ],
+  "intake_task": "t_01a2127783e23224",
+  "occurrences": [
+    {
+      "head_sha": "7f7561f52e83e5f76edac498082462c5fdd17192",
+      "job_id": 139162679647,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 891,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45600903679,
+      "slice": 10,
+      "slices": 12,
+      "source_sha": "7f7561f52e83e5f76edac498082462c5fdd17192",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+    },
+    {
+      "head_sha": "677a657f0416d24c51b6eacc017d25cdd9f53a59",
+      "job_id": 139167921529,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 892,
+      "owner_check": [
+        {
+          "candidate": "t_01a1b8f8ac4ac8e8",
+          "reason": "closed_history_incomplete",
+          "status": "done"
+        }
+      ],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45603281098,
+      "slice": 5,
+      "slices": 12,
+      "source_sha": "677a657f0416d24c51b6eacc017d25cdd9f53a59",
+      "status": "needs_triage",
+      "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+    },
+    {
+      "head_sha": "448e9df4e0b130c55568b722e902d82f805c9a8c",
+      "job_id": 139182863450,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 893,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45607505629,
+      "slice": 9,
+      "slices": 12,
+      "source_sha": "b4d9b696fac9ec274d3b00cc4eb0fb850898f399",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "68da7497670db04be1c6cd6e5d9cc861d954784b",
+      "job_id": 139194117964,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 894,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45610929109,
+      "slice": 9,
+      "slices": 12,
+      "source_sha": "68da7497670db04be1c6cd6e5d9cc861d954784b",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "402680056ad2998fedc287d19c602a90a3d81395",
+      "job_id": 139226012827,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 895,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45620064945,
+      "slice": 8,
+      "slices": 9,
+      "source_sha": "010d18f737a000db96ed7068799873f80da2cf9b",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    }
+  ],
+  "owner_annotations": [
+    {
+      "first_attempt_evidence": "run45600903679/job139162679647:1855-1864: contract=None then None.params at session.resume validation",
+      "occurrence_id": 891,
+      "qualification": "Actual source gateway/session_controls.py uses registry-submodule import, lacks package-catalog initialization barrier. Controlled cold actual package import reproduces same exception; original thread schedule is not recorded.",
+      "repair_status": "not landed; canonically published branch02717dd5ebbe58ac6f2de43083ef377b4fb71a3f has no PR yet because normal gh pr create encountered GraphQL quota exhaustion; final-head proof ongoing",
+      "source_qualified": true,
+      "source_sha": "7f7561f52e83e5f76edac498082462c5fdd17192"
+    }
+  ],
+  "pages": [
+    {
+      "digest": "40ead068ae55245b4e96d10c7a47b0cf7e77973d97cb2634b4dcd5d0f93a7e95",
+      "original_json": "{\"occurrences\": [{\"head_sha\": \"7f7561f52e83e5f76edac498082462c5fdd17192\", \"job_id\": 139162679647, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 891, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45600903679, \"slice\": 10, \"slices\": 12, \"source_sha\": \"7f7561f52e83e5f76edac498082462c5fdd17192\", \"status\": \"needs_triage\", \"test_id\": \"tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach\"}], \"version\": 1}",
+      "payload": {
+        "occurrences": [
+          {
+            "head_sha": "7f7561f52e83e5f76edac498082462c5fdd17192",
+            "job_id": 139162679647,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 891,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45600903679,
+            "slice": 10,
+            "slices": 12,
+            "source_sha": "7f7561f52e83e5f76edac498082462c5fdd17192",
+            "status": "needs_triage",
+            "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "3fa1ff14da84cf6b12411d1dc5ff8785040b6befe0477fdb00454614733f3777",
+      "original_json": "{\"occurrences\": [{\"head_sha\": \"677a657f0416d24c51b6eacc017d25cdd9f53a59\", \"job_id\": 139167921529, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 892, \"owner_check\": [{\"candidate\": \"t_01a1b8f8ac4ac8e8\", \"reason\": \"closed_history_incomplete\", \"status\": \"done\"}], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45603281098, \"slice\": 5, \"slices\": 12, \"source_sha\": \"677a657f0416d24c51b6eacc017d25cdd9f53a59\", \"status\": \"needs_triage\", \"test_id\": \"tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile\"}], \"version\": 1}",
+      "payload": {
+        "occurrences": [
+          {
+            "head_sha": "677a657f0416d24c51b6eacc017d25cdd9f53a59",
+            "job_id": 139167921529,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 892,
+            "owner_check": [
+              {
+                "candidate": "t_01a1b8f8ac4ac8e8",
+                "reason": "closed_history_incomplete",
+                "status": "done"
+              }
+            ],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45603281098,
+            "slice": 5,
+            "slices": 12,
+            "source_sha": "677a657f0416d24c51b6eacc017d25cdd9f53a59",
+            "status": "needs_triage",
+            "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "a5805840b24cb012cac2e4a617eb78593164d0cf4a94d6d8916fb62f88052ab7",
+      "original_json": "{\"occurrences\": [{\"head_sha\": \"448e9df4e0b130c55568b722e902d82f805c9a8c\", \"job_id\": 139182863450, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 893, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45607505629, \"slice\": 9, \"slices\": 12, \"source_sha\": \"b4d9b696fac9ec274d3b00cc4eb0fb850898f399\", \"status\": \"needs_triage\", \"test_id\": \"tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes\"}], \"version\": 1}",
+      "payload": {
+        "occurrences": [
+          {
+            "head_sha": "448e9df4e0b130c55568b722e902d82f805c9a8c",
+            "job_id": 139182863450,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 893,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45607505629,
+            "slice": 9,
+            "slices": 12,
+            "source_sha": "b4d9b696fac9ec274d3b00cc4eb0fb850898f399",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "aaf52f698ad6c033c65a70d929ded65dd36c6661053c7063606f45f9f0af415d",
+      "original_json": "{\"occurrences\": [{\"head_sha\": \"68da7497670db04be1c6cd6e5d9cc861d954784b\", \"job_id\": 139194117964, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 894, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45610929109, \"slice\": 9, \"slices\": 12, \"source_sha\": \"68da7497670db04be1c6cd6e5d9cc861d954784b\", \"status\": \"needs_triage\", \"test_id\": \"tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes\"}], \"version\": 1}",
+      "payload": {
+        "occurrences": [
+          {
+            "head_sha": "68da7497670db04be1c6cd6e5d9cc861d954784b",
+            "job_id": 139194117964,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 894,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45610929109,
+            "slice": 9,
+            "slices": 12,
+            "source_sha": "68da7497670db04be1c6cd6e5d9cc861d954784b",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "1ba77676941ae1543ff69d523c8bb176885b4fbbf0b486e69a25d742b80c5d3a",
+      "original_json": "{\"occurrences\": [{\"head_sha\": \"402680056ad2998fedc287d19c602a90a3d81395\", \"job_id\": 139226012827, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 895, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45620064945, \"slice\": 8, \"slices\": 9, \"source_sha\": \"010d18f737a000db96ed7068799873f80da2cf9b\", \"status\": \"needs_triage\", \"test_id\": \"tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes\"}], \"version\": 1}",
+      "payload": {
+        "occurrences": [
+          {
+            "head_sha": "402680056ad2998fedc287d19c602a90a3d81395",
+            "job_id": 139226012827,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 895,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45620064945,
+            "slice": 8,
+            "slices": 9,
+            "source_sha": "010d18f737a000db96ed7068799873f80da2cf9b",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    }
+  ],
+  "repair_owner": "t_01a2117e043cbca0",
+  "version": 1
+}

@@ -533,3 +533,42 @@ failed final-head sweep. Supplemental887/889 retain that owner and actual source
 
 No new competing repair owners or repository exporters were created. This consolidation
 does not close either repair owner, transfer its acceptance, or imply fleet deployment.
+
+
+## November 25 supplemental intake — occurrences891–895
+
+Intake `t_01a2127783e23224`. Frozen five immutable pages, five occurrences and three exact tests. Source metadata preserved unchanged in occurrences.json; dispositions are separate. No retry threshold changes.
+
+| Exact test | Occurrences | Disposition / follow-up owner |
+|---|---|---|
+| `tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile` | 892 | source/log qualification pending; `t_01a2117deceffea3` |
+| `tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach` | 891 | source/log qualification pending; `t_01a2117e043cbca0` |
+| `tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes` | 893,894,895 | source/log qualification pending; `t_01a2117deceffea3` |
+
+Registry historical owner t_01a1b8f8ac4ac8e8 is DONE; its merged PR946 is history, not ownership of occurrence892. Current gateway owner reports related retirement repair PR4406 merged, but that does not establish source ancestry or repair coverage of occurrence892. Upload owner reports a catalog import fix in qualification; it is not acceptance of occurrence891. Readiness occurrences893–895 remain metadata-only observations. No environmental waiver or timing attribution.
+
+Single consolidated repository docs/ci-flaky-intake.md publication remains with t_01a2117e043cbca0. This is consolidation input, not a claim to have modified repository main. Existing independent review, required CI, canonical landing and stability requirements stay on repair owners.
+
+## Original run provenance
+
+- Occurrence 891: https://github.com/softmax-universe/daveey-hermes/actions/runs/45600903679/job/139162679647; attempt 1; source `7f7561f52e83e5f76edac498082462c5fdd17192`; head `7f7561f52e83e5f76edac498082462c5fdd17192`; slice 10/12.
+- Occurrence 892: https://github.com/softmax-universe/daveey-hermes/actions/runs/45603281098/job/139167921529; attempt 1; source `677a657f0416d24c51b6eacc017d25cdd9f53a59`; head `677a657f0416d24c51b6eacc017d25cdd9f53a59`; slice 5/12.
+- Occurrence 893: https://github.com/softmax-universe/daveey-hermes/actions/runs/45607505629/job/139182863450; attempt 1; source `b4d9b696fac9ec274d3b00cc4eb0fb850898f399`; head `448e9df4e0b130c55568b722e902d82f805c9a8c`; slice 9/12.
+- Occurrence 894: https://github.com/softmax-universe/daveey-hermes/actions/runs/45610929109/job/139194117964; attempt 1; source `68da7497670db04be1c6cd6e5d9cc861d954784b`; head `68da7497670db04be1c6cd6e5d9cc861d954784b`; slice 9/12.
+- Occurrence 895: https://github.com/softmax-universe/daveey-hermes/actions/runs/45620064945/job/139226012827; attempt 1; source `010d18f737a000db96ed7068799873f80da2cf9b`; head `402680056ad2998fedc287d19c602a90a3d81395`; slice 8/9.
+
+
+### Owner qualification update (2026-11-25 14:10 UTC)
+
+The intake dispositions above remain immutable metadata. Owner qualification now confirms upload891
+original job139162679647, lines1855–1864: `contract=None` at `session.resume`, followed by
+`AttributeError: NoneType.params`. Actual source7f7561f52e83e5f76edac498082462c5fdd17192
+imports the ready registry submodule without awaiting its still-initializing package catalog.
+A controlled cold real-package schedule reproduces that exact failure; historical thread telemetry is absent.
+The existing owner has a package-catalog barrier repair in qualification, not landed: original20 whole-file
+trials27pass each/no retries and188 direct-import consumer files1367pass/0fail/1pre-existing skip.
+Canonical publication changed the head to02717dd5ebbe58ac6f2de43083ef377b4fb71a3f; final-head20-run proof,
+requiredCI, independent exact-head review and landing remain owed. Normal PR creation hit GraphQL quota;
+no alternative identity or reserve bypass was used. Registry892/readiness893–895 remain unqualified by this owner.
+
+Complete unchanged source records/pages/dispositions and separate qualification: [ci-flaky-intake-2026-11-25-supplement-891-895.json](ci-flaky-intake-2026-11-25-supplement-891-895.json); SHA256 `eb70c3436aeb9276ea17c2f2109c37743cc109a9d5329da7cb44190d8408943a`.
