@@ -96,15 +96,15 @@ def route_environment(authority, policy, config, *, model=None):
     for route in routes:
         if not isinstance(route, dict):
             continue
-        model = route.get('model') or route.get('default')
-        if is_class_selector(model):
+        route_model = route.get('model') or route.get('default')
+        if is_class_selector(route_model):
             # A class is not provider auto-detection. The adopted worker resolves
             # it later, with its session identity; give it only this class's
             # policy-authorized providers, never every registry/profile secret.
             routing = config.get('model_routing', {})
             validate_policy(routing)
             if routing.get('enabled') and route.get('provider', 'auto') in (None, '', 'auto'):
-                for candidate in eligible_routes(routing, model.removeprefix('class:')):
+                for candidate in eligible_routes(routing, route_model.removeprefix('class:')):
                     block = config.get('providers', {}).get(candidate['provider'], {})
                     if is_provider_enabled(block):
                         names.update(_route_names(candidate, config, values))

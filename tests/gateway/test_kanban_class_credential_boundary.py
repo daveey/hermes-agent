@@ -101,6 +101,24 @@ def test_bootstrap_uses_refreshed_model_not_stale_policy_pin(tmp_path, monkeypat
         'ANTHROPIC_API_KEY': 'synthetic-anthropic'}
 
 
+@pytest.mark.parametrize('primary,expected', [
+    ({'provider': 'anthropic'}, {'ANTHROPIC_API_KEY': 'synthetic-anthropic'}),
+    ({'provider': 'custom', 'base_url': 'https://inference.example.com/v1',
+      'key_env': 'GEMINI_API_KEY'}, {'GEMINI_API_KEY': 'synthetic-gemini'}),
+])
+def test_primary_override_preserves_provider_metadata(tmp_path, monkeypatch, primary, expected):
+    from gateway.session_worker_credentials import route_environment
+
+    config = {'model': {'default': 'profile-default', **primary}, 'auxiliary': {}}
+    original = json.dumps(config, sort_keys=True)
+    monkeypatch.setattr('gateway.session_worker_credentials._profile_values', lambda *args: {
+        'GEMINI_API_KEY': 'synthetic-gemini', 'ANTHROPIC_API_KEY': 'synthetic-anthropic',
+        'OPENROUTER_API_KEY': 'synthetic-openrouter', 'UNDECLARED_SECRET': 'synthetic-unrelated'})
+    assert route_environment(SimpleNamespace(profile_id=str(tmp_path)),
+        SimpleNamespace(ignore_user_config=False), config, model='concrete-launch') == expected
+    assert json.dumps(config, sort_keys=True) == original
+
+
 def test_primary_override_preserves_declared_auxiliary_inheritance(tmp_path, monkeypatch, class_config):
     from gateway.session_worker_credentials import route_environment
 
