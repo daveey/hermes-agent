@@ -1039,7 +1039,7 @@ describe('SidebarSessionRow kanban counts', () => {
     expect(time.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('shows a green worker-wait square and the published attention glyph on a one-line row (no age)', async () => {
+  it('shows an orange stuck count and preserves the published attention glyph on a one-line row (no age)', async () => {
     const { $sidebarRowMeta } = await import('@/store/layout')
     const before = $sidebarRowMeta.get()
     act(() => $sidebarRowMeta.set([]))
@@ -1059,8 +1059,11 @@ describe('SidebarSessionRow kanban counts', () => {
 
       expect(container.querySelector('time')).toBeNull()
       const squares = screen.getByTestId('session-row-card-squares')
-      expect(squares.querySelector('[data-card-colour="green"]')).not.toBeNull()
-      expect(squares.getAttribute('aria-label')).toBe('Waiting for a worker 1')
+      const stuck = squares.querySelector('[data-card-colour="orange"]')
+      expect(stuck?.textContent).toBe('1')
+      expect(stuck?.className).toContain('border-orange-500')
+      expect(squares.querySelector('[data-card-colour="green"]')).toBeNull()
+      expect(squares.getAttribute('aria-label')).toBe('Stuck 1')
       expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('attention')
       const glyph = container.querySelector('[data-slot="session-status-stripe"]')
       expect(glyph?.getAttribute('data-status-stripe')).toBe('attention')
