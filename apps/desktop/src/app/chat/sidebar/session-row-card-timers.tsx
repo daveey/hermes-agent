@@ -30,7 +30,8 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
   const ref = useRef<HTMLSpanElement>(null)
   const [budget, setBudget] = useState(160)
 
-  const cards = [...(session.kanban_timed_cards ?? [])]
+  // Retained rows are historical, not evidence of current running work or a live ask.
+  const cards = [...(session.offline_cached ? [] : (session.kanban_timed_cards ?? []))]
     .filter(c => Number.isFinite(c.since) && c.since > 0 && (c.state === 'running' || c.state === 'blocked'))
     .sort(
       (a, b) =>

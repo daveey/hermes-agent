@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
 import { I18nProvider } from '@/i18n'
+import { mergeOfflineFallback } from '@/store/offline-sessions'
 
 import { flatRowCardMarks, runningCardCount, sessionCardColours } from './session-row-card-squares'
 import { compactElapsed } from './session-row-card-timers'
@@ -75,6 +76,30 @@ it('orders blue left, red right, oldest first; five clocks and overflow, full to
   expect(timers.getAttribute('aria-label')).toContain('… +2')
   expect(timers.nextElementSibling).toBe(getByTestId('cloud'))
   expect(getByTestId('cloud').nextElementSibling).toBeNull()
+})
+
+it('suppresses stale clocks on owner-list failure and restores them after an authoritative list', () => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+
+  const live = {
+    id: 's',
+    profile: 'default',
+    connection_id: 'local',
+    kanban_observed_at: NOW,
+    kanban_timed_cards: [timer('a', 'running', 45), timer('b', 'blocked', 70)],
+    kanban_timed_more: 2
+  } as SessionInfo
+
+  const [offline] = mergeOfflineFallback([live], [], { ['local\u0000default']: false })
+  expect(offline.offline_cached).toBe(true)
+  const first = draw(offline)
+  expect(first.container.querySelector('[data-card-timer]')).toBeNull()
+  expect(first.container.querySelector('[data-timer-overflow]')).toBeNull()
+  first.unmount()
+  const [recovered] = mergeOfflineFallback([live], [offline], { ['local\u0000default']: true })
+  const { container } = draw(recovered)
+  expect(container.querySelector('[data-card-timer="running"]')?.textContent).toBe('45s')
+  expect(container.querySelector('[data-card-timer="blocked"]')?.textContent).toBe('1m')
 })
 
 it('does not start a display clock on rows without timed cards', () => {
