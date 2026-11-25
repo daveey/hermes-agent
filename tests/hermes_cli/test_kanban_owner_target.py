@@ -13,6 +13,53 @@ from hermes_cli import kanban_owner_target as target
 REF = "owner-target:mini/core"
 
 
+def test_git_refuses_before_spawn_when_draining(monkeypatch, tmp_path):
+    from hermes_cli import worker_drain_fence as fence
+
+    def refuse(purpose):
+        assert purpose == "session-repair.owner-target.git"
+        raise fence.DrainRefused("draining")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("git spawned after drain refusal")
+
+    monkeypatch.setattr(fence, "admit", refuse)
+    monkeypatch.setattr(target.subprocess, "Popen", forbidden)
+    with pytest.raises(fence.DrainRefused, match="draining"):
+        target._git(tmp_path, "status")
+
+
+def test_git_holds_drain_lease_through_child_and_closes(monkeypatch, tmp_path):
+    from hermes_cli import worker_drain_fence as fence
+
+    class Lease:
+        fd = None
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    lease = Lease()
+    real_popen = target.subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        assert not lease.closed
+        proc = real_popen(*args, **kwargs)
+        real_wait = proc.wait
+
+        def wait(*args, **kwargs):
+            assert not lease.closed
+            return real_wait(*args, **kwargs)
+
+        proc.wait = wait
+        return proc
+
+    monkeypatch.setattr(fence, "admit", lambda purpose: lease)
+    monkeypatch.setattr(target.subprocess, "Popen", spawn)
+    assert target._git(tmp_path, "--version")[0] == 0
+    assert lease.closed
+
+
 def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL).decode().strip()
 

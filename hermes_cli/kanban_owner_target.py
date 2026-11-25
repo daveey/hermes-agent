@@ -25,6 +25,8 @@ import stat
 import subprocess
 import time
 
+from hermes_cli.worker_drain_fence import fenced
+
 _SELECTOR = re.compile(r"owner-target:([A-Za-z0-9_.-]{1,64})/([A-Za-z0-9_.-]{1,64})\Z")
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _LABEL = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
@@ -83,6 +85,7 @@ def _json(path, now=None, max_bytes=MAX_BYTES):
     return value
 
 
+@fenced("session-repair.owner-target.git")
 def _git(repo, *args):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
