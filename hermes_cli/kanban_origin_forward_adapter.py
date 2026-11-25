@@ -37,8 +37,15 @@ def receive(request):
     def inventory():
         # Decode failures describe unavailable remote evidence, not a bad caller
         # request. Keep this normalization inside the inventory-read boundary.
+        from hermes_cli.kanban_sync_client import HubError
         try:
             return Hub(load_identity()).machines()
+        except HubError as exc:
+            # Only a malformed 200 body (typed 502 by decode_json) is a decode failure;
+            # real transport/HTTP errors keep their evidence-unavailable classification.
+            if exc.status != 502 or "invalid JSON" not in str(exc):
+                raise
+            raise ValueError("origin_forward_inventory_unavailable") from exc
         except (ValueError, RecursionError) as exc:
             raise ValueError("origin_forward_inventory_unavailable") from exc
 
