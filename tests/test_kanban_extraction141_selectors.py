@@ -80,4 +80,9 @@ def test_create_wrapper_unknown_class_is_baseline_not_compliance():
     assert seen == [args]
     result = json.loads(handler({'model': 'concrete'}))
     assert 'model-neutral' in result['error']
-    assert 'code' not in result
+    # Concrete selectors are still refused before handler admission; the owner
+    # courier now receives an explicit no-write result instead of unknown/pending.
+    assert result['code'] == 'kanban_model_restriction'
+    assert result['created'] is False and result['handoff_complete'] is False
+    assert result['status'] == 'rejected'
+    assert seen == [args]

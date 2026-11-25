@@ -12,7 +12,10 @@ def model_neutral_create(fn):
             validate_selector(args.get('model'), args.get('provider'), mandatory=args.get('pin_mandatory'))
             validate_text(args.get('title'), args.get('body'))
         except ValueError as exc:
-            return tool_error(str(exc))
+            # Only pure pre-dispatch validation proves that no creation occurred.
+            # Couriers must not retry this immutable request as an unknown write.
+            return tool_error(str(exc), code='kanban_model_restriction', created=False,
+                              status='rejected', handoff_complete=False)
         return fn(args, **kwargs)
     return create
 
