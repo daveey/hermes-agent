@@ -165,9 +165,14 @@ it('keeps ETA and other coloured marks alongside elapsed clocks with the cloud l
 
   const first = draw(fields)
 
-  for (const colour of ['pink', 'amber', 'green', 'violet']) {
+  for (const colour of ['pink', 'amber', 'orange', 'violet']) {
     expect(first.container.querySelector(`[data-card-colour="${colour}"]`)).not.toBeNull()
   }
+
+  const stuck = first.container.querySelector('[data-card-colour="orange"]')
+  expect(stuck?.textContent).toBe('1')
+  expect(stuck?.className).toContain('border-orange-500')
+  expect(first.container.querySelector('[data-card-colour="green"]')).toBeNull()
 
   first.unmount()
   const { getByTestId } = draw(fields, 'external')
