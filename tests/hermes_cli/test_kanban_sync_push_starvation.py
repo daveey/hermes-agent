@@ -380,9 +380,7 @@ def test_sync_diff_compares_the_replica_as_is_while_a_round_holds_the_board(live
     before, _ = _replica_state()
     _other_creates(svc, 4)
     monkeypatch.setattr(ksc, "load_identity", lambda: svc.hub(ME).ident)
-    hub = svc.hub(ME)
-    monkeypatch.setattr(hub, "close", lambda: None, raising=False)
-    monkeypatch.setattr(ksc, "Hub", lambda ident: hub)
+    monkeypatch.setattr(ksc, "Hub", lambda ident: svc.hub(ME))
     with board_sync_lock(kanban_home / "kanban.db"):
         kanban_sync_cli._diff(argparse.Namespace(board=BOARD, json=True))
     report = json.loads(capsys.readouterr().out)

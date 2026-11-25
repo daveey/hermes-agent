@@ -407,6 +407,9 @@ class FakeHub:
         self.svc, self.gateway = svc, gateway
         self.ident = ksc.Identity(url="https://hub.test", key="k", gateway=gateway)
 
+    def close(self) -> None:
+        """Match Hub's resource contract; this in-memory fake owns no executor."""
+
     def _check(self) -> None:
         if self.svc.offline:
             raise OSError("hub unreachable")

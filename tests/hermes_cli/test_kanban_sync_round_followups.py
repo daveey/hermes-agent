@@ -354,7 +354,6 @@ def test_repin_conflict_while_a_round_holds_the_board_does_not_cas_blind(gws, sv
 def _diff(svc_, kanban_home_, monkeypatch, capsys, hub):
     from hermes_cli import kanban_sync_cli
     monkeypatch.setattr(ksc, "load_identity", lambda: svc_.hub(ME).ident)
-    monkeypatch.setattr(hub, "close", lambda: None, raising=False)
     monkeypatch.setattr(ksc, "Hub", lambda ident: hub)
     code = kanban_sync_cli._diff(argparse.Namespace(board=BOARD, json=True))
     return code, json.loads(capsys.readouterr().out)
