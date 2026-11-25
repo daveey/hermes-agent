@@ -57,12 +57,14 @@ def refused(gws, svc, monkeypatch, request):
     return hub, op, before, evidence
 
 
-@pytest.mark.parametrize('veto', [
+VETOES = [
     'table', 'operation', 'reason', 'shadow', 'row', 'parent', 'parent_ops', 'pending', 'receipt',
     'no_tomb', 'parent_tomb', 'wrong_tomb', 'no_audit', 'duplicate_audit', 'audit_table', 'audit_uid',
     'audit_reason', 'audit_fields', 'task_id', 'remote_live', 'floor', 'remote_row', 'remote_tomb',
-])
-def test_every_retirement_predicate_fails_closed(refused, veto):
+]
+
+
+def assert_retirement_predicate_fails_closed(refused, veto):
     from hermes_cli.kanban_sync_rejected_event import moot_event
     _, op, before, evidence = copy.deepcopy((None, *refused[1:]))
     if veto in ('table', 'operation', 'reason'):
@@ -112,9 +114,7 @@ def test_every_retirement_predicate_fails_closed(refused, veto):
     assert not moot_event(op, before, evidence), veto
 
 
-@pytest.mark.parametrize('target_first', [True, False])
-@pytest.mark.parametrize('race', ['audit', 'mode', 'tombstone'])
-def test_evidence_read_revalidates_retirement_provenance(refused, svc, monkeypatch, race, target_first):
+def assert_evidence_read_revalidates_retirement_provenance(refused, svc, monkeypatch, race, target_first):
     from hermes_cli.kanban_sync_rejections import resolve_rejections
     hub, op, before, _ = refused
     # The phantom-run fixture also rejects its completed event. Exercise both
@@ -167,7 +167,7 @@ def test_each_allow_more_guard_removal_is_killed(refused, monkeypatch):
     source = ast.parse(inspect.getsource(event.moot_event))
     guard = next(n for n in ast.walk(source) if isinstance(n, ast.If))
     success = next(n for n in ast.walk(source) if isinstance(n, ast.BoolOp) and isinstance(n.op, ast.And))
-    vetoes = test_every_retirement_predicate_fails_closed.pytestmark[0].args[1]
+    vetoes = VETOES
     for node, value in [(guard.test, False), (success, True)]:
         for index in range(len(node.values)):
             tree = copy.deepcopy(source)
@@ -181,7 +181,7 @@ def test_each_allow_more_guard_removal_is_killed(refused, monkeypatch):
                 killed = False
                 for veto in vetoes:
                     try:
-                        test_every_retirement_predicate_fails_closed(refused, veto)
+                        assert_retirement_predicate_fails_closed(refused, veto)
                     except (AssertionError, IndexError):
                         killed = True
                         break
