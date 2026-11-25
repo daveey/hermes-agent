@@ -244,9 +244,39 @@ def test_no_floor_means_no_pressure_rule(root, monkeypatch):
     assert a.is_dir()
 
 
-def test_free_bytes_reads_the_real_filesystem(root):
-    st = os.statvfs(root)
-    assert ret._free_bytes(root) == st.f_bavail * st.f_frsize > 0
+def test_free_bytes_reads_the_real_filesystem(root, monkeypatch):
+    real_statvfs = os.statvfs
+    samples = []
+
+    def sample(path):
+        assert path == root
+        st = real_statvfs(path)
+        samples.append(st)
+        return st
+
+    monkeypatch.setattr(ret.os, "statvfs", sample)
+    free = ret._free_bytes(root)
+    # Another statvfs call samples a changing, host-wide counter, not an oracle.
+    assert len(samples) == 1
+    st = samples[0]
+    assert free == st.f_bavail * st.f_frsize > 0
+
+
+@pytest.mark.parametrize("available,fragment", [(7, 4096), (13, 1024)])
+def test_free_bytes_uses_one_available_fragment_sample(root, monkeypatch, available, fragment):
+    samples = []
+
+    def sample(path):
+        assert path == root
+        # A second read sees different free space, even without scheduler luck.
+        st = os.statvfs_result((8192, fragment, 100, 90, available - len(samples),
+                               200, 190, 180, 0, 255))
+        samples.append(st)
+        return st
+
+    monkeypatch.setattr(ret.os, "statvfs", sample)
+    assert ret._free_bytes(root) == available * fragment
+    assert len(samples) == 1
 
 
 def test_failed_removal_is_logged_and_the_pass_continues(root, monkeypatch, caplog):
