@@ -263,6 +263,16 @@ def test_unknown_schema_or_triggers_return_none_without_repair(conn, mutate):
     assert not conn.in_transaction
 
 
+def test_unknown_containment_table_refuses_counts_and_links_but_not_attention(conn):
+    """Attention reads no containment ledger: an unenumerated ``containment_*`` table must not uncertify it."""
+    conn.execute("CREATE TABLE containment_future_input (x TEXT)")
+    conn.commit()
+    values = rev.read_revisions(conn, ID, (rev.COUNTS, rev.LINKS, rev.ATTENTION))
+    assert values[rev.COUNTS.name] is None and values[rev.LINKS.name] is None
+    assert values[rev.ATTENTION.name] is not None
+    assert rev.read_attention_revision(conn, ID) == values[rev.ATTENTION.name]
+
+
 def test_dropping_optional_table_makes_old_triggers_foreign(conn):
     conn.execute("DROP TABLE containment_attestations")
     conn.commit()

@@ -36,6 +36,30 @@ def test_holder_batches_local_parts_with_identical_keys(world, monkeypatch):
     assert calls == [(world.board, ('counts', 'links', 'attention'))]
 
 
+def test_holder_keys_carry_the_hub_signature_for_every_local_part(world, monkeypatch, tmp_path):
+    """Each batched part key is the per-part fingerprint, hub signature included, and moves with the hub alone."""
+    from hermes_cli import kanban_annotation_parts as parts
+
+    _install(world)
+    hub = tmp_path / 'hub.db'
+    hub.write_bytes(b'')
+    signature = ['hub-1']
+    monkeypatch.setattr(ksa, '_hub_db_path', lambda: hub)
+    monkeypatch.setattr(ksa, '_hub_content_signature', lambda path: (str(path), signature[0]))
+    local = ('counts', 'links', 'attention')
+    before = parts.keys(helpers.SCOPE)
+    for part in local:
+        assert before[part][0] == parts._part_fingerprint(part)
+        assert before[part][0][-1] == (str(hub), 'hub-1')
+    assert parts.keys(helpers.SCOPE)['links'] == before['links']  # unchanged hub and board: stable key
+    signature[0] = 'hub-2'
+    after = parts.keys(helpers.SCOPE)
+    for part in local:
+        assert after[part][0] != before[part][0]
+        assert after[part][0][:-1] == before[part][0][:-1]  # only the hub element moved
+        assert after[part][0] == parts._part_fingerprint(part)
+
+
 def test_irrelevant_board_storm_reads_no_part(world):
     _install(world)
     # Complete declaration: this check reads only its card and the explicit file.
