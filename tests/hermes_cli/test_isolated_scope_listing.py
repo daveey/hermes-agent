@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import suppress
 
 import psutil
 import pytest
@@ -152,6 +153,76 @@ def _get_profiles(port, token, proc, log, timeout=60):
     pytest.fail(f"serve never answered (exit={proc.poll()}): {log.read_text(errors='replace')}")
 
 
+def _stop_serve_process(proc):
+    if proc.poll() is None:
+        try:
+            parent = psutil.Process(proc.pid)
+            family = [*parent.children(recursive=True), parent]
+        except psutil.NoSuchProcess:
+            family = []
+        for process in family:
+            with suppress(psutil.NoSuchProcess):
+                process.terminate()
+        _, alive = psutil.wait_procs(family, timeout=5)
+        for process in alive:
+            with suppress(psutil.NoSuchProcess):
+                process.kill()
+    proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize("boundary", ["census", "terminate", "kill"])
+def test_serve_cleanup_tolerates_real_child_exit_at_signal_boundary(monkeypatch, boundary):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    original_children = psutil.Process.children
+    original_signal = getattr(psutil.Process, "kill" if boundary == "kill" else "terminate")
+    observed = []
+
+    def retire():
+        proc.kill()
+        proc.wait(timeout=5)
+        observed.append(proc.returncode)
+
+    def raced_children(process, *args, **kwargs):
+        if process.pid == proc.pid and boundary == "census":
+            retire()
+        return original_children(process, *args, **kwargs)
+
+    def raced_signal(process):
+        if process.pid == proc.pid:
+            retire()
+        return original_signal(process)
+
+    monkeypatch.setattr(psutil.Process, "children", raced_children)
+    if boundary == "kill":
+        monkeypatch.setattr(psutil.Process, "terminate", lambda process: None)
+        monkeypatch.setattr(psutil, "wait_procs", lambda family, timeout: ([], family))
+    if boundary != "census":
+        monkeypatch.setattr(psutil.Process, "kill" if boundary == "kill" else "terminate", raced_signal)
+    try:
+        _stop_serve_process(proc)
+        assert len(observed) == 1
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_serve_cleanup_does_not_hide_permission_failure(monkeypatch):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+
+    def forbidden(process):
+        raise psutil.AccessDenied(process.pid)
+
+    monkeypatch.setattr(psutil.Process, "terminate", forbidden)
+    try:
+        with pytest.raises(psutil.AccessDenied):
+            _stop_serve_process(proc)
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
 def test_real_profile_flag_isolated_serve_lists_only_its_profile(tmp_path):
     root = tmp_path / "hermes"
     for home in (root, root / "profiles" / "worker"):
@@ -171,12 +242,5 @@ def test_real_profile_flag_isolated_serve_lists_only_its_profile(tmp_path):
     try:
         body = _get_profiles(port, "isolated-scope-test-token", proc, log)
     finally:
-        if proc.poll() is None:
-            family = [*psutil.Process(proc.pid).children(recursive=True), psutil.Process(proc.pid)]
-            for p in family:
-                p.terminate()
-            _, alive = psutil.wait_procs(family, timeout=5)
-            for p in alive:
-                p.kill()
-        proc.wait(timeout=10)
+        _stop_serve_process(proc)
     assert [p["name"] for p in body["profiles"]] == ["worker"]
