@@ -3,6 +3,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_db_connect import connect
+from hermes_cli.kanban_actionability_selection import select
 from tests.hermes_cli.test_kanban_actionability_todo_sources import T0, _clock, _event, _ref, _refs, _rows
 
 
@@ -155,6 +156,19 @@ def test_park_after_handoff_uses_the_park_source(tmp_path, monkeypatch):
             assert row['escalation']['at'] is not None
             assert 'escalation_deadline_missing' not in row['violations']
             assert 'creation_intent_invalid' not in row['violations']
+
+
+def test_explicit_episode_takes_precedence_over_running_handoff():
+    """Confirmed/observation readers pin an episode even when the status cell still says running."""
+    claim = {'uid': 'claim', 'kind': 'claimed', 'payload': {}, 'created_at': T0}
+    episode = {'uid': 'episode', 'kind': 'contained', 'payload': {}, 'created_at': T0 + 10}
+    edge = {'uid': 'edge', 'kind': 'linked', 'created_at': T0 + 20,
+            'payload': {'actionability_intent': {'status': 'running'}}}
+    events = [claim, episode, edge]
+    order = lambda event: event['created_at']
+    assert select('running', events, order_key=order) is edge
+    assert select('running', events, order_key=order, episode='episode') is episode
+    assert select('running', events, order_key=order, episode='missing') is None
 
 
 def test_todo_stamped_link_sorting_after_the_claim_is_not_a_running_handoff(tmp_path, monkeypatch):
