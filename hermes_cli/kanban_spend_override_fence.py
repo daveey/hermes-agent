@@ -41,8 +41,10 @@ def check(conn, task_id, *, seen=None, board=None):
               else 'kanban-spend-budget')
     notes = [e for e in events if e['kind'] == 'commented' and _event_order(e) > _event_order(last)
              and json.loads(e['payload'] or '{}').get('author') == author]
-    if not notes and reference is None and 'episode' not in decision:
-        # Legacy set_override wrote its comment first in the same transaction.
+    if (not notes and reference is None and 'episode' not in decision
+            and author == 'kanban-spend-reviewer'):
+        # Reviewer grants retain their legacy immediate-predecessor contract.
+        # Manual budgets must pass _prior_comment's exact-content/uniqueness guards.
         # Inspect ALL task events: filtering kinds would hide an intervening event.
         index = events.index(last)
         previous = events[index - 1] if index else None
