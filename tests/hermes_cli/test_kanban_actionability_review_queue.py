@@ -9,7 +9,18 @@ NOT_REQUIRED = {'at': None, 'route': 'existing_decision_requested', 'state': 'no
 
 
 def _review(**extra):
-    return project({'task': {'id': 'handoff', 'status': 'review', 'assignee': 'default'}, **extra}, now=1000)
+    return project({'task': {'id': 'handoff', 'status': 'review', 'assignee': 'default'},
+                    'review_dispatch': True, **extra}, now=1000)
+
+
+@pytest.mark.parametrize('fact', [{}, {'review_dispatch': False}, {'review_dispatch': None}, {'review_dispatch': 1},
+                                  {'review_dispatch': 'true'}])
+def test_review_row_without_established_dispatch_keeps_its_missing_deadline(fact):
+    """Pure project default: no reviewer admission is assumed unless the caller supplies exactly True."""
+    row = project({'task': {'id': 'handoff', 'status': 'review', 'assignee': 'default'}, **fact}, now=1000)
+    assert row['action'] == 'review_current_scope' and row['blocker'] is None
+    assert row['escalation']['state'] == 'unavailable'
+    assert row['violations'] == ['escalation_deadline_missing']
 
 
 def test_review_queue_needs_no_administrative_deadline():
@@ -59,9 +70,49 @@ def test_existing_review_deadline_is_not_erased():
     assert row['escalation']['state'] == 'pending'
 
 
-def test_real_review_handoff_reaches_describe_and_report(tmp_path):
+def _config(monkeypatch, value):
+    from hermes_cli import config
+
+    def load():
+        if isinstance(value, Exception):
+            raise value
+        return value
+    monkeypatch.setattr(config, 'load_config', load)
+
+
+@pytest.mark.parametrize('config', [
+    {'kanban': {'review_dispatch': False}},
+    {'kanban': {'review_dispatch': 'yes'}},
+    {'kanban': {}},
+    {'kanban': None},
+    {},
+    None,
+    RuntimeError('config unreadable'),
+])
+def test_review_handoff_on_a_board_without_review_dispatch_stays_flagged(tmp_path, monkeypatch, config):
+    """Human-only review, or a setting that cannot be read: no dispatcher admits a reviewer, so the wait has no clock."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_actionability_cli import report
+    from hermes_cli.kanban_actionability_sources import describe
+    from hermes_cli.kanban_db_connect import connect
+    with connect(tmp_path / 'kanban.db') as conn:
+        tid = kb.create_task(conn, title='implemented work', assignee='default')
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        assert kb.request_review(conn, tid, summary='implemented; please review',
+                                 expected_run_id=claimed.current_run_id) is True
+        _config(monkeypatch, config)
+        listed = {r['task_id']: r for r in report(conn)['rows']}
+        for row in (describe(conn, tid), listed[tid]):
+            assert row['status'] == 'review' and row['action'] == 'review_current_scope'
+            assert row['escalation']['state'] == 'unavailable'
+            assert row['violations'] == ['escalation_deadline_missing']
+
+
+def test_real_review_handoff_reaches_describe_and_report(tmp_path, monkeypatch):
     """The census path: review_requested from a live run, read before any reviewer claims it."""
     from hermes_cli import kanban_db as kb
+    _config(monkeypatch, {'kanban': {'review_dispatch': True}})
     from hermes_cli.kanban_actionability_cli import report
     from hermes_cli.kanban_actionability_sources import describe
     from hermes_cli.kanban_db_connect import connect

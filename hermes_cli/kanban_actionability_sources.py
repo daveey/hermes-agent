@@ -233,6 +233,15 @@ def _administration(reader: Reader, events: list[dict], episode: str | None) -> 
     return admin, {**(contracts[0] if contracts else {}), 'escalate_at': min(deadlines) if deadlines else None}
 
 
+def _review_dispatch() -> bool:
+    """True only when the board's config was read and says reviewers are dispatched; anything else is not established."""
+    try:
+        from hermes_cli.config import load_config
+        return load_config()['kanban']['review_dispatch'] is True
+    except Exception:  # health: allow BLE001 -- any config read failure means dispatch is not established; the row stays flagged
+        return False
+
+
 def describe(conn: sqlite3.Connection, tid: str, *, now: int | None = None, reader: Reader | None = None) -> dict:
     """One task and its immediate parents only; malformed optional evidence stays UNKNOWN."""
     reader = reader or Reader(conn)
@@ -393,6 +402,8 @@ def _describe(conn, tid, *, now, reader):
         runs = reader.rows('SELECT * FROM task_runs WHERE id=? AND task_id=?', (task['current_run_id'], tid))
         facts['run'] = runs[0] if runs else None
     facts['unknown'] |= bool(stop and not episode)
+    if task['status'] == 'review':
+        facts['review_dispatch'] = _review_dispatch()
     from hermes_cli.kanban_actionability_confirmed import compose
     observed_at = int(time.time()) if now is None else now
     row = compose(reader, task, facts, project(facts, now=observed_at), now=observed_at)
