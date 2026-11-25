@@ -398,7 +398,6 @@ def _github_predates_runtime(repository: str, sha: str, cache_file: Path) -> Opt
     verdict = _read_runtime_verdict(repository, sha)
     try:
         from utils import atomic_json_write
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
         atomic_json_write(cache_file, {**known, sha: verdict if verdict is not None else
                                       {"retryAt": time.time() + _UPDATE_CHECK_FAILURE_CACHE_SECONDS}})
     except OSError as exc:

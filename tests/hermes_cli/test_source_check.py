@@ -147,6 +147,54 @@ def test_source_cache_write_creates_cache_under_a_live_home(tmp_path, monkeypatc
     assert json.loads(cache_file.read_text()) == {"identity": identity, "ts": 1.0, "status": status}
 
 
+@pytest.mark.parametrize("retirement", ["rename", "delete"])
+@pytest.mark.parametrize("verdict", [True, False, None])
+def test_release_verdict_finishing_after_retirement_does_not_recreate_profile(
+        tmp_path, monkeypatch, retirement, verdict):
+    from hermes_cli import source_check
+
+    profile = tmp_path / ".hermes" / "profiles" / "gamma"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("{}")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    cache_file = profile / "source-checks" / "release-runtime.json"
+    calls = []
+
+    def finish_read(repository, sha):
+        calls.append((repository, sha))
+        # Retirement happens while the banner's remote verdict is outstanding.
+        if retirement == "rename":
+            profile.rename(profile.with_name("delta"))
+        else:
+            shutil.rmtree(profile)
+        return verdict
+
+    monkeypatch.setattr(source_check, "_read_runtime_verdict", finish_read)
+    assert source_check._github_predates_runtime("fixture/fork", "a" * 40, cache_file) is verdict
+    assert calls == [("fixture/fork", "a" * 40)]
+    assert not profile.exists(), "late release verdict recreated the retired profile"
+    if retirement == "rename":
+        assert (profile.with_name("delta") / "config.yaml").is_file()
+
+
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("verdict", [True, False, None])
+def test_release_verdict_cache_still_writes_under_live_home(tmp_path, monkeypatch, named, verdict):
+    from hermes_cli import source_check
+
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / "gamma" if named else root
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(source_check, "_read_runtime_verdict", lambda *_args: verdict)
+    monkeypatch.setattr(source_check, "time", type("Clock", (), {"time": staticmethod(lambda: 1234.0)}))
+    cache_file = home / "source-checks" / "release-runtime.json"
+    assert source_check._github_predates_runtime("fixture/fork", "a" * 40, cache_file) is verdict
+    expected = verdict if verdict is not None else {
+        "retryAt": 1234.0 + source_check._UPDATE_CHECK_FAILURE_CACHE_SECONDS}
+    assert json.loads(cache_file.read_text()) == {"a" * 40: expected}
+
+
 def test_target_worktree_owns_admission_and_fork_comparison(installation, monkeypatch):
     from hermes_cli.source_check import check_for_updates
 
