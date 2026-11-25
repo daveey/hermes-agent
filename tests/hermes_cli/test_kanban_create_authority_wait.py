@@ -47,11 +47,15 @@ def _answer(exc):
     return owner._dispatch_result(owner.origin_refusal(exc, origin=True))
 
 
-def test_an_owner_with_sync_disabled_is_terminal(kanban_home):
+def test_an_owner_with_sync_off_waits(kanban_home):
+    """Sync off (or an unreadable config) is a setting, not a fact no one can change: the create waits, and the
+    Board's 7-day request expiry ends a wait that never resolves."""
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title='orphan', assignee='default')
         exc = _refusal(conn, tid)
-    assert exc.wait is None and _answer(exc)['status'] == 'rejected'
+    assert exc.wait == 'origin_owner_sync_off'
+    out = _answer(exc)
+    assert out['status'] == 'pending' and out['code'] == 'origin_owner_sync_off'
 
 
 def test_a_not_yet_synced_owner_waits(kanban_home):
@@ -91,10 +95,13 @@ def test_a_bare_selfwork_create_keeps_its_own_rule(kanban_home):
     assert json.loads(owner.origin_refusal(exc, origin=True))['created'] is False
 
 
-def test_a_released_creating_chat_is_terminal_even_while_unsynced(kanban_home, monkeypatch):
-    """Definitive causes first: no sync brings back a released chat, so the unsynced board does not make it wait."""
+@pytest.mark.parametrize('sync', ['off', 'on_unsynced'])
+def test_a_released_creating_chat_is_terminal_even_while_waiting(kanban_home, monkeypatch, sync):
+    """Definitive causes first: no sync brings back a released chat, so sync off or an unsynced board does not
+    make it wait."""
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
-    _enabled(kanban_home)
+    if sync == 'on_unsynced':
+        _enabled(kanban_home)
     with kbc.connect_closing() as conn:
         _links(conn)
         tid = kb.create_task(conn, title='orphan', assignee='default')
@@ -105,11 +112,12 @@ def test_a_released_creating_chat_is_terminal_even_while_unsynced(kanban_home, m
     assert exc.wait is None and _answer(exc)['status'] == 'rejected'
 
 
-def test_a_local_creator_with_no_sessions_is_terminal(kanban_home, monkeypatch):
+def test_a_local_creator_whose_sessions_have_not_synced_waits(kanban_home, monkeypatch):
+    """Its ``owner_admitted`` events sync separately from the task row: no sessions yet is a wait."""
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     with kbc.connect_closing() as conn:
         _synced(conn, kanban_home)
-        creator = kb.create_task(conn, title='cron creator', assignee='default')
+        creator = kb.create_task(conn, title='creator', assignee='default')
         tid = kb.create_task(conn, title='child', assignee='default')
         exc = _refusal(conn, tid, creator=creator)
-    assert exc.wait is None and _answer(exc)['status'] == 'rejected'
+    assert exc.wait == 'origin_creator_sessions_unsynced' and _answer(exc)['status'] == 'pending'

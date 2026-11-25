@@ -1121,3 +1121,34 @@ def test_a_person_budget_without_a_readable_note_is_itself_a_required_read(board
     rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(event_id), '--reason', 'lift')
     assert rc == 0, err
     assert budget.card_limits(board, tid, budget.limits()) == budget.Limits(0, 0)
+
+
+
+def test_an_earlier_overrides_note_never_stands_for_the_persons_event(board, monkeypatch):
+    """Two overrides within a minute; the person's newest one has no note here (not synced yet). The agent's
+    earlier note is not this event's text, so the person's event itself is printed and required."""
+    tid = kb.create_task(board, title='Budgeted work', assignee='default')
+    budget.set_override(board, tid, runs=50, cache_read_tokens=0, by='bot', reason='AGENT NOTE', writer_kind='agent')
+    person = {'runs': 3, 'cache_read_tokens': 5_000_000, 'by': 'david', 'reason': 'cheap', 'writer_kind': 'human'}
+    with kb.write_txn(board):
+        kb._append_event(board, tid, budget.OVERRIDE_EVENT, person)
+    event_id = board.execute("SELECT MAX(id) FROM task_events WHERE task_id=? AND kind=?",
+                             (tid, budget.OVERRIDE_EVENT)).fetchone()[0]
+    agent_note = board.execute("SELECT MAX(id) FROM task_comments WHERE task_id=? AND body LIKE '%AGENT NOTE%'",
+                               (tid,)).fetchone()[0]
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(agent_note), '--reason', 'lift')
+    assert rc == 4 and newest_budget(board, tid) == person
+    assert f'Budget event {event_id}' in err and 'set by david: cheap' in err and 'AGENT NOTE' not in err
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(agent_note), '--reason', 'lift')
+    assert rc == 4 and newest_budget(board, tid) == person  # the agent's note is still not the read
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(event_id), '--reason', 'lift')
+    assert rc == 0, err
+
+
+def test_the_persons_own_note_is_printed_when_it_is_readable(board, monkeypatch):
+    tid = kb.create_task(board, title='Budgeted work', assignee='default')
+    budget.set_override(board, tid, runs=50, cache_read_tokens=0, by='bot', reason='AGENT NOTE', writer_kind='agent')
+    budget.set_override(board, tid, runs=3, cache_read_tokens=5_000_000, by='david', reason='cheap',
+                        writer_kind='human')
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'lift')
+    assert rc == 4 and 'set by david: cheap.' in err and 'AGENT NOTE' not in err and 'Budget event' not in err

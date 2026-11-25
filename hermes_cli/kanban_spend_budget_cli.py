@@ -64,20 +64,28 @@ _PERSON_NOTE = "Spend budget for this card:"  # the start of the comment set_ove
 
 def _person_note(conn, tid: str, event: dict):
     """The ``{id, who, time, body}`` of the comment ``set_override`` wrote with override ``event``, else None.
-    Both are written in one transaction: the decision comment it names, or the newest budget comment by the
-    budget writer no later than the event."""
+
+    A note is accepted only when its text is this event's own: ``set_override`` writes the event's values and
+    ``set by {by}: {reason}.`` into it, so another override's note (an earlier one in the same minute, or a
+    later agent's) never stands for this event. Candidates are the decision comment the event names and the
+    budget writer's notes of the event's own transaction window; with none matching, the caller prints the event
+    itself (:func:`_event_item`)."""
     from datetime import UTC, datetime
     payload = json.loads(event.get("payload") or "{}")
-    named = (payload.get("decision_comment") or {}).get("comment_id") if isinstance(payload, dict) else None
-    row = None
+    if not isinstance(payload, dict):
+        return None
+    expected = (f"{_PERSON_NOTE} {ksb._override_text(payload)}, set by {str(payload.get('by') or '').strip()}: "
+                f"{str(payload.get('reason') or '').strip()}. ")
+    named = (payload.get("decision_comment") or {}).get("comment_id")
+    at = int(event.get("created_at") or 0)
+    rows = []
     if isinstance(named, int):
-        row = conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND id=?",
-                           (tid, named)).fetchone()
-    if row is None:
-        at = int(event.get("created_at") or 0)  # written in the same transaction: never an older override's note
-        row = conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND author=? "
-                           "AND body LIKE ? AND created_at BETWEEN ? AND ? ORDER BY id DESC LIMIT 1",
-                           (tid, ksb.AUTHOR, _PERSON_NOTE + "%", at - 60, at + 1)).fetchone()
+        rows += conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND id=?",
+                             (tid, named)).fetchall()
+    rows += conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND author=? "
+                         "AND body LIKE ? AND created_at BETWEEN ? AND ? ORDER BY id DESC",
+                         (tid, ksb.AUTHOR, _PERSON_NOTE + "%", at - 60, at + 1)).fetchall()
+    row = next((r for r in rows if str(r[3] or "").startswith(expected)), None)
     if row is None:
         return None
     return {"id": int(row[0]), "who": f"{row[1]} (the limit being changed)", "body": str(row[3] or "")[:600],
