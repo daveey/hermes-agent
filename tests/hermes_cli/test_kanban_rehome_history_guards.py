@@ -64,6 +64,31 @@ def test_prior_home_must_be_distinct_nonempty_string(gws, prior):
         replica.close()
 
 
+@pytest.mark.parametrize('veto', ['wrong-destination', 'replica-peer-marker'])
+def test_matching_transfer_still_requires_destination_and_replica_authority(gws, veto):
+    hub, tid, episode, _ = _world(gws)
+    if veto == 'wrong-destination':
+        payload = json.dumps({'from': 'worker-1', 'to': 'worker-2'})
+        with hub.conn:
+            hub.conn.execute('UPDATE kanban_sync_state SET applying=1')
+            hub.conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='rehomed'", (payload, tid))
+            hub.conn.execute('UPDATE kanban_sync_state SET applying=0')
+        _edit_replica("UPDATE task_events SET payload=? WHERE task_id=? AND kind='rehomed'", (payload, tid))
+    else:
+        _edit_replica("UPDATE task_events SET origin_gateway='worker-1' WHERE task_id=? AND kind='rehomed'", (tid,))
+    before = dict(hub.conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+    runs = [tuple(row) for row in hub.conn.execute('SELECT * FROM task_runs WHERE task_id=?', (tid,))]
+    replica = node.open_replica(hub.conn)
+    try:
+        report = history.refill(hub.conn, replica, 'hub', [tid])
+        assert report[tid]['filled'] == 0
+        assert hub.conn.execute('SELECT 1 FROM task_events WHERE uid=?', (episode,)).fetchone() is None
+        assert dict(hub.conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()) == before
+        assert [tuple(row) for row in hub.conn.execute('SELECT * FROM task_runs WHERE task_id=?', (tid,))] == runs
+    finally:
+        replica.close()
+
+
 def test_replica_must_agree_with_current_home(gws):
     hub, tid, episode, _ = _world(gws)
     _edit_replica('UPDATE tasks SET created_on=? WHERE id=?', ('worker-1', tid))
