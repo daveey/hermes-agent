@@ -54,6 +54,14 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 @pytest.fixture
+def imported_dashboard():
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+
+    with imported_dashboard_lifecycles():
+        yield
+
+
+@pytest.fixture
 def client(kanban_home):
     app = FastAPI()
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
@@ -1093,7 +1101,7 @@ def test_specify_happy_path(client, monkeypatch):
 # Aux-LLM endpoints under multiplexed hosting — profile secret scope (#123372)
 # ---------------------------------------------------------------------------
 
-def test_specify_resolves_each_profiles_key_under_multiplex(kanban_home, tmp_path, monkeypatch):
+def test_specify_resolves_each_profiles_key_under_multiplex(kanban_home, tmp_path, monkeypatch, imported_dashboard):
     """Specify / Decompose / Estimate reach the aux client with no agent turn, so under
     multi-profile hosting an unscoped provider-key read fails closed (``LLM error:
     UnscopedSecretError``). The plugin router is mounted the way ``_mount_plugin_api_routes``
@@ -1179,6 +1187,43 @@ def test_touch_card_tap_opens_instead_of_dragging():
 
 # Run clock: current run start, not first-ever start
 # ---------------------------------------------------------------------------
+
+
+def test_imported_dashboard_drains_only_its_new_mounts(kanban_home, monkeypatch):
+    """Force mount -> foreign-home lookup -> drain, without scheduler timing.
+
+    The specify test imports web_server, which mounts a second app's provider.
+    A bare router's TestClient does not own that app's lifespan.
+    """
+    from types import SimpleNamespace
+    from hermes_cli.fact_plugin_mount import lifecycles
+    from plugins.kanban.dashboard import board_fact_views
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+
+    app = FastAPI()
+    registry = lifecycles(app)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.web_server', SimpleNamespace(app=app))
+    previous = board_fact_views._installed
+    # A preexisting handle is not ours, even when it shares the same registry.
+    preserved = SimpleNamespace(close=lambda: pytest.fail('closed borrowed handle'))
+    borrowed = Path('/borrowed/plugin_api.py')
+    registry._handles[borrowed] = preserved
+    _load_plugin_router()
+    module = sys.modules['hermes_dashboard_plugin_kanban_test']
+    assert module.__file__ is not None
+    api_path = Path(module.__file__)
+    with imported_dashboard_lifecycles():
+        registry.start(api_path, module)
+        runtime = registry._handles[api_path.resolve()]
+        assert board_fact_views._installed[0] is runtime
+        with monkeypatch.context() as changed:
+            changed.setenv('HERMES_HOME', str(kanban_home / 'next-test'))
+            result = runtime.provider('default')
+            assert result.reason == 'board_scope_unavailable'
+    assert runtime._drained
+    assert board_fact_views._installed is previous
+    assert registry._handles == {borrowed: preserved}
+    registry._handles.pop(borrowed)
 
 
 def test_board_card_exposes_current_run_start(client):
