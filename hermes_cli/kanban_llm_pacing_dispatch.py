@@ -432,7 +432,11 @@ def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, *, refre
         return None
     now = time.time()
     paced = {v["provider"]: float(v.get("until") or now + cfg.read_interval) for v in verdicts}
-    unusable: dict[str, float] = {}
+    from hermes_cli.kanban_refusal_fallback import refused_providers
+    # Safety exclusions are permanent selection walls, not paced pools with a reset.
+    # Apply before probing so an excluded first peer cannot hide a qualified later
+    # peer or consume a claim/failure when the genuine pacing hold must remain.
+    unusable: dict[str, float] = dict.fromkeys(refused_providers(conn, task.id), math.inf)
     model, provider, reason = route
     # A default route already moved off a wall or by its episode is still the unpinned default card.
     reason = str(reason or "")

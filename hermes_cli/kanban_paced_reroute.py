@@ -76,11 +76,13 @@ def _review_peer(conn, task, cfg, held, now, *, registered=False):
     from hermes_cli import kanban_provider_walls as pw
     from hermes_cli.kanban_review_model import independent_routes, registry_refusal
     assignee = getattr(task, "assignee", None)
+    from hermes_cli.kanban_refusal_fallback import refused_providers
+    safety_refused = set(refused_providers(conn, task.id))
     walled = pw.active_walls(now=now)
     for alt_model, alt_provider in independent_routes(set(), cfg, assignee):
         alt_provider = pw._norm(alt_provider)
         if (not alt_provider or alt_provider == "auto" or alt_provider in held or alt_provider in walled
-                or pw.live_quota_wall(alt_provider, alt_model)):
+                or alt_provider in safety_refused or pw.live_quota_wall(alt_provider, alt_model)):
             continue
         if registered and registry_refusal(alt_model, alt_provider, assignee):
             continue
