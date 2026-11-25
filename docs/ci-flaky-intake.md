@@ -642,3 +642,12 @@ Isolated-profile900 is a fixture cleanup race: original job139283024204:1310–1
 Gateway readiness status is owner-reported here: PR4439 landed67876b0fd11bb585442e60c57f3f1b30ed3598eb with independent review/CI/20x6. Actual sources896/897 lack that repair per owner; intake independently checked901 ancestor/pre-fix. The original frozen intake dispositions above are retained, not retroactively rewritten.
 
 Complete unchanged inputs and separate owner annotations: [ci-flaky-intake-2026-11-25-supplement-896-902.json](ci-flaky-intake-2026-11-25-supplement-896-902.json); SHA256 `b176eecd27f60953db49323aa504bc2e1ac4b6977ffa9b546f8cbe1fa7aefaef`.
+
+
+## Nov25 supplemental intake: occurrence903
+
+One immutable source record, one page and one exact test are preserved separately in [ci-flaky-intake-2026-11-25-supplement-903.json](ci-flaky-intake-2026-11-25-supplement-903.json). SHA256 `d0a68c2c056740cb435d097f8921ff5f934f88a756691b12b41ab7085f7b0348`. Prior exports and historical totals above remain unchanged; combined supplemental range891–903 contains thirteen records.
+
+Source run45644573502 attempt1/job139312608655, actual source68ff324cb940486f0923391c7f9105f466d97369; exact test `tests/tools/test_mcp_child_filter_supervisor.py::test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor`. Frozen disposition: `existing_owner_pending_review_and_landing`; repair owner t_01a2117deceffea3. No fixed or environmental disposition is inferred.
+
+The intake reports ordinary-child inclusion failed before positive-control exec argv readiness, not supervisor exclusion. The repair owner reports source qualification, deterministic RED/GREEN and twenty whole-file rounds at PR4445 head5fbe628f97586c84f653769eb87966db69506c26. Those proofs were not rerun by this docs consolidation. Historical argv scheduling is unknown. At the frozen intake snapshot fresh changed-head review, CI acceptance and canonical landing remained owed, and that intake granted no release of its reported decision/spend hold. These historical dispositions are preserved unchanged, not assertions of current execution or landing.

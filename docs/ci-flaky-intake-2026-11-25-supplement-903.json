@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "repository": "softmax-universe/daveey-hermes",
+  "page_id": "bf576fe9c36ef15bc6ac81b2128fe16893455aadf15dbcf7949c5edacf52acca",
+  "manifest": {
+    "occurrences": [{"head_sha": "ce0a57867fb4e445318fd871d1059e35e306b6bd", "job_id": 139312608655, "observed_day": "2026-11-25", "occurrence_id": 903, "owner_check": [], "retried": "tests", "run_attempt": 1, "run_id": 45644573502, "slice": 7, "slices": 9, "source_sha": "68ff324cb940486f0923391c7f9105f466d97369", "status": "needs_triage", "test_id": "tests/tools/test_mcp_child_filter_supervisor.py::test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor"}],
+    "version": 1
+  },
+  "dispositions": [{
+    "occurrence_id": 903,
+    "test_id": "tests/tools/test_mcp_child_filter_supervisor.py::test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor",
+    "disposition": "existing_owner_pending_review_and_landing",
+    "repair_owner": "@task:default@hub/t_01a2117deceffea3",
+    "docs_export_owner": "@task:default@hub/t_01a2117e043cbca0",
+    "docs_target": "docs/ci-flaky-intake.md",
+    "owner_report": "Ordinary-child inclusion failed before positive-control exec argv readiness, not supervisor exclusion. Owner reports source qualification and controlled RED/GREEN plus twenty whole-file rounds at PR4445 head 5fbe628f97586c84f653769eb87966db69506c26. Historical argv schedule unknown; proof not rerun by this administrative intake.",
+    "remaining": "Fresh changed-head review inspection, CI acceptance and canonical landing remain with the repair owner. Docs consolidation remains with the existing docs owner. No fixed, landed or environmental disposition is claimed.",
+    "repair_hold": "Retained triage decision_pending/spend hold; no release authorized by this intake.",
+    "handoffs": {"docs_comment_id": 253628, "repair_comment_id": 253629, "readback": "Full persisted comment bodies and matching operator receipt events read from authorized Board replica in this run; not a live execution claim."}
+  }],
+  "policy_changes": [],
+  "new_cards": [],
+  "export_note": "Reconstructed on worker-a1 from immutable card manifest after cross-worker resume found no local predecessor files. This is a new export, not the predecessor byte hash. Original source metadata is unchanged. Consolidate occurrence903 separately without rewriting historical export totals."
+}
