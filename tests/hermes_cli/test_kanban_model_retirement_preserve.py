@@ -73,6 +73,29 @@ def test_only_obligation_identity_is_neutralized_not_exclusions_or_provenance():
                        + NEUTRAL_ROUTE + '; keep CI green.')
 
 
+@pytest.mark.parametrize('identity', ['opus', '**opus**', '_opus_', '__opus__', '`opus`', '*opus*'])
+@pytest.mark.parametrize('transform', [retired_body, forwarded_text])
+def test_markdown_identity_keeps_active_gates(identity, transform):
+    line = f'Must use {identity}; keep CI green. Never hand merge.'
+    with pytest.raises(ValueError):
+        validate_text(line)
+    out = transform(line)
+    validate_text(out)
+    active = _active(out)
+    assert 'keep CI green. Never hand merge.' in active
+    assert identity.replace('opus', NEUTRAL_ROUTE) in out.splitlines()[1]
+    assert transform(out) == out
+
+
+def test_forwarding_refuses_unknown_neutralization_without_discarding_gates(monkeypatch):
+    from hermes_cli import kanban_model_neutral as policy
+    monkeypatch.setattr(policy, 'neutral_line', lambda line: None)
+    with pytest.raises(ValueError):
+        forwarded_text('Must use opus; keep CI green. Never hand merge.')
+    line = 'Must use opus; keep CI green. Never hand merge.'
+    assert retired_body(line) == line
+
+
 def test_nameless_pure_directive_is_quoted_alone():
     assert retired_body('  require_model: true\n') == PREFIX + json.dumps('  require_model: true') + '\n'
     assert forwarded_text('require_model: true') == PREFIX + json.dumps('require_model: true')

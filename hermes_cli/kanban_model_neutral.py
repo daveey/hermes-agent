@@ -217,6 +217,19 @@ def _passes(text):
     return True
 
 
+def _route_spans(line):
+    """Map the validator's one-pass Markdown rendering back to original bytes."""
+    positions, last = [], 0
+    for match in re.finditer(r'(`+|\*\*|__|\*|_)(.+?)\1', line):
+        positions.extend(range(last, match.start()))
+        positions.extend(range(*match.span(2)))
+        last = match.end()
+    positions.extend(range(last, len(line)))
+    rendered = ''.join(line[index] for index in positions)
+    return [(positions[match.start()], positions[match.end() - 1] + 1)
+            for match in _ROUTE_OCCURRENCE.finditer(rendered)]
+
+
 def neutral_line(line):
     """The refused line with only the route identities its obligations name made neutral.
 
@@ -226,7 +239,7 @@ def neutral_line(line):
     machine directive such as ``require_model: true``). No lexical guess decides
     which prose is a gate: only the unchanged ingress recognizer is consulted.
     """
-    spans = [m.span() for m in _ROUTE_OCCURRENCE.finditer(line)]
+    spans = _route_spans(line)
 
     def render(chosen):
         out, last = [], 0
@@ -268,7 +281,13 @@ def forwarded_text(text):
     lines = []
     for line in (text or '').splitlines():
         if not _passes(line):
-            line = retained_line(line) or _EVIDENCE + json.dumps(line, ensure_ascii=False)
+            if _REQUIRED.fullmatch(line):
+                line = _EVIDENCE + json.dumps(line, ensure_ascii=False)
+            else:
+                retained = retained_line(line)
+                if retained is None:
+                    validate_text(line)  # Refuse rather than discard unknown mixed obligations.
+                line = retained
         lines.append(line)
     return '\n'.join(lines)
 
