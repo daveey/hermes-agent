@@ -82,9 +82,11 @@ def bind(conn: sqlite3.Connection, armed: bool) -> None:
             origin = current_origin(conn, task) if known else None
             if known:
                 from hermes_cli.kanban_owner_reassessment_transport import captured_origin
+                ordinary = origin  # a synthesized parent never carries a park uid without its receipt
                 origin = captured_origin(conn, op, origin)
                 conn.execute("UPDATE kanban_sync_outbox SET status_origin=? WHERE op_id=? AND wire_json IS NULL",
                              (origin, op))
+                origin = ordinary
             conn.execute("INSERT INTO kanban_sync_status_origins(task_id, origin, status) "
                          "SELECT id, ?, status FROM tasks WHERE id=? ON CONFLICT(task_id) "
                          "DO UPDATE SET origin=excluded.origin, status=excluded.status", (origin, task))

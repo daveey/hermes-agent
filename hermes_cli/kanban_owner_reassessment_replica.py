@@ -65,7 +65,6 @@ def _store(conn: sqlite3.Connection, evidence: dict, receipt: dict) -> None:
         prior = conn.execute(f"SELECT event_uid,board,task_id,episode_uid,run_uid,gateway,evidence FROM {TABLE} "
                              "WHERE event_uid=? OR episode_uid=?", (uid, receipt["episode_uid"])).fetchall()
         if prior:
-            import json
             if (len(prior) != 1 or tuple(prior[0])[:6] != values[:6]
                     or canonical.certified_identity(canonical.parse_evidence(prior[0][6])) != canonical.certified_identity(evidence)):
                 raise ReassessmentConflict("canonical reassessment identity changed")
@@ -100,7 +99,6 @@ def verified_receipt(conn: sqlite3.Connection, event_uid: str | None) -> dict | 
     Callers must still check :func:`canonical.event_matches` against their event row and
     :func:`canonical.current_matches` against the current task before relying on it.
     """
-    import json
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone():
         return None
     row = conn.execute(f"SELECT board,task_id,episode_uid,run_uid,gateway,evidence FROM {TABLE} WHERE event_uid=?",
@@ -161,7 +159,6 @@ def verified_for_event(conn: sqlite3.Connection, event: dict, task: dict | None 
 
 
 def _is_candidate(ch) -> bool:
-    import json
     if ch.table != "task_events" or ch.op != "upsert" or ch.fields.get("kind") not in canonical.PARK_KINDS:
         return False
     try:
@@ -195,7 +192,6 @@ def certify_page(conn: sqlite3.Connection, hub, board: str, changes) -> None:
 
 def adopt_receipts(conn: sqlite3.Connection, source: sqlite3.Connection, changes) -> None:
     """Offline pickup: carry already-recorded receipts from the pulled replica, re-certified."""
-    import json
     for ch in changes:
         if not _is_candidate(ch):
             continue

@@ -78,7 +78,7 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
         return False  # keep the exact recovery refusal visible; never omit an approved recovery field
     if result.get("reason") != "forbidden_field" or row["op"] not in ("upsert", "import"):
         return False
-    match = re.fullmatch(r"not writable on ([a-z_]+): ([a-z_]+(?:, [a-z_]+)*)", str(result.get("detail") or ""))
+    match = re.fullmatch(r"not writable on ([a-z0-9_]+): ([a-z0-9_]+(?:, [a-z0-9_]+)*)", str(result.get("detail") or ""))
     if match is None or match[1] != row["table_name"]:
         return False
     fields = wire.get("fields", {})
@@ -110,6 +110,7 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
 
 
 VIRTUAL_DROPPED = "virtual_dropped"
+_REASSESSMENT = ("owner_reassessment_v1", "owner_reassessment_fallback_status_origin")
 # Real columns a new Board fences on custody/manifest cards (workspace_source v1, R4c): refused one per detail.
 FENCED_FIELDS: dict[str, frozenset[str]] = {"tasks": frozenset({"workspace_kind", "branch_name"})}
 
@@ -121,13 +122,19 @@ def _drop_virtual(conn: sqlite3.Connection, row: dict, wire: dict, dropped: list
     path), and retire the refused original: an omission row could never be delivered (``_queue_restore`` reads
     real columns only, and a fenced column stays fenced while custody exists) and a retained rejected op would hold
     the card from repair (``repair_holds``) forever."""
-    reduced = {k: v for k, v in (row["fields"] if isinstance(row["fields"], dict)
-                                 else json.loads(row["fields"])).items() if k not in dropped}
+    stored = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"])
+    origin = row.get("status_origin")
+    if any(k in dropped for k in _REASSESSMENT):  # the two optional fields travel and leave together
+        dropped = [*dropped, *(k for k in _REASSESSMENT if k not in dropped)]
+        saved = stored.get("owner_reassessment_fallback_status_origin")
+        if isinstance(saved, str):
+            origin = saved  # the park uid is not the ordinary lifecycle origin an old Board validates
+    reduced = {k: v for k, v in stored.items() if k not in dropped}
     if reduced or row["op"] != "upsert":  # an upsert of only refused fields has nothing left to say
         conn.execute(
             "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at, status_origin) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (sync.uuid7(), row["table_name"], row["row_uid"], row["op"], json.dumps(reduced),
-             row.get("base_version"), wire["hlc"], row["created_at"], row.get("status_origin")))
+             row.get("base_version"), wire["hlc"], row["created_at"], origin))
     conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id = ?", (row["op_id"],))
     return VIRTUAL_DROPPED

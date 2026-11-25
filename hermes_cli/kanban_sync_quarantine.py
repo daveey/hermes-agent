@@ -240,8 +240,13 @@ def certified_page(conn, hub, board: str, changes) -> list:
     from hermes_cli import kanban_containment_replica as replica
     from hermes_cli import kanban_owner_reassessment_replica as reassessment
     from hermes_cli.kanban_containment_lifecycle import ContainmentConflict
-    reassessment.certify_page(conn, hub, board, changes)
     for change in changes:
+        try:  # one card's contradicted reassessment receipt holds that card; siblings keep syncing
+            reassessment.certify_page(conn, hub, board, [change])
+        except reassessment.ReassessmentConflict as exc:
+            quarantine_change(conn, board, change,
+                              ContainmentConflict(str(exc), kind="reassessment_conflict", uid=change.uid))
+            continue
         if not protected(change):
             continue
         try:
@@ -260,6 +265,13 @@ def quarantine_change(conn, board: str, change, exc, *, at: int | None = None) -
     cached = replica._cached(conn, change.uid)
     if cached:
         held_tasks.add(cached["row"]["task_id"])
+    if exc.kind == "reassessment_conflict":
+        from hermes_cli import kanban_owner_reassessment_replica as reassessment
+        if _exists(conn, reassessment.TABLE):
+            prior = conn.execute(f"SELECT task_id FROM {reassessment.TABLE} WHERE event_uid=?",
+                                 (change.uid,)).fetchone()
+            if prior:
+                held_tasks.add(prior[0])
     if not held_tasks:
         raise exc  # no task identity: fail the board round rather than skip uncertain history
     reason = str(exc) if exc.uid in (None, change.uid) else f"{exc} (receipt {exc.uid})"

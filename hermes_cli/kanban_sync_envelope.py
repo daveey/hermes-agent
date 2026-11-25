@@ -11,7 +11,31 @@ import sqlite3
 from collections.abc import Callable
 
 
-def outbound(conn: sqlite3.Connection, row: dict, build: Callable[[], dict], *, supported: bool = True) -> dict:
+REASSESSMENT_FIELDS = ("owner_reassessment_v1", "owner_reassessment_fallback_status_origin")
+
+
+def gate_reassessment(row: dict, wire: dict, ok: bool) -> dict:
+    """Serialization-time gate: the stored op keeps its captured binding; only the wire is downgraded.
+
+    A Board that does not advertise ``owner_reassessment_v1`` gets neither optional field and the saved
+    ordinary status origin, so the status still lands. Called before a wire is frozen.
+    """
+    fields = wire.get("fields")
+    if ok or not isinstance(fields, dict) or not any(k in fields for k in REASSESSMENT_FIELDS):
+        return wire
+    saved = row.get("fields", {})
+    saved = json.loads(saved) if isinstance(saved, str) else saved
+    fallback = fields.get("owner_reassessment_fallback_status_origin",
+                          saved.get("owner_reassessment_fallback_status_origin"))
+    for key in REASSESSMENT_FIELDS:
+        fields.pop(key, None)
+    if "status_origin" in wire and isinstance(fallback, str):
+        wire["status_origin"] = fallback
+    return wire
+
+
+def outbound(conn: sqlite3.Connection, row: dict, build: Callable[[], dict], *, supported: bool = True,
+             reassessment: bool = False) -> dict:
     """Rebuild neither a transmitted payload nor its ordering clock on uncertain retry."""
     saved = conn.execute("SELECT wire_json FROM kanban_sync_outbox WHERE op_id=?", (row["op_id"],)).fetchone()
     if saved and saved[0] is not None:
@@ -19,14 +43,16 @@ def outbound(conn: sqlite3.Connection, row: dict, build: Callable[[], dict], *, 
         if wire["client_op_id"] == row["op_id"]:
             if not supported:
                 raise OSError("Board status-origin capability absent; immutable uncertain envelope held")
+            if not reassessment and any(k in wire.get("fields", {}) for k in REASSESSMENT_FIELDS):
+                raise OSError("Board reassessment capability absent; immutable uncertain envelope held")
             return wire
         # Explicit lifecycle/schema repair can replace an op's identity in place.
         # Its former envelope belongs to the retired id, never the replacement.
     wire = build()
     if not supported:
-        return wire  # old Worker: retain legacy per-attempt rebuild/strip behaviour
+        return gate_reassessment(row, wire, reassessment)  # old Worker: retain legacy per-attempt rebuild/strip
     from hermes_cli.kanban_sync_status_origin import add_origin, freezeable
-    wire = add_origin(conn, row, wire)
+    wire = gate_reassessment(row, add_origin(conn, row, wire), reassessment)
     if not freezeable(row, wire):
         return wire  # historical unbound status is not upgraded by inventing an origin
     wire["frozen_replay"] = 1

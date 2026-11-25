@@ -676,7 +676,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             envelopes.prune_parents(conn)
             rows, _wire, parents = _within_batch(conn, rows, [{} for _r in rows], gateway)
             wire = [retain_transport.outbound(conn, r) if r["op"] in ("retain", "actionability_record") else envelopes.outbound(conn, r, lambda r=r: strip_stale_push(
-                conn, wire_ops.translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))), supported=bool(origin_cap)) for r in rows]
+                conn, wire_ops.translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))), supported=bool(origin_cap),
+                reassessment=type(origin_cap.get("owner_reassessment_v1")) is int and origin_cap["owner_reassessment_v1"] == 1) for r in rows]
             parents = [(envelopes.parent(conn, tid, lambda op=op: op, supported=bool(origin_cap)), tid) for op, tid in parents]
             wire = [op for op, _tid in parents] + wire
         try:
