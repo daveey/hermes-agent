@@ -166,6 +166,34 @@ def test_malformed_created_history_never_invents_worktree_binding(kanban_home, p
         check(conn, kb.get_task(conn, tid))
 
 
+@pytest.mark.parametrize("bound", ["relative-source", "/absent/source/workspace"])
+def test_unverified_created_path_is_diagnostic_only(kanban_home, monkeypatch, bound):
+    import json
+    from hermes_cli.kanban_missing_workspace import check
+
+    # Even an existing relative directory is not a host-absolute binding.
+    if bound == "relative-source":
+        monkeypatch.setattr("pathlib.Path.is_dir", lambda path: True)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="foreign source", workspace_kind="dir")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='created'",
+                         (json.dumps({"workspace_path": bound}), tid))
+        with pytest.raises(workspace.WorktreeWorkspaceConfigError, match="not verified"):
+            check(conn, kb.get_task(conn, tid))
+        assert kb.get_task(conn, tid).workspace_path is None
+
+
+def test_missing_created_event_keeps_default_worktree_resolution(kanban_home):
+    from hermes_cli.kanban_missing_workspace import check
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="no history", workspace_kind="worktree")
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_events WHERE task_id=?", (tid,))
+        check(conn, kb.get_task(conn, tid))
+
+
 @pytest.mark.parametrize("kind,path", [("scratch", None), ("dir", "/already-bound"), ("worktree", "/bound")])
 def test_existing_bindings_and_scratch_do_not_read_history(kind, path):
     from hermes_cli.kanban_missing_workspace import check

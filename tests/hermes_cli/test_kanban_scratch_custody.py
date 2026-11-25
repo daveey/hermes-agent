@@ -153,7 +153,13 @@ def test_eviction_receipt_and_rollback_are_local_only(env):
 
 @pytest.mark.parametrize("kwargs", [{"kind": "dir"}, {"path_mode": "root"}, {"path_mode": "outside"}])
 def test_eviction_requires_explicit_managed_scratch(env, kwargs):
-    _, path, _ = evicted(env, **kwargs)
+    if kwargs.get("kind") == "dir":
+        # Source-bound rows now retain their local binding, not a scratch receipt.
+        tid, path, _ = task(env, **kwargs)
+        assert worker.evict(env.conn) == []
+        assert kb.get_task(env.conn, tid).workspace_path == str(path)
+    else:
+        _, path, _ = evicted(env, **kwargs)
     assert custody.receipts(env.conn) == []
     assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
     assert path.exists()

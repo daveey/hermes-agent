@@ -236,7 +236,7 @@ def test_no_source_snapshot_takes_legacy_path(conn, monkeypatch):
     from hermes_cli import kanban_db_workspace as kbw
     from hermes_cli import kanban_source_dispatch as ksd
     monkeypatch.setattr(kbw, "resolve_workspace", lambda task, board=None: "/legacy")
-    claimed = SimpleNamespace(id="t_plain", workspace_kind="scratch")
+    claimed = SimpleNamespace(id="t_plain", workspace_kind="scratch", workspace_path=None)
     kws.stash_grant_snapshot("t_plain", kws.snapshot_from_row({"workspace_source": None, "workspace_custody": None}))
     assert ksd.resolve(conn, claimed, board=None, kbw=kbw) == ("/legacy", None, None)
 
