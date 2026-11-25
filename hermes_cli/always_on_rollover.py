@@ -262,9 +262,12 @@ def this_backend_port() -> Optional[int]:
 def request_roll(run: Callable = subprocess.run) -> bool:
     """Ask the roller unit for a warm roll without waiting for it (``hermes update``'s dashboard refresh)."""
     try:
+        from hermes_cli.always_on_deployment import refresh_standalone_controller
+        refresh_standalone_controller()
         return run(["systemctl", "--user", "restart", "--no-block", ROLLER_UNIT], capture_output=True,
                    text=True, encoding="utf-8", errors="replace", timeout=15).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"warm roll request failed: {exc}")
         return False
 
 
