@@ -749,9 +749,19 @@ else escalates (`spend_review_escalated` and a comment), and the stop is then
 routed to the creator chat or a decision card as before. A stop already routed
 there but undecided after five minutes gets the same single review. The delay
 is configurable as `kanban.spend_review_after_seconds` (default 300; a nonnegative
-integer). New ordinary stops still queue immediately. Scope and
-safety stops are never reviewed; `kanban.spend_review: false` turns the
-reviewer off.
+integer). New ordinary stops still queue immediately. Scope and capability
+stops receive delayed canonical-only review; safety stops are never queued,
+granted or retried. `kanban.spend_review: false` turns the reviewer off.
+
+A frozen canonical request keeps its original bytes across transport failures.
+Human intervention, terminal transitions and safety holds prohibit resubmission;
+receipt readback alone may still settle the original request. After four total
+started attempts without confirmation, automation stops and files an administrative
+reconciliation card, including for terminal source cards. This is **not cancellation**
+or proof that no operation was submitted: the immutable journal and all execution
+holds remain. The administrator must reconcile the exact Board receipt, not choose
+a replacement verdict or infer clearance from an absent receipt. The reviewer no
+longer suppresses the stale-stop backstop while administrative reconciliation is pending.
 
 Every card has an owning chat. A card created from a chat is owned by that
 chat, and a worker's card by its creator's. Any other card gets its producer's

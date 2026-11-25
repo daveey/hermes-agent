@@ -663,10 +663,10 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                 except Exception:  # health: allow BLE001 -- one card's failure must not stop the backstop for the rest
                     logger.warning("kanban: stranded-park re-file failed for %s", tid, exc_info=True)
                 continue
-            if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
-                    or _excluded(conn, _gated(conn, row), now, age=age, defer=defer_s)):
-                continue
             try:
+                if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
+                        or _excluded(conn, _gated(conn, row), now, age=age, defer=defer_s)):
+                    continue
                 if live_owner(conn, tid, own=own, liveness=liveness):
                     continue
                 if _escalate(conn, row, entry, now=now, age=age, defer=defer_s, desk=desk,

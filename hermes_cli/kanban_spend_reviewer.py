@@ -317,7 +317,11 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
                 # still reconcile their exact receipt instead of losing custody.
                 escalate(conn, task_id, episode, f"{cause} stops are excluded from spend review; hold retained")
                 continue
-            if attempts >= MAX_ATTEMPTS and not journal.get(conn, task_id, episode):
+            frozen = journal.get(conn, task_id, episode)
+            if frozen and attempts >= journal.MAX_RECONCILE_ATTEMPTS:
+                journal.escalate_unconfirmed(conn, task_id, episode)
+                continue
+            if attempts >= MAX_ATTEMPTS and not frozen:
                 escalate(conn, task_id, episode, f"the spend reviewer did not finish after {attempts} attempts")
                 continue
         except Exception:  # health: allow BLE001 -- per-card boundary; this hold is retained, siblings proceed

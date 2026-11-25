@@ -290,13 +290,11 @@ def sweep_stale_triage(
         "THEN json_extract(e.payload,'$.author') END,'')='kanban-decision-notice')), t.created_at) <= ? "
         "AND " + _PENDING, (cutoff, *_PENDING_ARGS),
     ).fetchall()
-    from hermes_cli.kanban_resume_requester import open_recovery_card
-    from hermes_cli.kanban_goal_recovery import current_park
     from hermes_cli.kanban_wake_check import foreign_ids
 
     # Retained executor copies have no triage policy authority. Local cap keys cannot
     # arbitrate supervisor creation across gateways, even when neither has synced yet.
-    from hermes_cli.kanban_spend_decision import pending as spend_decision_pending, repair_triage_routes
+    from hermes_cli.kanban_spend_decision import repair_triage_routes
     copies = foreign_ids(conn)
     # Decision ownership needs repair even while execution is gated, fresh, capped
     # or contained. Only the home board may publish its replacement route.
@@ -306,39 +304,49 @@ def sweep_stale_triage(
         escalate_stranded_contained(conn, now=now, skip=copies)
     except Exception:
         logger.exception("kanban: containment strand escalation failed")
-    from hermes_cli.kanban_containment_connections import held as containment_held
     for row in rows:
-        if row["id"] in copies or containment_held(conn, row["id"]):
-            continue
-        if spend_decision_pending(conn, row["id"]):
-            continue
-        if row["human_request"] or open_recovery_card(conn, row["id"]) or current_park(conn, row['id']):
-            continue  # a human owns it, or its kernel recovery card is its producer
-        from hermes_cli.kanban_triage_cleanup import archive_requested_fixture
-        if archive_requested_fixture(conn, row["id"]):
-            continue
-        recent = conn.execute(
-            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'triage_swept' AND created_at > ?",
-            (row["id"], now - TRIAGE_SWEEP_CAP_WINDOW),
-        ).fetchone()[0]
-        if recent >= TRIAGE_SWEEP_CAP:
-            try:
-                _cap(conn, row, now)
-            except Exception:
-                logger.exception("kanban: triage sweep cap failed for %s", row["id"])
-            continue
-        assignee = (row["assignee"] or "").strip() or default_assignee or "default"
-        body = row["body"] or ""
-        if _TRIAGE_BRIEF.strip() not in body:
-            body += _TRIAGE_BRIEF
-        with _kb.write_txn(conn):
-            if spend_decision_pending(conn, row["id"]) or containment_held(conn, row["id"]):
-                continue
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",
-                (assignee, body, row["id"]),
-            )
-            if cur.rowcount:
-                _kb._append_event(conn, row["id"], "triage_swept", {"assignee": assignee, "older_than": older_than})
-                swept.append(row["id"])
+        try:
+            _sweep_stale_card(conn, row, copies, now, older_than, default_assignee, swept)
+        except (ValueError, TypeError):
+            logger.exception("kanban: triage sweep skipped %s; hold retained", row["id"])
     return swept
+
+
+def _sweep_stale_card(conn, row, copies, now, older_than, default_assignee, swept):
+    from hermes_cli.kanban_spend_decision import pending as spend_decision_pending
+    from hermes_cli.kanban_containment_connections import held as containment_held
+    from hermes_cli.kanban_resume_requester import open_recovery_card
+    from hermes_cli.kanban_goal_recovery import current_park
+    if row["id"] in copies or containment_held(conn, row["id"]):
+        return
+    if spend_decision_pending(conn, row["id"]):
+        return
+    if row["human_request"] or open_recovery_card(conn, row["id"]) or current_park(conn, row['id']):
+        return  # a human owns it, or its kernel recovery card is its producer
+    from hermes_cli.kanban_triage_cleanup import archive_requested_fixture
+    if archive_requested_fixture(conn, row["id"]):
+        return
+    recent = conn.execute(
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'triage_swept' AND created_at > ?",
+        (row["id"], now - TRIAGE_SWEEP_CAP_WINDOW),
+    ).fetchone()[0]
+    if recent >= TRIAGE_SWEEP_CAP:
+        try:
+            _cap(conn, row, now)
+        except Exception:
+            logger.exception("kanban: triage sweep cap failed for %s", row["id"])
+        return
+    assignee = (row["assignee"] or "").strip() or default_assignee or "default"
+    body = row["body"] or ""
+    if _TRIAGE_BRIEF.strip() not in body:
+        body += _TRIAGE_BRIEF
+    with _kb.write_txn(conn):
+        if spend_decision_pending(conn, row["id"]) or containment_held(conn, row["id"]):
+            return
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",
+            (assignee, body, row["id"]),
+        )
+        if cur.rowcount:
+            _kb._append_event(conn, row["id"], "triage_swept", {"assignee": assignee, "older_than": older_than})
+            swept.append(row["id"])
