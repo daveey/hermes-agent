@@ -36,6 +36,19 @@ def _recorded(conn, tid):
     # not reinterpret wait_on/archive as release before its edges/status arrive.
     if any(r['payload'].get('authority_kind') == 'spend_reviewer' for r in records):
         return None
+    # Renewal is not the agent's final promotion/read decision. Maintenance has
+    # no --seen acknowledgement to borrow: preserve the explicit promotion gate
+    # for the authenticated renewing session, also under the writer recheck.
+    from hermes_cli.kanban_release_comments import UnreadComments, check
+    for record in records:
+        payload = record['payload']
+        if payload.get('actor_kind') == 'agent':
+            if not payload.get('actor_session'):
+                return None
+            try:
+                check(conn, tid, session=payload['actor_session'], seen=None, verb='promote')
+            except UnreadComments:
+                return None
     # A canonical renewal's own proven mandate is its authorization, not a countermand.
     mandates = set()
     for r in records:
