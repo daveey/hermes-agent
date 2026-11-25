@@ -86,8 +86,13 @@ def test_dispatch_receipt_and_owner_use_review_model_without_changing_row(board)
         assert seen["model"] == OPUS
         assert stored.model_override is None  # original selector retained in retirement audit
         assert tier.owner_model_pin(conn, stored) == (OPUS, "anthropic")
-        assert events[-1] == {"model": OPUS, "provider": "anthropic", "reason": "review_unpinned",
-                              "lane": "review", "review_independence": "separate_execution"}
+        assert isinstance(events[-1], dict)
+        receipt = dict(events[-1])
+        resolution = receipt.pop("review_resolution")
+        assert resolution["final_route"] == {"model": OPUS, "provider": "anthropic", "reason": "review_unpinned"}
+        assert resolution["outcome"] == "selected"
+        assert receipt == {"model": OPUS, "provider": "anthropic", "reason": "review_unpinned",
+                           "lane": "review", "review_independence": "separate_execution"}
 
 
 @pytest.mark.parametrize("failure", ["no_route", "receipt_write", "bad_metadata", "class_pin"])

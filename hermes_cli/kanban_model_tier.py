@@ -86,7 +86,7 @@ def _prior_failure(conn: sqlite3.Connection, task_id: str, current_run_id: Optio
 
 
 def resolve_model_tier(
-    conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None,
+    conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None, collector=None,
 ) -> tuple[Optional[str], Optional[str], str]:
     """``(model, provider, reason)`` for a claimed task. ``model`` is None when the worker keeps whatever it
     would have run on anyway (its own pin or the profile's model); ``reason`` names the rule that decided."""
@@ -97,8 +97,9 @@ def resolve_model_tier(
         default_model = "class:standard"
     from hermes_cli.kanban_review_model import is_review_run
     if is_review_run(conn, task, lane):
-        from hermes_cli.kanban_review_model import resolve_review_model
-        review = resolve_review_model(conn, task, cfg)
+        from hermes_cli.kanban_review_model import _diagnose, resolve_review_model
+        review = resolve_review_model(conn, task, cfg, **({"collector": collector} if collector is not None else {}))
+        _diagnose(collector, initial_route=dict(zip(("model", "provider", "reason"), review)) if review else None)
         if review is not None:
             return review
     selector = _str(getattr(task, "model_override", None))
@@ -367,17 +368,19 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
     return reason
 
 
-def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
+def resolve_dispatch_tier(conn, task, *, lane, cfg=None, collector=None):
     """One read-only route decision for preview and actual admission.
 
     A card with a provider-refused set never starts on a refused provider (``kanban_refusal_fallback``)."""
-    route = _resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
+    route = _resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg,
+                                   **({"collector": collector} if collector is not None else {}))
     from hermes_cli.kanban_refusal_fallback import reroute
     return reroute(conn, task, route, lane=lane)
 
 
-def _resolve_dispatch_tier(conn, task, *, lane, cfg=None):
-    base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
+def _resolve_dispatch_tier(conn, task, *, lane, cfg=None, collector=None):
+    base = resolve_model_tier(conn, task, lane=lane, cfg=cfg,
+                              **({"collector": collector} if collector is not None else {}))
     from hermes_cli.kanban_model_neutral import routing_view
     task = routing_view(task)
     from hermes_cli.kanban_review_model import is_review_run, mandatory_reviewer_pin
@@ -508,11 +511,46 @@ def _paced_receipt(conn, task, reason, *, lane, cfg):
         return None
 
 
+def _review_resolution_block(conn, task, collector, final_route):
+    """Only the actual, open current run may carry optional review evidence.
+
+    Called inside the authoritative receipt transaction. Diagnostic faults drop
+    this block, never the receipt or admission; no substitute run is selected.
+    """
+    if not collector:
+        return {}
+    try:
+        import json
+        import math
+        run_id = getattr(task, "current_run_id", None)
+        row = conn.execute(
+            "SELECT 1 FROM tasks t JOIN task_runs r ON r.id=t.current_run_id "
+            "WHERE t.id=? AND t.current_run_id=? AND r.task_id=t.id AND r.ended_at IS NULL",
+            (task.id, run_id)).fetchone()
+        if row is None:
+            return {}
+        observed_at = collector["observed_at"]
+        if isinstance(observed_at, bool) or not math.isfinite(observed_at):
+            return {}
+        block = {key: collector[key] for key in ("version", "observed_at", "outcome", "candidates", "initial_route")}
+        block["final_route"] = dict(zip(("model", "provider", "reason"), final_route))
+        block["downstream_changed"] = block["initial_route"] != block["final_route"]
+        # Strict JSON rejects unexpected nonfinite route/observation data without
+        # touching the authoritative event writer's existing failure contract.
+        json.dumps(block, allow_nan=False)
+        return {"review_resolution": block}
+    except Exception:  # health: allow BLE001 -- diagnostics cannot refuse admission
+        logger.debug("kanban review resolution diagnostics omitted", exc_info=True)
+        return {}
+
+
 def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
     from hermes_cli.kanban_review_model import is_review_run
     is_review = is_review_run(conn, task, lane)
+    collector = {} if is_review else None
     try:
-        model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
+        model, provider, reason = resolve_dispatch_tier(
+            conn, task, lane=lane, cfg=cfg, **({"collector": collector} if collector is not None else {}))
     except Exception as exc:
         if is_review:
             from hermes_cli.kanban_review_model import resolution_error
@@ -581,6 +619,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                     logger.warning("kanban review %s: review_model %s refused by this host's routing registry; "
                                    "reviewing on %s", task.id, (payload["requested"] or {}).get("model"), model)
             with _kb.write_txn(conn):
+                payload.update(_review_resolution_block(conn, task, collector, (model, provider, reason)))
                 _kb._append_event(conn, task.id, "model_tier", payload, run_id=getattr(task, "current_run_id", None))
                 if repinned:
                     # The pin moves for this run only (in memory); the reroute is always on the record.

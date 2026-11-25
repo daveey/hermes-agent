@@ -406,7 +406,48 @@ def independent_routes(pin, cfg, assignee, *, level="deep"):
         yield route["model"], route["provider"]
 
 
-def resolve_review_model(conn, task, cfg):
+def _diagnose(collector, **fields):
+    """Best-effort call-local evidence; never a routing input or a provider read."""
+    if collector is not None:
+        try:
+            collector.update(fields)
+        except Exception:  # health: allow BLE001 -- optional evidence must not affect admission
+            collector.clear()
+
+
+def _observation(value, now):
+    import math
+    if value is None:
+        return {"state": "not_reported"}
+    if isinstance(value, bool):
+        return {"state": "boolean_true" if value else "boolean_false"}
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return {"state": "future" if value > now else "elapsed", "deadline": value}
+    return {"state": "unknown_deadline"}
+
+
+def _candidate(collector, level, model, provider, now, sources, reasons):
+    if collector is None:
+        return
+    try:
+        collector.setdefault("candidates", []).append({
+            "level": level, "model": model, "provider": provider,
+            **{key: _observation(value, now) for key, value in zip(
+                ("active_wall", "pacing_hold", "live_quota_wall"), sources)},
+            "reasons": reasons})
+    except Exception:  # health: allow BLE001 -- omit diagnostics, not the decision
+        collector.clear()
+
+
+def _reject_candidate(collector):
+    if collector is not None:
+        try:
+            collector["candidates"][-1]["reasons"].append("registry_refused")
+        except Exception:  # health: allow BLE001 -- a lost diagnostic is not an admission failure
+            collector.clear()
+
+
+def resolve_review_model(conn, task, cfg, *, collector=None):
     """Select a real review route without requiring different model provenance."""
     import math
     import time
@@ -434,10 +475,12 @@ def resolve_review_model(conn, task, cfg):
     walls = pw.active_walls(now=now)
     holds = held_pools(cfg.get("llm_pacing"), now)
     waits = []
+    _diagnose(collector, version=1, observed_at=now, outcome="selected", candidates=[])
 
-    def _unavailable(model, provider):
+    def _unavailable(model, provider, level="deep"):
         norm = pw._norm(provider)
         if not norm or norm == "auto":
+            _candidate(collector, level, model, norm, now, (), ["provider_unresolved"])
             return True
         live_wall = pw.live_quota_wall(norm, model)
         sources = (walls.get(norm), holds.get(norm), live_wall)
@@ -447,20 +490,24 @@ def resolve_review_model(conn, task, cfg):
         # Pool membership still refuses the route when its reset is unknown or
         # elapsed. A second finite wall cannot prove when that hold will clear.
         if norm in holds and not finite_future(holds[norm]):
+            _candidate(collector, level, model, norm, now, sources, ["pacing_hold_unknown_or_elapsed"])
             return True
         if live_wall is True or (isinstance(live_wall, (int, float)) and not math.isfinite(live_wall)):
+            _candidate(collector, level, model, norm, now, sources, ["live_wall_unknown_deadline"])
             return True
         deadlines = [value for value in sources if finite_future(value)]
         if deadlines:
             if registry_refusal(model, provider, assignee) is None:
                 waits.append(max(deadlines))  # a route needs ALL its overlapping walls/holds to clear
+            _candidate(collector, level, model, norm, now, sources, ["finite_wall_or_hold"])
             return True
+        _candidate(collector, level, model, norm, now, sources, [])
         return False
 
     # Honor a concrete handoff override unless its pool is held or walled.
     override_moved = False
     if override and refusal is None and not class_override:
-        if not _unavailable(override[0], override[1]):
+        if not _unavailable(override[0], override[1], "override"):
             return override
         override_moved = True
     # Historical reviewer pins are audit evidence, not candidates or mandates.
@@ -469,7 +516,10 @@ def resolve_review_model(conn, task, cfg):
     independent_candidate = False
     for model, provider in candidates:
         independent_candidate = True
-        if _unavailable(model, provider) or (override and registry_refusal(model, provider, assignee)):
+        if _unavailable(model, provider):
+            continue
+        if override and registry_refusal(model, provider, assignee):
+            _reject_candidate(collector)
             continue
         reason = (OVERRIDE_REFUSED if refusal else "review_override" if class_override or override_moved
                   else "review_unpinned")
@@ -477,7 +527,10 @@ def resolve_review_model(conn, task, cfg):
     # Refused overrides retain their existing registered-deep-only recovery contract.
     for model, provider in (() if refusal else independent_routes(set(), cfg, assignee, level="standard")):
         independent_candidate = True
-        if _unavailable(model, provider) or (override and registry_refusal(model, provider, assignee)):
+        if _unavailable(model, provider, "standard"):
+            continue
+        if override and registry_refusal(model, provider, assignee):
+            _reject_candidate(collector)
             continue
         return model, provider, "review_tier_fallback"
     levels = "deep" if refusal else "deep or standard"
@@ -490,7 +543,9 @@ def resolve_review_model(conn, task, cfg):
         from hermes_cli.kanban_model_assignment import _assignee_config
         policy = (_assignee_config(assignee) or {}).get("model_routing") or {}
         if not policy.get("enabled", False):
+            _diagnose(collector, outcome="legacy_fallback")
             return None
+    _diagnose(collector, outcome="unavailable")
     _raise_no_route(detail, waits, independent_candidate or override_moved)
 
 
