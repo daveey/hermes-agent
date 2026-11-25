@@ -447,3 +447,89 @@ the owning chat’s accepted existing-merged-repair disposition; this export did
 - Board/CLI owner `t_01a2117e043cbca0` owns this single consolidation and its remaining repairs.
   Other intake owners retain their exact-test scopes. Historical closed registry owner
   `t_01a1b8f8ac4ac8e8` is not an open owner or proof that Nov23–25 recurrences are fixed.
+
+## Frozen Nov25 supplements (occurrences 827–890)
+
+This adds **64 unchanged observations across 5 exact tests**, without replacing the
+prior 99–826 export or rewriting its historical intake dispositions. Report time is not
+source time: `source_sha` and `head_sha` remain distinct. This is not a post-fix-recurrence
+claim, an environmental waiver, or an assertion that the producer backlog is empty.
+
+[Frozen source, dispositions and explicit source qualifications](ci-flaky-intake-2026-11-25-supplement-827-890.json)
+has SHA256 `84014127bd58016d138246532ad4de8e732963dbb10870707c715a40c096364b`. The two original batches are 827–885 (59 records,
+intake `t_01a211a4ee04cb0c`) and 886–890 (5 records, intake
+`t_01a2122da94cbacd`). Every occurrence/run/job/attempt/slice/source/head field and
+every original per-batch disposition is retained unchanged. Source qualifications are
+separate annotations, never edits to observations.
+
+| Exact test | Observations | Current canonical scope / boundary |
+|---|---:|---|
+| `tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile` | 3 | `t_01a2117deceffea3`; gateway repair/qualification pending; registry4406 unqualified after failed final-head sweep |
+| `tests/hermes_cli/test_annotation_native_holder.py::test_real_projection_idle_and_changed_source` | 2 | Historical PR4389 repair, not an open repair owner; board-cli owns provenance/export only |
+| `tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach` | 1 | `t_01a2117e043cbca0`; mechanism/repair still pending, including singleton830 |
+| `tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start` | 50 | `t_01a2117e043cbca0`; related PR4390 landed, actual source qualification is separate |
+| `tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes` | 8 | `t_01a2117deceffea3`; gateway repair/qualification pending; registry4406 unqualified after failed final-head sweep |
+
+### Latest original dashboard attempts and source qualification
+
+- Occurrence890: run45586926211 / job139115628861, original first-attempt log
+  lines1827–1836 shows `503 facts_unavailable / board_scope_unavailable`. Its actual
+  source is `dd2eeb0f70ac7704d6c4434849a2222e631610da` (also its head).
+- Occurrence888: run45588334044 / job139116035958, original lines1843–1852
+  shows the same scope refusal. Its actual source is
+  `4e0f31843c194ce8c8459ed66f830d5f78ee8801`, not reported PR head
+  `fa97a06bc8756bccc97cbc75c5d29232f4aa969b`.
+- GitHub contents API readback for actual source888/890 and886 found the same
+  dashboard test blob `96f12286b4c8cdf297df54c84b41cee1530f8279`, without
+  the imported-dashboard custody fixture or its regression. Therefore these observations
+  do not establish a recurrence on PR4390’s repaired source. This is source-content
+  qualification, not proof that every historical observation had an identical schedule.
+- Other 47 dashboard observations retain explicit unread-source qualifications in the
+  JSON. They are not silently classified as pre-fix or post-fix by timestamps.
+- Annotation854/860 retain the intake’s GitHub-compare qualification: their actual
+  sources diverged before merged PR4389 (`1cbd643a68267ad5b7ea0cb6191bbe907ff392c6`),
+  behind10/1 respectively. The closed historical native-config repair card is not an
+  active repair owner. These two observations do not prove a post-fix recurrence.
+
+### Repair delivery snapshot (November 25, 2026, 11:56 UTC)
+
+The earlier section’s “published for CI/review” language is a frozen historical snapshot.
+The board-cli owner has since independently verified these canonical merges:
+
+| Exact scope | Reviewed PR head | Landed commit |
+|---|---|---|
+| Current-run-start | [4390](https://github.com/softmax-universe/daveey-hermes/pull/4390), `472aff6164aa58c2a09bfe43566c502cd18efd10` | `4e9ce1e397f26b6ac35bff52468c0d8157f41f82` |
+| Real filesystem free-byte sample | [4400](https://github.com/softmax-universe/daveey-hermes/pull/4400), `4971e859d9762d3b5cc0e7f0dfefa823edf04a36` | `5b7382b6f48424d9e3059cf549cbd5a334131762` |
+| Scheduled owner park clock | [4404](https://github.com/softmax-universe/daveey-hermes/pull/4404), `06cb00704473cdece42db32c9763c32fb0c34aa2` | `8d138277145f5c87314c108c2629bfa1a551f54b` |
+| Guard-hold cap clock | [4412](https://github.com/softmax-universe/daveey-hermes/pull/4412), `d27a26aa9c00331459aa95191016be45ee0f82af` | `4c1799e471f08540f88566cdd9cee986629dab7b` |
+| Injected model-load progress | [4415](https://github.com/softmax-universe/daveey-hermes/pull/4415), `ffa0d0d1b496967ecf681450b1839e2e624f4fa4` | `d17d094e77e7cf6524f28d95f591861ea2b17f5f` |
+| Session tasks endpoint | [4419](https://github.com/softmax-universe/daveey-hermes/pull/4419), `f0f8845e038c3d0683f66846e26c66e8080aa681` | `9ba632a68d0bd81f70d5e2cf9d3375cecf61978a` |
+| HF non-GGUF, project-plugin falsy/truthy, vanished-file listing (4 exact tests) | [4421](https://github.com/softmax-universe/daveey-hermes/pull/4421), `b87ca2989c29bb8c8a89fa6018c73083c4d63929` | `fb8d369a35c3f81839b7204fa9b37509a64660c1` |
+
+These ten exact tests have deterministic controls, independent exact-head review, green
+required CI and twenty consecutive no-retry whole-file trials on each final published
+head. The owner retains every raw summary/head/trial receipt. No test skip/xfail/deletion,
+sleep bump, broader timeout or retry-threshold change was used. Initial metadata export
+[4396](https://github.com/softmax-universe/daveey-hermes/pull/4396) landed separately as
+`5afbd0da4f9dd1664f41d394ade84c5f24ef46be`, preserving 728 observations99–826.
+
+Eleven board-cli exact tests remain incomplete: hub-session projection, native startup,
+bulk archive/ready/running-rejected, document upload, password restart, shell interrupt,
+snapshot restore, session capture faults and desktop idle proof. Whole-file passes or a
+related merge do not qualify these automatically. The three bulk historical failures came
+from source1c568929436ea8ca50c5a49b3b534b81d9f708bb, which has an earlier host-origin
+websocket test importing the full dashboard before bulk. That branch-only predecessor is
+absent on current main; causal qualification must not blame only the later specify test.
+
+Gateway owner `t_01a2117deceffea3` retains its separate thirty-test scope. Authority
+[4418](https://github.com/softmax-universe/daveey-hermes/pull/4418) is independently
+GitHub-read MERGED, reviewed9729a47660186c3110174f503ba90fff40426409 →
+landed7f7561f52e83e5f76edac498082462c5fdd17192. Its detailed twenty-round111-test
+proof and review are operator-reported, not rerun by this export. Cooldown4377 and
+housekeeping4397 are reported landed. WeCom4422 is reported published at
+636306532bcaa24e5ca159ea070ec872a3551fbd, pending final proof/review/CI/landing.
+Registry4406 remains explicitly **unqualified**, despite diagnostic passes, after a
+failed final-head sweep. Supplemental887/889 retain that owner and actual source/head.
+
+No new competing repair owners or repository exporters were created. This consolidation
+does not close either repair owner, transfer its acceptance, or imply fleet deployment.

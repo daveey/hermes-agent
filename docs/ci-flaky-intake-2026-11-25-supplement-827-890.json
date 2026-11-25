@@ -1,0 +1,1445 @@
+{
+  "version": 1,
+  "batches": [
+    {
+      "intake_task": "t_01a211a4ee04cb0c",
+      "occurrences": [
+        {
+          "head_sha": "229dd9963823dcad14f00b9e916a155ef8c171f6",
+          "job_id": 139047106575,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 827,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45567793156,
+          "slice": 5,
+          "slices": 6,
+          "source_sha": "8d50b48f0f752ff1559b9c0c383928a9c2cd122f",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "b239f969a81d6dd138eac01c3a2c01b3e4b6bf46",
+          "job_id": 139044641083,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 828,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45567108969,
+          "slice": 5,
+          "slices": 12,
+          "source_sha": "a58b4ad01a6f780e5984fb1c7e56788ceaffb15f",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "b239f969a81d6dd138eac01c3a2c01b3e4b6bf46",
+          "job_id": 139044641073,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 829,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45567108969,
+          "slice": 7,
+          "slices": 12,
+          "source_sha": "a58b4ad01a6f780e5984fb1c7e56788ceaffb15f",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "b239f969a81d6dd138eac01c3a2c01b3e4b6bf46",
+          "job_id": 139044641033,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 830,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45567108969,
+          "slice": 8,
+          "slices": 12,
+          "source_sha": "a58b4ad01a6f780e5984fb1c7e56788ceaffb15f",
+          "status": "needs_triage",
+          "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+        },
+        {
+          "head_sha": "b239f969a81d6dd138eac01c3a2c01b3e4b6bf46",
+          "job_id": 139044641086,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 831,
+          "owner_check": [
+            {
+              "candidate": "t_01a1b8f8ac4ac8e8",
+              "reason": "closed_history_incomplete",
+              "status": "done"
+            }
+          ],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45567108969,
+          "slice": 12,
+          "slices": 12,
+          "source_sha": "a58b4ad01a6f780e5984fb1c7e56788ceaffb15f",
+          "status": "needs_triage",
+          "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+        },
+        {
+          "head_sha": "b1e4a0c6ce1f48d0302bd661c19b5807d6c91c2b",
+          "job_id": 139044356974,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 832,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45566961306,
+          "slice": 3,
+          "slices": 11,
+          "source_sha": "d0fe2b0bde576095764f2526ee68fde0921f07bc",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "30386567b290cc036e2a9ca2b3935244476e1b1d",
+          "job_id": 139043639981,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 833,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45566267846,
+          "slice": 4,
+          "slices": 12,
+          "source_sha": "30386567b290cc036e2a9ca2b3935244476e1b1d",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "4df05bf65be120a411e8308c800040b13301673d",
+          "job_id": 139041917493,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 834,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45566233588,
+          "slice": 4,
+          "slices": 12,
+          "source_sha": "65028613cdf606f56d668b1a4f65d6b13be7723f",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "b78364e62aeff1a631afc26b63c048237896cb8c",
+          "job_id": 139041791863,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 835,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45566198902,
+          "slice": 5,
+          "slices": 12,
+          "source_sha": "9a13151cc142ad8dab55fd6e74ebe949aa44d735",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "b78364e62aeff1a631afc26b63c048237896cb8c",
+          "job_id": 139041791919,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 836,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45566198902,
+          "slice": 7,
+          "slices": 12,
+          "source_sha": "9a13151cc142ad8dab55fd6e74ebe949aa44d735",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "cb9d802bbeeaa6865202f312cceb32f8547eeaed",
+          "job_id": 139041286583,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 837,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45566036095,
+          "slice": 4,
+          "slices": 12,
+          "source_sha": "edc59459416a2701416a2ab779270be7b7ebefcf",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "459d827106e551e1ae2b2cd08bfc5fb7b607f1d9",
+          "job_id": 139051620045,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 838,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45569173210,
+          "slice": 6,
+          "slices": 12,
+          "source_sha": "f11253956a0216f7aa86470913529c19ef93d991",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "81d090cdeeaa6af1cef5194f2dcb741a531327a8",
+          "job_id": 139051380624,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 839,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45569024494,
+          "slice": 5,
+          "slices": 12,
+          "source_sha": "81d090cdeeaa6af1cef5194f2dcb741a531327a8",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "ae3c77dbee887ea9f579ce0ef1c23597ddef257b",
+          "job_id": 139049746279,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 840,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45568584334,
+          "slice": 4,
+          "slices": 7,
+          "source_sha": "8c0fb09d1edb41e1246208d693d3453caffc4457",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "7ddde81f94f38eb72ec0b3bab19c9dc279a9e1d1",
+          "job_id": 139049138686,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 841,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45568412099,
+          "slice": 4,
+          "slices": 12,
+          "source_sha": "2e0668afe0ca0f0118998407dff5b7d9f180dcea",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "7ddde81f94f38eb72ec0b3bab19c9dc279a9e1d1",
+          "job_id": 139049138754,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 842,
+          "owner_check": [
+            {
+              "candidate": "t_01a1b8f8ac4ac8e8",
+              "reason": "closed_history_incomplete",
+              "status": "done"
+            }
+          ],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45568412099,
+          "slice": 12,
+          "slices": 12,
+          "source_sha": "2e0668afe0ca0f0118998407dff5b7d9f180dcea",
+          "status": "needs_triage",
+          "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+        },
+        {
+          "head_sha": "fd2f55c6cad623d02f9d3912b8ac4115bd37c522",
+          "job_id": 139047500395,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 843,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45566976708,
+          "slice": 4,
+          "slices": 12,
+          "source_sha": "fd2f55c6cad623d02f9d3912b8ac4115bd37c522",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "08c3ba5ffff4e85e3b04d0bd33b70973c08b54f3",
+          "job_id": 139058894223,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 844,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45571360514,
+          "slice": 2,
+          "slices": 6,
+          "source_sha": "b950cdd161751167b63c7cbf4ec04528ed25b24e",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "0afbd8e840a10af92106541ca8e37200db32ffa1",
+          "job_id": 139058016844,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 845,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45571063780,
+          "slice": 6,
+          "slices": 12,
+          "source_sha": "d0edb6332eb560dfe68f4f57ba6410088d9a862e",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "6c8b2e6d5e5291133f798bffd2064c318ef0fb03",
+          "job_id": 139057813103,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 846,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45571045316,
+          "slice": 7,
+          "slices": 12,
+          "source_sha": "e00951ccd4d483dff6c4110b5684cbfec87048da",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "6c8b2e6d5e5291133f798bffd2064c318ef0fb03",
+          "job_id": 139057813139,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 847,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45571045316,
+          "slice": 9,
+          "slices": 12,
+          "source_sha": "e00951ccd4d483dff6c4110b5684cbfec87048da",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "f247c80c34b9a1fd356637bce08baa1a249ef16f",
+          "job_id": 139059233091,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 848,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45570656860,
+          "slice": 7,
+          "slices": 12,
+          "source_sha": "f247c80c34b9a1fd356637bce08baa1a249ef16f",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "04b7e844f9ddc9a94d75da5c5d80331bf18c85b7",
+          "job_id": 139055375959,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 849,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45570156355,
+          "slice": 6,
+          "slices": 12,
+          "source_sha": "04b7e844f9ddc9a94d75da5c5d80331bf18c85b7",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "c5912a71448789aa8b6f47e4d8e42d2bf7d06a11",
+          "job_id": 139054685360,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 850,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45570100776,
+          "slice": 6,
+          "slices": 12,
+          "source_sha": "cf31fedb2a993dea2b43a290337f7c89a3324ccd",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "978fe702680199e62995fb8dca0b0eb035e55fe2",
+          "job_id": 139064565548,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 851,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45573053791,
+          "slice": 6,
+          "slices": 12,
+          "source_sha": "d414b44230fdf8f50a414cac6e20e1b3621fe9cd",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "133c5311c05b6c3ed00d3965d70c49a40862fb79",
+          "job_id": 139063197442,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 852,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45572222731,
+          "slice": 9,
+          "slices": 12,
+          "source_sha": "133c5311c05b6c3ed00d3965d70c49a40862fb79",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "501c3892d0a035a62eb33b8767b2827663a3ddf2",
+          "job_id": 139061589128,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 853,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45572173575,
+          "slice": 2,
+          "slices": 12,
+          "source_sha": "e986e7642e9f89def446c05986f336b56554e33c",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "501c3892d0a035a62eb33b8767b2827663a3ddf2",
+          "job_id": 139061589041,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 854,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45572173575,
+          "slice": 9,
+          "slices": 12,
+          "source_sha": "e986e7642e9f89def446c05986f336b56554e33c",
+          "status": "needs_triage",
+          "test_id": "tests/hermes_cli/test_annotation_native_holder.py::test_real_projection_idle_and_changed_source"
+        },
+        {
+          "head_sha": "447e04c7026d3e1f22bbe4f38ed7d0ae52859119",
+          "job_id": 139061457635,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 855,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45572134318,
+          "slice": 10,
+          "slices": 12,
+          "source_sha": "62c4a563638710b43169f2e63b766f934fbbe2c0",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "5662090ced1f56ebb7625d98075d5330573c1232",
+          "job_id": 139072426555,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 856,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45575414141,
+          "slice": 11,
+          "slices": 12,
+          "source_sha": "4848fe741720a674e9ea9392fd549aef2925b1de",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "71fd97a5cf3b688e7797f050fe5d9885bfe73a95",
+          "job_id": 139071544215,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 857,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45574764314,
+          "slice": 11,
+          "slices": 12,
+          "source_sha": "71fd97a5cf3b688e7797f050fe5d9885bfe73a95",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "f6c3fb3830d74d40e6403c5ff587f692fe0ffa0f",
+          "job_id": 139069599812,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 858,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45574640699,
+          "slice": 11,
+          "slices": 12,
+          "source_sha": "346ae13735da9f0543818c50c60cd53641565d57",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "1239332fb21617c53c8aaa5212505a60bc74716b",
+          "job_id": 139067310944,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 859,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45573764099,
+          "slice": 10,
+          "slices": 12,
+          "source_sha": "1239332fb21617c53c8aaa5212505a60bc74716b",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "6185f3e6d13bdacc80d7b7f27c05c1e4ecca05ea",
+          "job_id": 139079104272,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 860,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45577415927,
+          "slice": 7,
+          "slices": 12,
+          "source_sha": "04e5689e89d4ac7722d22de811fc30fef4497b4c",
+          "status": "needs_triage",
+          "test_id": "tests/hermes_cli/test_annotation_native_holder.py::test_real_projection_idle_and_changed_source"
+        },
+        {
+          "head_sha": "6185f3e6d13bdacc80d7b7f27c05c1e4ecca05ea",
+          "job_id": 139079104289,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 861,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45577415927,
+          "slice": 12,
+          "slices": 12,
+          "source_sha": "04e5689e89d4ac7722d22de811fc30fef4497b4c",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "ce444ca397d82ec85e0bd6c5c7151ebc01d21a8d",
+          "job_id": 139078639205,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 862,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45577249850,
+          "slice": 10,
+          "slices": 11,
+          "source_sha": "d4a50e4670708850e82710a343a744f4e058c29d",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "e3e6b4c96d898d0a6751fde0c0009014a5265c9e",
+          "job_id": 139076100723,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 863,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45576354282,
+          "slice": 11,
+          "slices": 12,
+          "source_sha": "e3e6b4c96d898d0a6751fde0c0009014a5265c9e",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "3f1edc0b83f09d6983ab8fbc675b95b63ecd995a",
+          "job_id": 139073306294,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 864,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45575748914,
+          "slice": 11,
+          "slices": 12,
+          "source_sha": "c0011d13257b997ae7c4ab193f35cfce1b781847",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "f6eec783ff46455caad82766dc4f6699ea03aee9",
+          "job_id": 139085982599,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 865,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45579540601,
+          "slice": 1,
+          "slices": 12,
+          "source_sha": "f2c30c3cf738dc67991ec682675d0d30553d2b58",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "f6eec783ff46455caad82766dc4f6699ea03aee9",
+          "job_id": 139085982659,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 866,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45579540601,
+          "slice": 5,
+          "slices": 12,
+          "source_sha": "f2c30c3cf738dc67991ec682675d0d30553d2b58",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "d2685e07db71687cfe3a8b2031670e7871720905",
+          "job_id": 139085624156,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 867,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45579326245,
+          "slice": 10,
+          "slices": 11,
+          "source_sha": "17646ce50c8e03b5c7d6bcdf663d0f51d8bfae6c",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "3ef2ce1224d1a06c182a208111dff23326909861",
+          "job_id": 139085194826,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 868,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45579254019,
+          "slice": 12,
+          "slices": 12,
+          "source_sha": "02298551143287ee321e1daba13f3ca172586593",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "21f3716ebffa00601145afbabdf23a3e7f73ca0b",
+          "job_id": 139083678881,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 869,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45578781364,
+          "slice": 6,
+          "slices": 12,
+          "source_sha": "3f0217e7bf31cb69139aa21d187116590b826e51",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "5b7382b6f48424d9e3059cf549cbd5a334131762",
+          "job_id": 139085019702,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 870,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45578546291,
+          "slice": 12,
+          "slices": 12,
+          "source_sha": "5b7382b6f48424d9e3059cf549cbd5a334131762",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "1cbd643a68267ad5b7ea0cb6191bbe907ff392c6",
+          "job_id": 139080582322,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 871,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45577475022,
+          "slice": 12,
+          "slices": 12,
+          "source_sha": "1cbd643a68267ad5b7ea0cb6191bbe907ff392c6",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "31f35b354ffdab37513c26e7e7e6f6e2bf7769a4",
+          "job_id": 139078834287,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 872,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45577404379,
+          "slice": 3,
+          "slices": 12,
+          "source_sha": "5e31bb253760782d6eb21f08fed1887f78ad840f",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "31f35b354ffdab37513c26e7e7e6f6e2bf7769a4",
+          "job_id": 139078834300,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 873,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45577404379,
+          "slice": 12,
+          "slices": 12,
+          "source_sha": "5e31bb253760782d6eb21f08fed1887f78ad840f",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "8a136e764cb2ca2ad7415fb43513d42b27a6928f",
+          "job_id": 139094515083,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 874,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45581047636,
+          "slice": 1,
+          "slices": 12,
+          "source_sha": "8a136e764cb2ca2ad7415fb43513d42b27a6928f",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "8a136e764cb2ca2ad7415fb43513d42b27a6928f",
+          "job_id": 139094515123,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 875,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45581047636,
+          "slice": 4,
+          "slices": 12,
+          "source_sha": "8a136e764cb2ca2ad7415fb43513d42b27a6928f",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "dc37e0103794587720306ebc3213ac1d04e22253",
+          "job_id": 139090420666,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 876,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45580785392,
+          "slice": 2,
+          "slices": 12,
+          "source_sha": "77f5c592fe4287cdc1cea43dc0c1fe06bd237938",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "db5b58e51b2e34707267b8a70949b21d4551d0c3",
+          "job_id": 139089819010,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 877,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45580189865,
+          "slice": 1,
+          "slices": 12,
+          "source_sha": "db5b58e51b2e34707267b8a70949b21d4551d0c3",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "a28d18f82c93adde03d725cbe85b37723c941dd1",
+          "job_id": 139104627393,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 878,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45585060274,
+          "slice": 1,
+          "slices": 12,
+          "source_sha": "a28d18f82c93adde03d725cbe85b37723c941dd1",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "ad205fb8b1aed921e2a1451f35b19819fa288e9b",
+          "job_id": 139104493383,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 879,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45585016226,
+          "slice": 1,
+          "slices": 12,
+          "source_sha": "d0e72848c527f86981e87b2562b5452fcf19dd92",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "aa1a6cfa12d8f399eea1bbdcf0959bc0bfe46201",
+          "job_id": 139103817823,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 880,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45584741520,
+          "slice": 1,
+          "slices": 10,
+          "source_sha": "84ee738e5d7412d99c7382a8c4641d5b437c4fbd",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "0cdaa206853a20977ab854ce60075431120844fb",
+          "job_id": 139111139858,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 881,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45586977421,
+          "slice": 2,
+          "slices": 12,
+          "source_sha": "ed0e531a2a4dbacd2d7d975b4f147237686f65e8",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "99be06005a57953e333432fa9a4852ed0613aba2",
+          "job_id": 139110622235,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 882,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45586698680,
+          "slice": 6,
+          "slices": 12,
+          "source_sha": "56fbe5349ea1e30fa8380cc052dab94ef5183e3f",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "db26a80681e68b485eed1beb138fecef0a327824",
+          "job_id": 139109755159,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 883,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45586400197,
+          "slice": 3,
+          "slices": 12,
+          "source_sha": "108f717aaa2c6314a4d064d811ae6bbf5e38de8b",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "79630af853137b62e9876205ebb2bd28ba339c2f",
+          "job_id": 139108107410,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 884,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45585965019,
+          "slice": 9,
+          "slices": 12,
+          "source_sha": "6cdf8fc15472dd6198854cf45a8b86acac2ab677",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "0039f2c73c040c8c7b612136ec360684dbed35e7",
+          "job_id": 139109860720,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 885,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45585309632,
+          "slice": 1,
+          "slices": 12,
+          "source_sha": "0039f2c73c040c8c7b612136ec360684dbed35e7",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        }
+      ],
+      "dispositions": [
+        {
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start",
+          "count": 47,
+          "occurrence_ids": [
+            827,
+            828,
+            832,
+            833,
+            834,
+            835,
+            837,
+            838,
+            839,
+            840,
+            841,
+            843,
+            844,
+            845,
+            846,
+            848,
+            849,
+            850,
+            851,
+            852,
+            853,
+            855,
+            856,
+            857,
+            858,
+            859,
+            861,
+            862,
+            863,
+            864,
+            865,
+            867,
+            868,
+            869,
+            870,
+            871,
+            873,
+            874,
+            876,
+            877,
+            878,
+            879,
+            880,
+            881,
+            882,
+            884,
+            885
+          ],
+          "disposition": "existing_owner_with_merged_related_fix_qualification",
+          "follow_up_owner": "@task:default@hub/t_01a2117e043cbca0",
+          "note": "PR4390 freshly verified MERGED at09:47:43Z, landed4e9ce1e397f26b6ac35bff52468c0d8157f41f82. Owner reports deterministic imported-BoardRuntime lifetime fix. Preserve exact owner for historical-source/log qualification of these observations; metadata does not prove each has the same mechanism or any post-fix failure."
+        },
+        {
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes",
+          "count": 7,
+          "occurrence_ids": [
+            829,
+            836,
+            847,
+            866,
+            872,
+            875,
+            883
+          ],
+          "disposition": "existing_exact_test_owner_investigating",
+          "follow_up_owner": "@task:default@hub/t_01a2117deceffea3",
+          "note": "Already owned by gateway group, including readiness extension from adjacent intake. Registry PR4406 repair remains open/rework per latest owner readback; closed PR946 predecessor contains no citation of831/842 and is not a current owner. Metadata is not causal proof."
+        },
+        {
+          "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach",
+          "count": 1,
+          "occurrence_ids": [
+            830
+          ],
+          "disposition": "existing_exact_test_owner_investigating",
+          "follow_up_owner": "@task:default@hub/t_01a2117e043cbca0",
+          "note": "Already added to board-cli group by adjacent Nov24/Nov25 intakes; mechanism remains unknown for this observation. No singleton environmental waiver."
+        },
+        {
+          "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile",
+          "count": 2,
+          "occurrence_ids": [
+            831,
+            842
+          ],
+          "disposition": "existing_exact_test_owner_investigating",
+          "follow_up_owner": "@task:default@hub/t_01a2117deceffea3",
+          "note": "Already owned by gateway group, including readiness extension from adjacent intake. Registry PR4406 repair remains open/rework per latest owner readback; closed PR946 predecessor contains no citation of831/842 and is not a current owner. Metadata is not causal proof."
+        },
+        {
+          "test_id": "tests/hermes_cli/test_annotation_native_holder.py::test_real_projection_idle_and_changed_source",
+          "count": 2,
+          "occurrence_ids": [
+            854,
+            860
+          ],
+          "disposition": "historical_branch_observations_fix_already_merged",
+          "follow_up_owner": "@task:default@hub/t_01a2117e043cbca0",
+          "note": "PR4389 merged as1cbd643a68267ad5b7ea0cb6191bbe907ff392c6. GitHub compares show both actual source revisions diverged before that fix (behind10/1 respectively); these do not establish a post-fix recurrence. Historical native-config repair t_01a2117dd47317fc is DONE, not an active owner. Board-cli is the existing consolidated docs owner for qualification/export; no new repair card warranted from metadata alone."
+        }
+      ]
+    },
+    {
+      "intake_task": "t_01a2122da94cbacd",
+      "occurrences": [
+        {
+          "head_sha": "e5cc9481bba110c07fdc2ea2b8abaf0170f7275a",
+          "job_id": 139116911740,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 886,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45588537422,
+          "slice": 7,
+          "slices": 12,
+          "source_sha": "0c87c20d7c329662233dba0d1ef14e3067f9f559",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "e5cc9481bba110c07fdc2ea2b8abaf0170f7275a",
+          "job_id": 139116911727,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 887,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45588537422,
+          "slice": 8,
+          "slices": 12,
+          "source_sha": "0c87c20d7c329662233dba0d1ef14e3067f9f559",
+          "status": "needs_triage",
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        },
+        {
+          "head_sha": "fa97a06bc8756bccc97cbc75c5d29232f4aa969b",
+          "job_id": 139116035958,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 888,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45588334044,
+          "slice": 2,
+          "slices": 12,
+          "source_sha": "4e0f31843c194ce8c8459ed66f830d5f78ee8801",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        },
+        {
+          "head_sha": "dd2eeb0f70ac7704d6c4434849a2222e631610da",
+          "job_id": 139115628733,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 889,
+          "owner_check": [
+            {
+              "candidate": "t_01a1b8f8ac4ac8e8",
+              "reason": "closed_history_incomplete",
+              "status": "done"
+            }
+          ],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45586926211,
+          "slice": 1,
+          "slices": 12,
+          "source_sha": "dd2eeb0f70ac7704d6c4434849a2222e631610da",
+          "status": "needs_triage",
+          "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+        },
+        {
+          "head_sha": "dd2eeb0f70ac7704d6c4434849a2222e631610da",
+          "job_id": 139115628861,
+          "observed_day": "2026-11-25",
+          "occurrence_id": 890,
+          "owner_check": [],
+          "retried": "tests",
+          "run_attempt": 1,
+          "run_id": 45586926211,
+          "slice": 2,
+          "slices": 12,
+          "source_sha": "dd2eeb0f70ac7704d6c4434849a2222e631610da",
+          "status": "needs_triage",
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start"
+        }
+      ],
+      "dispositions": [
+        {
+          "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile",
+          "occurrence_ids": [
+            889
+          ],
+          "count": 1,
+          "disposition": "existing_exact_test_owner_source_qualification_pending",
+          "owner": "@task:default@hub/t_01a2117deceffea3",
+          "note": "Existing gateway owner investigating; PR4406 remains unqualified after a failed final-head registry sweep. Metadata alone proves no mechanism or repair."
+        },
+        {
+          "test_id": "tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start",
+          "occurrence_ids": [
+            886,
+            888,
+            890
+          ],
+          "count": 3,
+          "disposition": "existing_exact_test_owner_source_qualification_pending",
+          "owner": "@task:default@hub/t_01a2117e043cbca0",
+          "note": "Related dashboard PR4390 is reported merged by its owner; source/log qualification is still required for these observations. No claim of post-fix recurrence or common mechanism."
+        },
+        {
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes",
+          "occurrence_ids": [
+            887
+          ],
+          "count": 1,
+          "disposition": "existing_exact_test_owner_source_qualification_pending",
+          "owner": "@task:default@hub/t_01a2117deceffea3",
+          "note": "Existing gateway owner investigating; PR4406 remains unqualified after a failed final-head registry sweep. Metadata alone proves no mechanism or repair."
+        }
+      ]
+    }
+  ],
+  "source_qualification": [
+    {
+      "occurrence_id": 827,
+      "head_sha": "229dd9963823dcad14f00b9e916a155ef8c171f6",
+      "source_sha": "8d50b48f0f752ff1559b9c0c383928a9c2cd122f",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 828,
+      "head_sha": "b239f969a81d6dd138eac01c3a2c01b3e4b6bf46",
+      "source_sha": "a58b4ad01a6f780e5984fb1c7e56788ceaffb15f",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 832,
+      "head_sha": "b1e4a0c6ce1f48d0302bd661c19b5807d6c91c2b",
+      "source_sha": "d0fe2b0bde576095764f2526ee68fde0921f07bc",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 833,
+      "head_sha": "30386567b290cc036e2a9ca2b3935244476e1b1d",
+      "source_sha": "30386567b290cc036e2a9ca2b3935244476e1b1d",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 834,
+      "head_sha": "4df05bf65be120a411e8308c800040b13301673d",
+      "source_sha": "65028613cdf606f56d668b1a4f65d6b13be7723f",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 835,
+      "head_sha": "b78364e62aeff1a631afc26b63c048237896cb8c",
+      "source_sha": "9a13151cc142ad8dab55fd6e74ebe949aa44d735",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 837,
+      "head_sha": "cb9d802bbeeaa6865202f312cceb32f8547eeaed",
+      "source_sha": "edc59459416a2701416a2ab779270be7b7ebefcf",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 838,
+      "head_sha": "459d827106e551e1ae2b2cd08bfc5fb7b607f1d9",
+      "source_sha": "f11253956a0216f7aa86470913529c19ef93d991",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 839,
+      "head_sha": "81d090cdeeaa6af1cef5194f2dcb741a531327a8",
+      "source_sha": "81d090cdeeaa6af1cef5194f2dcb741a531327a8",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 840,
+      "head_sha": "ae3c77dbee887ea9f579ce0ef1c23597ddef257b",
+      "source_sha": "8c0fb09d1edb41e1246208d693d3453caffc4457",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 841,
+      "head_sha": "7ddde81f94f38eb72ec0b3bab19c9dc279a9e1d1",
+      "source_sha": "2e0668afe0ca0f0118998407dff5b7d9f180dcea",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 843,
+      "head_sha": "fd2f55c6cad623d02f9d3912b8ac4115bd37c522",
+      "source_sha": "fd2f55c6cad623d02f9d3912b8ac4115bd37c522",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 844,
+      "head_sha": "08c3ba5ffff4e85e3b04d0bd33b70973c08b54f3",
+      "source_sha": "b950cdd161751167b63c7cbf4ec04528ed25b24e",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 845,
+      "head_sha": "0afbd8e840a10af92106541ca8e37200db32ffa1",
+      "source_sha": "d0edb6332eb560dfe68f4f57ba6410088d9a862e",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 846,
+      "head_sha": "6c8b2e6d5e5291133f798bffd2064c318ef0fb03",
+      "source_sha": "e00951ccd4d483dff6c4110b5684cbfec87048da",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 848,
+      "head_sha": "f247c80c34b9a1fd356637bce08baa1a249ef16f",
+      "source_sha": "f247c80c34b9a1fd356637bce08baa1a249ef16f",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 849,
+      "head_sha": "04b7e844f9ddc9a94d75da5c5d80331bf18c85b7",
+      "source_sha": "04b7e844f9ddc9a94d75da5c5d80331bf18c85b7",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 850,
+      "head_sha": "c5912a71448789aa8b6f47e4d8e42d2bf7d06a11",
+      "source_sha": "cf31fedb2a993dea2b43a290337f7c89a3324ccd",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 851,
+      "head_sha": "978fe702680199e62995fb8dca0b0eb035e55fe2",
+      "source_sha": "d414b44230fdf8f50a414cac6e20e1b3621fe9cd",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 852,
+      "head_sha": "133c5311c05b6c3ed00d3965d70c49a40862fb79",
+      "source_sha": "133c5311c05b6c3ed00d3965d70c49a40862fb79",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 853,
+      "head_sha": "501c3892d0a035a62eb33b8767b2827663a3ddf2",
+      "source_sha": "e986e7642e9f89def446c05986f336b56554e33c",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 855,
+      "head_sha": "447e04c7026d3e1f22bbe4f38ed7d0ae52859119",
+      "source_sha": "62c4a563638710b43169f2e63b766f934fbbe2c0",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 856,
+      "head_sha": "5662090ced1f56ebb7625d98075d5330573c1232",
+      "source_sha": "4848fe741720a674e9ea9392fd549aef2925b1de",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 857,
+      "head_sha": "71fd97a5cf3b688e7797f050fe5d9885bfe73a95",
+      "source_sha": "71fd97a5cf3b688e7797f050fe5d9885bfe73a95",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 858,
+      "head_sha": "f6c3fb3830d74d40e6403c5ff587f692fe0ffa0f",
+      "source_sha": "346ae13735da9f0543818c50c60cd53641565d57",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 859,
+      "head_sha": "1239332fb21617c53c8aaa5212505a60bc74716b",
+      "source_sha": "1239332fb21617c53c8aaa5212505a60bc74716b",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 861,
+      "head_sha": "6185f3e6d13bdacc80d7b7f27c05c1e4ecca05ea",
+      "source_sha": "04e5689e89d4ac7722d22de811fc30fef4497b4c",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 862,
+      "head_sha": "ce444ca397d82ec85e0bd6c5c7151ebc01d21a8d",
+      "source_sha": "d4a50e4670708850e82710a343a744f4e058c29d",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 863,
+      "head_sha": "e3e6b4c96d898d0a6751fde0c0009014a5265c9e",
+      "source_sha": "e3e6b4c96d898d0a6751fde0c0009014a5265c9e",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 864,
+      "head_sha": "3f1edc0b83f09d6983ab8fbc675b95b63ecd995a",
+      "source_sha": "c0011d13257b997ae7c4ab193f35cfce1b781847",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 865,
+      "head_sha": "f6eec783ff46455caad82766dc4f6699ea03aee9",
+      "source_sha": "f2c30c3cf738dc67991ec682675d0d30553d2b58",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 867,
+      "head_sha": "d2685e07db71687cfe3a8b2031670e7871720905",
+      "source_sha": "17646ce50c8e03b5c7d6bcdf663d0f51d8bfae6c",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 868,
+      "head_sha": "3ef2ce1224d1a06c182a208111dff23326909861",
+      "source_sha": "02298551143287ee321e1daba13f3ca172586593",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 869,
+      "head_sha": "21f3716ebffa00601145afbabdf23a3e7f73ca0b",
+      "source_sha": "3f0217e7bf31cb69139aa21d187116590b826e51",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 870,
+      "head_sha": "5b7382b6f48424d9e3059cf549cbd5a334131762",
+      "source_sha": "5b7382b6f48424d9e3059cf549cbd5a334131762",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 871,
+      "head_sha": "1cbd643a68267ad5b7ea0cb6191bbe907ff392c6",
+      "source_sha": "1cbd643a68267ad5b7ea0cb6191bbe907ff392c6",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 873,
+      "head_sha": "31f35b354ffdab37513c26e7e7e6f6e2bf7769a4",
+      "source_sha": "5e31bb253760782d6eb21f08fed1887f78ad840f",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 874,
+      "head_sha": "8a136e764cb2ca2ad7415fb43513d42b27a6928f",
+      "source_sha": "8a136e764cb2ca2ad7415fb43513d42b27a6928f",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 876,
+      "head_sha": "dc37e0103794587720306ebc3213ac1d04e22253",
+      "source_sha": "77f5c592fe4287cdc1cea43dc0c1fe06bd237938",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 877,
+      "head_sha": "db5b58e51b2e34707267b8a70949b21d4551d0c3",
+      "source_sha": "db5b58e51b2e34707267b8a70949b21d4551d0c3",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 878,
+      "head_sha": "a28d18f82c93adde03d725cbe85b37723c941dd1",
+      "source_sha": "a28d18f82c93adde03d725cbe85b37723c941dd1",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 879,
+      "head_sha": "ad205fb8b1aed921e2a1451f35b19819fa288e9b",
+      "source_sha": "d0e72848c527f86981e87b2562b5452fcf19dd92",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 880,
+      "head_sha": "aa1a6cfa12d8f399eea1bbdcf0959bc0bfe46201",
+      "source_sha": "84ee738e5d7412d99c7382a8c4641d5b437c4fbd",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 881,
+      "head_sha": "0cdaa206853a20977ab854ce60075431120844fb",
+      "source_sha": "ed0e531a2a4dbacd2d7d975b4f147237686f65e8",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 882,
+      "head_sha": "99be06005a57953e333432fa9a4852ed0613aba2",
+      "source_sha": "56fbe5349ea1e30fa8380cc052dab94ef5183e3f",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 884,
+      "head_sha": "79630af853137b62e9876205ebb2bd28ba339c2f",
+      "source_sha": "6cdf8fc15472dd6198854cf45a8b86acac2ab677",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 885,
+      "head_sha": "0039f2c73c040c8c7b612136ec360684dbed35e7",
+      "source_sha": "0039f2c73c040c8c7b612136ec360684dbed35e7",
+      "qualification": "not source-read in this run; no recurrence conclusion"
+    },
+    {
+      "occurrence_id": 886,
+      "head_sha": "e5cc9481bba110c07fdc2ea2b8abaf0170f7275a",
+      "source_sha": "0c87c20d7c329662233dba0d1ef14e3067f9f559",
+      "source_has_imported_dashboard_fixture": false,
+      "source_uses_import_custody": false,
+      "source_has_custody_regression": false,
+      "blob_sha": "96f12286b4c8cdf297df54c84b41cee1530f8279"
+    },
+    {
+      "occurrence_id": 888,
+      "head_sha": "fa97a06bc8756bccc97cbc75c5d29232f4aa969b",
+      "source_sha": "4e0f31843c194ce8c8459ed66f830d5f78ee8801",
+      "source_has_imported_dashboard_fixture": false,
+      "source_uses_import_custody": false,
+      "source_has_custody_regression": false,
+      "blob_sha": "96f12286b4c8cdf297df54c84b41cee1530f8279"
+    },
+    {
+      "occurrence_id": 890,
+      "head_sha": "dd2eeb0f70ac7704d6c4434849a2222e631610da",
+      "source_sha": "dd2eeb0f70ac7704d6c4434849a2222e631610da",
+      "source_has_imported_dashboard_fixture": false,
+      "source_uses_import_custody": false,
+      "source_has_custody_regression": false,
+      "blob_sha": "96f12286b4c8cdf297df54c84b41cee1530f8279"
+    }
+  ],
+  "qualification_boundary": "Intake dispositions are frozen source metadata. Unread source revisions remain explicitly unqualified; no post-fix recurrence inferred from report time or head_sha."
+}
