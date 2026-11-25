@@ -110,4 +110,8 @@ def test_closure_identity_distinguishes_same_code():
     a, b = make(), make()
     di.declaration('c', a, list)
     assert di.key({'c': a}) == di.key({'c': a})
-    assert di.key({'c': b}) != di.key({'c': b})  # undeclared fn b
+    old = di.key({'c': a})
+    di.declaration('c', b, list)
+    assert di.key({'c': b}) != old  # same code and inputs, distinct closure
+    assert di.key({'c': b}) == di.key({'c': b})
+    assert di.key({'c': a}) != di.key({'c': a})  # replaced fn a is undeclared
