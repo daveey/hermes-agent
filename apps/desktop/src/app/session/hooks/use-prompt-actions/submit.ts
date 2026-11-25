@@ -69,6 +69,7 @@ import {
   noteSubmissionIdRefused,
   submissionIdentityEpoch
 } from './submission-identity-support'
+import { sendUnconfirmed, submissionAborted, submissionFailed, writeInFlightSubmission } from './submission-outcome'
 import { submitAcrossGatewayRestart } from './submit-across-restart'
 import {
   acquireSubmitInFlight,
@@ -872,7 +873,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         if (failure) {
           // Not sent: say so (a session switch stays silent), then drop the bubble.
-          rejectSendOnFailedResume(failure.error, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: Boolean(retained) })
+          rejectSendOnFailedResume(failure.error, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: sendUnconfirmed(retained) })
 
           return abortForSessionSwitch(null)
         }
@@ -995,7 +996,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // drain this abort is a no-op on foreground state (both helpers are
           // targetIsCurrentView-guarded) and simply drops the queued send. A
           // foreground send is not sent either: say so, then drop the bubble.
-          rejectSendOnFailedResume(err, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: Boolean(retained) })
+          rejectSendOnFailedResume(err, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: sendUnconfirmed(retained) })
 
           return abortForSessionSwitch(null)
         }
@@ -1210,10 +1211,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         }
 
         const retryKey = retainedKey ?? (await preparedSubmissionSlot(retryKeyForTarget()))
-        await writePreparedSubmission(retryKey, prepared)
+        await writeInFlightSubmission(retryKey, prepared)
 
         if (sessionDriftReason()) {
-          return abortForSessionSwitch(liveSessionId)
+          return submissionAborted(retryKey, prepared, () => abortForSessionSwitch(liveSessionId))
         }
 
         // On sleep/wake the gateway's in-memory session may have been cleared
@@ -1487,7 +1488,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             return abortForSessionSwitch(sessionId)
           }
 
-          throw firstErr
+          throw await submissionFailed(retryKey, prepared, firstErr, { definite: isDefiniteSubmitRefusal, replayUncertain: restartReplayUncertain })
         }
 
         // The gateway admitted it: a failed journal retirement (ENOSPC/EIO) must not report a

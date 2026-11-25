@@ -1,3 +1,4 @@
+import { JsonRpcGatewayError } from '@hermes/shared'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
 import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
@@ -24,7 +25,8 @@ import { useSessionActions } from '../use-session-actions'
 import { resumeFailedToastId } from '../use-session-actions/resume-latches'
 
 import { actRender, Harness, type HarnessHandle, RUNTIME_SESSION_ID } from './index-test-utils'
-import { clearStoredJournal } from './prepared-submissions-test-utils'
+import { ENTRY_PREFIX } from './prepared-submissions'
+import { clearStoredJournal, storedJournal } from './prepared-submissions-test-utils'
 import { resetRejectedOptimisticSendsForTests } from './rejected-optimistic-sends'
 import { clearSingleFlightSessionResumeState } from './single-flight-resume'
 import { resetSubmissionIdSupportForTests } from './submission-identity-support'
@@ -319,6 +321,81 @@ async function sendWithResumeDown(options: SubmitTextOptions) {
   return accepted
 }
 
+interface FirstAttempt {
+  /** What the first attempt's prompt.submit does (it throws). */
+  submit?: () => never
+  /** The user switches chats right after the journal entry is written: the submit never leaves. */
+  driftOnJournalWrite?: boolean
+}
+
+const ownerRefusal = () =>
+  new JsonRpcGatewayError('This chat is active in another Hermes window/terminal.', {
+    code: 4090,
+    data: { reason: 'SESSION_NOT_OWNED' }
+  })
+
+/** A first attempt into the chat's live runtime that ends as `first` says, leaving its journal
+ *  entry; `retry` then sends the same words again (the composer's restored draft, same identity)
+ *  after the runtime binding is lost and the hub stops answering resumes. */
+async function failFirstAttempt(first: FirstAttempt) {
+  const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+  const busyRef: MutableRefObject<boolean> = { current: false }
+  const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
+  const runtimeIdByStoredSessionIdRef = { current: new Map([[STORED_SESSION_ID, RUNTIME_SESSION_ID]]) }
+
+  const requestGateway = vi.fn(async (method: string) => {
+    if (method === 'prompt.submit' && first.submit) {
+      first.submit()
+    }
+
+    throw resumeTimeout()
+  })
+
+  const setItem = Storage.prototype.setItem
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+    setItem.call(this, key, value)
+
+    if (first.driftOnJournalWrite && key.startsWith(ENTRY_PREFIX)) {
+      selectedStoredSessionIdRef.current = 'another-chat'
+    }
+  })
+
+  let prompt: HarnessHandle | null = null
+  await actRender(
+    <Harness
+      activeSessionIdRef={activeSessionIdRef}
+      busyRef={busyRef}
+      onReady={handle => (prompt = handle)}
+      refreshSessions={async () => undefined}
+      requestGateway={requestGateway}
+      runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+      selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+      storedSessionId={STORED_SESSION_ID}
+    />
+  )
+
+  expect(await prompt!.submitText(TEXT, COMPOSER_SEND)).toBe(false)
+  expect(requestGateway.mock.calls.some(([method]) => method === 'prompt.submit')).toBe(!first.driftOnJournalWrite)
+
+  return {
+    journalOutcomes: () => Object.values(storedJournal()).map(entry => entry.outcome ?? 'unknown'),
+    retry: async () => {
+      first.driftOnJournalWrite = false
+      // Back in the chat: a drift abort leaves the view it left to clear its own busy flag.
+      selectedStoredSessionIdRef.current = STORED_SESSION_ID
+      busyRef.current = false
+      activeSessionIdRef.current = null
+      runtimeIdByStoredSessionIdRef.current.clear()
+      clearNotifications()
+      const resumesBefore = resumeCalls(requestGateway)
+      const accepted = await prompt!.submitText(TEXT, COMPOSER_SEND)
+      expect(resumeCalls(requestGateway)).toBe(resumesBefore + 1)
+
+      return accepted
+    }
+  }
+}
+
 beforeEach(() => {
   clearSingleFlightSessionResumeState()
   clearStoredJournal()
@@ -466,40 +543,21 @@ describe('the notice says where the words are', () => {
     expect(errorNotices().map(notice => notice.title)).toEqual(titles)
   })
 
-  it('a retry of a send whose earlier outcome is unknown does not claim it was not sent', async () => {
-    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+  it.each<[string, FirstAttempt, string, string]>([
+    // The first attempt reaches the backend and its answer never comes back.
+    ['is unknown: the retry cannot say it was not sent', { submit: () => { throw new Error('request timed out after 1800s: prompt.submit') } },
+      'unknown', `${copy.promptSendUnconfirmed} ${copy.promptBackInComposer}`],
+    // The owner answered that it admitted nothing (another window holds the chat).
+    ['was a definite refusal: the retry says it was not sent', { submit: () => { throw ownerRefusal() } },
+      'refused', NOT_SENT_BACK_IN_COMPOSER],
+    // The user switched chats after the journal entry was written and before the submit left.
+    ['was aborted before the send: the retry says it was not sent', { driftOnJournalWrite: true },
+      'aborted', NOT_SENT_BACK_IN_COMPOSER]
+  ])('a retry of a send whose earlier attempt %s', async (_label, first, outcome, notice) => {
+    const { journalOutcomes, retry } = await failFirstAttempt(first)
 
-    const runtimeIdByStoredSessionIdRef = { current: new Map([[STORED_SESSION_ID, RUNTIME_SESSION_ID]]) }
-
-    const requestGateway = vi.fn(async (method: string) => {
-      // The first attempt reaches the backend and its answer never comes back; then the runtime
-      // binding is lost and the hub stops answering resumes.
-      throw method === 'prompt.submit' ? new Error('request timed out after 1800s: prompt.submit') : resumeTimeout()
-    })
-
-    let prompt: HarnessHandle | null = null
-    await actRender(
-      <Harness
-        activeSessionIdRef={activeSessionIdRef}
-        onReady={handle => (prompt = handle)}
-        refreshSessions={async () => undefined}
-        requestGateway={requestGateway}
-        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
-        storedSessionId={STORED_SESSION_ID}
-      />
-    )
-
-    expect(await prompt!.submitText(TEXT, COMPOSER_SEND)).toBe(false)
-    activeSessionIdRef.current = null
-    runtimeIdByStoredSessionIdRef.current.clear()
-    clearNotifications()
-    const resumesBefore = resumeCalls(requestGateway)
-
-    expect(await prompt!.submitText(TEXT, COMPOSER_SEND)).toBe(false)
-
-    expect(resumeCalls(requestGateway)).toBe(resumesBefore + 1)
-    expect(errorNotices().map(notice => notice.title)).toEqual([
-      `${copy.promptSendUnconfirmed} ${copy.promptBackInComposer}`
-    ])
+    expect(journalOutcomes()).toEqual([outcome])
+    expect(await retry()).toBe(false)
+    expect(errorNotices().map(n => n.title)).toEqual([notice])
   })
 })

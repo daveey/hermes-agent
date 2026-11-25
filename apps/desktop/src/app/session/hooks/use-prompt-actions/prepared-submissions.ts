@@ -27,6 +27,8 @@ export interface PreparedSubmission {
   displayText?: string
   params: Record<string, unknown>
   legacyAttempted?: boolean
+  /** How the last attempt ended when it did not land (submission-outcome.ts); absent = unknown. */
+  outcome?: 'aborted' | 'refused' | 'unknown'
 }
 
 // Admitted entries whose durable removal failed (ENOSPC/EIO): journal key -> spent submission id.

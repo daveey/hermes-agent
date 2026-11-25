@@ -202,10 +202,11 @@ describe('a refused identityless send', () => {
     const setItem = storage.setItem
     let resetWrites = 0
 
-    // Only the reset of `legacyAttempted` after the refusal fails to save.
+    // Every save after the refusal fails: the reset of `legacyAttempted`, then the refusal outcome
+    // (submission-outcome.ts) that is recorded on the same entry.
     vi.spyOn(storage, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
       if (legacySends(submits) === 1 && JSON.parse(value)?.legacyAttempted === false) {
-        resetWrites += 1
+        resetWrites += JSON.parse(value).outcome === undefined ? 1 : 0
         throw storageError
       }
 
@@ -227,6 +228,7 @@ describe('a refused identityless send', () => {
     expect(errors.join('\n')).not.toContain('journal is full')
     expect($notifications.get().map(n => n.message).join('\n')).not.toContain('journal is full')
     expect(warn).toHaveBeenCalledWith('[prepared-submission-reset]', storageError)
+    expect(warn).toHaveBeenCalledWith('[prepared-submission-outcome]', storageError)
   })
 
   it('a legacy send refused session busy (4009) is retried by the busy loop instead of failing as unconfirmed', async () => {
