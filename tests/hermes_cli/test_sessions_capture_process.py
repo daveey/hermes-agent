@@ -122,6 +122,54 @@ def test_spawn_failure_is_typed():
         CaptureProcess(command=['/nonexistent/capture-worker'])('sessions', {})
 
 
+def _burn(seconds, then):
+    # Burn child CPU (process_time, so a loaded host cannot make it sleep through the budget).
+    return (f'import sys, time\nsys.stdin.buffer.read()\nend = time.process_time() + {seconds!r}\n'
+            f'while time.process_time() < end:\n    pass\n{then}')
+
+
+def _capture_child_stat():
+    from hermes_cli import loop_accounting
+    return loop_accounting.counters().get('sessions.capture.child', {})
+
+
+def test_child_cpu_is_accounted_outside_the_owner_thread():
+    import threading as _threading
+    from hermes_cli import loop_accounting
+
+    def owner_accounted():
+        own = _threading.get_native_id()
+        return sum(t['accounted_cpu_s'] for t in loop_accounting.thread_cpu() if t['tid'] == own)
+
+    before, owner_before = _capture_child_stat(), owner_accounted()
+    capture = CaptureProcess(command=command(_burn(.3, frame())))
+    try:
+        assert json.loads(capture('sessions', {}))['sessions'][0]['id'] == 'real-row'
+    finally:
+        capture.close()
+    after = _capture_child_stat()
+    assert after['runs'] == before.get('runs', 0) + 1
+    assert after['errors'] == before.get('errors', 0)
+    assert after['fallbacks'] == before.get('fallbacks', 0)  # the CPU was readable, not assumed 0
+    assert after['cpu_s'] - before.get('cpu_s', 0) >= .25
+    # The CPU belongs to another process: the owner thread must not count it as its own.
+    assert owner_accounted() - owner_before < .1
+
+
+def test_failed_child_cpu_is_accounted_as_an_error():
+    before = _capture_child_stat()
+    capture = CaptureProcess(seconds=.5, command=command(_burn(30, '')))
+    with pytest.raises(CaptureUnavailable) as error:
+        capture('sessions', {})
+    assert error.value.reason == 'timeout'
+    after = _capture_child_stat()
+    assert after['runs'] == before.get('runs', 0) + 1
+    assert after['errors'] == before.get('errors', 0) + 1
+    assert after['error_kinds'].get('CaptureUnavailable', 0) == before.get('error_kinds', {}).get(
+        'CaptureUnavailable', 0) + 1
+    assert after['cpu_s'] - before.get('cpu_s', 0) >= .1
+
+
 def test_high_descriptor_frame_read():
     import fcntl
     import os

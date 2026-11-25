@@ -17,6 +17,8 @@ from fastapi import HTTPException
 from fastapi.params import Param
 from starlette.responses import Response
 
+from hermes_cli import loop_accounting as _la
+
 
 _UNBOUND = object()
 PENDING_NATIVE = object()  # Installed native owner, not ready; NEVER select legacy.
@@ -148,14 +150,18 @@ class SessionsFactRoutes:
             self._condition.notify_all()
 
     def response(self, name, selector):
-        touch = getattr(self._handle, 'touch', None)
-        if touch is not None:
-            touch(name, selector)  # Optional owner-memory LRU hint, never source I/O.
-        result = self._handle.v1.snapshot(self._scope).view(name, selector)
-        if isinstance(result, self._ready_type):
-            return Response(content=result.encoded, media_type="application/json")
-        if isinstance(result, self._pending_type):
-            self._handle.demand(name, selector)
+        # The legacy reader's own span never runs in facts mode. Account the read that
+        # replaced it, or a facts-served route looks like zero requests and zero CPU.
+        with _la.pass_(f"route/profiles.{name}.facts") as accounted:
+            touch = getattr(self._handle, 'touch', None)
+            if touch is not None:
+                touch(name, selector)  # Optional owner-memory LRU hint, never source I/O.
+            result = self._handle.v1.snapshot(self._scope).view(name, selector)
+            if isinstance(result, self._ready_type):
+                return Response(content=result.encoded, media_type="application/json")
+            accounted.fallback()  # A designed 503, not an error of the pass.
+            if isinstance(result, self._pending_type):
+                self._handle.demand(name, selector)
         raise HTTPException(503, "sessions projection unavailable", headers={"Retry-After": "1"})
 
     async def first_response(self, name, selector):

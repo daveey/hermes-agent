@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 
+from hermes_cli import loop_accounting as _la
 from hermes_cli._launchers import runtime_command
 from hermes_cli._startup_fast import project_root_str
 from hermes_cli._subprocess_compat import kill_process_tree
@@ -103,6 +104,7 @@ class CaptureProcess:
             except OSError as exc:
                 raise CaptureUnavailable('spawn') from exc
             self._child = child
+        cpu_s, completed = None, False
         try:
             # Small request fits the pipe; a non-reading child must not block the owner.
             os.set_blocking(child.stdin.fileno(), False)
@@ -119,6 +121,7 @@ class CaptureProcess:
             # Require exactly one frame and a successful child exit, within the SAME budget.
             if _read_trailer(child, deadline):
                 raise CaptureUnavailable('trailing_frame')
+            cpu_s = _child_cpu(child.pid)  # before the wait reaps it and its counters
             if child.wait(timeout=max(0, deadline - time.monotonic())) != 0:
                 raise CaptureUnavailable('crash')
             if time.monotonic() > deadline:
@@ -126,10 +129,17 @@ class CaptureProcess:
             result = json.loads(body)
             if not isinstance(result, dict):
                 raise CaptureUnavailable('invalid_body')
+            completed = True
             return body
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             raise CaptureUnavailable('transport') from exc
         finally:
+            if cpu_s is None:
+                cpu_s = _child_cpu(child.pid)  # a failed or cancelled child spent CPU too
+            # The child's CPU is outside this process: no thread here may claim it (outer=False).
+            _la.record('sessions.capture.child', cpu_s=cpu_s or 0.0, wall_s=time.monotonic() - started,
+                       fallback=cpu_s is None, error=not completed,
+                       error_kind=None if completed else 'CaptureUnavailable', outer=False)
             if child.poll() is None:
                 kill_process_tree(child)
             child.wait(timeout=1)
@@ -159,3 +169,17 @@ class CaptureProcess:
 def _read_trailer(child, deadline):
     _wait(child.stdout, selectors.EVENT_READ, deadline)
     return os.read(child.stdout.fileno(), 1)
+
+
+def _child_cpu(pid):
+    """CPU seconds of a live or not-yet-reaped child plus the descendants it has reaped, else None.
+
+    Linux procfs only, like the native capture itself. Sampled when the response frame ends, so
+    it leaves out the child's interpreter teardown: a lower bound, never an estimate.
+    """
+    try:
+        with open(f'/proc/{pid}/stat', encoding='ascii', errors='replace') as stat:
+            fields = stat.read().rpartition(')')[2].split()
+        return sum(int(fields[index]) for index in (11, 12, 13, 14)) / os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, IndexError):
+        return None
