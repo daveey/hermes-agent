@@ -121,10 +121,11 @@ def test_a_human_comment_after_the_stop_is_heard_before_any_grant(kanban_home, s
         assert reviewer.state(conn, tid, episode) == reviewer.ESCALATED
 
 
-def test_grants_are_capped_until_someone_else_decides(kanban_home, spend_reviewer, inline):
+def test_grants_are_capped_until_someone_else_decides(kanban_home, spend_reviewer, inline, monkeypatch):
+    clock = int(time.time())
+    monkeypatch.setattr(ksb.time, "time", lambda: clock)
     with kbc.connect_closing() as conn:
         tid, _ = _stopped(conn)
-        clock = int(time.time())
         for _ in range(reviewer.DEFAULT_MAX_GRANTS):
             spend_reviewer.append(_grant(runs=2))
             reviewer.start_due(conn, now=clock)
@@ -374,6 +375,81 @@ def test_a_dispatcher_tick_drops_finished_review_threads(kanban_home, spend_revi
         assert reviewer._THREADS == [running]
     finally:
         reviewer._THREADS.clear()
+
+
+def test_three_spent_runs_buy_exactly_two_more(kanban_home, spend_reviewer, inline, monkeypatch):
+    clock = int(time.time())
+    monkeypatch.setattr(ksb.time, "time", lambda: clock)
+    spend_reviewer.append(_grant(runs=2))
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Bounded progress", assignee="default")
+        ksb.set_override(conn, tid, runs=3, by="owner", reason="initial allowance")
+        helpers._runs(conn, tid, 3)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_runs SET summary=? WHERE task_id=?", (PROGRESS, tid))
+        assert ksb.spend(conn, tid).runs == 3
+        assert ksb.hold(conn, tid, lim=helpers.LIMITS) == "triage"
+        reviewer.start_due(conn)
+        assert kb.get_task(conn, tid).status == "ready"
+        assert ksb.hold(conn, tid, lim=helpers.LIMITS) is None
+        for count in (1, 2):
+            clock += 100
+            with kb.write_txn(conn):
+                conn.execute("INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, summary) "
+                             "VALUES (?, 'default', 'done', ?, ?, 'continued', ?)",
+                             (tid, clock - 90, clock, PROGRESS))
+            assert ksb.spend(conn, tid).runs == count
+            assert ksb.hold(conn, tid, lim=helpers.LIMITS) == (None if count == 1 else "triage")
+
+
+@pytest.mark.parametrize("during_judge", [False, True])
+@pytest.mark.parametrize("writer_kind", ["human", "agent"])
+def test_a_post_stop_override_is_never_overwritten(kanban_home, spend_reviewer, inline, monkeypatch,
+                                                  during_judge, writer_kind):
+    with kbc.connect_closing() as conn:
+        tid, episode = _stopped(conn)
+
+        def decide():
+            ksb.set_override(conn, tid, runs=15, by="owner", reason="owner decision", writer_kind=writer_kind)
+
+        def judge(ctx):
+            if during_judge:
+                decide()
+            return _grant(runs=2)
+
+        if not during_judge:
+            decide()
+        monkeypatch.setattr(reviewer, "judge", judge)
+        reviewer.start_due(conn)
+        assert kb.get_task(conn, tid).status == "triage"
+        assert ksb.card_override(conn, tid)["by"] == "owner"
+        assert ksb.card_override(conn, tid)["runs"] == 15
+        assert reviewer.state(conn, tid, episode) == reviewer.ESCALATED
+        assert _kinds(conn, tid).count(ksb.OVERRIDE_EVENT) == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_zero_run_retriage_never_grants_again(kanban_home, spend_reviewer, inline, legacy):
+    spend_reviewer.append(_grant(runs=2))
+    with kbc.connect_closing() as conn:
+        tid, _ = _stopped(conn)
+        reviewer.start_due(conn)
+        assert kb.get_task(conn, tid).status == "ready"
+        with kb.write_txn(conn):
+            if legacy:  # historical grants lacked a fresh-window marker
+                conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='promoted_manual'",
+                             ('{"actor":"kanban-spend-reviewer"}', tid))
+            conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+            kb._append_event(conn, tid, ksb.EVENT, {"limit": "runs", "runs": 3, "since": 0,
+                                                  "limits": {"runs": 2}})
+        episode = reviewer.episode_of(decision.pending_episode(conn, tid))
+        spend_reviewer.append(_grant(runs=2))
+        reviewer.queue(conn, tid, episode)
+        for _ in range(3):
+            reviewer.start_due(conn)
+        assert kb.get_task(conn, tid).status == "triage"
+        assert _kinds(conn, tid).count(reviewer.GRANTED) == 1
+        assert _kinds(conn, tid).count("promoted_manual") == 1
 
 
 def test_the_one_shot_dispatch_command_waits_for_its_reviews(kanban_home, monkeypatch):

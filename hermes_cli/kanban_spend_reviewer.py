@@ -24,8 +24,9 @@ sat for up to 40 h. The reviewer decides at once, outside the worker queue:
 * **Grant** only when code also checks: N is at most the allowance that just ran out (and
   ``kanban_spend_promote.MAX_RUNS``); the judge quoted at least ``QUOTE_MIN`` characters verbatim from that
   window's run summaries or non-system comments as progress; and, again under the write lock, the stop is still
-  the card's current, ordinary, pending, undisposed stop, still in triage, with no human comment since and no
-  open parent. The grant is the decision card's promotion (``kanban_spend_promote.apply``):
+  the card's current, ordinary, pending, undisposed stop, still in triage, with no human comment or budget
+  decision since and no open parent. A promotion followed by triage with zero new runs cannot earn another
+  grant: the owner must reconcile it. The grant is the decision card's promotion (``kanban_spend_promote.apply``):
   status ready, a ``spend_budget_set`` of exactly N runs, a ``promoted_manual`` that opens a fresh window,
   and a comment. An open decision card for the same stop is archived as decided.
 * **Escalate** otherwise (``spend_review_escalated`` plus a comment with the reason): the stop is routed the
@@ -434,6 +435,17 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
     if _disposed(conn, task_id, episode):
         return "a closed decision card already disposed of the stop"
     after = _event_order(stop)
+    history = [dict(ev) for ev in conn.execute(
+        "SELECT * FROM task_events WHERE task_id = ? AND kind IN ('spend_budget_set', 'promoted_manual')",
+        (task_id,))]
+    if any(ev["kind"] == 'spend_budget_set' and _event_order(ev) > after for ev in history):
+        return "a budget decision was recorded after the stop; the owner decides its promotion"
+    promotions = [ev for ev in history if ev["kind"] == 'promoted_manual' and _event_order(ev) < after]
+    if promotions:
+        promoted = max(promotions, key=_event_order)
+        if not conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND started_at >= ? AND started_at <= ? "
+                            "LIMIT 1", (task_id, promoted["created_at"], stop["created_at"])).fetchone():
+            return "the card returned to triage after promotion with zero new runs; the owner must reconcile it"
     for ev in conn.execute("SELECT * FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_valid(payload) "
                            "AND (json_extract(payload, '$.writer_kind') = 'human' "
                            "OR json_extract(payload, '$.relayed_human') IS NOT NULL)", (task_id,)):
