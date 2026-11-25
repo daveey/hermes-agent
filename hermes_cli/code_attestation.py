@@ -16,7 +16,7 @@ import re
 import subprocess
 import sys
 import sysconfig
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from itertools import islice
 import threading
 import time
@@ -107,6 +107,8 @@ class _DependencyIndex:
         self.roots = ()
         self.rows = {}
         self.dists = {}
+        self._owners = {}
+        self._ambiguous = set()
         self.limit = False
         self._built = set()
         self._total = 0
@@ -138,7 +140,11 @@ class _DependencyIndex:
                 size = int(row[2])
             except ValueError:
                 continue
-            self.rows[root / relative] = (dist, digest, size)
+            path = root / relative
+            if path in self.rows:
+                self._ambiguous.add(path)
+            self.rows[path] = (dist, digest, size)
+            self._owners[path] = (root, dist)
 
     def build(self):
         for root in self.roots:
@@ -162,7 +168,7 @@ class _DependencyIndex:
                     installer = _sha(_read_bounded(info / "INSTALLER", 4096))
                 except (OSError, ValueError):
                     installer = None
-                self.dists[info.name[:-len(".dist-info")]] = {
+                self.dists[(root, info.name[:-len(".dist-info")])] = {
                     "dir": str(root), "record_sha256": _sha(record),
                     "installer_sha256": installer, "used": False}
                 self._parse(root, info, record.decode("utf-8", "replace"))
@@ -173,7 +179,7 @@ class _DependencyIndex:
     def identity(self, path):
         """(canonical PEP 503 dist name, version, relative posix path) of a RECORD row, else None."""
         row = self.rows.get(path)
-        if row is None:
+        if row is None or path in self._ambiguous:
             return None
         stem = row[0]
         name, _, version = stem.rpartition("-")
@@ -187,7 +193,7 @@ class _DependencyIndex:
         """(dist, digest) when the file's current bytes match its receipt, else None."""
         self.build()
         row = self.rows.get(path)
-        if row is None:
+        if row is None or path in self._ambiguous:
             return None
         dist, digest, size = row
         try:
@@ -201,8 +207,19 @@ class _DependencyIndex:
             return None
         if data_digest != digest or actual != size:
             return None
-        self.dists[dist]["used"] = True
+        self.distribution(path)["used"] = True
         return dist, digest
+
+    def distribution(self, path):
+        """The exact installer/root that owns this unique source claim."""
+        return self.dists[self._owners[path]]
+
+    def receipts(self):
+        # Preserve single-generation names, qualify overlaps instead of overwriting.
+        counts = Counter(name for _, name in self.dists)
+        return {(name if counts[name] == 1 else str(root / name)):
+                {k: v for k, v in info.items() if k != "used"}
+                for (root, name), info in self.dists.items() if info["used"]}
 
 
 def _read_bounded(path, limit):
@@ -1241,7 +1258,7 @@ class Attestation:
         if (self._deps.identity(path) != _ATTRS_IDENTITY or
                 code.co_qualname != "<module>" or _sha(source) != _ATTRS_SOURCE):
             return
-        info = self._deps.dists[self._deps.rows[path][0]]
+        info = self._deps.distribution(path)
         descriptor = GeneratorDescriptor.from_executed(
             "attrs:_compile_and_eval", code, "_compile_and_eval", source,
             {"dist": "attrs", "version": "26.1.0", "record_sha256": info["record_sha256"]})
@@ -1343,7 +1360,7 @@ class Attestation:
             return
         for stale in self._dep_generators.pop(key, ()):  # A4: reload replaces, never stacks
             self._generators.pop(stale, None)
-        info = self._deps.dists.get(self._deps.rows[path][0], {})
+        info = self._deps.distribution(path)
         distribution = {"dist": dist, "version": version,
                         "record_sha256": info.get("record_sha256")}
         created = []
@@ -1421,8 +1438,7 @@ class Attestation:
         """Receipts actually used: trusted by installer receipt, not audited, no coverage."""
         with self._lock:
             return {"trust": DEPENDENCY_TRUST, "roots": [str(r) for r in self._deps.roots],
-                    "dists": {name: {k: v for k, v in info.items() if k != "used"}
-                              for name, info in self._deps.dists.items() if info["used"]},
+                    "dists": self._deps.receipts(),
                     "units": [dict(u) for u in self._dep_units.values()],
                     "native_loads": [dict(n) for n in self._native_loads],
                     "unknown_producers": {k: sorted(v) for k, v in self._unknown_detail.items()},
