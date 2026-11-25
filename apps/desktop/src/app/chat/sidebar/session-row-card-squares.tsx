@@ -3,11 +3,11 @@ import { type ReactNode, useContext, useEffect, useState } from 'react'
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { executionIdentityKey, selectExecutionObservation } from '@/lib/execution-observations'
 import { deriveExternalVisual } from '@/lib/external-run'
 import { cn } from '@/lib/utils'
 import { isWaitKind, ORANGE_OVER, type WaitEta, type WaitReadout, waitReadout } from '@/lib/wait-eta'
 import type { SessionStatusStripe } from '@/store/session-dot-state'
+import { sidebarCardWork } from '@/store/sidebar-card-work'
 
 import { CardCountsContext } from './card-counts-context'
 import { SessionRowCardTimers } from './session-row-card-timers'
@@ -16,6 +16,7 @@ import { useWaitClock } from './use-wait-clock'
 const COLOURS = {
   red: 'bg-red-500',
   pink: 'bg-pink-500',
+  orange: 'bg-orange-500',
   green: 'bg-emerald-500',
   amber: 'bg-amber-500',
   blue: 'bg-sky-400 dark:bg-sky-500',
@@ -28,36 +29,12 @@ type CardColour = keyof typeof COLOURS
 const OUTLINES: Record<CardColour, string> = {
   red: 'border-red-500',
   pink: 'border-pink-500',
+  orange: 'border-orange-500',
   green: 'border-emerald-500',
   amber: 'border-amber-500',
   blue: 'border-sky-400 dark:border-sky-500',
   grey: 'border-zinc-400 dark:border-zinc-500',
   violet: 'border-violet-500'
-}
-
-/** Counts do not distinguish ready from running; only current card evidence can refine that fallback. */
-function queuedCards(session: SessionInfo): number {
-  const values = Array.isArray(session.execution_observations) ? session.execution_observations : []
-  const identities = new Map<string, unknown>()
-
-  for (const value of values) {
-    if (!value || typeof value !== 'object' || !('identity' in value)) {
-      continue
-    }
-
-    const identity = value.identity
-    const key = executionIdentityKey(identity)
-
-    if (key && identity && typeof identity === 'object' && 'kind' in identity && identity.kind === 'card') {
-      identities.set(key, identity)
-    }
-  }
-
-  const now = Date.now() / 1000
-
-  return [...identities.values()].filter(
-    identity => selectExecutionObservation(values, identity, now).state === 'queued'
-  ).length
 }
 
 /** One entry per distinct card colour, in urgency order. No backend reads. */
@@ -68,14 +45,17 @@ export function sessionCardColours(
   const parked = session.kanban_parked ?? 0
   const stalled = session.kanban_stalled ?? 0
   const live = Math.max(0, (session.kanban_active ?? 0) - parked - (session.kanban_held ?? 0))
-  const queued = Math.min(live, queuedCards(session))
+  const work = sidebarCardWork(session)
+  const queued = Math.min(live, work.queued)
+  const quiet = Math.min(Math.max(0, live - queued), work.quiet)
 
   const counts: Record<CardColour, number> = {
     red: session.needs_you?.length ?? session.kanban_blocked ?? 0,
     pink: session.kanban_held ?? 0,
-    green: stalled + queued,
+    orange: stalled + quiet,
+    green: queued,
     amber: session.kanban_attention ?? 0,
-    blue: live - queued,
+    blue: live - queued - quiet,
     grey: Math.max(0, parked - stalled) + executionUnknown + Number(Boolean(session.kanban_unknown)),
     violet: session.kanban_unseen ?? 0
   }
@@ -147,7 +127,7 @@ export function CardSquares({
         role="img"
       >
         {colours.map(({ colour, count }) =>
-          counts ? (
+          counts || colour === 'orange' ? (
             <span
               className={`inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-[2px] border px-[2px] text-[0.625rem] leading-none tabular-nums text-(--ui-text-secondary) ${OUTLINES[colour]}`}
               data-card-colour={colour}

@@ -28,7 +28,7 @@ for (const width of [180, 240, 400]) {
     </style><div id="section"><div class="${headerClass}">
       <button id="label">BACKGROUND 20</button><div id="action" class="${actionClass}">
       <span id="counts" class="${groupClass![1]} ${groupClass![2]}">
-        ${[6, 1, 1, 3, 110, 12, 8].map(n => `<span class="${badgeClass}">${n}</span>`).join('')}
+        ${[6, 1, 4, 1, 3, 110, 12, 8].map(n => `<span class="${badgeClass}">${n}</span>`).join('')}
       </span></div></div><div id="row"><span id="tail">110</span></div></div>`)
 
     const geometry = await page.locator('#section').evaluate(el => {

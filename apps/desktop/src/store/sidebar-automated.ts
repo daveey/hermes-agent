@@ -1,8 +1,10 @@
 import type { SessionInfo } from '@/types/hermes'
 
+import { hasFreshKanbanObservation } from './kanban-observation'
 import { $pinnedSessionIds, $sidebarShowAutomated } from './layout'
 import { isSessionParked } from './session-blocked'
 import { $sessionDotStateById, kanbanStripeCounts, type SessionDotState } from './session-dot-state'
+import { sidebarCardWork } from './sidebar-card-work'
 
 /**
  * [daveey] Automated / test sessions in the sidebar.
@@ -33,7 +35,17 @@ type AutomatedRow = Pick<
   | 'pinned'
   | 'review_wait'
 > &
-  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_stalled' | 'kanban_external' | 'kanban_external_down' | 'kanban_observed_at' | 'muted'>>
+  Partial<
+    Pick<
+      SessionInfo,
+      | 'execution_observations'
+      | 'kanban_stalled'
+      | 'kanban_external'
+      | 'kanban_external_down'
+      | 'kanban_observed_at'
+      | 'muted'
+    >
+  >
 
 export interface AutomatedRowContext {
   /** Explicit render clock for memoized filters; imperative callers use the current clock. */
@@ -47,7 +59,12 @@ export interface AutomatedRowContext {
 }
 
 /** A bot row that is waiting on the user: needs input, or a red / grey stripe. */
-export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotState, userBlocked: boolean, nowSeconds?: number): boolean {
+export function automatedRowNeedsAttention(
+  row: AutomatedRow,
+  state: SessionDotState,
+  userBlocked: boolean,
+  nowSeconds?: number
+): boolean {
   if (state === 'needs-input' || state === 'stalled') {
     return true
   }
@@ -56,8 +73,18 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
 
   // Visibility policy is not status/color authority. Missing protocol on a hidden bot must not
   // resurface every automated row; the surviving row still paints only its canonical status.
-  return userBlocked || counts.blocked > 0 || counts.stalled > 0 || counts.externalDown > 0 ||
-    row.review_wait === 'stuck' || (row.kanban_attention ?? 0) > 0
+  const stuck =
+    (hasFreshKanbanObservation(row) && (row.kanban_stalled ?? 0) > 0) || sidebarCardWork(row, nowSeconds).quiet > 0
+
+  return (
+    userBlocked ||
+    stuck ||
+    counts.blocked > 0 ||
+    counts.stalled > 0 ||
+    counts.externalDown > 0 ||
+    row.review_wait === 'stuck' ||
+    (row.kanban_attention ?? 0) > 0
+  )
 }
 
 export function sessionHiddenAsAutomated(

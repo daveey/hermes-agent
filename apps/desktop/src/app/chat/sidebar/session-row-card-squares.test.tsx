@@ -36,9 +36,9 @@ describe('sessionCardColours', () => {
   it('pink counts held cards', () => {
     expect(sessionCardColours(session({ kanban_held: 2 }), 0)).toEqual([{ colour: 'pink', count: 2 }])
   })
-  it('green marks worker waits while amber retains completed-card attention', () => {
+  it('orange marks stalled work while amber retains completed-card attention', () => {
     expect(sessionCardColours(session({ kanban_stalled: 2, kanban_attention: 1 }), 0)).toEqual([
-      { colour: 'green', count: 2 },
+      { colour: 'orange', count: 2 },
       { colour: 'amber', count: 1 }
     ])
   })
@@ -115,7 +115,7 @@ describe('sessionCardColours', () => {
         }),
         0
       ).map(item => item.colour)
-    ).toEqual(['red', 'pink', 'green', 'blue', 'grey', 'violet'])
+    ).toEqual(['red', 'pink', 'orange', 'blue', 'grey', 'violet'])
   })
 })
 
@@ -147,10 +147,10 @@ it.each([
 it('renders worker waits and unseen completions with distinct colours and copy', () => {
   vi.useFakeTimers()
   const { container } = draw({ kanban_active: 2, kanban_parked: 2, kanban_stalled: 2, kanban_unseen: 1 })
-  expect(container.querySelector('[data-card-colour="green"]')?.className).toContain('bg-emerald-500')
+  expect(container.querySelector('[data-card-colour="orange"]')?.className).toContain('border-orange-500')
   expect(container.querySelector('[data-card-colour="violet"]')?.className).toContain('bg-violet-500')
   const squares = screen.getByTestId('session-row-card-squares')
-  expect(squares.getAttribute('aria-label')).toBe('Waiting for a worker 2 · Done, not yet seen 1')
+  expect(squares.getAttribute('aria-label')).toBe('Stuck 2 · Done, not yet seen 1')
   act(() => {
     fireEvent.pointerMove(squares, { pointerType: 'mouse' })
     vi.advanceTimersByTime(700)

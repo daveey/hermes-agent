@@ -42,6 +42,7 @@ export const enSessionRowStatus = {
   cardColours: {
     red: 'Needs you',
     pink: 'Held',
+    orange: 'Stuck',
     amber: 'Needs attention',
     blue: 'Running',
     grey: 'Waiting',

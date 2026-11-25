@@ -69,6 +69,7 @@ export function sessionHasOpenCards(session: SessionInfo): boolean {
     (session.kanban_blocked ?? 0) > 0 ||
     (session.kanban_held ?? 0) > 0 ||
     (session.kanban_parked ?? 0) > 0 ||
+    (session.kanban_stalled ?? 0) > 0 ||
     (session.needs_you?.length ?? 0) > 0
   )
 }

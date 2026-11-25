@@ -129,6 +129,25 @@ def test_annotation_keeps_count_and_identity_generation_together(board, monkeypa
     assert ksa.annotate_kanban_activity([_row()])[0]["kanban_active"] == 1
 
 
+@pytest.mark.parametrize('sid', ['ordinary-user-chat', 'kanban_owner_terminal'])
+@pytest.mark.parametrize('kind', ['scope_stopped', 'decision_pending'])
+def test_administrative_triage_remains_unfinished_without_a_live_executor(board, monkeypatch, sid, kind):
+    _add_card(board, 't_stuck', 'triage', sid)
+    _add_card(board, 't_done', 'done', sid)
+    with sqlite3.connect(board) as conn:
+        conn.execute('CREATE TABLE task_events '
+                     '(id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER)')
+        conn.execute("INSERT INTO task_events VALUES (1, 't_stuck', 'decision_retained', ?, 1)",
+                     (json.dumps({'disposition': {'reason': kind}}),))
+    monkeypatch.setattr(ksa.time, 'time', lambda: 100000.0)
+    row = ksa.annotate_kanban_activity([{'id': sid}])[0]
+    assert row['kanban_active'] == row['kanban_parked'] == 1
+    assert 'kanban_blocked' not in row and not row.get('needs_you')
+    assert row['kanban_waiting_on'] == ['t_stuck']
+    assert row['kanban_observed_at'] <= 100000.0
+    assert {card['id'] for card in ksa.session_tasks([sid])} == {'t_stuck'}
+
+
 def test_same_local_id_on_different_boards_remains_distinct(board):
     _add_card(board, "t_shared", "running", "s_root", "s_tip")
     other = board.parent / "kanban" / "boards" / "other" / "kanban.db"

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { $kanbanObservationTick } from '@/store/kanban-observation'
-import { $pinnedSessionIds, resetSidebarView, setSidebarAgentsGrouped } from '@/store/layout'
+import { $pinnedSessionIds, $sidebarShowAutomated, resetSidebarView, setSidebarAgentsGrouped } from '@/store/layout'
 import { $projectTree } from '@/store/projects'
 import { $sessions } from '@/store/session'
 import { makeSessionInfo } from '@/test/session-info'
@@ -249,7 +249,7 @@ it('aggregates every colour in urgency order and omits zero totals', () => {
   ).toEqual([
     ['red', '6'],
     ['pink', '4'],
-    ['green', '2'],
+    ['orange', '2'],
     ['amber', '8'],
     ['blue', '10'],
     ['grey', '10'],
@@ -272,6 +272,34 @@ it('hides the section when the last open card closes and keeps normal pins', () 
   expect(screen.queryByText('Background')).toBeNull()
   expect(screen.queryByText('Owner kanban_owner_runner')).toBeNull()
   expect(screen.getByText('Normal pinned chat')).toBeTruthy()
+})
+
+it('shows ordinary and Background stuck-only and mixed sessions in the actual left pane', () => {
+  $sidebarShowAutomated.set(false)
+  const stuck = { kanban_active: 4, kanban_parked: 4, kanban_stalled: 4 }
+  const mixed = { ...stuck, kanban_active: 8 }
+  $sessions.set([
+    owner('kanban_owner_stuck', stuck),
+    owner('kanban_owner_mixed', mixed),
+    owner('kanban_owner_running', { kanban_active: 1 }),
+    owner('kanban_owner_done'),
+    owner('ordinary-stuck', { ...stuck, pinned: false, automated: true }),
+    owner('ordinary-mixed', { ...mixed, pinned: false, automated: true })
+  ])
+  mount()
+
+  for (const id of ['ordinary-stuck', 'ordinary-mixed', 'kanban_owner_stuck', 'kanban_owner_mixed']) {
+    const row = screen.getByText(`Owner ${id}`).closest('.group.row-hover')!
+    expect(row.querySelector('[data-card-colour="orange"]')).not.toBeNull()
+    expect(row.querySelector('[data-card-colour="orange"]')?.textContent).toBe('4')
+    expect(row.querySelector('[data-card-colour="red"]')).toBeNull()
+  }
+
+  const header = within(section('Background')).getByRole('button', { expanded: true })
+  const counts = within(header.parentElement!).getByTestId('session-row-card-squares')
+  expect(counts.getAttribute('aria-label')).toBe('Stuck 8 · Running 5')
+  expect(within(header).getByText('3')).toBeTruthy()
+  expect(screen.queryByText('Owner kanban_owner_done')).toBeNull()
 })
 
 it('persists Background collapse independently of Pinned across remounts', () => {
