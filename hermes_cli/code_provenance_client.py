@@ -54,8 +54,10 @@ def collect(home: Path, expected: dict) -> dict:
         while offset is not None:
             page = query(home, {'schema': 1, 'op': 'page', 'snapshot_id': summary['snapshot_id'],
                                'section': section, 'offset': offset, 'limit': 128})
-            if (page.get('complete') is not True or page.get('snapshot_id') != summary['snapshot_id']
-                    or page.get('captured') != summary['captured'] or page.get('offset') != offset
+            if (page.get('complete') is not True or page.get('purpose') != 'diagnostic_only'
+                    or page.get('snapshot_id') != summary['snapshot_id']
+                    or page.get('captured') != summary['captured'] or type(page.get('offset')) is not int
+                    or page.get('offset') != offset
                     or page.get('section') != section or page.get('sections') != summary['sections']):
                 raise ValueError('provenance_page_mismatch')
             entries, next_offset = page['entries'], page['next']

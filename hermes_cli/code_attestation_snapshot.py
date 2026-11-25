@@ -36,6 +36,7 @@ class DiagnosticSnapshot:
     begin_mono: float
     end_mono: float
     disk: Mapping[str, str | None]
+    boot: Mapping[str, str | None]
     full_provenance: bool = False
 
 
@@ -62,7 +63,7 @@ def _preflight(row, deadline):
                 size += len(ENCODER.encode(value[offset:offset + 1024])) - 2
                 if size > MAX_ENTRY_BYTES:
                     raise ValueError('entry_too_large')
-        elif value is not None and type(value) not in (int, bool):
+        elif value is not None and type(value) not in (int, bool, float):
             raise ValueError('unsupported_metadata_value')
 
 
@@ -88,7 +89,12 @@ class _Builder:
         self.total += size + 1
         self.rows[section].append(b''.join(chunks))
 
-    def finish(self, generation, begin, disk):
+    def finish(self, generation, begin, disk, boot):
+        end = time.monotonic()
+        self.add('metadata', {'kind': 'capture', 'generation': generation,
+                             'begin_mono': begin, 'end_mono': end})
+        if self.total + len(ENCODER.encode(boot)) > MAX_SNAPSHOT_BYTES:
+            raise ValueError('snapshot_too_large')
         sections, manifest = {}, {}
         for name, rows in self.rows.items():
             rows.sort()  # canonical entry bytes, lexicographic; duplicates are retained
@@ -103,15 +109,16 @@ class _Builder:
         if time.monotonic() >= self.deadline:
             raise TimeoutError('snapshot_deadline')
         return DiagnosticSnapshot(MappingProxyType(sections), MappingProxyType(manifest),
-                                  generation, begin, time.monotonic(), MappingProxyType(disk))
+                                  generation, begin, end, MappingProxyType(disk), MappingProxyType(boot))
 
 
 def _metadata(ledger, builder):
-    builder.add('metadata', {'kind': 'ledger', 'core_root': str(ledger.core_root),
+    boot = {'kind': 'ledger', 'core_root': str(ledger.core_root),
         'boot_sha': ledger.boot_sha, 'route': ledger.route,
         'boot_registry_blob': ledger._blobs.get(REGISTRY),
         'boot_registry_status': 'recorded' if REGISTRY in ledger._blobs else 'unavailable',
-        'stub_head_digest': ledger.stub_head_digest})
+        'stub_head_digest': ledger.stub_head_digest}
+    builder.add('metadata', boot)
     builder.add('metadata', {'kind': 'interpreter', **scalars(ledger.interpreter_identity,
         ('executable', 'version', 'cache_tag', 'prefix', 'base_prefix', 'binary_sha256'))})
     for seed in ledger._seed:
@@ -122,6 +129,7 @@ def _metadata(ledger, builder):
         'reason': 'Only retained ledger metadata; historical evicted/generated output is not reconstructed.'})
     builder.add('metadata', {'kind': 'dependency_index', 'limit_reached': ledger._deps.limit,
         'record_is_not_receipted': True, 'native_transitive_libraries': 'unavailable'})
+    return boot
 
 
 def _roots(ledger, builder):
@@ -191,10 +199,10 @@ def snapshot(ledger, *, deadline: float) -> DiagnosticSnapshot:
             builder.add('unknowns', reason)
             extension = reason in ledger._extension_unknowns and reason not in ledger._blocking_unknowns
             builder.add('quiet_extension' if extension else 'quiet_blocking', reason)
-        _metadata(ledger, builder)
+        boot = _metadata(ledger, builder)
         builder.add('metadata', {'kind': 'disk', **disk})
         _roots(ledger, builder)
         _execution(ledger, builder)
-        return builder.finish(ledger._generation, begin, disk)
+        return builder.finish(ledger._generation, begin, disk, boot)
     finally:
         ledger._lock.release()

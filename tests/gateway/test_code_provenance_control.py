@@ -311,6 +311,29 @@ def test_export_has_no_reservations_runner_or_file_mutations(runtime, monkeypatc
     asyncio.run(scenario())
 
 
+def test_full_supported_collector_excludes_code_frame_config_environment(runtime, monkeypatch):
+    async def scenario():
+        server, _control, params = await start(runtime)
+        try:
+            from hermes_cli.code_provenance_client import collect
+            import sys
+            local_secret = 'FRAME_SECRET_SENTINEL'
+            runtime[2]._units[0].update(code=(lambda: 'CONSTANT_SECRET_SENTINEL').__code__,
+                                      frame=sys._getframe())
+            monkeypatch.setenv('PROVENANCE_SECRET_TEST', 'ENV_SECRET_SENTINEL')
+            (runtime[0] / 'config.yaml').write_text('token: CONFIG_SECRET_SENTINEL\n')
+            document = await asyncio.to_thread(collect, runtime[0], params['expected'])
+            assert local_secret not in json.dumps(document)
+            assert not any(secret in json.dumps(document) for secret in
+                           ('CONSTANT_SECRET_SENTINEL', 'ENV_SECRET_SENTINEL', 'CONFIG_SECRET_SENTINEL'))
+            assert document['summary']['ledger']['boot_sha'] == runtime[2].boot_sha
+            assert document['sections']['unknowns'] == sorted(runtime[2]._unknown)
+        finally:
+            runtime[2]._units[0].pop('frame', None)
+            await server.stop()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('mode', ['entry', 'total', 'inventory'])
 def test_wire_errors_are_explicit_incomplete_no_secret(runtime, monkeypatch, mode):
     if mode == 'entry':

@@ -183,3 +183,39 @@ def test_actual_hook_cold_capture_consistent_and_never_authorizes(tmp_path):
     assert result['raw'] == result['after']
     assert result['captured_generation'] == result['generation']
     assert result['allowed'] is False
+
+
+def test_projection_metadata_whitelist_and_immutable_manifest(ledger):
+    from hermes_cli import code_attestation_snapshot as projection
+    ledger._dep_units = {'unit': {'filename': '/retained/unit.py', 'producer_distribution':
+        {'dist': 'safe', 'secret': 'SECRET_SENTINEL'}, 'code': (lambda: 'SECRET_SENTINEL').__code__}}
+    ledger._units[0]['producer_distribution'] = {'dist': 'also-safe', 'secret': 'SECRET_SENTINEL'}
+    ledger._native_loads = [{'name': '/native.so', 'caller_component': 'core', 'secret': 'SECRET_SENTINEL'}]
+    ledger._generators = {'g': SimpleNamespace(name='safe-generator', source_sha256='1' * 64,
+        kind='generator', distribution={'dist': 'safe', 'secret': 'SECRET_SENTINEL'})}
+    ledger._unknown_sources = {'extension': [{'filename': '/known.py', 'source_sha256': '2' * 64,
+        'secret': 'SECRET_SENTINEL', 'frame_locals': {'secret': 'SECRET_SENTINEL'}}]}
+    ledger._unknown_detail = {'extension': {'safe-producer'}}
+    ledger._seed.append({'module': 'known', 'git_blob': '3' * 40, 'secret': 'SECRET_SENTINEL'})
+    snapshot = capture()
+    assert 'SECRET_SENTINEL' not in repr(snapshot)
+    assert any(row.get('distribution', {}).get('dist') == 'safe' for row in values(snapshot, 'producers'))
+    assert any(row.get('producer_distribution', {}).get('dist') == 'safe' for row in values(snapshot, 'executed_units'))
+    metadata = values(snapshot, 'metadata')
+    assert {'kind': 'capture', 'generation': snapshot.generation, 'begin_mono': snapshot.begin_mono,
+            'end_mono': snapshot.end_mono} in metadata
+    assert {'kind': 'disk', **snapshot.disk} in metadata
+    assert dict(snapshot.boot) in metadata
+    with pytest.raises(TypeError):
+        snapshot.manifest['unknowns']['count'] = 0
+    with pytest.raises(ValueError, match='unsupported_metadata_value'):
+        projection._Builder(time.monotonic() + 1).add('metadata', {'unsupported': object()})
+
+
+def test_metadata_missing_registry_and_launcher_remains_unavailable(ledger):
+    ledger._launcher = None
+    ledger._blobs.clear()
+    snapshot = capture()
+    assert snapshot.boot['boot_registry_blob'] is None
+    assert snapshot.boot['boot_registry_status'] == 'unavailable'
+    assert not any(row['kind'] == 'launcher' for row in values(snapshot, 'metadata'))

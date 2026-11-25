@@ -167,7 +167,7 @@ class CodeProvenanceControl:
             'snapshot_id': stored['token'], 'ttl_seconds': TTL_SECONDS,
             'captured': {'identity': stored['identity'], 'generation': snapshot.generation,
                          'begin_mono': snapshot.begin_mono, 'end_mono': snapshot.end_mono},
-            'current': self.current(), 'disk': stored['disk'],
+            'current': self.current(), 'disk': stored['disk'], 'ledger': dict(snapshot.boot),
             'sections': {key: dict(value) for key, value in snapshot.manifest.items()},
             'raw': dict(snapshot.manifest['unknowns']),
             'incomplete': ['historical_unretained_provenance'],
