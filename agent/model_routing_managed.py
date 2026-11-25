@@ -146,7 +146,7 @@ def verify_managed_agent(agent, request):
     """Fence cached agents and stale overrides at each outbound attempt."""
     from hermes_cli.kanban_refusal_boundary import require_policy
     require_policy(getattr(agent, '_kanban_refusal_policy', None),
-                   model=request.get('model', agent.model), provider=agent.provider)
+                   model=request.get('model', agent.model), provider=agent.provider, request=True)
     config = managed_config()
     if config is None:
         return
