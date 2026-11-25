@@ -9,7 +9,6 @@ like the CLI verbs and kanban_* tools. Archive keeps its stop-request route (tes
 
 from __future__ import annotations
 
-import time
 
 import pytest
 
@@ -137,9 +136,10 @@ def test_unknown_status_under_a_remote_lease_is_still_a_400(gws, svc, kills):
 
 # --- regressions: no live remote lease, no refusal -------------------------------------------------------------
 
-def _expire(hub, tid):
+def _cleared(hub, tid):
+    # Model canonical lease release, not merely passage of its timestamp.
     with kb.write_txn(hub.conn):
-        hub.conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int(time.time() * 1000) - 1000, tid))
+        hub.conn.execute("UPDATE tasks SET lease_holder = NULL, lease_expires = NULL WHERE id = ?", (tid,))
 
 
 def _own(hub, tid):
@@ -147,7 +147,7 @@ def _own(hub, tid):
         hub.conn.execute("UPDATE tasks SET lease_holder = ? WHERE id = ?", (str(sync._state(hub.conn)["gateway_id"]), tid))
 
 
-@pytest.mark.parametrize("lease", [_expire, _own], ids=["expired", "own-gateway"])
+@pytest.mark.parametrize("lease", [_cleared, _own], ids=["board-cleared", "own-gateway"])
 def test_patch_done_without_a_live_remote_lease_completes_as_before(gws, svc, kills, lease):
     hub, tid = _remote(gws, svc)
     lease(hub, tid)
@@ -156,7 +156,7 @@ def test_patch_done_without_a_live_remote_lease_completes_as_before(gws, svc, ki
     assert kb.get_task(hub.conn, tid).status == "done"
 
 
-@pytest.mark.parametrize("lease", [_expire, _own], ids=["expired", "own-gateway"])
+@pytest.mark.parametrize("lease", [_cleared, _own], ids=["board-cleared", "own-gateway"])
 def test_bulk_ready_without_a_live_remote_lease_moves_as_before(gws, svc, kills, lease):
     hub, tid = _remote(gws, svc)
     lease(hub, tid)

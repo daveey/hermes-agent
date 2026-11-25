@@ -191,12 +191,27 @@ def test_every_lifecycle_tool_under_a_remote_lease_is_refused(gws, svc, kills, v
 
 # --- regressions: no live remote lease, no refusal -------------------------------------------------------------
 
-def test_cli_complete_after_the_remote_lease_expired_completes_as_before(gws, svc, kills):
+@pytest.mark.parametrize("line,verb", [("reclaim {tid}", "reclaim"), ("complete {tid} --summary x", "complete"), ("assign {tid} other", "assign")])
+def test_cli_lapsed_remote_lease_still_fences_until_board_clears_it(gws, svc, kills, line, verb):
+    # Board retains a dark holder's expired lease for up to 12h; timestamp expiry is not release.
     hub, worker = gws
     tid = _running_on_worker(hub, worker, svc)
     hub.enter()
     with kb.write_txn(hub.conn):
         hub.conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int(time.time() * 1000) - 1000, tid))
+    before, run_before = _snapshot(hub.conn), _run_row(hub.conn, tid)
+    rc, out = _cli(line.format(tid=tid))
+    _assert_refused(hub.conn, tid, before, run_before, rc, out, verb)
+    assert "Reclaimed" not in out and "Completed" not in out
+    assert kills == []
+
+
+def test_cli_complete_after_board_clears_remote_lease_completes_as_before(gws, svc, kills):
+    hub, worker = gws
+    tid = _running_on_worker(hub, worker, svc)
+    hub.enter()
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET lease_holder = NULL, lease_expires = NULL WHERE id = ?", (tid,))
     rc, out = _cli(f"complete {tid} --summary x")
     assert rc == 0 and f"Completed {tid}" in out, out
     assert kb.get_task(hub.conn, tid).status == "done"
@@ -214,12 +229,12 @@ def test_cli_complete_when_this_gateway_holds_the_lease_completes_as_before(gws,
     assert kb.get_task(hub.conn, tid).status == "done"
 
 
-def test_cli_assign_after_the_remote_lease_expired_assigns_as_before(gws, svc, kills):
+def test_cli_assign_after_board_clears_remote_lease_assigns_as_before(gws, svc, kills):
     hub, worker = gws
     tid = _running_on_worker(hub, worker, svc)
     hub.enter()
     with kb.write_txn(hub.conn):
-        hub.conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int(time.time() * 1000) - 1000, tid))
+        hub.conn.execute("UPDATE tasks SET lease_holder = NULL, lease_expires = NULL WHERE id = ?", (tid,))
     rc, out = _cli(f"assign {tid} other")
     assert rc == 0 and f"Assigned {tid} to other" in out, out
     assert kb.get_task(hub.conn, tid).assignee == "other"

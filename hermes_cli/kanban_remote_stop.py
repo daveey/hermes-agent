@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import time
 from typing import Any, Callable, Optional
 
 from hermes_cli import kanban_db_sync as sync
@@ -47,7 +46,8 @@ class RemoteArchiveRefused(ValueError):
 def remote_holder(conn: sqlite3.Connection, task_id: str, now_ms: Optional[int] = None) -> Optional[str]:
     """The other gateway whose live Board lease covers ``task_id`` (no local claim), else None.
 
-    Only primary boards mirror leases; an expired lease is not a holder (the Board accepts writes again)."""
+    Only primary boards mirror leases. Timestamp expiry does not release a lease: the Board may retain it
+    for a dark holder (up to 12h) until renewal, operator reset, or canonical expiry clears the row."""
     if sync.board_mode(conn) != "primary":
         return None
     row = conn.execute("SELECT status, claim_lock, lease_holder, lease_expires FROM tasks WHERE id = ?",
@@ -55,8 +55,8 @@ def remote_holder(conn: sqlite3.Connection, task_id: str, now_ms: Optional[int] 
     if row is None or not row["lease_holder"] or row["lease_expires"] is None or row["claim_lock"] is not None:
         return None
     own = str(sync._state(conn)["gateway_id"])
-    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    if row["lease_holder"] == own or int(row["lease_expires"]) <= now_ms:
+    # Keep now_ms as a compatibility argument; only a canonical clear releases remote custody.
+    if row["lease_holder"] == own:
         return None
     return str(row["lease_holder"])
 

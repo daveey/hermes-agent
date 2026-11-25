@@ -18,7 +18,7 @@ from tests.hermes_cli import test_kanban_remote_lease_dashboard as _dash
 from tests.hermes_cli.test_kanban_worker_node import WORKER
 
 svc, gws, kills, _snapshot, _run_row = _dash.svc, _dash.gws, _dash.kills, _dash._snapshot, _dash._run_row
-API, _client, _remote, _expire, _own = _dash.API, _dash._client, _dash._remote, _dash._expire, _dash._own
+API, _client, _remote, _cleared, _own = _dash.API, _dash._client, _dash._remote, _dash._cleared, _dash._own
 
 
 def _board_assignee(hub, tid):
@@ -67,7 +67,7 @@ def test_bulk_assignee_refusal_of_one_card_does_not_stop_its_siblings(gws, svc, 
 
 # --- regressions: no live remote lease, no refusal -------------------------------------------------------------
 
-@pytest.mark.parametrize("lease", [_expire, _own], ids=["expired", "own-gateway"])
+@pytest.mark.parametrize("lease", [_cleared, _own], ids=["board-cleared", "own-gateway"])
 def test_patch_assignee_without_a_live_remote_lease_assigns_as_before(gws, svc, kills, lease):
     hub, tid = _remote(gws, svc)
     lease(hub, tid)
@@ -77,7 +77,7 @@ def test_patch_assignee_without_a_live_remote_lease_assigns_as_before(gws, svc, 
     assert kb.get_task(hub.conn, tid).assignee == "other"
 
 
-@pytest.mark.parametrize("lease", [_expire, _own], ids=["expired", "own-gateway"])
+@pytest.mark.parametrize("lease", [_cleared, _own], ids=["board-cleared", "own-gateway"])
 def test_bulk_assignee_without_a_live_remote_lease_assigns_as_before(gws, svc, kills, lease):
     hub, tid = _remote(gws, svc)
     lease(hub, tid)
