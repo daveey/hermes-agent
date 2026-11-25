@@ -276,6 +276,8 @@ def sweep_stale_triage(
     ``TRIAGE_ENTRY_EVENTS`` event newer than its last ``triage_swept``. Past ``TRIAGE_SWEEP_CAP`` sweeps
     in ``TRIAGE_SWEEP_CAP_WINDOW`` it is capped instead (see :func:`_cap`). Cards with an open human
     request, or an open kernel recovery card for their current park, are left alone. Returns swept task ids."""
+    from hermes_cli.kanban_decided_triage import repair_decided_triage
+    repair_decided_triage(conn)
     now = int(now if now is not None else time.time())
     cutoff = now - older_than
     swept: list[str] = []
