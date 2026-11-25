@@ -42,12 +42,23 @@ export function usePanelTitlebar(ref: RefObject<HTMLElement | null>, enabled: bo
       return
     }
 
+    // Contributed pane tools (titleBar.tools.right) sit in their own cluster
+    // just left of the fixed one. Reserve them too while they share the band:
+    // Electron app-region ignores stacking, so the drag handle under them
+    // turns every real click on a plugin tool into a window drag.
+    const paneTools = document.querySelector<HTMLElement>('[data-titlebar-cluster="tools"]')?.getBoundingClientRect()
+
+    const rightEdge =
+      paneTools && paneTools.width > 0 && paneTools.top < rightControls.bottom
+        ? Math.min(rightControls.left, paneTools.left)
+        : rightControls.left
+
     const left = Math.min(rect.width, Math.max(0, leftControls.right + 12 - rect.left))
     // No extra pad on the right: a +N here is a dead strip (the spacer has no
     // app-region) flush against Settings. The 48px data-window-drag-handle is
     // already the gutter (#131729). Do not mark this spacer drag — it sits
     // under the z-70 cluster, and Electron app-region ignores stacking.
-    const right = Math.min(rect.width - left, Math.max(0, rect.right - rightControls.left))
+    const right = Math.min(rect.width - left, Math.max(0, rect.right - rightEdge))
     element.style.setProperty('--panel-titlebar-left', `${left}px`)
     element.style.setProperty('--panel-titlebar-right', `${right}px`)
     setBelowControls(minimized || rect.width - left - right < 120)

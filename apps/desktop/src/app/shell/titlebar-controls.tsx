@@ -316,10 +316,16 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
 
   const view = appViewForPath(location.pathname)
 
-  // Route changes can replace measured clusters without resizing the panels.
+  // Route changes can replace measured clusters without resizing the panels;
+  // so can a plugin tool registering after first paint (the tools cluster mounts).
+  const paneToolsKey = tools
+    .filter(visibleTool)
+    .map(tool => `${tool.id}:${tool.span ?? 1}`)
+    .join(',')
+
   useEffect(() => {
     window.dispatchEvent(new CustomEvent(TITLEBAR_CHROME_CHANGED_EVENT))
-  }, [location.pathname, pageOwnsTitlebar])
+  }, [location.pathname, pageOwnsTitlebar, paneToolsKey])
 
   // Overlays own the window. These clusters are `fixed` at a higher z-index
   // than the overlay card, so they'd otherwise bleed over it — hide them (and
@@ -386,6 +392,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
             titlebarToolClusterClass,
             'top-[calc(var(--titlebar-controls-top)+var(--right-rail-top-inset,0px))] right-[calc(var(--titlebar-tools-right)+var(--shell-preview-toolbar-gap,0))]'
           )}
+          // Measured by usePanelTitlebar so the pane drag handle stops short of these tools.
+          data-titlebar-cluster="tools"
         >
           {visiblePaneTools.map(tool => (
             <TitlebarToolButton key={tool.id} navigate={navigate} tool={tool} />

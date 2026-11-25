@@ -71,6 +71,35 @@ describe('usePanelTitlebar', () => {
     expect(element.style.getPropertyValue('--panel-titlebar-left')).toBe('86px')
   })
 
+  it('reserves the contributed pane-tools cluster too, so the window-drag handle never covers its buttons', () => {
+    // Plugin titlebar tools (titleBar.tools.right) render in their own cluster
+    // left of the fixed one. Electron app-region ignores stacking, so a drag
+    // handle under them turns every real click into a window drag.
+    const tools = document.createElement('div')
+    tools.dataset.titlebarCluster = 'tools'
+    tools.getBoundingClientRect = () => rect(500, 384)
+    document.body.append(tools)
+    const element = document.createElement('div')
+    element.getBoundingClientRect = () => rect(0, 1000)
+    document.body.append(element)
+
+    renderHook(() => usePanelTitlebar({ current: element }, true, false))
+    expect(element.style.getPropertyValue('--panel-titlebar-right')).toBe('500px')
+  })
+
+  it('ignores a pane-tools cluster pushed below the titlebar band (right rail inset)', () => {
+    const tools = document.createElement('div')
+    tools.dataset.titlebarCluster = 'tools'
+    tools.getBoundingClientRect = () => ({ ...rect(500, 384), bottom: 74, top: 40, y: 40 }) as DOMRect
+    document.body.append(tools)
+    const element = document.createElement('div')
+    element.getBoundingClientRect = () => rect(0, 1000)
+    document.body.append(element)
+
+    renderHook(() => usePanelTitlebar({ current: element }, true, false))
+    expect(element.style.getPropertyValue('--panel-titlebar-right')).toBe('100px')
+  })
+
   it('ignores connection updates that leave the chrome where it is', () => {
     const element = document.createElement('div')
     element.getBoundingClientRect = () => rect(0, 1000)
