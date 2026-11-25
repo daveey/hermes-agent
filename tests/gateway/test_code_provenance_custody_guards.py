@@ -14,7 +14,11 @@ ledger = helpers.ledger
 pytestmark = pytest.mark.platforms('linux', 'macos')
 
 
-@pytest.mark.parametrize('section', [{'unknowns': None}, 'not-a-section'])
+class SectionString(str):
+    pass
+
+
+@pytest.mark.parametrize('section', [SectionString('unknowns'), 'not-a-section'])
 def test_section_type_and_membership_are_independent(section):
     with pytest.raises(ValueError, match='invalid_page'):
         pc._validate({'schema': 1, 'op': 'page', 'snapshot_id': 'a' * 64,

@@ -81,6 +81,19 @@ def test_post_inventory_deadline_prevents_later_projection(ledger, monkeypatch):
         projection.snapshot(ledger, deadline=5)
 
 
+@pytest.mark.parametrize('present', [False, True])
+def test_absent_or_empty_registry_does_not_invoke_plugin_verifier(ledger, monkeypatch, present):
+    from hermes_cli import plugin_review_records
+    if present:
+        ledger._reviewed_plugins = {}
+    else:
+        ledger.__dict__.pop('_reviewed_plugins', None)
+    calls = []
+    monkeypatch.setattr(plugin_review_records, 'verify_registered', lambda actual: calls.append(actual))
+    helpers.capture()
+    assert calls == []
+
+
 def test_review_registry_is_verified_before_export(ledger, monkeypatch):
     from hermes_cli import plugin_review_records
     ledger._reviewed_plugins = {'plugin': SimpleNamespace()}
