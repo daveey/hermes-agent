@@ -32,6 +32,10 @@ def _recorded(conn, tid):
     # Origin order, not local arrival ids: a synced Board may deliver events out of order.
     records = [r for r in renewal.renewals(conn, tid)
                if r['payload']['episode'] == episode and _event_order(r) > after]
+    # Canonical review owns placement as well as renewal. A partial feed must
+    # not reinterpret wait_on/archive as release before its edges/status arrive.
+    if any(r['payload'].get('authority_kind') == 'spend_reviewer' for r in records):
+        return None
     # A canonical renewal's own proven mandate is its authorization, not a countermand.
     mandates = set()
     for r in records:

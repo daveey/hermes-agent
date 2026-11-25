@@ -54,11 +54,13 @@ def _file(conn: sqlite3.Connection, card: dict, now: float) -> str:
     cause = effective_cause(conn, tid, stop) or 'run budget'
     stopped = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(stop['created_at']))
     from hermes_cli.kanban_model_neutral import forwarded_text
+    action = ("Safety refusal stays held: escalate to David for a decision; no automatic retry or release. "
+              if cause == 'safety_refusal' else
+              f"Decide {tid}: use `hermes kanban release {tid}` from an authorized owning chat, "
+              "archive it if no longer wanted, or escalate to its owner if authority is missing. ")
     body = (f"Card {tid} stopped at {stopped}. Stop cause: {cause}.\n"
             "Source title (historical evidence):\n" + forwarded_text(card['title']) + "\n\n"
-            "Neither the spend reviewer nor an owner route picked up this stop.\n"
-            f"Decide {tid}: use `hermes kanban release {tid}` from an authorized owning chat, "
-            "archive it if no longer wanted, or escalate to its owner if authority is missing. "
+            "Neither the spend reviewer nor an owner route picked up this stop.\n" + action +
             "Worker shells cannot release it directly; do not rerun unchanged work or bypass a safety hold.")
     new_id = kb.create_task(conn, title=f"Spend stop on {tid} undecided for {minutes} min: no review, no route",
                             body=body, assignee='default', created_by=AUTHOR, workspace_kind='scratch',

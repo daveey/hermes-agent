@@ -76,6 +76,17 @@ def test_never_recurse(kanban_home, creator):
         assert watchdog.watch(conn, now=NOW) == []
 
 
+def test_safety_watch_only_escalates_without_release_advice(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid, _ = stop(conn, cause='safety_refusal')
+        created, = watchdog.watch(conn, now=NOW)
+        card = kb.get_task(conn, created)
+        assert 'escalate to David' in card.body
+        assert 'hermes kanban release' not in card.body
+        assert kb.get_task(conn, tid).status == 'triage'
+        assert watchdog.watch(conn, now=NOW) == []
+
+
 def test_reviewed_episode(kanban_home):
     with kbc.connect_closing() as conn:
         tid, ep = stop(conn)

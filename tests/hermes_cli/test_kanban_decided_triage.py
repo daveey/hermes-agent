@@ -1,4 +1,6 @@
 """Maintenance finishes recorded decisions, never invents execution authority."""
+import json
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -77,6 +79,25 @@ def test_real_authorized_scope_renewal_is_finished(board, monkeypatch):
     assert repair(board) == [tid]
     assert kb.get_task(board, tid).status == 'ready'
     assert not decision.pending(board, tid)
+
+
+@pytest.mark.parametrize('verdict', ['release', 'wait_on', 'archive'])
+def test_canonical_reviewer_placement_is_not_repaired_from_partial_feed(board, monkeypatch, verdict):
+    from hermes_cli import kanban_scope_renewal as renewal
+    tid, _, episode = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    scope.renew(board, tid, episode, scope.mandate(board, tid))
+    event = renewal.renewals(board, tid)[0]
+    payload = {**event['payload'], 'authority_kind': 'spend_reviewer', 'verdict': verdict}
+    with kb.write_txn(board):
+        board.execute('UPDATE task_events SET payload=? WHERE id=?', (json.dumps(payload), event['id']))
+    # Feed delivered renewal before canonical placement/dependency edges. Never
+    # infer release from it; the canonical operation owns all three verdicts.
+    assert renewal.renewals(board, tid)
+    before = board.total_changes
+    assert repair(board) == []
+    assert board.total_changes == before
+    assert kb.get_task(board, tid).status == 'triage'
 
 
 def test_maintenance_hook_handles_fresh_decision_without_stale_sweep(kanban_home):
