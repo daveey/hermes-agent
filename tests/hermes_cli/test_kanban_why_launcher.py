@@ -65,6 +65,7 @@ def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch
     actual = json.loads(result.stdout)
     for answer in (actual, expected):
         answer.pop('elapsed_s')
+        answer.pop('age_s')
         answer['first_stop'].pop('age_s')
         answer['recorded'].pop('age_s')
         for step in answer['chain']:
