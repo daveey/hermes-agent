@@ -13,7 +13,7 @@ turn = fixtures.turn
 refresh = fixtures.refresh
 
 
-@pytest.mark.parametrize('fate', ['running', 'gone'])
+@pytest.mark.parametrize('fate', ['running', 'gone', 'reused'])
 def test_foreign_checkpoint_process_vetoes_green(db, tmp_path, monkeypatch, fate):
     turn(db)
     checkpoint = tmp_path / 'processes.json'
@@ -31,6 +31,10 @@ def test_foreign_checkpoint_process_vetoes_green(db, tmp_path, monkeypatch, fate
         assert value['kind'] == 'waiting'
         assert value['on'][0]['state'] == 'running'
         assert value['on'][0]['id'] == 'process:proc_foreign'
+        assert value['coverage']['state'] == 'complete'
+    else:
+        assert value['coverage']['state'] == 'unknown'
+        assert not any(item.get('state') == 'running' for item in value.get('on', []))
 
 
 def test_foreign_checkpoint_other_owner_is_not_this_sessions_work(db, tmp_path, monkeypatch):

@@ -28,7 +28,7 @@ def entry(**changes):
 @pytest.mark.parametrize('change', [
     {'pid': True}, {'pid': 0}, {'host_start_time': True}, {'host_start_time': 0},
     {'session_id': None}, {'session_id': 'wrong'}, {'pid_scope': 'container'},
-    {'parent_session_id': None},
+    {'parent_session_id': None}, {'sandbox_key': 'other'},
 ])
 def test_unverifiable_checkpoint_cannot_certify_green(db, tmp_path, monkeypatch, change):
     status.turn(db)
