@@ -1,0 +1,424 @@
+{
+  "inputs": [
+    {
+      "intake_dispositions": [
+        {
+          "count": 2,
+          "disposition": "existing_exact_test_owner_source_qualification_pending",
+          "follow_up_owner": "@task:default@hub/t_01a2117e043cbca0",
+          "note": "Metadata records retries only. Preserve existing upload investigation; original first-attempt logs and actual source ancestry require qualification. No repaired claim.",
+          "occurrence_ids": [
+            898,
+            899
+          ],
+          "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+        },
+        {
+          "count": 2,
+          "disposition": "existing_exact_test_owner_source_qualification_pending",
+          "follow_up_owner": "@task:default@hub/t_01a2117deceffea3",
+          "note": "Metadata records retries only. Original first-attempt logs and actual source ancestry require owner qualification; no causal, environmental waiver or repaired claim. Related readiness PR4439 is reported by existing owner, not intake-verified repair of these sources.",
+          "occurrence_ids": [
+            896,
+            897
+          ],
+          "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+        }
+      ],
+      "intake_task": "t_01a213014af9133f",
+      "pages": [
+        {
+          "data": {
+            "occurrences": [
+              {
+                "head_sha": "88dd658a13dda085f26c5c3a7e556f2d95470561",
+                "job_id": 139244532540,
+                "observed_day": "2026-11-25",
+                "occurrence_id": 896,
+                "owner_check": [],
+                "retried": "tests",
+                "run_attempt": 1,
+                "run_id": 45625456728,
+                "slice": 10,
+                "slices": 12,
+                "source_sha": "88dd658a13dda085f26c5c3a7e556f2d95470561",
+                "status": "needs_triage",
+                "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+              }
+            ],
+            "version": 1
+          },
+          "marker": "99b0bed0b716406625ffce2e9ba8f220453b2792c4af030c73e8a0adf2b15d26",
+          "payload": "{\"occurrences\": [{\"head_sha\": \"88dd658a13dda085f26c5c3a7e556f2d95470561\", \"job_id\": 139244532540, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 896, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45625456728, \"slice\": 10, \"slices\": 12, \"source_sha\": \"88dd658a13dda085f26c5c3a7e556f2d95470561\", \"status\": \"needs_triage\", \"test_id\": \"tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes\"}], \"version\": 1}"
+        },
+        {
+          "data": {
+            "occurrences": [
+              {
+                "head_sha": "23c690065cfe6f94d2a3b98b9b69fb238f363b44",
+                "job_id": 139256493231,
+                "observed_day": "2026-11-25",
+                "occurrence_id": 897,
+                "owner_check": [],
+                "retried": "tests",
+                "run_attempt": 1,
+                "run_id": 45628752230,
+                "slice": 5,
+                "slices": 10,
+                "source_sha": "0aecd2644bdda46d45e934bf7446b71b1a3ab757",
+                "status": "needs_triage",
+                "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+              }
+            ],
+            "version": 1
+          },
+          "marker": "554c1ba4204fc065a7aa11a2bbca5cf0f628fadaece62a74a5c731e41d9401a3",
+          "payload": "{\"occurrences\": [{\"head_sha\": \"23c690065cfe6f94d2a3b98b9b69fb238f363b44\", \"job_id\": 139256493231, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 897, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45628752230, \"slice\": 5, \"slices\": 10, \"source_sha\": \"0aecd2644bdda46d45e934bf7446b71b1a3ab757\", \"status\": \"needs_triage\", \"test_id\": \"tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes\"}], \"version\": 1}"
+        },
+        {
+          "data": {
+            "occurrences": [
+              {
+                "head_sha": "b9230afc8b31cfb53eef79c564f683fa5da7528d",
+                "job_id": 139270242126,
+                "observed_day": "2026-11-25",
+                "occurrence_id": 898,
+                "owner_check": [],
+                "retried": "tests",
+                "run_attempt": 1,
+                "run_id": 45632513175,
+                "slice": 11,
+                "slices": 12,
+                "source_sha": "c5f920054975306b77bf7fecbaee14f93299c635",
+                "status": "needs_triage",
+                "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+              },
+              {
+                "head_sha": "a8b333b0617892c16c9d06bddc86af42d50fddd8",
+                "job_id": 139262868485,
+                "observed_day": "2026-11-25",
+                "occurrence_id": 899,
+                "owner_check": [],
+                "retried": "tests",
+                "run_attempt": 1,
+                "run_id": 45630649293,
+                "slice": 7,
+                "slices": 12,
+                "source_sha": "5a10c083d4b1029aa366511a70afaab9046a6bc4",
+                "status": "needs_triage",
+                "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+              }
+            ],
+            "version": 1
+          },
+          "marker": "4f1d7ce682ba51ad554fc53e17b745cc178235f87b63bd7e8b9fd17ce0d3f8a8",
+          "payload": "{\"occurrences\": [{\"head_sha\": \"b9230afc8b31cfb53eef79c564f683fa5da7528d\", \"job_id\": 139270242126, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 898, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45632513175, \"slice\": 11, \"slices\": 12, \"source_sha\": \"c5f920054975306b77bf7fecbaee14f93299c635\", \"status\": \"needs_triage\", \"test_id\": \"tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach\"}, {\"head_sha\": \"a8b333b0617892c16c9d06bddc86af42d50fddd8\", \"job_id\": 139262868485, \"observed_day\": \"2026-11-25\", \"occurrence_id\": 899, \"owner_check\": [], \"retried\": \"tests\", \"run_attempt\": 1, \"run_id\": 45630649293, \"slice\": 7, \"slices\": 12, \"source_sha\": \"5a10c083d4b1029aa366511a70afaab9046a6bc4\", \"status\": \"needs_triage\", \"test_id\": \"tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach\"}], \"version\": 1}"
+        }
+      ]
+    },
+    {
+      "intake_dispositions": {
+        "consolidation_owner": "@task:default@hub/t_01a2117e043cbca0",
+        "dispositions": [
+          {
+            "comment_id": 253396,
+            "disposition": "new_cleanup_disappearance_race_routed_for_qualification",
+            "evidence": "occurrence-900.log:1310-1349",
+            "followup_owner": "@task:default@hub/t_01a2117e043cbca0",
+            "occurrence_id": 900,
+            "ownership_kind": "new_scope_routed_to_existing_cli_group_not_preexisting_exact_owner",
+            "remaining": "Qualification and controlled real-child proof; preserve original assertions,20 no-retry whole-file runs,independent review,CI and canonical landing. Owner may route specialist through owning chat."
+          },
+          {
+            "comment_id": 253402,
+            "disposition": "pre_repair_observation_preserve_existing_exact_owner",
+            "evidence": "occurrence-901.log:1821;readiness-source-compare.json",
+            "followup_owner": "@task:default@hub/t_01a2117deceffea3",
+            "occurrence_id": 901,
+            "remaining": "Owner retains repair acceptance evidence; new source is ancestor of reported landed repair,not a post-fix recurrence."
+          },
+          {
+            "comment_id": 253408,
+            "disposition": "existing_exact_test_owner_actual_source_qualification_pending",
+            "evidence": "occurrence-902.log:1869-1873,1938-1939",
+            "followup_owner": "@task:default@hub/t_01a2117e043cbca0",
+            "occurrence_id": 902,
+            "remaining": "Compare actual source against owned cold-contract repair; retain independent review,CI,canonical landing."
+          }
+        ],
+        "frozen_occurrence_ids": [
+          900,
+          901,
+          902
+        ],
+        "intake": "t_01a21337bf7a01da",
+        "new_repair_cards": 0,
+        "repository_docs_publication": "pending_with_existing_owner",
+        "retry_policy_changed": false,
+        "source_metadata_modified": false,
+        "version": 1
+      },
+      "intake_task": "t_01a21337bf7a01da",
+      "manifest_pages": {
+        "pages": [
+          {
+            "digest": "8cefbfeab7d1d3706027a85d296fa9dd7c8d5d32314e0bdba690e148c646e599",
+            "payload": {
+              "occurrences": [
+                {
+                  "head_sha": "e8eb45325e00142dc077c5870c041b6c15a291e0",
+                  "job_id": 139283024204,
+                  "observed_day": "2026-11-25",
+                  "occurrence_id": 900,
+                  "owner_check": [],
+                  "retried": "tests",
+                  "run_attempt": 1,
+                  "run_id": 45636312398,
+                  "slice": 4,
+                  "slices": 10,
+                  "source_sha": "f9f4f2db9dd0fb154ff610e3d606d34b8652e902",
+                  "status": "needs_triage",
+                  "test_id": "tests/hermes_cli/test_isolated_scope_listing.py::test_real_profile_flag_isolated_serve_lists_only_its_profile"
+                },
+                {
+                  "head_sha": "7f929c56a48bd9580f4ff46c7109014f92e14936",
+                  "job_id": 139280297692,
+                  "observed_day": "2026-11-25",
+                  "occurrence_id": 901,
+                  "owner_check": [],
+                  "retried": "tests",
+                  "run_attempt": 1,
+                  "run_id": 45634653848,
+                  "slice": 1,
+                  "slices": 12,
+                  "source_sha": "7f929c56a48bd9580f4ff46c7109014f92e14936",
+                  "status": "needs_triage",
+                  "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+                }
+              ],
+              "version": 1
+            }
+          },
+          {
+            "digest": "d19d706a8fb818e9d90a622dd351436c69ea7819fb327b72b0edca9c3c12fc03",
+            "payload": {
+              "occurrences": [
+                {
+                  "head_sha": "c5131a9e7f8898cd6017a41dc6bdf6cc4569d6d1",
+                  "job_id": 139293745798,
+                  "observed_day": "2026-11-25",
+                  "occurrence_id": 902,
+                  "owner_check": [],
+                  "retried": "tests",
+                  "run_attempt": 1,
+                  "run_id": 45637719811,
+                  "slice": 3,
+                  "slices": 12,
+                  "source_sha": "c5131a9e7f8898cd6017a41dc6bdf6cc4569d6d1",
+                  "status": "needs_triage",
+                  "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+                }
+              ],
+              "version": 1
+            }
+          }
+        ],
+        "version": 1
+      }
+    }
+  ],
+  "occurrences": [
+    {
+      "head_sha": "88dd658a13dda085f26c5c3a7e556f2d95470561",
+      "job_id": 139244532540,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 896,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45625456728,
+      "slice": 10,
+      "slices": 12,
+      "source_sha": "88dd658a13dda085f26c5c3a7e556f2d95470561",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "23c690065cfe6f94d2a3b98b9b69fb238f363b44",
+      "job_id": 139256493231,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 897,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45628752230,
+      "slice": 5,
+      "slices": 10,
+      "source_sha": "0aecd2644bdda46d45e934bf7446b71b1a3ab757",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "b9230afc8b31cfb53eef79c564f683fa5da7528d",
+      "job_id": 139270242126,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 898,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45632513175,
+      "slice": 11,
+      "slices": 12,
+      "source_sha": "c5f920054975306b77bf7fecbaee14f93299c635",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+    },
+    {
+      "head_sha": "a8b333b0617892c16c9d06bddc86af42d50fddd8",
+      "job_id": 139262868485,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 899,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45630649293,
+      "slice": 7,
+      "slices": 12,
+      "source_sha": "5a10c083d4b1029aa366511a70afaab9046a6bc4",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+    },
+    {
+      "head_sha": "e8eb45325e00142dc077c5870c041b6c15a291e0",
+      "job_id": 139283024204,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 900,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45636312398,
+      "slice": 4,
+      "slices": 10,
+      "source_sha": "f9f4f2db9dd0fb154ff610e3d606d34b8652e902",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_cli/test_isolated_scope_listing.py::test_real_profile_flag_isolated_serve_lists_only_its_profile"
+    },
+    {
+      "head_sha": "7f929c56a48bd9580f4ff46c7109014f92e14936",
+      "job_id": 139280297692,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 901,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45634653848,
+      "slice": 1,
+      "slices": 12,
+      "source_sha": "7f929c56a48bd9580f4ff46c7109014f92e14936",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "c5131a9e7f8898cd6017a41dc6bdf6cc4569d6d1",
+      "job_id": 139293745798,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 902,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45637719811,
+      "slice": 3,
+      "slices": 12,
+      "source_sha": "c5131a9e7f8898cd6017a41dc6bdf6cc4569d6d1",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+    }
+  ],
+  "owner_annotations": [
+    {
+      "occurrence_id": 898,
+      "original_job_citations": [
+        {
+          "line": 1873,
+          "text": "Python tests / Run tests (11/12)\tUNKNOWN STEP\t2026-11-25T14:27:25.4517415Z contract = None, params = {'session_id': 'old-desktop'}"
+        },
+        {
+          "line": 1880,
+          "text": "Python tests / Run tests (11/12)\tUNKNOWN STEP\t2026-11-25T14:27:25.4518929Z >           contract.params.model_validate(params)"
+        },
+        {
+          "line": 1882,
+          "text": "Python tests / Run tests (11/12)\tUNKNOWN STEP\t2026-11-25T14:27:25.4519312Z E           AttributeError: 'NoneType' object has no attribute 'params'"
+        },
+        {
+          "line": 1949,
+          "text": "Python tests / Run tests (11/12)\tUNKNOWN STEP\t2026-11-25T14:27:25.4543540Z FAILED tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach - AttributeError: 'NoneType' object has no attribute 'params'"
+        },
+        {
+          "line": 2081,
+          "text": "Python tests / Run tests (11/12)\tUNKNOWN STEP\tFAILED tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach - AttributeError: 'NoneType' object has no attribute 'params'"
+        }
+      ],
+      "qualification": "Actual source lacks package-catalog import barrier; same None.params failure mechanism class. Controlled real-package import proof exists; historical thread telemetry absent; no post-fix inference.",
+      "repair_status": "PR4446 published02717dd5ebbe58ac6f2de43083ef377b4fb71a3f; original/final20x27 qualified, independent review/required CI/landing pending at snapshot",
+      "source_qualified": true,
+      "source_sha": "c5f920054975306b77bf7fecbaee14f93299c635"
+    },
+    {
+      "occurrence_id": 899,
+      "original_job_citations": [
+        {
+          "line": 1889,
+          "text": "Python tests / Run tests (7/12)\tUNKNOWN STEP\t2026-11-25T14:17:08.4717590Z contract = None, params = {'session_id': 'old-desktop'}"
+        },
+        {
+          "line": 1896,
+          "text": "Python tests / Run tests (7/12)\tUNKNOWN STEP\t2026-11-25T14:17:08.4719170Z >           contract.params.model_validate(params)"
+        },
+        {
+          "line": 1898,
+          "text": "Python tests / Run tests (7/12)\tUNKNOWN STEP\t2026-11-25T14:17:08.4719696Z E           AttributeError: 'NoneType' object has no attribute 'params'"
+        },
+        {
+          "line": 1968,
+          "text": "Python tests / Run tests (7/12)\tUNKNOWN STEP\t2026-11-25T14:17:08.4754963Z FAILED tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach - AttributeError: 'NoneType' object has no attribute 'params'"
+        },
+        {
+          "line": 2099,
+          "text": "Python tests / Run tests (7/12)\tUNKNOWN STEP\tFAILED tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach - AttributeError: 'NoneType' object has no attribute 'params'"
+        }
+      ],
+      "qualification": "Actual source lacks package-catalog import barrier; same None.params failure mechanism class. Controlled real-package import proof exists; historical thread telemetry absent; no post-fix inference.",
+      "repair_status": "PR4446 published02717dd5ebbe58ac6f2de43083ef377b4fb71a3f; original/final20x27 qualified, independent review/required CI/landing pending at snapshot",
+      "source_qualified": true,
+      "source_sha": "5a10c083d4b1029aa366511a70afaab9046a6bc4"
+    },
+    {
+      "occurrence_id": 900,
+      "qualification": "Original job139283024204 lines1310-1349: finally p.terminate raises NoSuchProcess/ESRCH. Actual source has unsuppressed cleanup. Real-child reaping before census/terminate/kill gives old RED3fail6pass, narrow disappearance handling GREEN9pass. Original listing assertions retained.",
+      "repair_status": "Committed0e16b671d45210180d294bdd1eea6b047d9c1a3a;20-run proof active, not published/landed at snapshot",
+      "source_qualified": true,
+      "source_sha": "f9f4f2db9dd0fb154ff610e3d606d34b8652e902"
+    },
+    {
+      "occurrence_id": 902,
+      "qualification": "Original job139293745798 lines1869-1873 None.params. Actual gateway/session_controls.py uses registry-submodule import and lacks package-catalog initialization barrier. Same controlled mechanism class as existing upload repair; historical import-thread schedule absent.",
+      "repair_status": "PR4446 not landed at snapshot",
+      "source_qualified": true,
+      "source_sha": "c5131a9e7f8898cd6017a41dc6bdf6cc4569d6d1"
+    },
+    {
+      "occurrence_ids": [
+        896,
+        897,
+        901
+      ],
+      "qualification": "Gateway owner reports PR4439 merged67876b0fd11bb585442e60c57f3f1b30ed3598eb with exact independent approval, CI and20x6;896 ancestor/pre-fix,897 divergent/lacks repair. Intake independently qualifies901 actualsource7f929 as ancestor/pre-fix. No post-fix recurrence inferred.",
+      "repair_owner": "t_01a2117deceffea3",
+      "verification": "owner_reported"
+    }
+  ],
+  "repair_owner": "t_01a2117e043cbca0",
+  "snapshot_at": "2026-11-25T15:26:00+00:00",
+  "version": 1
+}

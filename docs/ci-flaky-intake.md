@@ -572,3 +572,73 @@ requiredCI, independent exact-head review and landing remain owed. Normal PR cre
 no alternative identity or reserve bypass was used. Registry892/readiness893–895 remain unqualified by this owner.
 
 Complete unchanged source records/pages/dispositions and separate qualification: [ci-flaky-intake-2026-11-25-supplement-891-895.json](ci-flaky-intake-2026-11-25-supplement-891-895.json); SHA256 `eb70c3436aeb9276ea17c2f2109c37743cc109a9d5329da7cb44190d8408943a`.
+
+
+## Nov25 supplemental CI intake: occurrences 896–899
+
+Frozen from intake t_01a213014af9133f: 3 immutable pages, 4 unique occurrences, 2 exact tests. Source records are unchanged in occurrences.json; dispositions remain separate.
+
+This is docs/ci-flaky-intake.md consolidation input, not a claim repository main changed. Single consolidated publication owner remains @task:default@hub/t_01a2117e043cbca0. No duplicate repair or docs PR. No retry, timeout, skip or xfail policy changes.
+
+## `tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach`
+- Occurrences: [898, 899]; count 2
+- Disposition: existing_exact_test_owner_source_qualification_pending
+- Follow-up owner: @task:default@hub/t_01a2117e043cbca0
+- Metadata records retries only. Preserve existing upload investigation; original first-attempt logs and actual source ancestry require qualification. No repaired claim.
+
+Occurrence 898: https://github.com/softmax-universe/daveey-hermes/actions/runs/45632513175/job/139270242126; attempt 1; slice 11/12; source `c5f920054975306b77bf7fecbaee14f93299c635`; head `b9230afc8b31cfb53eef79c564f683fa5da7528d`.
+
+Occurrence 899: https://github.com/softmax-universe/daveey-hermes/actions/runs/45630649293/job/139262868485; attempt 1; slice 7/12; source `5a10c083d4b1029aa366511a70afaab9046a6bc4`; head `a8b333b0617892c16c9d06bddc86af42d50fddd8`.
+
+## `tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes`
+- Occurrences: [896, 897]; count 2
+- Disposition: existing_exact_test_owner_source_qualification_pending
+- Follow-up owner: @task:default@hub/t_01a2117deceffea3
+- Metadata records retries only. Original first-attempt logs and actual source ancestry require owner qualification; no causal, environmental waiver or repaired claim. Related readiness PR4439 is reported by existing owner, not intake-verified repair of these sources.
+
+Occurrence 896: https://github.com/softmax-universe/daveey-hermes/actions/runs/45625456728/job/139244532540; attempt 1; slice 10/12; source `88dd658a13dda085f26c5c3a7e556f2d95470561`; head `88dd658a13dda085f26c5c3a7e556f2d95470561`.
+
+Occurrence 897: https://github.com/softmax-universe/daveey-hermes/actions/runs/45628752230/job/139256493231; attempt 1; slice 5/10; source `0aecd2644bdda46d45e934bf7446b71b1a3ab757`; head `23c690065cfe6f94d2a3b98b9b69fb238f363b44`.
+
+
+## Nov25 supplemental CI intake — occurrences 900–902
+
+Intake: `t_01a21337bf7a01da`. Repository: `softmax-universe/daveey-hermes`.
+Frozen input: **2 immutable pages, 3 unique occurrences, 3 exact tests**.
+This is a consolidation input for `docs/ci-flaky-intake.md`, not a competing repository edit or repair claim.
+The unchanged source records are in `manifest-pages.json`; `validate_manifest.py` verifies both page SHA256 values, unique IDs, exact-test cardinality and SHA formats. `validation.json` records success.
+
+## Dispositions and follow-up custody
+
+| Occurrence / exact test | Observed first attempt and disposition | Follow-up owner |
+|---|---|---|
+| 900 — `tests/hermes_cli/test_isolated_scope_listing.py::test_real_profile_flag_isolated_serve_lists_only_its_profile` | Job 139283024204 of run 45636312398, attempt 1, slice 4/10. `occurrence-900.log:1310–1349`: test's `finally` enumerates a process family, then `p.terminate()` at test line 177 raises `psutil.NoSuchProcess` from ESRCH after disappearance. Summary 1354–1355: 1 failed, 4 passed; retry passes. **New cleanup/process-disappearance race routed for repair qualification**; not proof the isolated listing contract failed, not an environmental waiver. Retain process identity and tolerate only actual disappearance, prove with a controlled real-child schedule, retain all original assertions and strict cleanup. Historical scheduling telemetry is absent. | Existing board/CLI group `t_01a2117e043cbca0`: new follow-up routing comment **253396**. This is newly routed scope, not a claim of prior exact-test ownership or completed repair. Its owner may route a specialist through the owning chat. Hub task-body/title search found no exact match other than this intake; this is not global absence certification. |
+| 901 — `tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes` | Job 139280297692 of run 45634653848, attempt 1, slice 1/12. `occurrence-901.log:1821`: old `assert started.wait(timeout=2)` fails. **Pre-repair observation; preserve existing exact owner**. Compare actual `source_sha` 7f929c56a48bd9580f4ff46c7109014f92e14936 to reported landed PR4439 commit 67876b0fd11bb585442e60c57f3f1b30ed3598eb: status ahead, behind_by 0, merge-base equals source (13 commits ahead). Not a post-fix recurrence. Owner reports canonical independent review, CI, final 20 whole-file runs and merge; this intake independently checked ancestry and original symptom, not those repair proofs. | Existing gateway exact-test owner `t_01a2117deceffea3`, comment **253402**. |
+| 902 — `tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach` | Appended operator page received during this run. Job 139293745798 of run 45637719811, attempt 1, slice 3/12. `occurrence-902.log:1869–1873`: `contract.params.model_validate(params)` raises `AttributeError: 'NoneType' object has no attribute 'params'`; summary 1938–1939: 1 failed, 25 passed; retry passes. **Existing exact-test owner, actual-source repair qualification pending**. Consistent symptom with its cold contract-registration investigation; not proof of the historical import schedule, a completed fix or post-fix recurrence. Actual `source_sha` equals `head_sha` c5131a9e7f8898cd6017a41dc6bdf6cc4569d6d1; original value retained. | Existing board/CLI exact-test owner `t_01a2117e043cbca0`, comment **253408**. |
+
+## Consolidation and remaining work
+
+Single repository docs/export publication stays with `t_01a2117e043cbca0`, already responsible for the adjacent supplements. Include this input with prior 891–899 evidence instead of opening another docs PR. Comments 253396 and 253408 request this consolidation. Until that owner lands it, this file is a delivered consolidation **input**, not a claim that repository docs already include 900–902.
+
+No duplicate repair cards were created. No production code, test, retry count, timeout, threshold, skip or xfail was changed. Intake completion closes routing only. Repair qualification, independent exact-head review, required CI, canonical landing and repository export publication remain with the named open owners. Original immutable metadata status remains `needs_triage`; derived dispositions are separate and do not rewrite producer history or claim the whole journal backlog is empty.
+
+## Provenance
+
+- Page `8cefbfeab7d1d3706027a85d296fa9dd7c8d5d32314e0bdba690e148c646e599`: body, occurrences 900–901.
+- Page `d19d706a8fb818e9d90a622dd351436c69ea7819fb327b72b0edca9c3c12fc03`: operator comment 253394, occurrence 902.
+- Full unshortened body and appended page checked through `kanban_show(verbose=true)` during this run.
+- Original logs retrieved directly with `gh run view RUN -R softmax-universe/daveey-hermes --job JOB --log`, not fabricated or reproduced output.
+- Owner lookup used exact named card readbacks and bounded authoritative hub task-body/title search; replica list calls were refused as worker-restricted and did not establish absence.
+
+
+### Owner qualification snapshot (2026-11-25 15:26 UTC)
+
+All seven source records896–902, five immutable pages and both original disposition sets are preserved unchanged. Counts: upload3, readiness3, isolated-profile cleanup1; three exact tests.
+
+Uploads898/899: original jobs139270242126:1873–1882 and139262868485:1889–1898 report `contract=None` followed by `None.params`. Upload902 original job139293745798:1869–1873 reports the same validation failure. All three actual source revisions lack the package-catalog import barrier. These are pre-repair source observations, not post-fix recurrences or observed historical thread schedules. Existing repair PR4446 at02717dd5ebbe58ac6f2de43083ef377b4fb71a3f has original/final20 whole-file runs27pass each; required CI, independent exact-head review and landing remain owed.
+
+Isolated-profile900 is a fixture cleanup race: original job139283024204:1310–1349 raises `psutil.NoSuchProcess` at `p.terminate()`. Actual source has unsuppressed cleanup. Controlled real owned children reaped immediately before census/terminate/kill produce three original failures; narrow disappearance handling preserves permissions errors and the original profile-list assertion (whole file9pass). Commit0e16b671d45210180d294bdd1eea6b047d9c1a3a is under20-run qualification, not published or landed. No environmental waiver, skip or retry change.
+
+Gateway readiness status is owner-reported here: PR4439 landed67876b0fd11bb585442e60c57f3f1b30ed3598eb with independent review/CI/20x6. Actual sources896/897 lack that repair per owner; intake independently checked901 ancestor/pre-fix. The original frozen intake dispositions above are retained, not retroactively rewritten.
+
+Complete unchanged inputs and separate owner annotations: [ci-flaky-intake-2026-11-25-supplement-896-902.json](ci-flaky-intake-2026-11-25-supplement-896-902.json); SHA256 `b176eecd27f60953db49323aa504bc2e1ac4b6977ffa9b546f8cbe1fa7aefaef`.
