@@ -44,6 +44,8 @@ def arm(conn: sqlite3.Connection) -> bool:
                      "WHEN NEW.table_name='tasks' AND NEW.op='upsert' "
                      "AND json_type(NEW.fields,'$.status') IS NOT NULL BEGIN "
                      f"INSERT INTO {_TABLE} VALUES (NEW.op_id, NEW.row_uid); END")
+        from hermes_cli import kanban_sync_evidence_order
+        kanban_sync_evidence_order.arm(conn)
         return True
     except sqlite3.Error:  # unsynced/pre-schema connection: no new protocol assertion
         return False
@@ -70,6 +72,8 @@ def bind(conn: sqlite3.Connection, armed: bool) -> None:
         if len(rows) > _LIMIT:
             _log.warning("kanban status capture exceeds %d; retaining legacy envelopes", _LIMIT)
             return
+        from hermes_cli import kanban_sync_evidence_order
+        kanban_sync_evidence_order.bind(conn, [tuple(r) for r in rows])
         counts: dict[str, int] = {}
         for _op, task in rows:
             counts[task] = counts.get(task, 0) + 1

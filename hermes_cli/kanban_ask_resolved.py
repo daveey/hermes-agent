@@ -233,13 +233,16 @@ def filing_fields(conn: sqlite3.Connection, human_request: Any) -> dict:
 
 def store_request(conn: sqlite3.Connection, task_id: str, human_request: Optional[dict]) -> None:
     """Write the card's human_request and (re)register its resolved_check probe. Caller holds the write txn."""
-    if human_request:
-        human_request = dict(human_request)
-        human_request.pop("resolved_check_dropped_at", None)
-        human_request.pop("resolved_check_drop_reason", None)
-    conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
-                 (json.dumps(human_request) if human_request else None, task_id))
+    conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?", (request_json(human_request), task_id))
     sync_row(conn, task_id)
+
+
+def request_json(human_request: Optional[dict]) -> Optional[str]:
+    """The stored form of an ask (drop markers stripped); None for no ask."""
+    if not human_request:
+        return None
+    return json.dumps({k: v for k, v in human_request.items()
+                       if k not in ("resolved_check_dropped_at", "resolved_check_drop_reason")})
 
 
 def sync_row(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None, due_now: bool = False) -> None:

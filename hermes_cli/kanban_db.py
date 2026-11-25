@@ -2789,7 +2789,7 @@ def block_task(
     ``comment`` (``(author, body)``) is written in the same txn, before the transition event,
     and only when the block lands (``kanban_reason_comment``).
     """
-    from hermes_cli.kanban_ask_resolved import filing_fields, store_request, sync_row
+    from hermes_cli.kanban_ask_resolved import filing_fields, request_json, sync_row
     from hermes_cli.kanban_human_request import reject_timed_request
     from hermes_cli.kanban_block_routing import clear_meta, validate_block_request
     from hermes_cli.kanban_goal_recovery import record_block
@@ -2924,11 +2924,11 @@ def block_task(
                 payload.pop("limit", None)
                 payload["shared_blocker_probe"] = True
         from hermes_cli.kanban_dependency_review import apply_block_update
-        if not apply_block_update(
-            conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload,
-        ):
+        if not apply_block_update(  # one row op: a status and its ask never travel apart [daveey]
+                conn, task_id, expected_run_id, kind, new_status, set_sql + ", human_request = ?",
+                (*params, request_json(human_request)), payload):
             return False
-        store_request(conn, task_id, human_request)
+        sync_row(conn, task_id)
         payload.update(status=new_status, human_request=human_request, **({"actor": actor} if actor else {}), **(filing_fields(conn, human_request) if new_status == "blocked" else {}))  # status: where it landed, read by the sync heal [daveey]
         from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
         payload.update(run_meta)

@@ -57,6 +57,15 @@ def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None =
                 break
             if parent['op_id'] not in included and all(p['op_id'] != parent['op_id'] for p in required):
                 required.append(parent)
+        from hermes_cli.kanban_sync_evidence_order import firsts
+        for event in [] if blocked else firsts(conn, row):
+            # The status op waits behind its own event exactly as a child waits behind its parent.
+            if ((event['retry_after'] or 0) > now or not sendable(conn, [event])
+                    or (allowed is not None and event['op_id'] not in allowed)):
+                blocked = True
+                break
+            if event['op_id'] not in included:
+                required.append(event)
         if blocked:
             continue
         # Keep both link parents together with their child when possible. If the

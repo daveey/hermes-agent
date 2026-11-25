@@ -52,6 +52,7 @@ SITES: dict[tuple[str, str, str, str], str] = {
     ("kanban_actionability_transport.py", "record_result", "UPDATE", _O): STATE_ONLY,
     ("kanban_retain_transport.py", "record_result", "UPDATE", _O): STATE_ONLY,
     ("kanban_sync_status_origin.py", "bind", "UPDATE", _O): STATE_ONLY,
+    ("kanban_sync_evidence_order.py", "bind", "UPDATE", _O): STATE_ONLY,
     ("kanban_actionability_transport.py", "confirm", "DELETE", _O): REMOVAL,
     ("kanban_actionability_transport.py", "record_result", "DELETE", _O): REMOVAL,
     ("kanban_containment_outbox.py", "strip_lifecycle", "DELETE", _O): REMOVAL,
