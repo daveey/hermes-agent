@@ -91,7 +91,7 @@ def report(live, shadow, hub, board, *, started=None):
                  'local_cut_inputs_changed')
         result = diff(live, shadow, identity[2])
         result['audited_server_refusals'] = [p['op_id'] for p in proofs]
-        audits = set(result['audited_server_refusals'])
+        audits = set(result['audited_server_refusals']) | set(result['audited_retain_rejections'])
         result['clean'] = not (result['missing_in_shadow'] or result['extra_in_shadow']
                                or result['field_mismatch'] or result['child_mismatch']
                                or result['rejected_ops'] != len(audits))

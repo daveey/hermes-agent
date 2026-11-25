@@ -60,6 +60,32 @@ def test_retained_matching_refusal_preserves_rows_and_independent_drift(case):
     assert not audit.report(live, shadow, hub, 'default')['clean']
 
 
+def test_existing_retain_audit_composes_without_double_counting(case):
+    import hashlib
+    (live, shadow), hub, _proof, _calls = case
+    for conn in (live, shadow):
+        conn.execute("INSERT INTO task_runs VALUES (1,'run','t_card',123)")
+    live.execute('''CREATE TABLE kanban_failure_commands(
+        run_uid TEXT, task_id TEXT, op_id TEXT, operation_kind TEXT,
+        request_uid TEXT, event_uid TEXT, request_json TEXT, request_sha256 TEXT,
+        delivery_state TEXT, canonical_receipt_json TEXT)''')
+    wire = dict(op='retain', client_op_id='retain-op', task='t_card', run_uid='run', event_uid='event')
+    text = json.dumps(wire, sort_keys=True, separators=(',', ':'))
+    live.execute('INSERT INTO kanban_failure_commands VALUES (?,?,?,?,?,?,?,?,?,?)',
+                 ('run','t_card','retain-op','retain','retain-op','event',text,
+                  hashlib.sha256(text.encode()).hexdigest(),'rejected',None))
+    live.execute("INSERT INTO kanban_sync_outbox VALUES (?,?,?,?,?,?,?)",
+                 ('retain-op','tasks','t_card','retain',text,'rejected','missing_decision_episode'))
+    before = [list(c.iterdump()) for c in (live, shadow)]
+    result = audit.report(live, shadow, hub, 'default')
+    assert result['audited_retain_rejections'] == ['retain-op']
+    assert result['audited_server_refusals'] == ['rejected-op']
+    assert result['rejected_ops'] == 2 and result['clean']
+    assert [list(c.iterdump()) for c in (live, shadow)] == before
+    shadow.execute("UPDATE tasks SET title='still real divergence'")
+    assert not audit.report(live, shadow, hub, 'default')['clean']
+
+
 @pytest.mark.parametrize('fault', ['missing','applied','reason','detail','id','gateway','board','authority','identity','version'])
 def test_unknown_or_conflicting_receipt_is_not_audited(case, fault):
     (live, shadow), hub, proof, _calls = case
