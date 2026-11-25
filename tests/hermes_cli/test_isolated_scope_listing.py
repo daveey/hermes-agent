@@ -208,13 +208,18 @@ def test_serve_cleanup_tolerates_real_child_exit_at_signal_boundary(monkeypatch,
         proc.wait(timeout=5)
 
 
-def test_serve_cleanup_does_not_hide_permission_failure(monkeypatch):
+@pytest.mark.parametrize("boundary", ["census", "terminate", "kill"])
+def test_serve_cleanup_does_not_hide_permission_failure(monkeypatch, boundary):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
 
-    def forbidden(process):
+    def forbidden(process, *args, **kwargs):
         raise psutil.AccessDenied(process.pid)
 
-    monkeypatch.setattr(psutil.Process, "terminate", forbidden)
+    if boundary == "kill":
+        monkeypatch.setattr(psutil.Process, "terminate", lambda process: None)
+        monkeypatch.setattr(psutil, "wait_procs", lambda family, timeout: ([], family))
+    method = "children" if boundary == "census" else boundary
+    monkeypatch.setattr(psutil.Process, method, forbidden)
     try:
         with pytest.raises(psutil.AccessDenied):
             _stop_serve_process(proc)
