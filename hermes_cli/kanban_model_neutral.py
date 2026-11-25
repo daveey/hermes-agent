@@ -24,7 +24,18 @@ def _model_names():
     # These are human shorthand for catalog families, not arbitrary claude-* tools.
     aliases = {alias for alias in ('opus', 'sonnet', 'fable', 'astra', 'luna', 'sol')
                if any(alias in re.split(r'[-.]', name) for name in names)}
-    return '|'.join(re.escape(name) for name in sorted(names | aliases, key=lambda name: (-len(name), name)))
+    # Human family+version spelling must consume the entire identity. Derive
+    # versions from the offline catalog, never accept arbitrary suffixes.
+    versioned = set()
+    for name in names:
+        for alias in aliases:
+            match = re.search(r'\b' + alias + r'-(\d+(?:[-.]\d+)*)(?:-|$)', name)
+            if match:
+                parts = re.split(r'[-.]', match[1])
+                for joiner in ('-', '.'):
+                    for separator in ('', '-', ' '):
+                        versioned.add(alias + separator + joiner.join(parts))
+    return '|'.join(re.escape(name) for name in sorted(names | aliases | versioned, key=lambda name: (-len(name), name)))
 
 
 _MODEL = re.compile(r'(?:\b|(?<=independent)|(?<=primary))(?:' + _model_names() + r')(?![\w-]|\.[\w])', re.IGNORECASE)
@@ -150,6 +161,59 @@ def standing_wait_words(texts, render, limit=3):
     return chosen
 
 
+# Bounded role grammar: identity must occupy an execution-role slot, and that
+# role must be requested (imperative/title) or the subject of an obligation.
+# This intentionally does not classify arbitrary natural-language model mentions.
+_ROLE_MODIFIERS = r'(?:(?:a|an|the|fresh|independent|primary|exact[- ]head|pinned)\s+)*'
+_NAMED_ROLE = _ROLE_MODIFIERS + _ROUTE_NAME + r'\s+(?:review|reviewer|subagent|worker)\b'
+_ROLE_REQUEST = re.compile(
+    r'^\s*(?:\d+[.)]\s*|[-*]\s*)?(?:run|arrange|request|obtain|spawn|dispatch)\s+'
+    + _ROLE_MODIFIERS, re.IGNORECASE)
+_ROLE_TITLE = re.compile(r'^\s*(?:independent|primary|exact[- ]head)\s+', re.IGNORECASE)
+_ROLE_NOUN = re.compile(_NAMED_ROLE, re.IGNORECASE)
+_ROLE_TAIL = re.compile(
+    r'\s*(?:(?:and|\+)\s+(?:exact[- ]head\s+)?(?:CI|tests?|approval)\s*)*'
+    r'(?:(?:is|are)\s+)?(?:mandatory|required)\b', re.IGNORECASE)
+
+
+def _requested_role(clause):
+    """Parse request heads separately from complete role/obligation subjects.
+
+    Punctuation does not erase receipt predicates. Only imperative heads may
+    start after a label; a named role alone must occupy the complete clause.
+    """
+    for segment in re.split(r'[:,]', clause):
+        segment = segment.strip()
+        command = _ROLE_REQUEST.match(segment)
+        if command:
+            rest = segment[command.end():]
+            if _ROLE_NOUN.match(rest):
+                return True
+            role = re.match(r'(?:review|subagent|worker)\b', rest, re.IGNORECASE)
+            if role:
+                complement = rest[role.end():]
+                # Direct executor complement, not a preposition nested in the
+                # reviewed subject ("review of code written by <model>").
+                if re.fullmatch(r'\s+(?:with|using|by)\s+' + _ROLE_MODIFIERS + _ROUTE_NAME
+                                + r'\s*[.!]?\s*', complement, re.IGNORECASE):
+                    return True
+                if re.search(r'\bwith\s+(?:a\s+)?pinned\s+' + _ROUTE_NAME
+                             + r'\s+(?:subagent|reviewer|worker)\b', complement, re.IGNORECASE):
+                    return True
+        # A coordinated list is an obligation only when its predicate belongs
+        # to this whole subject, not an arbitrary suffix in receipt prose.
+        role = _ROLE_NOUN.match(segment)
+        if role and _ROLE_TAIL.fullmatch(segment[role.end():].rstrip('.! ')):
+            return True
+    whole = clause.strip()
+    role = _ROLE_NOUN.match(whole)
+    if role and _ROLE_TITLE.match(whole):
+        return bool(re.fullmatch(
+            r'\s*(?:(?:through|via)\s+(?:[\w/-]+|[\w/-]+\s+card))?[.!]?\s*',
+            whole[role.end():], re.IGNORECASE))
+    return False
+
+
 def validate_text(*values):
     """Reject positive machine directives and explicit named-model obligations.
 
@@ -181,7 +245,8 @@ def validate_text(*values):
                     r'|(?:implementer models|forbidden overlaps|excluded models|exclude)\s*:'
                     r'|differ from|not be reviewed by|other than|distinct from|not (?:the )?same as)'
                     r'.*?(?=\b(?:must(?!\s+not)|requires?|required|mandatory|'
-                    r'no fallback for|(?:use|select|choose|pin|restrict)\s+(?:only\s+)?)\b|$)',
+                    r'no fallback for|(?:use|select|choose|pin|restrict)\s+(?:only\s+)?)\b'
+                    r'|[,;]\s*(?:run|arrange|request|obtain|spawn|dispatch)\b|$)',
                     ' ', clause, flags=re.IGNORECASE)
                 if re.fullmatch(
                     r'\s*(?:the )?(?:old|legacy|previous|historical) '
@@ -201,7 +266,8 @@ def validate_text(*values):
                     r'\b(?:needs?|requires?|must get)\s+(?:a\s+)?(?:fresh\s+)?'
                     r'(?:independent\s+)?review\s*\(\s*' + _ROUTE_NAME,
                     clause, re.IGNORECASE)
-                if _DIRECTIVE.search(clause) or _PROVIDER_DIRECTIVE.search(clause) or named_review or required_review:
+                if (_DIRECTIVE.search(clause) or _PROVIDER_DIRECTIVE.search(clause)
+                        or named_review or required_review or _requested_role(clause)):
                     raise ValueError(f'{ERROR}; refused line: {source_line}{_TEXT_GUIDANCE}')
 
 
