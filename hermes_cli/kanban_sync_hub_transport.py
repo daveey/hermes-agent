@@ -1,4 +1,19 @@
-"""Socket observation for the Board's kept-alive HTTP transport. [daveey]"""
+"""Socket observation and response decoding for Board HTTP transports. [daveey]"""
+import json
+
+
+def decode_json(raw):
+    """Malformed reply bytes are a board-local failure, not a retry signal.
+
+    Keep decoding separate from application validation: arbitrary ValueError
+    raised by a caller must not be mistaken for a broken HTTP response.
+    """
+    from hermes_cli.kanban_sync_client import HubError
+    try:
+        return json.loads(raw or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Do not include raw bytes: replies may carry private Board contents.
+        raise HubError(502, 'invalid JSON response') from exc
 
 import urllib.request
 

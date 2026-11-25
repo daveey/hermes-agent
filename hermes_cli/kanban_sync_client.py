@@ -57,7 +57,7 @@ from hermes_cli.kanban_sync_connections import connection, connection_scope, inv
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
 from hermes_cli.kanban_replay_sender import PushResult, ReplayFault, push
 from hermes_cli.kanban_sync_compat import REASSESSMENT_REFUSALS, TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
-from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed
+from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed, decode_json
 from hermes_cli.kanban_sync_hub_transport import BoundedRedirects, BoundedResponseError, read_response
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
@@ -412,7 +412,7 @@ class Hub(HubRoutesMixin):
                     if status == 410:
                         raise Resync(text)
                     raise HubError(status, text)
-                return json.loads(raw or b"{}")
+                return decode_json(raw)
             except Exception as exc:  # health: allow BLE001 -- stamps diagnostics, then re-raises the same error
                 note_attempt(exc, self.deadline, started, time.monotonic())
                 raise

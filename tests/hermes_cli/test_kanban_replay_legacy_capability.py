@@ -19,8 +19,10 @@ from hermes_cli import kanban_sync_client as client
 from tests.hermes_cli import kanban_sync_support as support
 
 
-@pytest.mark.parametrize('capability', [None, [], 'unsupported', {}])
-def test_legacy_malformed_capability_does_not_abort_later_board(tmp_path, monkeypatch, capability):
+@pytest.mark.parametrize('proxied', [False, True])
+@pytest.mark.parametrize('capability', [None, [], 'unsupported', {}, b'{', b'\xff'])
+def test_legacy_malformed_capability_does_not_abort_later_board(tmp_path, monkeypatch, capability, proxied):
+    monkeypatch.setattr(client.Hub, '_proxied', staticmethod(lambda parts: proxied))
     home = support.kanban_home(tmp_path, monkeypatch)
     support.write_sync_config(home, True)
     broken_path = home / 'kanban.db'
@@ -30,6 +32,7 @@ def test_legacy_malformed_capability_does_not_abort_later_board(tmp_path, monkey
     kb.create_task(conn, title='legacy capability isolation', assignee='worker')
     pending = conn.execute('SELECT COUNT(*) FROM kanban_sync_outbox').fetchone()[0]
     assert pending > 0
+    custody = [dict(row) for row in conn.execute('SELECT * FROM kanban_sync_outbox')]
 
     healthy_path = Path(tmp_path) / 'healthy.db'
     with kbc.connect(healthy_path) as healthy:
@@ -40,7 +43,7 @@ def test_legacy_malformed_capability_does_not_abort_later_board(tmp_path, monkey
 
     class Handler(BaseHTTPRequestHandler):
         def reply(self, body):
-            data = json.dumps(body).encode()
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
             self.send_response(200)
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
@@ -74,12 +77,28 @@ def test_legacy_malformed_capability_does_not_abort_later_board(tmp_path, monkey
     try:
         results = client.sync_all_once(hub, boards=[('default', broken_path), ('healthy', healthy_path)])
         assert [r.board for r in results] == ['default', 'healthy']
-        assert results[0].error is None
         assert results[1].error is None
         assert any(method == 'GET' and path.endswith('/default/replay/capability') for method, path in seen)
-        assert any(method == 'POST' and path.endswith('/default/ops') for method, path in seen)
+        assert any('/default/changes?' in path for _method, path in seen)
         assert any('/healthy/' in path for _method, path in seen)
-        assert conn.execute('SELECT COUNT(*) FROM kanban_sync_outbox').fetchone()[0] == 0
+        if isinstance(capability, bytes):
+            assert results[0].error
+            assert 'HubError' in results[0].error and 'invalid JSON response' in results[0].error
+            assert not any(method == 'POST' for method, _path in seen)
+            retained = [dict(row) for row in conn.execute('SELECT * FROM kanban_sync_outbox')]
+            assert len(retained) == len(custody)
+            for before, after in zip(custody, retained):
+                # Legacy freezing and failure diagnostics legitimately advance;
+                # source identity, payload and pending disposition do not.
+                for key in before.keys() - {'wire_json', 'attempts', 'last_error'}:
+                    assert after[key] == before[key], key
+                assert after['attempts'] > before['attempts']
+                assert 'invalid JSON response' in after['last_error']
+
+        else:
+            assert results[0].error is None
+            assert any(method == 'POST' and path.endswith('/default/ops') for method, path in seen)
+            assert conn.execute('SELECT COUNT(*) FROM kanban_sync_outbox').fetchone()[0] == 0
     finally:
         hub.close()
         server.shutdown()

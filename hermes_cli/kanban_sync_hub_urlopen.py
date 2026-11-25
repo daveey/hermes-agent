@@ -24,7 +24,7 @@ def call(hub, method: str, path: str, data: Optional[bytes], timeout: Optional[f
     try:
         try:
             with open_request(req, timeout=timeout) as resp:
-                return client.json.loads(client.read_response(resp, max_response_bytes) or b"{}")
+                return client.decode_json(client.read_response(resp, max_response_bytes))
         except client.urllib.error.HTTPError as exc:
             with exc:
                 text = client.read_response(exc, max_response_bytes, deterministic=False).decode("utf-8", "replace")[:500]
