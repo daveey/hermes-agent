@@ -169,6 +169,8 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
             task_id TEXT NOT NULL REFERENCES tasks(id),
             binding_json TEXT NOT NULL,
             child_request_id TEXT NOT NULL UNIQUE)""")
+        from hermes_cli.kanban_origin_intent_carry import ensure_task_index
+        ensure_task_index(conn)
         existing = conn.execute(
             "SELECT intent_json,task_id FROM origin_creation_intents WHERE request_id=?",
             (intent["request_id"],),
@@ -249,6 +251,8 @@ def adopt_with_origin(conn, intent: dict, *, board: str) -> str:
             task_id TEXT NOT NULL REFERENCES tasks(id),
             binding_json TEXT NOT NULL,
             child_request_id TEXT NOT NULL UNIQUE)""")
+        from hermes_cli.kanban_origin_intent_carry import ensure_task_index
+        ensure_task_index(conn)
         existing = conn.execute(
             "SELECT intent_json,task_id FROM origin_creation_intents WHERE request_id=?",
             (intent["request_id"],),

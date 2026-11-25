@@ -1332,6 +1332,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         except PermissionError:
             pass  # a read-only (delegated-child) opener: the next writer stamps; inheritance has a fallback
 
+    from hermes_cli.kanban_origin_intent_carry import ensure_task_index
+    ensure_task_index(conn)
     _rebuild_drifted_tables(conn)
     ensure_run_bookkeeping_index(conn)
     _ensure_notify_sub_triggers(conn)

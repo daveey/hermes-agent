@@ -41,6 +41,16 @@ INTENTS_DDL = """CREATE TABLE IF NOT EXISTS origin_creation_intents (
             child_request_id TEXT NOT NULL UNIQUE)"""
 
 
+def ensure_task_index(conn: sqlite3.Connection) -> None:
+    """Index owner-marker equality reads without creating the lazy intent table.
+
+    Keep binding_json out of the index: payloads can be large. Equal task IDs
+    retain rowid order, as in the original table scan; no read semantics change.
+    """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone():
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_origin_intents_task ON origin_creation_intents(task_id)')
+
+
 def record(conn: sqlite3.Connection, task_id: str, request_id: str, intent_json: str, binding_json: str,
            child_request_id: str) -> None:
     """Append the synced copy of a just-inserted ``origin_creation_intents`` row (caller's transaction).
@@ -89,4 +99,5 @@ def restore_from_event(conn: sqlite3.Connection, cols: Mapping[str, Any], own: s
     if row is None:
         return False
     conn.execute(INTENTS_DDL)
+    ensure_task_index(conn)
     return conn.execute("INSERT OR IGNORE INTO origin_creation_intents VALUES (?,?,?,?,?)", row).rowcount == 1
