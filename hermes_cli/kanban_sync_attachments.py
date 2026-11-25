@@ -89,6 +89,16 @@ def _record_local(conn, row, path, key, *, data=None):
     # A deleted/rebound row must not be resurrected after network I/O.
     # Read current metadata, not the pre-I/O snapshot: another writer may have
     # cleared the path while these bytes were being verified.
+    if data is None:
+        # A read-only verification must not reserve a writer. Any actual byte or
+        # metadata publication still rechecks custody and identity under the lock.
+        current = conn.execute("SELECT stored_path,blob_key FROM task_attachments WHERE uid=? "
+                               "AND task_id=? AND size=? AND blob_key IS ?",
+                               (row["uid"], row["task_id"], row["size"], row["blob_key"])).fetchone()
+        if current is None or frozen(conn, row["task_id"]):
+            return False
+        if current["stored_path"] == str(path) and current["blob_key"] == key:
+            return True
     with write_txn(conn):
         if frozen(conn, row["task_id"]):
             return False
