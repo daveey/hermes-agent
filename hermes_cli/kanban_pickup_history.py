@@ -7,7 +7,8 @@ A long card re-picked-up by a worker node then held its runs but not their early
 
 :func:`refill` repairs such a copy from this board's replica (the Board's full mirror), never inventing a row:
 
-* Only a foreign copy (``created_on`` another gateway) is refilled; this gateway's own cards are authoritative here.
+* Foreign copies refill only their missing prefix. Rehomed own cards additionally recover published
+  pre-handoff gaps through ``kanban_rehome_history``; present ownership is not proof of complete history.
 * Only the missing *prefix* is filled: replica events older than the earliest event the copy already holds, matched
   by ``uid``. A newer gap is not a truncation and the feed delivers it; refilling it could race that feed.
 * Every refilled row keeps its replica ``uid``, ``kind``, ``payload`` and ``created_at``; its run is the local run
@@ -57,8 +58,11 @@ def refill(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str,
     from hermes_cli.kanban_db_connect import write_txn
     explicit = ids is not None
     targets = list(ids) if explicit else foreign_copies(conn, own)
-    report: dict[str, dict] = {}
+    from hermes_cli.kanban_rehome_history import recover
+    report: dict[str, dict] = recover(conn, replica, own, targets if explicit else None)
     for tid in targets:
+        if tid in report:
+            continue
         card = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (tid,)).fetchone()
         if card is None or card[0] in (None, own):
             if explicit:

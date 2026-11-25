@@ -61,6 +61,8 @@ def run(live, replica, gateway, *, path, inputs, rebuilt=False) -> dict[str, lis
     # concurrent relevant commits therefore re-arm the next pass, never vanish.
     repaired = client.repair_divergence(live, replica, gateway)
     client.repair_missing_children(live, replica, gateway)
+    from hermes_cli.kanban_rehome_history import recover
+    recover(live, replica, gateway)
     if stamp is not None:
         with _lock:
             _done[key] = stamp
