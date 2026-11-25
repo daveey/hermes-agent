@@ -193,8 +193,19 @@ def ensure(producer: str, *, force: bool = False) -> str:
 def attach(conn, task_id: str, producer: str) -> str:
     """Inside create's transaction: make the producer's owner chat this card's creating chat."""
     sid = ensure(producer)
-    link(conn, task_id, producer, sid)
+    _attach_ensured(conn, task_id, producer, sid)
     return sid
+
+
+def _attach_ensured(conn, task_id: str, producer: str, sid: str) -> bool:
+    """Only callers that just ensured the local producer session issue custody.
+
+    Keep this separate from link(): replicated/projected links are not an issuer.
+    """
+    from hermes_cli.kanban_owner_origin import record
+    added = link(conn, task_id, producer, sid)
+    record(conn, task_id, sid)
+    return added
 
 
 def link(conn, task_id: str, producer: str, sid: str) -> bool:
@@ -270,7 +281,7 @@ def settle(conn, task_id: str, creator_task_id: Optional[str], *, created_by: Op
         log.warning("kanban owner chat for %s unavailable; card %s created ownerless", name, task_id, exc_info=True)
         _append_event(conn, task_id, UNAVAILABLE, {"producer": name, "error": str(exc)[:500]})
         return
-    link(conn, task_id, name, sid)
+    _attach_ensured(conn, task_id, name, sid)
     if not kca.has_authority(conn, task_id, creator_task_id, durable=True):
         raise kca.CreateAuthorityRefused(
             f"the owner chat for producer {name!r} could not be linked as this card's owner; nothing was created.")
@@ -436,7 +447,7 @@ def _relink(conn, task_id: str, producer: str, sid: str, links: bool, live) -> b
         if ref != sid:  # a notice to a deleted/archived owner chat is dropped: stop binding the card to it
             conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=? AND chat_id IN (?, ?)",
                          (task_id, ref, here + ref))
-    return link(conn, task_id, producer, sid) or sid in dead
+    return _attach_ensured(conn, task_id, producer, sid) or sid in dead
 
 
 def maybe_backfill(conn, *, now: float) -> Optional[dict]:

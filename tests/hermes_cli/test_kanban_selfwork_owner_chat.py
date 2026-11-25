@@ -41,10 +41,17 @@ def _attached(conn):
 
 
 def test_intake_card_is_owned_by_its_repository_owner_chat(request_envelope, monkeypatch, capsys):
+    with kbc.connect_closing() as conn:
+        from hermes_cli import kanban_db_sync as sync
+        sync.set_mode(conn, "primary")
     created = invoke(request_envelope, monkeypatch, capsys)
     assert created.get("created") is True, created
     tid, slot = created["task_id"], _slot(request_envelope)
     with kbc.connect_closing() as conn:
+        from hermes_cli import kanban_origin_native as native
+        binding = native._receipt(conn, tid)
+        assert binding is not None
+        assert binding["origin"]["session"] == owner.session_id(slot)
         assert _owner_sessions(conn, tid) == [owner.session_id(slot)]
         assert kca.has_authority(conn, tid, None, durable=True)
         assert [e["producer"] for e in _attached(conn)] == [slot]
