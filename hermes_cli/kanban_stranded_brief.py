@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 def _data(raw):
@@ -22,7 +23,9 @@ def reason(entry):
     detail = disposition.get('summary') if isinstance(disposition, dict) else None
     why = detail or data.get('summary') or data.get('reason') or data.get('error')
     if isinstance(why, str) and why not in ('decision_pending', 'scope_stopped', 'capability_unavailable'):
-        return _text(why.replace('_', ' '))
+        tag = re.match(r'\s*(\[stop_on=[a-z_]+\])\s*', why)  # kanban_retain.tool_args: keep the category as written
+        rest = why[tag.end():] if tag else why
+        return _text((tag.group(1) + ' ' if tag else '') + rest.replace('_', ' '))
     return {'spend_budget_triaged': 'The work reached its budget for further attempts.',
             'decision_retained': 'The decision owner kept the work stopped; further work has not been authorized.',
             'safety_refused': 'The provider refused the work; a budget decision cannot authorize another attempt.'}.get(

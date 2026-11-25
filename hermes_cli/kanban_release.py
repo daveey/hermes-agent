@@ -216,20 +216,29 @@ def dead_offer(conn: sqlite3.Connection, task_id: str, ask: Any) -> bool:
     return current is not None and (stamp != current or not _home_filed(conn, task_id, ask))
 
 
+def _newest(conn: sqlite3.Connection, tid: str, kind: str) -> Optional[dict]:
+    """The card's ``kind`` event created last (``_event_order``: second, uid millisecond, then local id), as
+    ``kanban_scope_renewal.mandate`` orders them. Local ids are arrival order: on a synced board a stop written
+    after a release can arrive before it."""
+    from hermes_cli.kanban_sync_divergence import _event_order
+    rows = [dict(r) for r in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind=?", (tid, kind))]
+    return max(rows, key=_event_order, default=None)
+
+
 def _newest_stop(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
     from hermes_cli.kanban_spend_decision import EVENT
-    row = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
-                       (tid, EVENT)).fetchone()
-    return dict(row) if row is not None else None
+    return _newest(conn, tid, EVENT)
 
 
 def _release_event(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
-    """The ``stop_released`` payload recorded after the card's newest stop (with its event ``_id``), else None."""
-    stop = _newest_stop(conn, tid)
-    row = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind=? AND id>? ORDER BY id DESC "
-                       "LIMIT 1", (tid, RELEASED, stop["id"] if stop else 0)).fetchone()
-    payload = _payload(row[1]) if row else {}
-    return {**payload, "_id": row[0]} if payload.get("version") == 1 else None
+    """The newest ``stop_released`` payload created after the card's newest stop (with its event ``_id``), else
+    None. Both are ordered by creation (``_event_order``), not arrival."""
+    from hermes_cli.kanban_sync_divergence import _event_order
+    stop, row = _newest_stop(conn, tid), _newest(conn, tid, RELEASED)
+    if row is None or (stop is not None and _event_order(row) <= _event_order(stop)):
+        return None
+    payload = _payload(row["payload"])
+    return {**payload, "_id": row["id"]} if payload.get("version") == 1 else None
 
 
 def current_mandate(conn: sqlite3.Connection, tid: str) -> Optional[dict]:

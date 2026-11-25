@@ -205,3 +205,69 @@ def test_rejected_retain_source_still_matches_a_tagged_call():
     assert _sent(args) == retain.tool_args(args)
     legacy = dict(scope.ARGS)  # a scope stop written before stop_on existed is compared as written
     assert _sent(legacy) == legacy
+
+
+# --- follow-up: human instructions stay in view; creation order; brief keeps the tag -------------------------
+
+
+def test_an_old_human_do_not_deploy_comment_stays_in_the_prompt(board, monkeypatch):
+    for name in ('HERMES_KANBAN_TASK', 'HERMES_KANBAN_RUN_ID'):
+        monkeypatch.delenv(name, raising=False)
+    tid = rel.spend_stopped(board)
+    kb.add_comment(board, tid, 'david', 'Do not deploy to production until I say so.', writer_kind='human')
+    kb.add_comment(board, tid, 'default', 'Agent plan: deploy after CI.', writer_kind='agent', writer_session='s')
+    kb.add_comment(board, tid, 'kanban-dispatcher', 'Woken: CI finished.')
+    for i in range(40):
+        kb.add_comment(board, tid, 'default', f'progress note {i}', writer_kind='agent', writer_session='s')
+    rel.run(board, tid)
+    context = kb.build_worker_context(board, tid)
+    assert 'Do not deploy to production until I say so.' in context
+    section = _section(context, '## Human instructions on this card')
+    assert 'Do not deploy' in section and 'Agent plan' not in section and 'Woken' not in section
+    assert context.index('## Release mandate') < context.index('## Human instructions on this card') \
+        < context.index('## Comment thread')
+
+
+def test_human_instructions_are_bounded_and_count_the_rest(board, monkeypatch):
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    tid = rel.spend_stopped(board)
+    for i in range(13):
+        kb.add_comment(board, tid, 'david', f'human rule {i} ' + 'x' * 2000, writer_kind='human')
+    for i in range(30):
+        kb.add_comment(board, tid, 'default', f'note {i}', writer_kind='agent', writer_session='s')
+    section = _section(kb.build_worker_context(board, tid), '## Human instructions on this card')
+    assert '_(3 more human comments not shown)_' in section
+    assert 'human rule 12 ' in section and 'human rule 2 ' not in section
+    assert section.count('x' * 1000) == 10 and 'x' * 1100 not in section  # 1 KiB each
+
+
+def _swap_ids(conn, a, b):
+    with kb.write_txn(conn):
+        conn.execute('UPDATE task_events SET id=-1 WHERE id=?', (a,))
+        conn.execute('UPDATE task_events SET id=? WHERE id=?', (a, b))
+        conn.execute('UPDATE task_events SET id=? WHERE id=-1', (b,))
+
+
+def test_release_and_stop_are_ordered_by_creation_not_arrival(board):
+    tid = rel.spend_stopped(board)
+    rel.run(board, tid)
+    (rid, rts), = board.execute("SELECT id, created_at FROM task_events WHERE task_id=? AND kind='stop_released'",
+                                (tid,)).fetchall()
+    with kb.write_txn(board):  # a stop written 10 s after the release ...
+        kb._append_event(board, tid, decision.EVENT, {'reason': 'Spend budget: 25 runs'})
+        sid = board.execute('SELECT MAX(id) FROM task_events').fetchone()[0]
+        board.execute('UPDATE task_events SET created_at=? WHERE id=?', (rts + 10, sid))
+    _swap_ids(board, rid, sid)  # ... that arrived before it
+    assert release._release_event(board, tid) is None and release.current_mandate(board, tid) is None
+    # Reversed: the stop was created before the release although it arrived after it.
+    with kb.write_txn(board):
+        board.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind=? AND created_at=?",
+                      (rts - 10, tid, decision.EVENT, rts + 10))
+    assert release._release_event(board, tid) is not None
+
+
+def test_stranded_brief_keeps_the_stop_on_tag():
+    from hermes_cli.kanban_stranded_brief import reason
+    entry = {'kind': 'decision_retained', 'payload': {'disposition': {
+        'summary': '[stop_on=same_error_three_times] the ship_ledger write failed three times'}}}
+    assert reason(entry) == '[stop_on=same_error_three_times] the ship ledger write failed three times'
