@@ -171,10 +171,8 @@ def _sweep(now: float) -> list:
     return out
 
 
-@board_legacy.reader()
-def version(path: str) -> Optional[tuple]:
-    """``(generation, dev, ino, schema_version, data_version)`` of ``path``; None when it
-    cannot be observed (missing file, open/read error): the caller reads uncached."""
+def _observer(path: str) -> Optional[_Observer]:
+    """Acquire current observer custody without redundantly sampling its clock."""
     path = str(path)
     now = time.monotonic()
     try:
@@ -210,6 +208,22 @@ def version(path: str) -> Optional[tuple]:
                 retired = []  # another thread opened a current one first
             retired += _sweep(now)
         _retire(fresh, *retired)
+    with _lock:
+        obs.used = now
+        if _observers.get(path) is obs:
+            _observers.move_to_end(path)
+    return obs
+
+
+@board_legacy.reader()
+def version(path: str) -> Optional[tuple]:
+    """Current commit clock; unobservable boards return None for an uncached read."""
+    obs = _observer(str(path))
+    return _clock(obs) if obs is not None else None
+
+
+def _clock(obs: _Observer) -> Optional[tuple]:
+    path = obs.path
     try:
         with obs.lock:
             schema = obs.conn.execute("PRAGMA schema_version").fetchone()[0]
@@ -223,11 +237,7 @@ def version(path: str) -> Optional[tuple]:
             gone = _drop_observer(path) if _observers.get(path) is obs else None
         _retire(gone)
         return None
-    with _lock:
-        obs.used = now
-        if _observers.get(path) is obs:
-            _observers.move_to_end(path)
-    return (obs.gen, ident[0], ident[1], int(schema), int(data))
+    return (obs.gen, *obs.ident, int(schema), int(data))
 
 
 @board_legacy.reader()
@@ -288,23 +298,18 @@ def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> d
     """
     from hermes_cli import kanban_task_change
 
-    ver = version(path)
-    with _lock:
-        obs = _observers.get(str(path)) if ver is not None else None
+    obs = _observer(str(path))
     if obs is None:
         return fallback()
     cache_key = (*key, "p2")
     with obs.refresh:
-        with obs.lock:
-            with _lock:
-                current = _observers.get(str(path)) is obs
-                hit = _entries.get(cache_key)
-            # Retain only the observer's commit clock, not a history-reader connection.
-            # Sample before opening the snapshot: a later commit invalidates next read.
-            commit_key = (obs.gen, *obs.ident,
-                          obs.conn.execute("PRAGMA schema_version").fetchone()[0],
-                          obs.conn.execute("PRAGMA data_version").fetchone()[0]) if current else None
-        if not current:
+        with _lock:
+            current = _observers.get(str(path)) is obs
+            hit = _entries.get(cache_key)
+        # Sample only after refresh custody: a waiter must see intervening commits.
+        # Failed/retired clocks never certify retained rows.
+        commit_key = _clock(obs) if current else None
+        if commit_key is None:
             return fallback()
         if hit is not None and len(hit) > 2 and hit[0] is not None and hit[2] == commit_key:
             from hermes_cli import loop_accounting

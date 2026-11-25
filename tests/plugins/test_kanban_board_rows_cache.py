@@ -113,6 +113,59 @@ def test_unchanged_board_materializes_rows_once(env, monkeypatch):
     assert all(_strip_now(b) == _strip_now(bodies[0]) for b in bodies[1:])
 
 
+def test_incremental_samples_commit_clock_once_per_read(env):
+    from plugins.kanban.dashboard import board_rows
+
+    mod, _sql_reads, _home = env
+    tid = _create("first")
+    _read(mod)
+    [obs] = board_rows._observers.values()
+    statements = []
+    obs.conn.set_trace_callback(statements.append)
+    try:
+        for title in ("first", "changed"):
+            if title == "changed":
+                _raw("UPDATE tasks SET title=? WHERE id=?", (title, tid))
+            statements.clear()
+            assert _cards(_read(mod))[tid]["title"] == title
+            clocks = [sql.upper() for sql in statements if sql.upper().startswith("PRAGMA ")]
+            assert clocks == ["PRAGMA SCHEMA_VERSION", "PRAGMA DATA_VERSION"]
+    finally:
+        obs.conn.set_trace_callback(None)
+
+
+def test_incremental_clock_is_sampled_after_refresh_custody(env, monkeypatch):
+    from contextlib import contextmanager
+    from plugins.kanban.dashboard import board_rows
+
+    mod, _sql_reads, _home = env
+    tid = _create("first")
+    _read(mod)
+    [obs] = board_rows._observers.values()
+
+    @contextmanager
+    def commit_while_acquiring():
+        _raw("UPDATE tasks SET title=? WHERE id=?", ("during wait", tid))
+        yield
+
+    monkeypatch.setattr(obs, "refresh", commit_while_acquiring())
+    assert _cards(_read(mod))[tid]["title"] == "during wait"
+
+
+def test_incremental_failed_clock_drops_observer_and_retries(env):
+    from plugins.kanban.dashboard import board_rows
+
+    mod, _sql_reads, _home = env
+    tid = _create("first")
+    _read(mod)
+    [obs] = board_rows._observers.values()
+    obs.conn.close()
+    _raw("UPDATE tasks SET title=? WHERE id=?", ("after failure", tid))
+    assert _cards(_read(mod))[tid]["title"] == "after failure"
+    assert obs not in board_rows._observers.values()
+    assert _cards(_read(mod))[tid]["title"] == "after failure"
+
+
 def test_local_commit_is_read_on_the_next_read_without_full_materialization(env):
     mod, sql_reads, _home = env
     _create("first")
