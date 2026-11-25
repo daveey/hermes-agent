@@ -165,10 +165,12 @@ def _control_items(sid: str) -> tuple[list[dict], list[dict]]:
 def _process_items(db: Any, tip: str) -> list[dict]:
     """Live and retained processes of this chat from the registry's strict qualified inventory."""
     from tools.process_registry import process_registry
+    from hermes_state_process_checkpoint import checkpoint_items
 
     with _so()._owner_scope(db):
         rows = process_registry.list_sessions(include_retained=True, strict=True, owner_session_id=tip)
-    items = []
+        checkpoints = checkpoint_items(process_registry, tip, {row['session_id'] for row in rows})
+    items = list(checkpoints)
     for row in rows:
         if row.get("status") != "exited":
             state = "running"
