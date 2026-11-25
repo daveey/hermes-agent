@@ -17,6 +17,7 @@ def _history():
 
 @pytest.mark.parametrize("case", [
     "valid", "same-run", "keyless", "wrong-key", "wrong-creator", "wrong-origin", "missing-run",
+    "empty-run", "null-run", "integer-run", "list-run", "object-run",
     "done", "sent", "queued", "failed", "expired", "unknown", "other-code", "handoff", "missing-handoff",
     "wrong-status", "wrong-action", "wrong-collection", "malformed-body", "malformed-result", "absent", "legacy-row",
 ])
@@ -28,6 +29,11 @@ def test_binding_retry_boundary(monkeypatch, case):
         "wrong-creator": lambda: body["args"].update(creator={**CREATOR, "task_id": "t_abcdef0123456789"}),
         "wrong-origin": lambda: body["args"].update(origin={**ORIGIN, "session": "elsewhere"}),
         "missing-run": lambda: body["args"].pop("run_uid"),
+        "empty-run": lambda: body["args"].update(run_uid=""),
+        "null-run": lambda: body["args"].update(run_uid=None),
+        "integer-run": lambda: body["args"].update(run_uid=3),
+        "list-run": lambda: body["args"].update(run_uid=["run-1"]),
+        "object-run": lambda: body["args"].update(run_uid={"uid": "run-1"}),
         "other-code": lambda: result.update(code="self_work_refused"),
         "handoff": lambda: result.update(handoff_complete=True),
         "missing-handoff": lambda: result.pop("handoff_complete"),

@@ -199,4 +199,8 @@ def test_later_run_retry_after_terminal_forward_rejection_gets_own_transport_ide
     second = call("run-2")
     assert second["ok"] and second["request_id"] != first["request_id"]
     assert call("run-2")["request_id"] == second["request_id"]  # exact retries in that run stay stable
-    assert ["idempotency_key=" + json.dumps("product-key")] == stored[second["request_id"]][1]
+    third = call("run-3")
+    assert third["ok"] and third["request_id"] not in (first["request_id"], second["request_id"])
+    assert call("run-3")["request_id"] == third["request_id"]
+    for retry in (second, third):
+        assert ["idempotency_key=" + json.dumps("product-key")] == stored[retry["request_id"]][1]
