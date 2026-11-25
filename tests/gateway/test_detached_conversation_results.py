@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.gateway.test_authority_lane_moves_on import _app_turn, _chat
 from tests.gateway.test_detached_conversation_lifecycle import _moved_on

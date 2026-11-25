@@ -14,6 +14,7 @@ import asyncio
 import threading
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.waiting import async_wait_until
 

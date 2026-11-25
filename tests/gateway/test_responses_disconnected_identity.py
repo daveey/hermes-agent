@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer

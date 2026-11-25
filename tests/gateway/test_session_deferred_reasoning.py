@@ -3,6 +3,7 @@ import asyncio
 import threading
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.gateway.test_session_mutation_model_busy import _owner, _run_turn, _running_model
 from tests.waiting import async_wait_until

@@ -8,6 +8,7 @@ turn. Only a chat the user closed (exit, /new and the other viewer closes) keeps
 and so do a manual cron run's finished text and the early per-task failure notice.
 """
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.gateway.test_completion_admission import pending
 from tests.gateway.test_session_end_delegations import _admissions, _local

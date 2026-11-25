@@ -7,6 +7,7 @@ admission. Busy sessions, queue order, owner restarts and lost acknowledgements 
 contract's, not a retry budget's.
 """
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.gateway.test_completion_admission import pending
 from tests.gateway.test_session_end_delegations import _PROCESS, _admissions, _deliver, _local, _notes

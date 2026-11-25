@@ -12,6 +12,7 @@ agent run is a stand-in that answers with the session and route it was given.
 import asyncio
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.waiting import async_wait_until
 

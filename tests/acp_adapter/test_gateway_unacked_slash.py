@@ -3,6 +3,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 import acp
 

@@ -9,6 +9,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.gateway.test_authority_lane_moves_on import _app, _app_turn, _chat, _gateway
 from tests.waiting import async_wait_until

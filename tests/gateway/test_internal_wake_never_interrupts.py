@@ -10,6 +10,7 @@ stand-in holding a real running-agent slot.
 import asyncio
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.waiting import async_wait_until
 

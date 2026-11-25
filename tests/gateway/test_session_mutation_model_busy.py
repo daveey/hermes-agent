@@ -4,6 +4,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from tests.waiting import async_wait_until
 

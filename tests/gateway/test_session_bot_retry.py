@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
 
 from gateway.session_contract import SessionActor
 from hermes_state_runtime import list_session_admissions
