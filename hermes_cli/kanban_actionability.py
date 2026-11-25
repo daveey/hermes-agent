@@ -236,9 +236,10 @@ def project(facts: dict, *, now: int) -> dict:
         row['evidence_state'] = 'unknown'
     elif (not deadline and not invalid_creation and not row['blocker']
           and row['owner']['kind'] == 'assignee' and row['owner'].get('refs')
-          and task['status'] in ('ready', 'running') and row['action'] == 'execute_current_scope'):
-        # A runnable card (queued for admission, or a live executor) is not an administrative
-        # wait: it needs no deadline. UNKNOWN eligibility and every hold above still show, and an
+          and (task['status'], row['action']) in (('ready', 'execute_current_scope'), ('running', 'execute_current_scope'),
+                                                  ('review', 'review_current_scope'))):
+        # A runnable card (queued for admission, a live executor, or queued for its reviewer's admission)
+        # is not an administrative wait: it needs no deadline. UNKNOWN eligibility and every hold above still show, and an
         # exact confirmed contract deadline still composes onto it (kanban_actionability_confirmed).
         row['escalation']['state'] = 'not_required'
     elif not deadline:

@@ -49,7 +49,7 @@ def test_executor_exemption_preserves_unresolved_custody(extra, violation):
     assert row['escalation']['state'] == 'unavailable'
 
 
-@pytest.mark.parametrize('status', ['todo', 'review', 'blocked', 'scheduled', 'triage'])
+@pytest.mark.parametrize('status', ['todo', 'blocked', 'scheduled', 'triage'])
 def test_other_nonterminal_states_still_require_deadlines(status):
     row = project({'task': {'id': 'waiting', 'status': status, 'assignee': 'default'}}, now=1000)
     assert 'escalation_deadline_missing' in row['violations']
