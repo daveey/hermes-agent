@@ -1,9 +1,10 @@
 """Single-fault contract cases for every clause of kanban_history_residue_source.
 
-Each malformed input violates exactly one predicate and keeps every earlier check satisfied
-(including the frozen wire echo), so dropping or flipping that predicate changes the outcome:
-either a malformed input is accepted or a non-Refused exception (AttributeError, TypeError,
-KeyError) escapes. Reasons are asserted exactly where a later guard would otherwise mask.
+Each malformed input isolates a predicate while keeping earlier checks satisfied
+(including the frozen wire echo). Most edits admit malformed input or allow a
+non-Refused exception to escape. C318 instead pins the diagnostic reason at the
+proof-object boundary; that is error-contract coverage, not an authorization kill.
+True redundant clauses are documented separately, never reported as killed.
 """
 import copy
 import json

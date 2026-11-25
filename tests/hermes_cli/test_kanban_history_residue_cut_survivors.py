@@ -65,12 +65,14 @@ def test_existing_intent_uses_original_expected_version(configured):
     assert [c[0] for c in calls] == ['POST', 'GET', 'GET']
 
 
-@pytest.mark.parametrize('count', [0, 21])
-def test_board_ledger_bound_before_cut(configured, monkeypatch, count):
+@pytest.mark.parametrize('empty', [True, False])
+def test_board_ledger_bound_simulates_empty_and_over_limit(configured, monkeypatch, empty):
+    # One real intent with a zero limit exercises the over-limit boundary cheaply;
+    # this is not a claim to have populated 21 actual ledger rows.
     paths, hub, _, _, connect = configured
     board.observe_board('default', 'op-original', 'Keep history')
-    monkeypatch.setattr(cut, 'MAX_OPS', 0 if count == 21 else 20)
-    if not count:
+    monkeypatch.setattr(cut, 'MAX_OPS', 20 if empty else 0)
+    if empty:
         identity = board.transport.scope(hub, 'default')
         monkeypatch.setattr(board.transport, 'scope', lambda *a: (identity[0], 'other', identity[2]))
     with pytest.raises(Refused, match='cut_ops_bound'):
