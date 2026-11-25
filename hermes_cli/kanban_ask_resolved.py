@@ -288,7 +288,10 @@ def broken_note(cmd: str, rc: Any, fails: int, tail: str) -> str:
 
 def _current(conn: sqlite3.Connection, task_id: str, cmd: str, generation: str) -> Optional[dict]:
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban_home_transfer import frozen
 
+    if frozen(conn, task_id):
+        return None
     state = kwc.get_state(conn, task_id)
     row = conn.execute("SELECT status, human_request FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if (state is None or state.get("purpose") != PURPOSE or state["cmd"] != cmd or state["generation"] != generation
@@ -408,6 +411,8 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
     if stale:
         with kb.write_txn(conn):
             for tid in stale:
+                if frozen(conn, tid):
+                    continue
                 sync_row(conn, tid)
                 out["dropped"].append(tid)
     if not missing:
@@ -450,6 +455,8 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
             if silent <= kwc.ALIVE_EVERY + 2 * int(every) + kwc.SILENT_GRACE:
                 continue
             with kb.write_txn(conn):
+                if frozen(conn, tid):
+                    continue
                 st = conn.execute("SELECT status, human_request FROM tasks WHERE id = ?", (tid,)).fetchone()
                 if (st is None or st[0] != "blocked" or resolved_check(st[1])[0] != cmd
                         or after(tid, filed_id, (SILENT_EVENT, *terminal))):
@@ -466,6 +473,8 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
             continue
         restored = after(tid, filed_id, (RESTORED_EVENT,))
         with kb.write_txn(conn):
+            if frozen(conn, tid):
+                continue
             row = conn.execute("SELECT status, human_request FROM tasks WHERE id = ?", (tid,)).fetchone()
             cmd = resolved_check(row[1])[0] if row is not None and row[0] == "blocked" else None
             if (not cmd or kwc.get_state(conn, tid) is not None or after(tid, filed_id, terminal)

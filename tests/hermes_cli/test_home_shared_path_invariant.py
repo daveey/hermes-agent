@@ -21,6 +21,8 @@ from tests.hermes_cli import test_home_release_operators as operator_cases
 from tests.hermes_cli import test_home_release_auxiliary as auxiliary_cases
 from tests.hermes_cli import test_home_release_sweeps as sweep_cases
 from tests.hermes_cli import test_home_feed_entrypoints as entry_cases
+from tests.hermes_cli import test_home_review_custody_repros as custody_review
+from tests.hermes_cli import test_home_probe_writer_custody as writer_cases
 
 board = support.board
 live = contracts.live
@@ -63,6 +65,13 @@ test_spend_reviewer_due_and_grant_exclude_transfer = sweep_cases.test_spend_revi
 test_poison_or_slow_replay_cannot_abort_independent_incoming_page = entry_cases.test_poison_or_slow_replay_cannot_abort_independent_incoming_page
 test_admin_repair_and_keep_filtered_apply_never_replay_unrelated_custody = entry_cases.test_admin_repair_and_keep_filtered_apply_never_replay_unrelated_custody
 test_real_budget_wrapper_defers_certified_prepared_containment_before_any_marker_write = entry_cases.test_real_budget_wrapper_defers_certified_prepared_containment_before_any_marker_write
+test_pending_drops_inflight_result_without_probe_mutation = custody_review.test_pending_drops_inflight_result_without_probe_mutation
+test_backfill_skips_pending_ask_and_restores_neighbor = custody_review.test_backfill_skips_pending_ask_and_restores_neighbor
+test_reconcile_rechecks_custody_after_selection = custody_review.test_reconcile_rechecks_custody_after_selection
+test_late_results_preserve_all_local_tables_and_healthy_neighbor = writer_cases.test_late_results_preserve_all_local_tables_and_healthy_neighbor
+test_reconcile_writer_entry_race_keeps_local_tables = writer_cases.test_reconcile_writer_entry_race_keeps_local_tables
+test_backfill_respects_completed_historical_host_and_unknown_custody = writer_cases.test_backfill_respects_completed_historical_host_and_unknown_custody
+test_late_probe_followup_cannot_record_decision_recovery = writer_cases.test_late_probe_followup_cannot_record_decision_recovery
 
 
 def mixed(conn, status, setup=None):
@@ -94,7 +103,9 @@ def mixed(conn, status, setup=None):
 
 def snapshot(conn, ids):
     return {tid: (tuple(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()),
-                  [tuple(r) for r in conn.execute('SELECT * FROM task_events WHERE task_id=? ORDER BY id', (tid,))])
+                  [tuple(r) for r in conn.execute('SELECT * FROM task_events WHERE task_id=? ORDER BY id', (tid,))],
+                  {table: rows for table, rows in writer_cases.snapshot(conn, tid).items()
+                   if rows and (table.startswith('task_wake_') or table == 'kanban_home_probe_watch1')})
             for tid in ids}
 
 

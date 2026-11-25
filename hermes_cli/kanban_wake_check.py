@@ -891,6 +891,9 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
     tail = _tail(out)
     interval = episode.stale_seconds() if stale_interval is None else stale_interval
     with kb.write_txn(conn):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(conn, task_id):
+            return None  # a submitted probe cannot write into a later custody interval
         state = get_state(conn, task_id)
         status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if (state is None or state["cmd"] != cmd or state["generation"] != generation

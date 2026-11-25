@@ -84,6 +84,9 @@ def escalate(conn, task_id: str, why_unanswered: str, *, trust_probe: bool = Fal
     from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(conn, task_id):
+            return False  # late probe follow-up still belongs to the pending epoch
         task = kb.get_task(conn, task_id)
         if task is None or task.status != "scheduled":
             return False

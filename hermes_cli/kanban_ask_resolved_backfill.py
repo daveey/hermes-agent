@@ -51,6 +51,8 @@ def backfill(conn: sqlite3.Connection) -> list[str]:
     from hermes_cli import kanban_ask_resolved as kar
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli import kanban_home_probe as probe
+    from hermes_cli.kanban_home_transfer import frozen
 
     try:
         ids = [r[0] for r in conn.execute(
@@ -63,15 +65,17 @@ def backfill(conn: sqlite3.Connection) -> list[str]:
     foreign = kwc.foreign_ids(conn, own)
     marked: list[str] = []
     for tid in ids:
+        if frozen(conn, tid):
+            continue
         drop = _latest_drop(conn, tid)
         if drop is None:
             continue
-        payload = conn.execute("SELECT payload FROM task_events WHERE id = ?", (drop[0],)).fetchone()
-        host = kb._json_dict(payload[0]).get("probe_host") if payload else None
-        if (host and own and host != own) or (tid in foreign and not host):
-            continue
         with kb.write_txn(conn):
-            if _latest_drop(conn, tid) != drop or not _eligible(conn, tid):
+            if frozen(conn, tid) or _latest_drop(conn, tid) != drop or not _eligible(conn, tid):
+                continue
+            payload = conn.execute("SELECT payload FROM task_events WHERE id = ?", (drop[0],)).fetchone()
+            host = probe.host(conn, tid, drop[0], kb._json_dict(payload[0]).get("probe_host") if payload else None)
+            if host == probe.UNKNOWN or (host and own and host != own) or (tid in foreign and not host):
                 continue
             kar.mark_dropped(conn, tid, drop[2], drop[3])
             # Sync remaps integer IDs but preserves UIDs and payloads verbatim. Older unsynced
