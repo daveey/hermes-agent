@@ -25,27 +25,45 @@ class CreateAuthorityRefused(ValueError):
 
 
 def wait_reason(conn, task_id: str, creator_task_id) -> str | None:
-    """Why a refused create may still succeed later on this board, as a reason code naming the wait, else None.
+    """Why a refused create may still succeed later on this board, as a reason code naming the wait; None when no
+    sync can change the refusal (terminal). Definitive causes are checked first, so a create that is also
+    waiting on a sync is still terminal when something no sync can fix refuses it:
 
-    - ``origin_owner_unsynced``: the board never synced (no Board identity) or has no synced chat-link table,
-      so it cannot hold the origin chat's ``created`` link yet;
+    - terminal: sync is disabled on this gateway (``kanban.sync.enabled`` off: it will not sync on its own); the
+      card's creating chat is a placeholder or was released; the creator task is here but has no sessions (a
+      cron or system creator: nothing to sync);
+    - ``origin_owner_unsynced``: sync is on but the board has no Board identity or chat-link table yet;
     - ``origin_gateway_unnamed``: this gateway has no name yet (before its first sync);
-    - ``origin_creator_unsynced``: the creator task, or its sessions, have not reached this board yet;
+    - ``origin_creator_unsynced``: the creator task has not reached this board yet;
     - ``origin_chat_provenance_unsynced``: a foreign chat link on the card whose provenance is not proven here
       yet (the proving rows sync later).
     """
-    from hermes_cli.kanban_db_sync import sync_state
+    from hermes_cli.kanban_db_sync import sync_enabled, sync_state
+    from hermes_cli.kanban_placement import is_placeholder_session
+    from hermes_cli.kanban_scope_renewal_cli import _sessions
+    if not sync_enabled():
+        return None
     links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone() is not None
+    row = conn.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+    sessions = [(row[0], 0)] if row and row[0] else []
+    if links:
+        sessions += [(r[0], r[1]) for r in conn.execute(
+            "SELECT chat_session, released FROM task_chat_links WHERE task_id=? AND kind='created'", (task_id,))]
+    for session, released in sessions:
+        if released or not str(session or "").strip() or is_placeholder_session(session) \
+                or _released_upstream(conn, task_id, session):
+            return None
+    creator = (conn.execute("SELECT 1 FROM tasks WHERE id=?", (creator_task_id,)).fetchone() is not None
+               if creator_task_id else None)
+    if creator and not _sessions(conn, creator_task_id):
+        return None
     if not links or not (sync_state(conn) or {}).get("gateway_id"):
         return "origin_owner_unsynced"
     me = _gateway(conn)
     if not me:
         return "origin_gateway_unnamed"
-    if creator_task_id:
-        from hermes_cli.kanban_scope_renewal_cli import _sessions
-        if conn.execute("SELECT 1 FROM tasks WHERE id=?", (creator_task_id,)).fetchone() is None \
-                or not _sessions(conn, creator_task_id):
-            return "origin_creator_unsynced"
+    if creator is False:
+        return "origin_creator_unsynced"
     from hermes_cli.kanban_creator_chats import _chat_links
     from hermes_cli.kanban_db_notify import is_machine_session
     from hermes_cli.kanban_session_provenance import proven_foreign_chats

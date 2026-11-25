@@ -74,13 +74,28 @@ def _person_note(conn, tid: str, event: dict):
         row = conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND id=?",
                            (tid, named)).fetchone()
     if row is None:
+        at = int(event.get("created_at") or 0)  # written in the same transaction: never an older override's note
         row = conn.execute("SELECT id, author, created_at, body FROM task_comments WHERE task_id=? AND author=? "
-                           "AND body LIKE ? AND created_at <= ? ORDER BY id DESC LIMIT 1",
-                           (tid, ksb.AUTHOR, _PERSON_NOTE + "%", int(event.get("created_at") or 0) + 1)).fetchone()
+                           "AND body LIKE ? AND created_at BETWEEN ? AND ? ORDER BY id DESC LIMIT 1",
+                           (tid, ksb.AUTHOR, _PERSON_NOTE + "%", at - 60, at + 1)).fetchone()
     if row is None:
         return None
     return {"id": int(row[0]), "who": f"{row[1]} (the limit being changed)", "body": str(row[3] or "")[:600],
             "time": datetime.fromtimestamp(int(row[2] or 0), UTC).isoformat()}
+
+
+def _event_item(event: dict) -> dict:
+    """The person's override event itself as a read item, when its note comment is not readable here (written
+    before notes, or not synced yet): who set it, why and the values, required in ``--seen`` like a comment and
+    recorded as shown by its event id and uid (``kanban_release.read_first``)."""
+    from datetime import UTC, datetime
+    payload = json.loads(event.get("payload") or "{}")
+    payload = payload if isinstance(payload, dict) else {}
+    return {"id": int(event["id"]), "kind": "event", "uid": event.get("uid"),
+            "who": f"{payload.get('by') or 'unknown'} (the limit being changed; its note is not readable here)",
+            "time": datetime.fromtimestamp(int(event.get("created_at") or 0), UTC).isoformat(),
+            "body": f"Spend budget: {ksb._override_text(payload)}, set by {payload.get('by') or 'unknown'}: "
+                    f"{payload.get('reason') or '(no reason recorded)'}"}
 
 
 def _agent_gate(conn, tid: str, writer: tuple, runs, cache, seen, board, args):
@@ -98,14 +113,14 @@ def _agent_gate(conn, tid: str, writer: tuple, runs, cache, seen, board, args):
     row = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
                        (tid, ksb.OVERRIDE_EVENT)).fetchone()
     anchor = dict(row)
-    note = _person_note(conn, tid, anchor)  # None: not readable here; the rest (and the fence's decision) still is
+    note = _person_note(conn, tid, anchor) or _event_item(anchor)  # no readable note: the budget event itself
     flags = ("--exempt" if args.exempt else "--clear" if args.clear else
              " ".join(f"--{name} {value}" for name, value in (("runs", runs), ("cache-read-tokens", cache))
                       if value is not None))
     rerun = f"hermes kanban {'--board ' + board + ' ' if board else ''}spend-budget {tid} {flags} --reason ..."
     try:
         seen = kr.read_first(conn, tid, anchor, writer, seen, board, verb="spend-budget",
-                            extra=[note] if note else [], rerun=rerun)
+                            extra=[note], rerun=rerun)
     except kr.Refusal as exc:
         return (f"kanban spend-budget: {tid}: refused: {exc.code}: raising or removing a {' and '.join(loosened)} "
                 f"limit a person may have set needs a read first. {exc}")

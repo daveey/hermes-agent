@@ -402,11 +402,13 @@ def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple,
     from datetime import UTC, datetime
     from hermes_cli import kanban_release_comments as unread
     from hermes_cli import kanban_spend_override_fence as fence
-    items: dict = {item["id"]: dict(item) for item in extra}
+    # Keyed by kind and id: an ``extra`` item may be a budget event (``kind: event``), whose id is a task_events
+    # id and never stands for, or collides with, a comment id.
+    items: dict = {(item.get("kind", "comment"), item["id"]): dict(item) for item in extra}
     for cid in _unread_human(conn, tid, stop, None):
         row = conn.execute("SELECT author, created_at, body FROM task_comments WHERE id=?", (cid,)).fetchone()
         if row is not None:
-            items[cid] = {"id": cid, "who": f"{row[0]} (human)", "body": str(row[2] or "")[:600],
+            items[("comment", cid)] = {"id": cid, "who": f"{row[0]} (human)", "body": str(row[2] or "")[:600],
                           "time": datetime.fromtimestamp(int(row[1] or 0), UTC).isoformat()}
     checks = (lambda: fence.check(conn, tid, seen=None, board=board),
               lambda: unread.check(conn, tid, session=writer[1], seen=None, verb=verb, board=board))
@@ -415,38 +417,46 @@ def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple,
             check()
         except unread.UnreadComments as exc:
             for c in exc.comments:
-                items.setdefault(c["id"], {"id": c["id"], "who": c["writer_session"], "time": c["time"],
+                items.setdefault(("comment", c["id"]), {"id": c["id"], "who": c["writer_session"], "time": c["time"],
                                            "body": c["body"]})
     return sorted(items.values(), key=lambda item: (item["id"] is None, item["id"] or 0))
 
 
-def _shown(conn: sqlite3.Connection, tid: str, session: Optional[str], verb: str, ids: Sequence[int]) -> bool:
+def _shown(conn: sqlite3.Connection, tid: str, session: Optional[str], verb: str, ids: Sequence[int],
+           events: Sequence[int] = ()) -> bool:
     """Every id in ``ids`` (what this verb's caller must read now) was printed to agent ``session`` by a read-first
     refusal of the same ``verb`` on this board: ``ids`` is a subset of the union of ``comment_ids`` over this
     board's own ``release_unread_shown`` events for that session and verb. Each verb prints its own required set
     (``spend-budget`` prints the limit's own budget comment, ``release`` the comments after the stop), so one
     verb's refusal never stands in for the other's. A row another gateway pushed proves nothing about what this
     caller was shown (:func:`own_events`); a caller with no session has no identity to match."""
-    if not session or not ids:
+    if not session or not (ids or events):
         return False
     printed: set = set()
+    printed_events: set = set()
     for e in own_events(conn, tid, (SHOWN,)):
         p = e["payload"]
         if p.get("session") == session and p.get("verb", "release") == verb:
             printed.update(c for c in (p.get("comment_ids") or []) if isinstance(c, int))
-    return set(ids) <= printed
+            printed_events.update(c for c in (p.get("event_ids") or []) if isinstance(c, int))
+    return set(ids) <= printed and set(events) <= printed_events
 
 
-def _record_shown(conn: sqlite3.Connection, tid: str, writer: tuple, ids: Sequence[int], verb: str) -> None:
-    """Record what a read-first refusal printed: the agent session, the comment ids, the time."""
+def _record_shown(conn: sqlite3.Connection, tid: str, writer: tuple, ids: Sequence[int], verb: str,
+                  events: Sequence[dict] = ()) -> None:
+    """Record what a read-first refusal printed: the agent session, the comment ids, the budget events (local id
+    and uid) printed in place of a note that is not readable here, the time."""
     import time
     from hermes_cli import kanban_db as kb
-    if not ids:
+    if not ids and not events:
         return
+    record = {"version": 1, "verb": verb, "actor_kind": writer[0], "session": writer[1] or None,
+              "comment_ids": sorted(set(ids)), "time": int(time.time())}
+    if events:
+        record["event_ids"] = sorted({e["id"] for e in events})
+        record["event_uids"] = sorted({str(e["uid"]) for e in events if e.get("uid")})
     with kb.write_txn(conn):
-        kb._append_event(conn, tid, SHOWN, {"version": 1, "verb": verb, "actor_kind": writer[0],
-                                            "session": writer[1] or None, "comment_ids": sorted(set(ids)),
-                                            "time": int(time.time())})
+        kb._append_event(conn, tid, SHOWN, record)
 
 
 def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], writer: tuple, seen: Optional[int],
@@ -469,11 +479,15 @@ def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], write
         if seen is not None:
             raise _Refusal("seen_not_needed", f"nothing on {tid} needs --seen; rerun without it")
         return None
-    ids = [item["id"] for item in items if item["id"] is not None]
+    events = [item for item in items if item.get("kind") == "event"]
+    comments = [item["id"] for item in items if item.get("kind") != "event" and item["id"] is not None]
+    ids = comments + [item["id"] for item in events]
     newest = max(ids) if len(ids) == len(items) else None
-    if newest is not None and seen == newest and _shown(conn, tid, writer[1], verb, ids):
-        return seen
-    shown = "\n".join(f"Comment {item['id']} | {item['who']} | {item['time']}\n{item['body']}" for item in items)
+    if (newest is not None and seen == newest
+            and _shown(conn, tid, writer[1], verb, comments, [item["id"] for item in events])):
+        return max(comments, default=None)  # the comment watermark: an event id never acknowledges a comment
+    shown = "\n".join(f"{'Budget event' if item.get('kind') == 'event' else 'Comment'} {item['id']} | "
+                      f"{item['who']} | {item['time']}\n{item['body']}" for item in items)
     command = rerun or f"hermes kanban {verb} {tid}"
     how = (f"After reading: `{command} --seen {newest}`" if newest is not None else
            "A comment's text has not synced here; wait for the sync and rerun")
@@ -484,9 +498,10 @@ def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], write
     if seen is not None:
         wrong = (f" (--seen {seen} is not the newest of them)" if seen != newest else
                  f" (not everything here was printed to this session by an earlier {verb} refusal; it is now)")
-    _record_shown(conn, tid, writer, ids, verb)
+    _record_shown(conn, tid, writer, comments, verb, events)
     doing = {"release": "releasing", "spend-budget": "changing the spend budget of"}.get(verb, verb)
-    raise _Refusal("budget_decision_unread", f"read these before {doing} {tid}{wrong}:\n{shown}\n{how}", unread=ids)
+    raise _Refusal("budget_decision_unread", f"read these before {doing} {tid}{wrong}:\n{shown}\n{how}",
+                   unread=comments, **({"unread_events": [item["id"] for item in events]} if events else {}))
 
 
 def _read_first(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple, seen: Optional[int],

@@ -50,8 +50,9 @@ class Service:
 
 @pytest.fixture
 def network(request, courier, tmp_path, monkeypatch):
-    """``request.param`` False: the owner (hub) board never synced. Default: a synced owner, as every courier
-    owner on the fleet is; only there can the origin chat's ``created`` link exist and later renew scope."""
+    """``request.param`` False: the owner (hub) board has sync off and never synced. Default: a synced owner, as
+    every courier owner on the fleet is; only there can the origin chat's ``created`` link exist and later renew
+    scope."""
     owner_synced = getattr(request, "param", True)
     roots, dbs = {}, {}
     for gateway in ("macbook", "worker-7", "hub"):
@@ -175,39 +176,40 @@ def _owner_create(network, monkeypatch):
 
 
 @pytest.mark.parametrize("network", [False], indirect=True)
-def test_a_waiting_owner_create_keeps_the_sender_pending(network, monkeypatch):
-    """An owner that cannot create yet only because it never synced answers ``pending`` with the wait's reason:
-    the sender's obligation stays open (never ``rejected``), nothing is queued twice and nothing is created."""
+def test_a_rejected_owner_create_stops_the_senders_retries(network, monkeypatch):
+    """The owner's terminal ``rejected`` (reported to the Board as the request's result) ends the forwarding
+    obligation on the sender: it answers ``rejected`` with the owner's reason and queues nothing again."""
     courier, dbs, service, host, runner, _, _ = network
     child = _owner_create(network, monkeypatch)
     request = next(r for r in service.requests.values() if r["action"] == "origin-forward")
     with host("hub"):
         courier.journal_request(dbs["hub"], child)
         status, creation = courier.advance_origin_create(dbs["hub"], {}, child, runner, service)
-    assert status == "pending" and creation["code"] == "origin_owner_unsynced", creation
+    assert status == "rejected", creation
+    service.requests[child["id"]] = {**child, "state": status, "result": creation}  # the owner's POST .../result
     with host("macbook"):
         sent = dbs["macbook"].execute("SELECT count(*) FROM sent").fetchone()[0]
         for _ in range(3):
             status, result = courier.advance_origin_forward(dbs["macbook"], {}, request, runner, service)
-            assert status == "pending" and result["code"] == "origin_forward_pending", result
+            assert status == "rejected" and result["code"] == "origin_forward_downstream_failed", result
+            assert result["downstream"]["code"] == "scope_authority_missing" and result["handoff_complete"] is False
         assert dbs["macbook"].execute("SELECT count(*) FROM sent").fetchone()[0] == sent
 
 
 @pytest.mark.parametrize("network", [False], indirect=True)
 def test_forwarding_to_a_never_synced_owner_creates_nothing(network, monkeypatch):
     """Creation authority (kanban_create_authority.require): a never-synced owner cannot hold the origin chat's
-    ``created`` link yet, so nothing could renew the card's scope. The create is refused whole, every time,
-    and kept: ``pending`` with ``origin_owner_unsynced`` naming the wait (the board may still sync), never the
-    reasonless ``origin_dispatch_pending`` and never a terminal ``rejected`` that would drop the create."""
+    ``created`` link, and with sync off it never will, so nothing could renew the card's scope. The create is
+    refused whole, every time, and terminally: ``rejected`` with the reason, never a ``pending`` the sender would
+    retry forever."""
     courier, dbs, service, host, runner, _, _ = network
     child = _owner_create(network, monkeypatch)
     with host("hub"):
         courier.journal_request(dbs["hub"], child)
         for _ in range(2):
             status, creation = courier.advance_origin_create(dbs["hub"], {}, child, runner, service)
-            assert status == "pending" and not creation.get("created"), creation
-            assert creation["code"] == "origin_owner_unsynced" and creation["refusal"] == "scope_authority_missing"
-            assert creation["handoff_complete"] is False
+            assert status == "rejected" and not creation.get("created"), creation
+            assert creation["code"] == "scope_authority_missing" and creation["handoff_complete"] is False
         with kanban_db_connect.connect_closing() as board:
             assert board.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
             assert board.execute("SELECT count(*) FROM kanban_notify_subs").fetchone()[0] == 0

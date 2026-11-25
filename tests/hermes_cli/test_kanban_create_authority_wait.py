@@ -14,17 +14,26 @@ from tests.hermes_cli import test_kanban_spend_budget as helpers
 kanban_home = helpers.kanban_home
 
 
-def _synced(conn, home):
-    from hermes_cli import kanban_db_sync as sync
-    from hermes_cli import kanban_sync_client as client
-    from tests.hermes_cli import kanban_sync_support as support
-    support.write_sync_config(home, True)
-    sync.install_or_remove(conn, str(home / 'kanban.db'))
-    client.ensure_identity(conn, 'default', 'fixture')
+def _links(conn):
     with kb.write_txn(conn):
         conn.execute("CREATE TABLE IF NOT EXISTS task_chat_links (id INTEGER PRIMARY KEY, uid TEXT, "
                      "task_id TEXT NOT NULL, chat_gateway TEXT NOT NULL, chat_profile TEXT, chat_session TEXT NOT NULL, "
                      "kind TEXT NOT NULL, released INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)")
+
+
+def _enabled(home):
+    """``kanban.sync.enabled`` on, before the board's first sync (no Board identity yet)."""
+    from tests.hermes_cli import kanban_sync_support as support
+    support.write_sync_config(home, True)
+
+
+def _synced(conn, home):
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    _enabled(home)
+    sync.install_or_remove(conn, str(home / 'kanban.db'))
+    client.ensure_identity(conn, 'default', 'fixture')
+    _links(conn)
 
 
 def _refusal(conn, tid, creator=None):
@@ -38,7 +47,15 @@ def _answer(exc):
     return owner._dispatch_result(owner.origin_refusal(exc, origin=True))
 
 
-def test_a_never_synced_owner_waits(kanban_home):
+def test_an_owner_with_sync_disabled_is_terminal(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title='orphan', assignee='default')
+        exc = _refusal(conn, tid)
+    assert exc.wait is None and _answer(exc)['status'] == 'rejected'
+
+
+def test_a_not_yet_synced_owner_waits(kanban_home):
+    _enabled(kanban_home)
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title='orphan', assignee='default')
         exc = _refusal(conn, tid)
@@ -72,3 +89,27 @@ def test_a_bare_selfwork_create_keeps_its_own_rule(kanban_home):
     exc = kca.CreateAuthorityRefused('no authority')
     assert owner.origin_refusal(exc, origin=False) is None
     assert json.loads(owner.origin_refusal(exc, origin=True))['created'] is False
+
+
+def test_a_released_creating_chat_is_terminal_even_while_unsynced(kanban_home, monkeypatch):
+    """Definitive causes first: no sync brings back a released chat, so the unsynced board does not make it wait."""
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    _enabled(kanban_home)
+    with kbc.connect_closing() as conn:
+        _links(conn)
+        tid = kb.create_task(conn, title='orphan', assignee='default')
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,"
+                         "created_at) VALUES ('u1',?,'macbook','default','chat-one','created',1,1)", (tid,))
+        exc = _refusal(conn, tid)
+    assert exc.wait is None and _answer(exc)['status'] == 'rejected'
+
+
+def test_a_local_creator_with_no_sessions_is_terminal(kanban_home, monkeypatch):
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    with kbc.connect_closing() as conn:
+        _synced(conn, kanban_home)
+        creator = kb.create_task(conn, title='cron creator', assignee='default')
+        tid = kb.create_task(conn, title='child', assignee='default')
+        exc = _refusal(conn, tid, creator=creator)
+    assert exc.wait is None and _answer(exc)['status'] == 'rejected'

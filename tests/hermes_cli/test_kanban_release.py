@@ -1096,3 +1096,28 @@ def test_an_agent_release_keeps_a_persons_run_limit_attribution(board, monkeypat
     rc, err = spend_budget(board, monkeypatch, tid, '--runs', '0', '--cache-read-tokens', '5000000',
                            '--reason', 'unlimited runs')
     assert rc == 4 and 'budget_decision_unread' in err and newest_budget(board, tid) == before
+
+
+
+@pytest.mark.parametrize('shape', ['pre_attribution', 'note_not_synced'])
+def test_a_person_budget_without_a_readable_note_is_itself_a_required_read(board, monkeypatch, shape):
+    tid = kb.create_task(board, title='Budgeted work', assignee='default')
+    payload = {'runs': 3, 'cache_read_tokens': 5_000_000, 'by': 'david', 'reason': 'cheap'}
+    if shape == 'note_not_synced':
+        payload['writer_kind'] = 'human'
+    with kb.write_txn(board):  # the event alone: no note comment on this board
+        kb._append_event(board, tid, budget.OVERRIDE_EVENT, payload)
+    event_id = board.execute("SELECT MAX(id) FROM task_events WHERE task_id=? AND kind=?",
+                             (tid, budget.OVERRIDE_EVENT)).fetchone()[0]
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'lift')
+    assert rc == 4 and 'budget_decision_unread' in err
+    assert f'Budget event {event_id}' in err and 'set by david: cheap' in err and 'runs 3' in err
+    assert newest_budget(board, tid) == payload
+    (record,) = shown_events(board, tid)
+    assert record['event_ids'] == [event_id] and record['verb'] == 'spend-budget'
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(event_id), '--reason', 'lift',
+                           writer=('agent', 'another-session', '1:HERMES_SESSION_ID'))
+    assert rc == 4 and newest_budget(board, tid) == payload  # another session never saw it
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(event_id), '--reason', 'lift')
+    assert rc == 0, err
+    assert budget.card_limits(board, tid, budget.limits()) == budget.Limits(0, 0)
