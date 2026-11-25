@@ -65,6 +65,11 @@ def checkpoint(conn, task_id, expected_run_id):
 
 def apply_block_update(conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload):
     """Capture review scope and release the claim in the caller's transaction."""
+    from hermes_cli.kanban_home_transfer import frozen
+    # Release decisions may commit before dependency placement starts its own writer.
+    # Raise inside that writer so all preliminary park effects roll back as well.
+    if frozen(conn, task_id):
+        raise ValueError("home transfer owns this card; block deferred")
     if kind == "dependency":
         evidence = checkpoint(conn, task_id, expected_run_id)
         if evidence:
