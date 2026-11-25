@@ -92,6 +92,57 @@ def test_domain_cap_lru_and_close_custody(board, tmp_path, monkeypatch):
         original.execute('SELECT 1')
 
 
+def test_domain_body_sqlite_error_retires_entry(board):
+    with pytest.raises(sqlite3.OperationalError, match='body failure'):
+        with domain.reading(board) as original:
+            raise sqlite3.OperationalError('body failure')
+    assert not domain._cache
+    with pytest.raises(sqlite3.ProgrammingError):
+        original.execute('SELECT 1')
+    with domain.reading(board) as current:
+        assert current is not original
+        assert current.execute('SELECT v FROM t').fetchone() == (1,)
+
+
+def test_domain_lru_refreshes_hit(board, tmp_path, monkeypatch):
+    monkeypatch.setattr(domain, 'LIMIT', 2)
+    others = [tmp_path / name for name in ('b.db', 'c.db')]
+    for path in others:
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute('CREATE TABLE t(v)')
+    b, c = others
+    with domain.reading(board):
+        pass
+    with domain.reading(b) as retired:
+        pass
+    with domain.reading(board):
+        pass
+    with domain.reading(c):
+        pass
+    assert list(domain._cache) == [str(board), str(c)]
+    with pytest.raises(sqlite3.ProgrammingError):
+        retired.execute('SELECT 1')
+
+
+def test_domain_gone_rechecked_inside_lifecycle(board, monkeypatch):
+    from hermes_cli import kanban_sync_board_watch as watch
+    with domain.reading(board) as original:
+        pass
+    answers = iter((True, False))
+    calls = []
+
+    def path_gone(path):
+        calls.append(path)
+        return next(answers)
+
+    monkeypatch.setattr(watch, 'path_gone', path_gone)
+    assert domain.release_gone() == 0
+    assert calls == [str(board), str(board)]
+    assert domain._cache[str(board)][0] is original
+    assert original.execute('SELECT v FROM t').fetchone() == (1,)
+    assert safe.has_live_connection(board)
+
+
 def test_domain_warm_statement_budget(board):
     with domain.reading(board) as conn:
         assert conn.execute('PRAGMA busy_timeout').fetchone() == (500,)
