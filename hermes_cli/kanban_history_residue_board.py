@@ -38,7 +38,8 @@ def _ledger(board, *, create=False):
             path.chmod(0o600)
         except FileExistsError:
             pass
-    return sqlite3.connect(path.resolve().as_uri() + '?mode=rw', uri=True, isolation_level=None, timeout=0)
+    # Separate custody journal, never the live board or replica; no board lifecycle hooks.
+    return sqlite3.connect(path.resolve().as_uri() + '?mode=rw', uri=True, isolation_level=None, timeout=0)  # noqa: kanban-lockguard
 
 
 def audit_diff(live, shadow, hub, board, *, pulled, started):

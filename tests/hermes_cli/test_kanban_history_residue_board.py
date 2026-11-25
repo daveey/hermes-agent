@@ -77,6 +77,24 @@ def configured(stores, tmp_path, monkeypatch):
         conn.close()
 
 
+def test_custody_ledger_is_separate_from_live_board_and_replica(configured):
+    paths, _hub, _calls, _state, connect = configured
+    live, shadow = (connect(path) for path in paths)
+    before = [list(conn.iterdump()) for conn in (live, shadow)]
+    with board.closing(board._ledger('default', create=True)) as ledger:
+        opened = ledger.execute('PRAGMA database_list').fetchone()[2]
+        assert opened == str(paths[1].with_suffix('.history-residue.db'))
+        assert opened not in {str(path) for path in paths}
+        assert type(ledger) is sqlite3.Connection
+        assert ledger.isolation_level is None
+        assert ledger.execute('PRAGMA busy_timeout').fetchone()[0] == 0
+        ledger.execute('CREATE TABLE custody_probe (value TEXT)')
+        ledger.execute("INSERT INTO custody_probe VALUES ('receipt')")
+    assert [list(conn.iterdump()) for conn in (live, shadow)] == before
+    with board.closing(board._ledger('default')) as ledger:
+        assert ledger.execute('SELECT value FROM custody_probe').fetchall() == [('receipt',)]
+
+
 def test_observe_then_fresh_diff_preserves_all_original_bytes(configured):
     paths, hub, calls, _state, connect = configured
     live, shadow = (connect(path) for path in paths)
