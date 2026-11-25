@@ -1029,7 +1029,8 @@ def _wake(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> O
 def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, wait: bool = False) -> dict:
     """Start every due probe (at most ``MAX_CONCURRENT`` in flight) and return at once;
     ``wait=True`` (tests, one-shot callers) also waits up to ``TICK_BUDGET_SECONDS`` for them.
-    Returns ``{"submitted": [task ids], "in_flight": n}``. Never raises."""
+    Returns ``{"submitted": [task ids], "in_flight": n}``. Propagates pass cancellation."""
+    from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
     from hermes_cli import kanban_ci_progress  # [daveey] a card parked on a CI run that never starts
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
@@ -1112,6 +1113,8 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
             conn, _pool(), slots_free=MAX_CONCURRENT - busy - kanban_ci_progress.running_sweeps())
         if sweep is not None:
             futures.append(sweep)
+    except DispatchWriteContended:
+        raise
     except Exception:
         logger.warning("kanban wake checks: tick failed", exc_info=True)
     if wait and futures:

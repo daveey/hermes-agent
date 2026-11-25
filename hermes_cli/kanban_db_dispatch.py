@@ -2139,12 +2139,8 @@ def _dispatch_once_locked(
         _kb._log.info('kanban dispatcher: scheduling paused — gateway draining or restart requested')
         return result
     if not dry_run:
-        from hermes_cli.kanban_worker_placement import dispatch_tick
-        try:
-            timed("dispatch.worker_placement", dispatch_tick, conn)
-        except Exception:
-            logger = _kb._log
-            logger.warning("kanban worker placement failed; continuing local dispatch", exc_info=True)
+        from hermes_cli.kanban_dispatch_maintenance import place_workers
+        place_workers(conn, timed)
     from hermes_cli.kanban_gateway_drain import core_update_hold
     result.core_update_drain_hold = core_update_hold()
     if result.core_update_drain_hold is not None:  # every caller (CLI, dashboard, gateway) claims nothing

@@ -752,8 +752,9 @@ _skip_logged = False
 
 
 def dispatcher_drain(conn: sqlite3.Connection, *, board: Optional[str] = None) -> list:
-    """Dispatcher-tick entry: never raises. Config ``kanban.supervisor_requests.enabled: false``
+    """Dispatcher-tick entry: propagates pass cancellation. Config ``kanban.supervisor_requests.enabled: false``
     (default on, not in config_defaults) leaves requests pending for ``supervisor-requests --drain``."""
+    from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
     try:
         from hermes_cli import kanban_supervisor_gate
         refusal = _non_worker_refusal()
@@ -764,6 +765,8 @@ def dispatcher_drain(conn: sqlite3.Connection, *, board: Optional[str] = None) -
                 _log.warning("kanban: not draining supervisor requests in this process: %s", refusal)
             return []
         return kanban_supervisor_gate.dispatch(conn, board)
+    except DispatchWriteContended:
+        raise
     except Exception:  # health: allow BLE001 -- the tick must go on; the rows stay queued
         _log.warning("kanban: draining supervisor requests failed", exc_info=True)
         return []
