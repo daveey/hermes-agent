@@ -10,8 +10,18 @@ status route's `loading` field and the chat's load notice."""
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 import hermes_cli.local_runtime.load_progress as lp
+
+
+@pytest.fixture(autouse=True)
+def isolated_progress_events(monkeypatch):
+    # These unit tests inject events; a real SSE watcher has independent authority
+    # to clear them on missing endpoint/disconnect. Do not launch that unowned loop.
+    monkeypatch.setattr(lp, "_ensure_watcher", lambda: None)
 
 
 def setup_function(_fn):
@@ -65,6 +75,15 @@ def test_loading_events_build_snapshot_and_terminal_clears():
 
     lp._apply_event("m1", "status_change", {"status": "loaded", "info": {}})
     assert lp.get_loading_progress() == {}
+
+
+def test_injected_progress_never_starts_a_live_watcher(monkeypatch):
+    def unexpected_thread(**_kwargs):
+        pytest.fail("event unit tests must not start a live SSE watcher")
+
+    monkeypatch.setattr(lp, "_watcher", None)
+    monkeypatch.setattr(lp, "threading", SimpleNamespace(Thread=unexpected_thread))
+    test_loading_events_build_snapshot_and_terminal_clears()
 
 
 def test_unload_and_failure_clear_too():
