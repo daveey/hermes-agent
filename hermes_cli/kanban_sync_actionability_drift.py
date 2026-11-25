@@ -93,6 +93,14 @@ def audited_rejection(live, shadow, op):
             if conn.execute('SELECT 1 FROM task_events WHERE uid=? AND task_id=?',
                             (frozen['source_uids'][0]['uid'], wire['task'])).fetchone() is None:
                 return False  # A missing original is not proof of a newer source.
+        statuses = [conn.execute('SELECT status FROM tasks WHERE id=?', (wire['task'],)).fetchone()
+                    for conn in (live, shadow)]
+        terminal_history = any(conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND kind='completed' LIMIT 1",
+            (wire['task'],)).fetchone() is not None for conn in (live, shadow))
+        if terminal_history or any(row is not None and row[0] in ('done', 'archived') for row in statuses):
+            from hermes_cli.kanban_sync_actionability_terminal import superseded
+            return superseded(live, shadow, wire['task'], frozen['source_uids'][0]['uid'])
         comparable = {**frozen, 'source_uids': [{'uid': s['uid']} for s in frozen['source_uids']]}
         current, replica = _source(live, wire['task']), _source(shadow, wire['task'])
         return _valid_facts(current, portable_only=True) and current == replica and current != comparable
