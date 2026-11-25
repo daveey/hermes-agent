@@ -182,3 +182,74 @@ def test_round_warning_names_inner_trigger_exception(conn, tmp_path, monkeypatch
         callback()
     assert caught.value is original
     functions.clear_error()
+
+
+def test_round_warning_omits_handled_inner_error_for_non_udf_failure(conn, tmp_path, monkeypatch, caplog):
+    task = seed(conn)
+
+    def broken():
+        raise ValueError("handled containment error")
+
+    functions.register(conn, "kanban_containment_handled", 0, broken)
+    conn.execute("CREATE TRIGGER handled_update BEFORE UPDATE ON tasks "
+                 "BEGIN SELECT kanban_containment_handled(); END")
+    monkeypatch.setattr(client, "publish_pickup_if_changed", lambda hub: None)
+    from hermes_cli import kanban_source_clones
+    monkeypatch.setattr(kanban_source_clones, "attest_if_due", lambda hub: None)
+    handled = []
+
+    def round_(*args):
+        with pytest.raises(sqlite3.OperationalError, match="user-defined function raised exception"):
+            conn.execute("UPDATE tasks SET title='changed' WHERE id=?", (task,))
+        handled.append(True)
+        raise OSError("transport failed after handled trigger")
+
+    monkeypatch.setattr(client, "sync_board", round_)
+    hub = SimpleNamespace(ident=SimpleNamespace(gateway="fixture"))
+    with caplog.at_level("WARNING", logger=client.__name__):
+        result = client.sync_all_once(hub, boards=[("non-udf", tmp_path / "board.db")])
+    assert handled == [True]
+    assert result[0].error == "OSError: transport failed after handled trigger"
+    assert "round for non-udf failed" in caplog.text
+    assert "; inner:" not in caplog.text
+
+
+def test_round_warning_clears_handled_inner_error_between_boards(conn, tmp_path, monkeypatch, caplog):
+    task = seed(conn)
+
+    def broken():
+        raise ValueError("earlier board containment error")
+
+    def plain_broken():
+        raise RuntimeError("plain callback error")
+
+    functions.register(conn, "kanban_containment_earlier", 0, broken)
+    conn.create_function("plain_diagnostic", 0, plain_broken)
+    conn.execute("CREATE TRIGGER earlier_update BEFORE UPDATE OF title ON tasks "
+                 "BEGIN SELECT kanban_containment_earlier(); END")
+    conn.execute("CREATE TRIGGER plain_update BEFORE UPDATE OF status ON tasks "
+                 "BEGIN SELECT plain_diagnostic(); END")
+    monkeypatch.setattr(client, "publish_pickup_if_changed", lambda hub: None)
+    from hermes_cli import kanban_source_clones
+    monkeypatch.setattr(kanban_source_clones, "attest_if_due", lambda hub: None)
+    visited = []
+
+    def round_(slug, path, hub, gateway):
+        visited.append(slug)
+        if slug == "earlier":
+            with pytest.raises(sqlite3.OperationalError, match="user-defined function raised exception"):
+                conn.execute("UPDATE tasks SET title='changed' WHERE id=?", (task,))
+            return client.RoundResult(board=slug, mode="fixture")
+        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (task,))
+
+    monkeypatch.setattr(client, "sync_board", round_)
+    hub = SimpleNamespace(ident=SimpleNamespace(gateway="fixture"))
+    with caplog.at_level("WARNING", logger=client.__name__):
+        result = client.sync_all_once(hub, boards=[("earlier", tmp_path / "earlier.db"),
+                                                  ("later", tmp_path / "later.db")])
+    assert visited == ["earlier", "later"]
+    assert not result[0].error
+    assert result[1].error == "OperationalError: user-defined function raised exception"
+    assert "round for earlier failed" not in caplog.text
+    assert "round for later failed" in caplog.text
+    assert "; inner:" not in caplog.text
