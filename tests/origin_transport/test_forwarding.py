@@ -185,6 +185,30 @@ def test_forwarding_to_a_never_synced_owner_creates_nothing(network, monkeypatch
             assert board.execute("SELECT count(*) FROM kanban_notify_subs").fetchone()[0] == 0
 
 
+def test_late_binding_rejection_is_durable_on_owning_chat_before_courier_finishes(network, monkeypatch):
+    import sqlite3
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_origin_native as native
+    courier, dbs, service, host, runner, _, _ = network
+    request = submit(network, monkeypatch)
+    with host('macbook'):
+        home = get_hermes_home()
+        (home / 'kanban/origin-ledger.db').unlink()
+        monkeypatch.setattr(native, 'lookup', lambda *a, **kw: None)
+        courier.journal_request(dbs['macbook'], request)
+        for _ in range(2):
+            status, result = courier.advance_origin_forward(dbs['macbook'], {}, request, runner, service)
+            assert status == 'rejected' and result['code'] == 'origin_forward_binding_missing'
+            assert result['handoff_complete'] is False
+            with sqlite3.connect(home / 'state.db') as state:
+                notices = state.execute("SELECT session_id,content FROM messages WHERE display_kind='kanban_notice'").fetchall()
+            assert len(notices) == 1 and notices[0][0] == 'chat-one'
+            assert request['id'] in notices[0][1] and 'not created' in notices[0][1]
+            assert dbs['macbook'].execute('SELECT count(*) FROM sent').fetchone()[0] == 0
+    with host('hub'), kanban_db_connect.connect_closing() as board:
+        assert board.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
+
+
 def test_three_hop_forwarding_creates_once_and_binds_only_macbook(network, monkeypatch):
     courier, dbs, service, host, runner, adapter, _ = network
     request = submit(network, monkeypatch)

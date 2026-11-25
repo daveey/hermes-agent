@@ -296,7 +296,8 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
     if action in {"origin-bind", "origin-forward"}:
         from hermes_constants import get_hermes_home
         ledger = "origin-forward.db" if action == "origin-forward" else "origin-ledger.db"
-        return kanban_path_is_fenced(get_hermes_home() / "kanban" / ledger)
+        return (kanban_path_is_fenced(get_hermes_home() / "kanban" / ledger)
+                or (action == "origin-forward" and kanban_path_is_fenced(get_hermes_home() / "state.db")))
     return kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
 
 

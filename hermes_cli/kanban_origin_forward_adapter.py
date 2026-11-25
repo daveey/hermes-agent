@@ -43,12 +43,19 @@ def receive(request):
             raise ValueError("origin_forward_inventory_unavailable") from exc
 
     from hermes_cli.kanban_origin_native import lookup as native_lookup
-    outbound = prepare(request, path=home / "kanban/origin-forward.db",
-                       native_lookup=lambda origin, creator: native_lookup(origin, creator, gateway=gateway),
-                       ledger=home / "kanban/origin-ledger.db", gateway=gateway, profile=profile,
-                       inventory_lookup=inventory,
-                       lease_lookup=lookup, now_ms=lambda: int(time.time() * 1000),
-                       session_exists=lambda sid: bool(_resolve_session(home / "state.db", sid)))
+    try:
+        outbound = prepare(request, path=home / "kanban/origin-forward.db",
+                           native_lookup=lambda origin, creator: native_lookup(origin, creator, gateway=gateway),
+                           ledger=home / "kanban/origin-ledger.db", gateway=gateway, profile=profile,
+                           inventory_lookup=inventory,
+                           lease_lookup=lookup, now_ms=lambda: int(time.time() * 1000),
+                           session_exists=lambda sid: bool(_resolve_session(home / "state.db", sid)))
+    except ValueError as exc:
+        if str(exc) != "origin_forward_binding_missing":
+            raise
+        from hermes_cli.kanban_origin_forward_notice import publish
+        publish(request, home=home, gateway=gateway, profile=profile)
+        return {"status": "rejected", "code": str(exc), "handoff_complete": False}
     return {"status": "prepared", "handoff_complete": False, "outbound": outbound}
 
 
@@ -66,7 +73,8 @@ def command(args):
         if not re.fullmatch(r"origin_[a-z_]+", code):
             code = "origin_forward_request_invalid"
         # Incomplete snapshots are absence of evidence, not a terminal decision.
-        status = "pending" if code in {"origin_forward_lease_unavailable", "origin_forward_inventory_unavailable"} else "rejected"
+        status = "pending" if code in {"origin_forward_lease_unavailable", "origin_forward_inventory_unavailable",
+                                        "origin_forward_notice_pending"} else "rejected"
         result = {"status": status, "code": code, "handoff_complete": False}
     print(json.dumps(result))
     return 0

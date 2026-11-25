@@ -40,7 +40,9 @@ def test_adapter_missing_vs_unavailable(forwarding, authority, tmp_path, monkeyp
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(adapter, "_gateway", lambda _: "macbook")
-    monkeypatch.setattr(adapter, "_resolve_session", lambda path, sid: sid == "chat-1")
+    from hermes_state import SessionDB
+    with SessionDB(home / 'state.db') as sessions:
+        sessions.create_session('chat-1', 'desktop')
     monkeypatch.setattr(native, "lookup", lambda *a, **kw: None)
     monkeypatch.setattr(sync, "load_identity", dict)
     monkeypatch.setattr(sync, "Hub", lambda _: SimpleNamespace(snapshot_page=lambda *a, **kw: {
