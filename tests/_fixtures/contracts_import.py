@@ -1,7 +1,7 @@
 """Cold contract import interleaving for the browser attachment regression.
 
 Run in a fresh interpreter: another thread has created registry.py, but has not
-registered sessions yet. Observe actual imports and lookups to release that
+registered sessions or canonical contracts yet. Observe actual imports and lookups to release that
 thread, never manufacture a missing contract or replace wire validation.
 """
 import asyncio
@@ -21,7 +21,8 @@ from hermes_state import SessionDB
 from hermes_state_runtime import begin_runtime_epoch
 
 
-def main():
+def main(stage="sessions"):
+    assert stage in {"sessions", "canonical"}
     assert "tui_gateway.contracts" not in sys.modules, "requires a cold catalog"
     blocked, release, finished = threading.Event(), threading.Event(), threading.Event()
     errors = []
@@ -38,7 +39,7 @@ def main():
 
     class Finder(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname, path=None, target=None):
-            if fullname != "tui_gateway.contracts.sessions":
+            if fullname != f"tui_gateway.contracts.{stage}":
                 return None
             spec = importlib.machinery.PathFinder.find_spec(fullname, path)
             assert spec is not None and spec.loader is not None
@@ -51,7 +52,7 @@ def main():
                 def exec_module(self, module):
                     registry = sys.modules["tui_gateway.contracts.registry"]
                     registry.METHODS = ObservedMethods(registry.METHODS)
-                    assert "session.resume" not in registry.METHODS
+                    assert ("session.resume" in registry.METHODS) == (stage == "canonical")
                     assert "session.resume" not in registry.CANONICAL_METHODS
                     blocked.set()
                     assert release.wait(15), "dispatch never reached the import boundary"
@@ -81,7 +82,7 @@ def main():
     thread = threading.Thread(target=import_catalog)
     thread.start()
     try:
-        assert blocked.wait(15), "import never reached the real sessions loader"
+        assert blocked.wait(15), f"import never reached the real {stage} loader"
         with tempfile.TemporaryDirectory() as temp, SessionDB(db_path=Path(temp) / "state.db") as db:
             async def scenario():
                 db.create_session("s", source="test")
@@ -113,4 +114,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else "sessions")

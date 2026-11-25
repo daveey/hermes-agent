@@ -71,10 +71,11 @@ def _docx_upload(text: str) -> bytes:
     return buffer.getvalue()
 
 
-def test_file_attach_waits_for_a_concurrent_cold_contract_import():
+@pytest.mark.parametrize("stage", ["sessions", "canonical"])
+def test_file_attach_waits_for_a_concurrent_cold_contract_import(stage):
     """Registry import alone must not snapshot an unfinished session contract."""
     result = subprocess.run(
-        [sys.executable, "-m", "tests._fixtures.contracts_import"],
+        [sys.executable, "-m", "tests._fixtures.contracts_import", stage],
         cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
