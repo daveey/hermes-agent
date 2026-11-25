@@ -53,6 +53,7 @@ def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str], *, repli
     """``(parked, events)``: the stored rows ``_describe_waits`` turns into wait info. Separate so a board memo can
     keep the rows and re-judge their age at each read (the stall cut-off moves with the clock, the rows do not)."""
     from hermes_cli import kanban_wait_info as kwi
+    from hermes_state_page_pack import read_rows
 
     ids = [str(t) for t in dict.fromkeys(task_ids)]
     if not ids:
@@ -61,20 +62,25 @@ def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str], *, repli
     cols = table_columns(conn, "tasks")  # one result row, not one per column
     pick = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in ("id", "status", "block_kind", "human_request",
                                                                           "awaiting"))
+    # [daveey] Each result row is a GIL release in the Desktop backend (kanban_table_columns), so both reads hand
+    # their rows over packed in one (hermes_state_page_pack: types, order and doubles preserved). The session list
+    # read ~140 hub parked cards here per board change: ~220 row steps, seconds under the serve's GIL convoy.
     parked: dict[str, tuple] = {}
-    for tid, status, kind, request, awaiting in conn.execute(
+    for tid, status, kind, request, awaiting in read_rows(conn,
             f"SELECT {pick} FROM tasks t WHERE t.id IN (SELECT value FROM json_each(?)) "
-            "AND t.status IN ('scheduled', 'blocked', 'triage')", (json.dumps(ids),)):
+            "AND t.status IN ('scheduled', 'blocked', 'triage')", (json.dumps(ids),), 5):
         parked[str(tid)] = (status, kind, request, awaiting)
     if not parked:
         return {}, {}
     events: dict[str, tuple] = {}
     kph = ",".join("?" for _ in kwi.PARK_EVENT_KINDS)
     try:
-        for tid, kind, payload, at in conn.execute(
+        # The newest park event per card, probed per card through (kind, task_id, id): grouped over ``task_id``
+        # SQLite walked every event of each card (idx_events_task), ~40 ms on the hub board, for the same ids.
+        for tid, kind, payload, at in read_rows(conn,
                 "SELECT e.task_id, e.kind, e.payload, e.created_at FROM task_events e WHERE e.id IN ("
-                "SELECT MAX(id) FROM task_events WHERE task_id IN (SELECT value FROM json_each(?)) "
-                f"AND kind IN ({kph}) GROUP BY task_id)", (json.dumps(list(parked)), *kwi.PARK_EVENT_KINDS)):
+                "SELECT (SELECT MAX(x.id) FROM task_events x WHERE x.task_id = j.value "
+                f"AND x.kind IN ({kph})) FROM json_each(?) j)", (*kwi.PARK_EVENT_KINDS, json.dumps(list(parked))), 4):
             events[str(tid)] = (kind, payload, at)
     except sqlite3.Error:  # board predates task_events
         pass

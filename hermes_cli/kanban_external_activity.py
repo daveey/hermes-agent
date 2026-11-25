@@ -96,10 +96,10 @@ def read_session_external(conn, pairs, wall, *, strict=True):
     waits = _eta_waits(conn, {t for _s, t in pairs}, wall)
     titles = {}
     ids = list(set(states) | {t for t, w in waits.items() if w.get("wait_kind") == "clock"})
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        titles.update((str(t), str(n or "")) for t, n in conn.execute(
-            f"SELECT id, title FROM tasks WHERE id IN ({','.join('?' for _ in chunk)})", chunk))
+    if ids:  # one packed row, not one per card (each row step is a GIL release in the Desktop backend) [daveey]
+        from hermes_state_page_pack import read_rows
+        titles.update((str(t), str(n or "")) for t, n in read_rows(
+            conn, "SELECT id, title FROM tasks WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(ids),), 2))
     for sid, tid in sorted(pairs):
         derived = states.get(tid)
         wait = waits.get(tid)

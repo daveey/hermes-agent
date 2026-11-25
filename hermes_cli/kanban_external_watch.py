@@ -260,8 +260,10 @@ def _card_states(conn, task_ids, *, now):
     try:
         hosts = hosts_seen(conn)
         ids = list(dict.fromkeys(str(t) for t in task_ids))
-        statuses = dict(conn.execute("SELECT id,status FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
-                                     (json.dumps(ids),)))
+        # One packed row, not one per parked card: each row step is a GIL release in the Desktop backend. [daveey]
+        from hermes_state_page_pack import read_rows
+        statuses = dict(read_rows(
+            conn, "SELECT id,status FROM tasks WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(ids),), 2))
         from hermes_cli.kanban_external_display import Capture
         selected = [tid for tid in ids if statuses.get(tid) == 'scheduled']
         if not selected:

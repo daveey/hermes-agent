@@ -29,14 +29,7 @@ def read_chunks(conn, sql, params):
 def _read(conn, sql, params, chunk):
     # Prepare only: LIMIT 0 never steps the projection or its correlated probes.
     names = [column[0] for column in conn.execute(f'SELECT * FROM ({sql}) LIMIT 0', params).description]
-    cells = []
-    for name in names:
-        column = _quoted(name)
-        # JSON numbers round doubles to 15 digits. Transport REAL as SQLite's
-        # round-trip decimal text and BLOB as hex, distinguished by storage type.
-        cells.append(f"json_array(typeof({column}), CASE typeof({column}) "
-                     f"WHEN 'real' THEN printf('%!.26g', {column}) "
-                     f"WHEN 'blob' THEN hex({column}) ELSE {column} END)")
+    cells = [_cell(_quoted(name)) for name in names]
     prefix = f"WITH _packed_rows AS MATERIALIZED ({sql}) "
     source, suffix = '_packed_rows', ''
     if chunk:
@@ -51,6 +44,28 @@ def _read(conn, sql, params, chunk):
     packed_rows = cursor.fetchall() if chunk else [cursor.fetchone()]
     return [dict(zip(names, (_value(kind, value) for kind, value in row)))
             for packed in packed_rows for row in json.loads(packed[0])]
+
+
+def read_rows(conn, sql, params, width):
+    """``conn.execute(sql, params).fetchall()`` as tuples in ONE statement and one handed-out row. [daveey]
+
+    For a reader whose ``width`` result columns are known: no prepare-only probe for their names, the columns are
+    renamed by position (a wrong ``width`` fails at prepare). Same transport as ``read_page``: SQLite types, row
+    order and binary64 values are preserved."""
+    cols = [f"_pack_c{i}" for i in range(width)]
+    packed = conn.execute(
+        f"WITH _packed_rows({','.join(cols)}) AS MATERIALIZED ({sql}) "
+        f"SELECT json_group_array(json_array({','.join(_cell(c) for c in cols)})) FROM _packed_rows",
+        params).fetchone()
+    return [tuple(_value(kind, value) for kind, value in row) for row in json.loads(packed[0])]
+
+
+def _cell(column):
+    # JSON numbers round doubles to 15 digits. Transport REAL as SQLite's
+    # round-trip decimal text and BLOB as hex, distinguished by storage type.
+    return (f"json_array(typeof({column}), CASE typeof({column}) "
+            f"WHEN 'real' THEN printf('%!.26g', {column}) "
+            f"WHEN 'blob' THEN hex({column}) ELSE {column} END)")
 
 
 def _value(kind, value):

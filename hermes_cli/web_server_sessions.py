@@ -3,6 +3,7 @@
 
 import logging
 import asyncio
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -336,6 +337,40 @@ def _with_session_maintenance(profile, operation, *args):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+# [daveey] Read-only opens whose declared-schema probe already passed in this process: (realpath, st_dev, st_ino,
+# PRAGMA schema_version, connection class, probe statements). The probe is ~25 statements per open, and every
+# session-list miss opens a fresh read-only SessionDB per changed profile, so the probe was most of
+# ``_read_profile_db``'s statements; in the Desktop backend each statement can wait out a GIL switch interval.
+# ``schema_version`` is bumped by every DDL from any process and the file identity changes when the store is
+# replaced, so an equal key proves the same schema the probe accepted: no clock, no TTL. A failed probe is never
+# remembered, so drift (#140315) and damage are probed and reported on every open, as before.
+_PROBED_STORES: set = set()
+_PROBED_STORES_MAX = 512
+_PROBED_LOCK = threading.Lock()
+
+
+def _file_identity(db_path: Path):
+    import os
+    try:
+        real = os.path.realpath(db_path)
+        st = os.stat(real)
+    except OSError:
+        return None
+    return real, st.st_dev, st.st_ino
+
+
+def _probe_key(conn, identity, probes):
+    """The memo key for this open, or None when it cannot be read cheaply (the caller then probes)."""
+    import sqlite3
+    if identity is None:
+        return None
+    try:
+        cookie = conn.execute("PRAGMA schema_version").fetchone()[0]
+    except sqlite3.Error:
+        return None
+    return (*identity, cookie, type(conn), probes)
+
+
 def _session_db_read_probe_statements() -> tuple:
     """Probe the declared schema without reconciling it on a browsing request."""
     from hermes_state_schema import schema_read_probe_statements
@@ -376,12 +411,23 @@ def _open_session_db_at_path(db_path: Path, *, read_only: bool):
     )
 
     def _open_probed():
+        identity = _file_identity(db_path)  # before connecting: a swap during the open never matches
         db = SessionDB(db_path=db_path, read_only=True)
         try:
             conn = getattr(db, "_conn", None)
             if conn is not None:
-                for statement in _session_db_read_probe_statements():
-                    conn.execute(statement).fetchone()
+                probes = _session_db_read_probe_statements()
+                key = _probe_key(conn, identity, probes)
+                with _PROBED_LOCK:
+                    probed = key is not None and key in _PROBED_STORES
+                if not probed:
+                    for statement in probes:
+                        conn.execute(statement).fetchone()
+                    if key is not None and _probe_key(conn, _file_identity(db_path), probes) == key:
+                        with _PROBED_LOCK:
+                            if len(_PROBED_STORES) >= _PROBED_STORES_MAX:
+                                _PROBED_STORES.clear()
+                            _PROBED_STORES.add(key)
             return db
         except BaseException:
             db.close()

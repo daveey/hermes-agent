@@ -24,18 +24,20 @@ class Capture:
             if blob:
                 payload = bytes.fromhex(payload)
             self.rows[tid, kind] = (eid, payload, at)
+        # Packed like the events above: one row per card would be one GIL release each in the Desktop backend.
+        from hermes_state_page_pack import read_rows
         self.wakes = {}
         try:
-            self.wakes = {tid: (cmd, every) for tid, cmd, every in conn.execute(
-                "SELECT task_id,cmd,every FROM task_wake_checks "
-                "WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}
+            self.wakes = {tid: (cmd, every) for tid, cmd, every in read_rows(
+                conn, "SELECT task_id,cmd,every FROM task_wake_checks "
+                "WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),), 3)}
         except sqlite3.Error:
             pass  # optional machine-local table; same fallback as literal plan
         self.last_at = {}
         try:
-            self.last_at = dict(conn.execute(
-                "SELECT task_id,last_at FROM task_wake_checks WHERE task_id IN (SELECT value FROM json_each(?))",
-                (json.dumps(ids),)))
+            self.last_at = dict(read_rows(
+                conn, "SELECT task_id,last_at FROM task_wake_checks WHERE task_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(ids),), 2))
         except sqlite3.Error:
             pass  # independent compatibility/error boundary in literal _shell_seen
         self._blockers = None

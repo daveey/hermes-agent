@@ -152,8 +152,9 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..
     if not ids:
         return {}
     try:
-        if "containment_episode" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
-            return {}
+        # [daveey] No separate schema probe: ``PRAGMA table_info(tasks)`` handed Python one row per column (59 on
+        # the hub board, each a GIL release in the Desktop backend) on every session-list board read. A board
+        # without the column (or the table) fails this statement at prepare time, the same empty answer.
         rows = conn.execute("SELECT id, containment_episode FROM tasks WHERE status = 'triage' "
                             "AND containment_episode IS NOT NULL AND id IN (SELECT value FROM json_each(?))",
                             (json.dumps(ids),)).fetchall()
