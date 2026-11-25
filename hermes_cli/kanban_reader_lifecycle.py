@@ -23,11 +23,12 @@ def borrow_lock(lock, budget):
         lock.release()
 
 
-def cached_entry(path, busy_budget=0.5):
-    return retry_open(lambda remaining: _cached_entry_once(path, remaining), busy_budget)
+def cached_entry(path, busy_budget=0.5, *, reader_cache=None):
+    options = {} if reader_cache is None else {'reader_cache': reader_cache}
+    return retry_open(lambda remaining: _cached_entry_once(path, remaining, **options), busy_budget)
 
 
-def borrow_warm(path):
+def borrow_warm(path, *, reader_cache=None):
     """Return an already-borrowed, attested live entry, or None for ordinary admission.
 
     No open/close occurs here. Retained tracking custody excludes raw offline access;
@@ -38,9 +39,10 @@ def borrow_warm(path):
     from hermes_cli import kanban_generation as gen, kanban_session_activity as activity
     from hermes_cli.kanban_lockguard import shm_identity
 
+    cache, cache_lock = reader_cache or (activity._RO_CACHE, activity._RO_CACHE_LOCK)
     key = str(path)
-    with activity._RO_CACHE_LOCK:
-        entry = activity._RO_CACHE.get(key)
+    with cache_lock:
+        entry = cache.get(key)
     if entry is None or not entry[2].acquire(blocking=False):
         return None
     keep = False
@@ -61,8 +63,8 @@ def borrow_warm(path):
                 or current != entry[3] or any(c._hermes_generation_shm is not None
                     and c._hermes_generation_shm != current for c in handles)):
             return None
-        with activity._RO_CACHE_LOCK:
-            keep = activity._RO_CACHE.get(key) is entry
+        with cache_lock:
+            keep = cache.get(key) is entry
         return (key, entry) if keep else None
     except (OSError, sqlite3.Error):
         return None
@@ -79,10 +81,11 @@ def is_shared_reader(path, conn) -> bool:
         return entry is not None and entry[0] is conn
 
 
-def _cached_entry_once(path, remaining):
+def _cached_entry_once(path, remaining, reader_cache=None):
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli.kanban_lockguard import shm_identity
 
+    cache, cache_lock = reader_cache or (activity._RO_CACHE, activity._RO_CACHE_LOCK)
     key = str(path)
     # Same-board opens/last closes are atomic; registry locks protect only map
     # operations. Borrowers never wait for this board lock while holding the map.
@@ -93,15 +96,15 @@ def _cached_entry_once(path, remaining):
         except OSError as exc:
             raise sqlite3.OperationalError(f"unable to open database file {path}: {exc}") from exc
         ident = (st.st_dev, st.st_ino)
-        with activity._RO_CACHE_LOCK:
-            entry = activity._RO_CACHE.get(key)
+        with cache_lock:
+            entry = cache.get(key)
             stale = entry if entry is not None and entry[1] != ident else None
             if stale is not None:
                 # A borrower may need the board lock to close on a read error.
                 # Never wait for it while holding that lock; preserve its entry.
                 if not stale[2].acquire(blocking=False):
                     raise DeletedWalGenerationError(f"kanban DB {path}: replaced reader is still borrowed; retry")
-                del activity._RO_CACHE[key]
+                del cache[key]
                 entry = None
         if stale is not None:
             try:
@@ -112,6 +115,6 @@ def _cached_entry_once(path, remaining):
             conn = activity._open_ro(path, check_same_thread=False, timeout=0)
             conn.execute(f"PRAGMA busy_timeout={int(activity._RO_BUSY_TIMEOUT_S * 1000)}")
             entry = (conn, ident, threading.Lock(), shm_identity(path))
-            with activity._RO_CACHE_LOCK:
-                activity._RO_CACHE[key] = entry
+            with cache_lock:
+                cache[key] = entry
         return key, entry

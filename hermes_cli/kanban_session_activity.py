@@ -421,6 +421,7 @@ from hermes_cli.kanban_session_activity_replica_resolution import replica_task_r
 
 
 from hermes_cli.kanban_generation import open_ro as _open_ro
+from hermes_cli.kanban_waiting_reader import reading as waiting_ro, close_all as close_waiting_readers
 
 
 # Linked-card reads run on every sidebar refresh across ~16 boards and replicas; a fresh connection pays schema
@@ -436,7 +437,7 @@ register_reader_cache(evict_readers)
 
 
 @contextlib.contextmanager
-def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Connection]:
+def cached_ro(path: Path, *, busy_budget: float = 0.5, reader_cache=None) -> Iterator[sqlite3.Connection]:
     """A shared read-only connection to ``path``, held exclusively for the ``with`` body. Reopened when the file is
     replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
     connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
@@ -446,9 +447,11 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
     with "cached reader is borrowed" (hub errors.log, 2026-11-21)."""
     from hermes_cli.kanban_reader_lifecycle import borrow_warm, cached_entry, try_borrow
 
+    cache, cache_lock = reader_cache or (_RO_CACHE, _RO_CACHE_LOCK)
+    options = {} if reader_cache is None else {'reader_cache': reader_cache}
     started = time.monotonic()
-    warm = borrow_warm(path)
-    key, entry = warm if warm is not None else cached_entry(path, busy_budget)
+    warm = borrow_warm(path, **options)
+    key, entry = warm if warm is not None else cached_entry(path, busy_budget, **options)
     conn, _ident, lock, _shm = entry
     remaining = busy_budget - (time.monotonic() - started)
     if warm is None and not try_borrow(lock, min(remaining, _RO_SHARED_WAIT_S)):
@@ -457,8 +460,8 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
             yield private
         return
     try:
-        with _RO_CACHE_LOCK:
-            if _RO_CACHE.get(key) is not entry:
+        with cache_lock:
+            if cache.get(key) is not entry:
                 from hermes_cli.kanban_generation import DeletedWalGenerationError
                 raise DeletedWalGenerationError(f"kanban DB {path}: reader was evicted while waiting; retry")
         conn.row_factory = None
@@ -470,19 +473,19 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
         try:
             yield conn
         except sqlite3.Error:
-            with _RO_CACHE_LOCK:
-                if _RO_CACHE.get(key) is entry:
-                    del _RO_CACHE[key]
+            with cache_lock:
+                if cache.get(key) is entry:
+                    del cache[key]
             _close_quietly(conn)
             raise
         finally:
-            if lowered and _RO_CACHE.get(key) is entry:
+            if lowered and cache.get(key) is entry:
                 try:
                     conn.execute(f"PRAGMA busy_timeout={int(_RO_BUSY_TIMEOUT_S * 1000)}")
                 except sqlite3.Error:  # never keep a reader with the probe's budget
-                    with _RO_CACHE_LOCK:
-                        if _RO_CACHE.get(key) is entry:
-                            del _RO_CACHE[key]
+                    with cache_lock:
+                        if cache.get(key) is entry:
+                            del cache[key]
                     _close_quietly(conn)
     finally:
         lock.release()

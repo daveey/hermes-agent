@@ -62,6 +62,8 @@ def release_gone() -> int:
             closed += 1
         finally:
             entry[2].release()
+    from hermes_cli import kanban_waiting_reader
+    closed += kanban_waiting_reader.release_gone()
     return closed
 
 
