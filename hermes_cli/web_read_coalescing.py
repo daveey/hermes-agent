@@ -7,6 +7,7 @@ from typing import get_type_hints
 
 from anyio.to_thread import run_sync
 from hermes_constants import get_hermes_home
+from hermes_cli.web_read_stages import ReadTrace
 
 
 def _freeze(value):
@@ -61,29 +62,38 @@ def coalesced_read(func, *, thread_runner=run_sync, admission_key=None, max_conc
         # Group before the read so a bad key fails this caller, not a shared task.
         group = None if admission_key is None else (home, _freeze(admission_key(bound.arguments)))
         pending, admission, groups = states.setdefault(loop, ({}, asyncio.Semaphore(max_concurrent), {}))
-        task = pending.get(key)
-        if task is None:
+        entry = pending.get(key)
+        if entry is None:
+            trace = ReadTrace()
             if overflow_to_runner and len(pending) >= max_concurrent:
                 # Do not postpone the lane's queue clock behind another semaphore.
-                return await thread_runner(partial(func, *args, **kwargs))
+                trace.join()
+                return await trace.run(thread_runner, partial(func, *args, **kwargs))
             group_slot = None if group is None else groups.setdefault(group, asyncio.Semaphore(1))
 
             async def execute():
                 try:
                     # Group first: a read queued behind its own group holds no shared slot.
                     if group_slot is None:
+                        trace.emit("read_admission_wait")
                         async with admission:
-                            return await thread_runner(partial(func, *args, **kwargs))
-                    async with group_slot, admission:
-                        return await thread_runner(partial(func, *args, **kwargs))
+                            return await trace.run(thread_runner, partial(func, *args, **kwargs))
+                    trace.emit("read_group_wait")
+                    async with group_slot:
+                        trace.emit("read_admission_wait")
+                        async with admission:
+                            return await trace.run(thread_runner, partial(func, *args, **kwargs))
                 finally:
                     pending.pop(key, None)
                     if not pending:
                         states.pop(loop, None)
             task = loop.create_task(execute())
-            pending[key] = task
+            pending[key] = (task, trace)
             # Observe failures even if every HTTP caller has disconnected.
             task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        else:
+            task, trace = entry
+        trace.join()
         # A disconnected caller must not release admission for a live worker.
         return await asyncio.shield(task)
 

@@ -13,9 +13,12 @@ import re
 import threading
 import time
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
+
+_request_trace: ContextVar[tuple | None] = ContextVar("request_stage_trace", default=None)
 
 POLL_PATHS = frozenset({
     "/api/plugins/user-steps/requests", "/api/plugins/hub-sync/status",
@@ -160,4 +163,8 @@ class RequestStageHandler:
         if state is not None:
             sink, fields = state
             sink.emit("handler_dispatch", **fields)
-        return await self.app(scope, receive, send)
+        token = _request_trace.set(state)
+        try:
+            return await self.app(scope, receive, send)
+        finally:
+            _request_trace.reset(token)
