@@ -248,7 +248,13 @@ def review(conn, task_id, episode, verdict, ctx):
                     kb._append_event(conn, task_id, reviewer.SETTLED, {"episode": episode,
                                      "receipt_uid": receipt["request_uid"], "verdict": receipt["verdict"]})
         return result
+    settled = {"episode": episode, "receipt_uid": receipt["request_uid"], "verdict": receipt["verdict"]}
+    if receipt["verdict"] == "wait_on":
+        # The Board applied this wait itself, in the receipt's own transaction: it linked the open target
+        # and parked the card in todo, so no core writer froze that dependency wait's deadline. The
+        # confirmed receipt is the landing; naming it lets the event seam freeze the wait before sync
+        # projects the Board's rows, leaving no interval in which the todo card has no clock.
+        settled.update(status="todo", parent=receipt["target"])
     with kb.write_txn(conn):
-        kb._append_event(conn, task_id, reviewer.SETTLED, {"episode": episode,
-                         "receipt_uid": receipt["request_uid"], "verdict": receipt["verdict"]})
+        kb._append_event(conn, task_id, reviewer.SETTLED, settled)
     return "settled"  # canonical effect confirmed; normal sync, not this helper, projects clearance

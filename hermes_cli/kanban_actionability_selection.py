@@ -5,7 +5,10 @@ import json
 
 # A wake or lane admission that found an open parent lands its card in todo and says so in ``status``.
 LANDINGS = ('condition_met', 'continuation_woken', 'wake_check_broken', 'wake_check_lost', 'wake_check_stale',
-            'wake_probe_stale', 'lane_admitted')
+            'wake_probe_stale', 'lane_admitted',
+            # The Board applies a spend reviewer's wait_on itself (edge and todo): the home gateway's settlement
+            # of that confirmed receipt is the landing its own writer can stamp.
+            'spend_review_settled')
 KINDS = {'todo': ('created', 'linked', 'unlinked', 'dependency_wait', 'unblocked', *LANDINGS),
          'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
          'review': ('review_requested', 'created'), 'blocked': ('blocked',),

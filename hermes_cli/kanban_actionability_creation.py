@@ -97,6 +97,13 @@ def stamp(conn, task_id, kind, payload, *, now):
         return payload
     original = payload
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+    # A confirmed Board wait_on receipt: the Board linked ``parent`` and parked the card in todo in that
+    # receipt's transaction, and this replica still shows the triage it left. Freeze the wait as it landed.
+    receipt = bool(kind == 'spend_review_settled' and isinstance(payload, dict) and payload.get('verdict') == 'wait_on'
+                   and payload.get('status') == 'todo' and _text(payload.get('parent')) and payload['parent'] != task_id
+                   and row is not None and row['status'] == 'triage')
+    if receipt and row is not None:
+        row = {**dict(row), 'status': 'todo', 'block_kind': None, 'human_request': None}
     handoff = row is not None and row['status'] == 'running' and kind in ('linked', 'unlinked')
     if kind in ('linked', 'unlinked', 'unblocked', *LANDINGS) and (
             row is None or not (row['status'] == 'todo' or handoff) or not isinstance(payload, dict)):
@@ -105,6 +112,8 @@ def stamp(conn, task_id, kind, payload, *, now):
         from hermes_cli.kanban_db_sync import run_uid
         from hermes_cli.kanban_actionability_parents import snapshot
         parents = [r[0] for r in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (task_id,))]
+        if receipt:
+            parents = sorted({*parents, payload['parent']})
         if kind in ('linked', 'unlinked', 'unblocked', *LANDINGS) and not parents:
             return original  # no parent to wait on: not a dependency wait, so nothing to freeze
         payload = {**payload, 'actionability_parent_ids': parents,

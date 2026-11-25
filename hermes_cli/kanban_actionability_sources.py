@@ -372,10 +372,12 @@ def _describe(conn, tid, *, now, reader):
         if reason:
             facts['private_hold'] = reason
     lane_deadline = None
-    if not facts.get('stop') and not facts.get('private_hold') and not deps:
+    if not facts.get('stop') and not facts.get('private_hold'):
         gate_at = _lane_gate_at(conn, tid, reader)
         if gate_at:
-            facts['lane_hold'] = True
+            # A lane merge links the held card under its owner: the row then names that dependency, and the
+            # lane gate it is still held at keeps its own clock (a repeated merge link never renews it).
+            facts['lane_hold'] = not deps
             # Fixed at the source, never renewed by a later census observation; a recorded contract wins.
             lane_deadline = gate_at + 86400
     wake_columns = reader.columns('task_wake_checks')
