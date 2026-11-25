@@ -1200,6 +1200,9 @@ def test_imported_dashboard_drains_only_its_new_mounts(kanban_home, monkeypatch)
     from plugins.kanban.dashboard import board_fact_views
     from tests._fixtures.board_mount import imported_dashboard_lifecycles
 
+    # This regression exercises the native runtime even on macOS/flag-off hosts.
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setenv('HERMES_FACTS_BOARD', '1')
     app = FastAPI()
     registry = lifecycles(app)
     monkeypatch.setitem(sys.modules, 'hermes_cli.web_server', SimpleNamespace(app=app))
@@ -1224,6 +1227,28 @@ def test_imported_dashboard_drains_only_its_new_mounts(kanban_home, monkeypatch)
     assert board_fact_views._installed is previous
     assert registry._handles == {borrowed: preserved}
     registry._handles.pop(borrowed)
+
+
+def test_imported_dashboard_drains_replacement_registry(kanban_home, monkeypatch):
+    """An app imported in the block can reuse an old registry's path key."""
+    from types import SimpleNamespace
+    from hermes_cli.fact_plugin_mount import lifecycles
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+
+    old_app, new_app = FastAPI(), FastAPI()
+    old_registry, new_registry = lifecycles(old_app), lifecycles(new_app)
+    shared_key = (kanban_home / 'plugin_api.py').resolve()
+    closed = []
+    old_handle = SimpleNamespace(close=lambda: pytest.fail('closed borrowed registry'))
+    old_registry._handles[shared_key] = old_handle
+    new_registry._handles[shared_key] = SimpleNamespace(close=lambda: closed.append(shared_key))
+    server = SimpleNamespace(app=old_app)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.web_server', server)
+    with imported_dashboard_lifecycles():
+        server.app = new_app
+    assert closed == [shared_key]
+    assert new_registry._handles == {}
+    assert old_registry._handles == {shared_key: old_handle}
 
 
 def test_board_card_exposes_current_run_start(client):
