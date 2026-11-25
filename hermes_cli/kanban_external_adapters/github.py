@@ -11,6 +11,7 @@ runs again on top of ``pr_progress``'s own reads: three or four calls per PR pol
 """
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import time
@@ -18,6 +19,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from hermes_cli import kanban_ci_progress as kcp
+
+logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "GitHub Actions"
 DEFAULT_RETRY_AFTER = 300
@@ -48,6 +51,7 @@ class Watched:
     adapter: str
     scope: str
     service_name: str = SERVICE_NAME
+    head_sha: str = ""  # a run poll: the commit the run built (from its run or job read), "" when unread
 
 
 def adapter_for(ref: str, hint: str = "") -> Optional[str]:
@@ -94,8 +98,10 @@ def _conclusion_job(conclusion: Optional[str]) -> str:
     return "unknown"
 
 
-def _run_job(jobs: list, repo: str, run_id: str, fetch_run: Optional[Callable]) -> tuple[str, str]:
-    """``(job state, detail)`` of a run from its listed jobs; the run's own read decides a finished or empty one."""
+def _run_job(jobs: list, repo: str, run_id: str, fetch_run: Optional[Callable],
+             seen: Optional[dict] = None) -> tuple[str, str]:
+    """``(job state, detail)`` of a run from its listed jobs; the run's own read decides a finished or empty one
+    (and is kept in ``seen["run"]``)."""
     running = [j for j in jobs if isinstance(j, dict) and j.get("status") == "in_progress"]
     if running:
         return "running", f"job '{running[0].get('name') or 'job'}' running"
@@ -104,6 +110,8 @@ def _run_job(jobs: list, repo: str, run_id: str, fetch_run: Optional[Callable]) 
         started = len(jobs) > len(unfinished)
         return ("running", "waiting on later jobs") if started else ("queued", "queued, no runner yet")
     run = (fetch_run or (lambda r, i: kcp._gh_api(f"repos/{r}/actions/runs/{i}")))(repo, run_id) or {}
+    if seen is not None:
+        seen["run"] = run
     if run.get("status") != "completed":
         # A run cancelled before any job was created lists none and is still finished: only its own read tells.
         return ("running", "finishing up") if jobs else ("queued", "no jobs created yet")
@@ -151,7 +159,8 @@ def _poll_run(ref, hint, now, fetch, fetch_runners, fetch_run, deadline) -> Watc
         return Watched({"job": "queued", "service": "degraded", "detail": detail[:DETAIL_MAX], "url": url,
                         "retry_after": None}, p, "github_run", scope)
     try:
-        job, detail = _run_job((seen.get("jobs") or {}).get("jobs") or [], p.repo, p.run_id, fetch_run)
+        jobs = (seen.get("jobs") or {}).get("jobs") or []
+        job, detail = _run_job(jobs, p.repo, p.run_id, fetch_run, seen)
     except kcp.NoCredential as exc:
         return _failed(kcp.Progress("unknown", p.repo, p.run_id, detail=str(exc), no_credential=True),
                        "github_run", scope)
@@ -161,7 +170,68 @@ def _poll_run(ref, hint, now, fetch, fetch_runners, fetch_run, deadline) -> Watc
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         return _failed(kcp.Progress("unknown", p.repo, p.run_id, detail=str(exc)), "github_run", scope)
     return Watched({"job": job, "service": "ok", "detail": detail, "url": url, "retry_after": None}, p,
-                   "github_run", scope)
+                   "github_run", scope, head_sha=_head_sha(seen.get("run"), jobs))
+
+
+def _head_sha(run: Optional[dict], jobs: list) -> str:
+    """The commit a run built: its own read's ``head_sha``, else its jobs' one (all jobs of a run share it)."""
+    for item in [run or {}, *[j for j in jobs if isinstance(j, dict)]]:
+        sha = str((item or {}).get("head_sha") or "").lower()
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            return sha
+    return ""
+
+
+def poll_commit(repo: str, sha: str, from_run: int, *, fetch: Optional[kcp.Fetch] = None,
+                fetch_runners: Optional[kcp.FetchRunners] = None, now: Optional[float] = None,
+                deadline: Optional[float] = None, api: Optional[Callable[[str], dict]] = None) -> Watched:
+    """Every workflow run of commit ``sha`` as ONE poll, for a card parked on run ``from_run`` of it that
+    succeeded while others may still run (the whole-commit wait). One ``actions/runs?head_sha=`` read; a
+    superseded attempt (an older run of a workflow that ran again on the same event) never decides.
+
+    ``job``: ``failed`` / ``cancelled`` as soon as any run ended so (a failure is a result: the card wakes at
+    once), else ``running`` while any run is not completed, else ``succeeded``. ``pending_runs`` and ``runs``
+    (id, name, status, conclusion) ride on the poll. A queued run goes through :func:`kcp.ci_run_progress` (at
+    most ``kcp.PR_QUEUED_RUNS_MAX``, as a PR's head): a run no runner takes is ``not_starting`` as on any CI park.
+    Raises on a failed read (:class:`kcp.OverBudget` included): the caller falls back to the single run."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise kcp.OverBudget("sweep budget spent before the commit's runs were read")
+    data = (api or kcp._gh_api)(f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100") or {}
+    listed = data.get("workflow_runs")
+    if not isinstance(listed, list):
+        raise ValueError(f"no workflow_runs in the runs of {sha[:10]}")
+    total = (data or {}).get("total_count")
+    if isinstance(total, int) and total > len(listed):
+        raise ValueError(f"commit {sha[:10]} has {total} workflow runs, {len(listed)} read: not judged on a page")
+    runs = sorted(_deciding_runs([r for r in listed if isinstance(r, dict) and r.get("id")]),
+                  key=lambda r: int(r["id"]))
+    if not any(int(r["id"]) == int(from_run) for r in runs):
+        # The watched run itself is missing from the list (paged out, or a newer attempt of its workflow): it is
+        # known finished and green, so it still counts in the verdict and the comment.
+        runs.append({"id": int(from_run), "name": f"run {from_run}", "status": "completed", "conclusion": "success"})
+    summary = [{"id": int(r["id"]), "name": str(r.get("name") or "run"), "status": str(r.get("status") or ""),
+                "conclusion": r.get("conclusion"), "updated_at": r.get("updated_at")} for r in runs]
+    pending = [r["id"] for r in summary if r["status"] != "completed"]
+    done = [_conclusion_job(r["conclusion"]) for r in summary if r["status"] == "completed"]
+    if "failed" in done:
+        job = "failed"
+    elif "cancelled" in done:
+        job = "cancelled"
+    else:
+        job = "running" if pending else "succeeded"
+    p = kcp.Progress("ok", repo, str(from_run))
+    if job == "running":
+        for run in [r for r in summary if r["status"] in _PENDING][:kcp.PR_QUEUED_RUNS_MAX]:
+            got = kcp.ci_run_progress(f"{repo}/actions/runs/{run['id']}", fetch=fetch, fetch_runners=fetch_runners,
+                                      now=now, deadline=deadline)
+            if got.state == kcp.NOT_STARTING:
+                p = got
+                break
+    left = f", {len(pending)} still running" if pending else ""
+    detail = f"commit {sha[:10]}: {len(summary)} workflow run(s){left}"
+    return Watched({"job": job, "service": "ok", "detail": detail, "url": f"https://github.com/{repo}/commit/{sha}",
+                    "retry_after": None, "runs": summary, "pending_runs": pending, "head_sha": sha,
+                    "from_run": int(from_run)}, p, "github_run", repo, head_sha=sha)
 
 
 def _poll_pr(ref, hint, parked_at, now, fetch, fetch_runners, deadline, api=None) -> Watched:
@@ -205,6 +275,26 @@ def _poll_pr(ref, hint, parked_at, now, fetch, fetch_runners, deadline, api=None
 def _budget(deadline: Optional[float]) -> None:
     if deadline is not None and time.monotonic() >= deadline:
         raise kcp.OverBudget("sweep budget spent before the PR's checks were read")
+
+
+def _workflow(run: dict) -> object:
+    return run.get("workflow_id") or run.get("name")
+
+
+def _run_key(run: dict) -> tuple:
+    """One workflow on one trigger (a re-trigger on the same event supersedes the attempt before it)."""
+    return _workflow(run), run.get("event")
+
+
+def _deciding_runs(listed: list) -> list[dict]:
+    """The runs that decide a commit's verdict: the newest run of each workflow, plus an older run of the same
+    workflow on ANOTHER event only when it FAILED (a push run failing beside a green pull_request run is a result).
+    An older sibling that was cancelled (a concurrency group shared by both events), skipped or is still pending
+    stays superseded, as before."""
+    newest = _newest(listed, _workflow)
+    ids = {r.get("id") for r in newest}
+    return newest + [r for r in _newest(listed, _run_key) if r.get("id") not in ids
+                     and r.get("status") == "completed" and r.get("conclusion") in _FAILED]
 
 
 def _newest(items: list, key: Callable[[dict], object]) -> list[dict]:
@@ -253,8 +343,15 @@ def _pr_verdict(api: Callable[[str], dict], repo: str, head: str, base: str, now
 
     A superseded attempt (an older cancelled run of a workflow that ran again) never decides."""
     _budget(deadline)
-    listed = (api(f"repos/{repo}/actions/runs?head_sha={head}&per_page=100") or {}).get("workflow_runs") or []
-    runs = _newest(listed, lambda r: r.get("workflow_id") or r.get("name"))
+    data = api(f"repos/{repo}/actions/runs?head_sha={head}&per_page=100") or {}
+    listed = data.get("workflow_runs") or []
+    total = data.get("total_count")
+    if isinstance(total, int) and total > len(listed):
+        # A verdict on one page could miss a failed or running workflow: not judged, the park's deadline stands.
+        logger.warning("kanban PR checks: head %s of %s has %d workflow runs, %d read: not judged on one page",
+                       head[:10], repo, total, len(listed))
+        return "unknown", f"{total} workflow runs on head {head[:10]}, {len(listed)} read: not judged on one page"
+    runs = _deciding_runs(listed)
     started = any(r.get("status") in ("in_progress", "completed") for r in runs)
     required = required_checks(api, repo, base, deadline)
     if required:

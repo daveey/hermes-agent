@@ -85,6 +85,7 @@ NO_CREDENTIAL_WARN_SECONDS = 60 * 60
 SWEEP_EVERY_SECONDS = 60
 MAX_CARDS_PER_SWEEP = 6
 SWEEP_BUDGET_SECONDS = 90
+WIDEN_MAX_SECONDS = 60 * 60  # how long a park widened to its commit waits on the other runs after its run went green
 RECENT_RUNS_MAX = 4  # completed runs whose jobs the unreadable-runner-list fallback reads
 IN_PROGRESS_RUNS_MAX = 40  # in-progress runs whose jobs it reads (all of them on a normal day: 23 on 2026-11-13)
 POOL_SCAN_READERS = 6  # those job lists read at once: each read is a broker vend + gh call, ~3 s on the hub
@@ -685,7 +686,7 @@ _JITTER: dict[tuple[str, str], tuple[Any, float]] = {}  # (db, task) -> (park ev
 
 def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float,
                   rand: Optional[float] = None, park_id: Optional[int] = None,
-                  ref: Optional[str] = None) -> Optional[str]:
+                  ref: Optional[str] = None, widen: Optional[dict] = None) -> Optional[str]:
     """[daveey] Write the poll as the card's external-watch record (and wake / assert / clear as it says). A failure
     to record never fails the sweep. Returns the wake event kind or None."""
     from hermes_cli import kanban_external_watch as kew
@@ -695,10 +696,66 @@ def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float,
         declared = ctx["payload"].get("watch") if isinstance(ctx["payload"].get("watch"), dict) else {}
         return kew.apply_poll(conn, task_id, watched.poll, now=wall, adapter=watched.adapter, scope=watched.scope,
                               every=clamp_every(declared.get("every"), DEFAULT_CI_EVERY),
-                              service_name=watched.service_name, rand=rand, park_id=park_id, ref=ref)
+                              service_name=watched.service_name, rand=rand, park_id=park_id, ref=ref,
+                              widen=widen)
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError):
         logger.warning("kanban external watch: could not record the poll of %s", task_id, exc_info=True)
         return None
+
+
+def _whole_commit(conn: sqlite3.Connection, task_id: str, ref: str, hint: str, park_id: Any, *, wall: float,
+                  fetch: Optional[Fetch], fetch_runners: Optional[FetchRunners], fetch_run: Optional[Callable],
+                  deadline: float) -> tuple[Any, Optional[dict]]:
+    """``(watched, widen)`` for one CI-waiting card: the adapter's poll of its ref, except that a GitHub Actions run
+    that SUCCEEDED is judged with every other workflow run of its commit (``github.poll_commit``), so one early
+    green run does not wake a card whose commit is still building (2026-11-25: 85 of 435 CI wakes re-parked on
+    another run of the same commit within 3 min). ``widen`` is set when that commit still has runs pending: the
+    park then waits on the commit (``ci_wait_widened``) and later sweeps read only the commit's runs. A failed run
+    is a result and is never widened. A failed read of the commit's runs falls back to the single run (logged);
+    a sweep budget spent before it defers the card to the next sweep. Shares the sweep's budget and cadence."""
+    from hermes_cli import kanban_external_watch as kew
+    from hermes_cli.kanban_external_adapters import github
+
+    kw = dict(fetch=fetch, fetch_runners=fetch_runners, now=wall, deadline=deadline)
+    target = run_target(ref, hint)
+    scope = kew.widened_scope(conn, task_id, int(park_id)) if target and park_id is not None else None
+    if scope is not None:
+        from_run, sha = int(scope.get("from_run") or target[1]), str(scope["head_sha"])
+        watched = None
+    else:
+        watched = github.poll(ref, hint, parked_at=_parked_at(conn, task_id), now=wall, fetch=fetch,
+                              fetch_runners=fetch_runners, fetch_run=fetch_run, deadline=deadline)
+        if (target is None or watched is None or watched.poll is None or watched.adapter != "github_run"
+                or watched.poll.get("job") != "succeeded" or not watched.head_sha):
+            return watched, None
+        from_run, sha = int(target[1]), watched.head_sha
+    try:
+        commit = github.poll_commit(target[0], sha, from_run, **kw)
+    except OverBudget as exc:
+        return github.Watched(None, Progress("unknown", target[0], str(from_run), detail=str(exc), deferred=True),
+                              "github_run", target[0]), None
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired):
+        logger.warning("kanban ci wait: the workflow runs of commit %s (%s, card %s) are unreadable; judging run %s "
+                       "alone", sha[:10], target[0], task_id, from_run, exc_info=True)
+        if watched is None:  # widened earlier: the watched run itself succeeded, so read it again and wake on it
+            watched = github.poll(ref, hint, parked_at=_parked_at(conn, task_id), now=wall, fetch=fetch,
+                                  fetch_runners=fetch_runners, fetch_run=fetch_run, deadline=deadline)
+        return watched, None
+    if commit.poll["job"] == "running":
+        if scope is not None:
+            since = float(scope.get("since") or wall)
+            if wall - since >= WIDEN_MAX_SECONDS:  # an approval gate or a long unrelated workflow: stop waiting
+                commit.poll.update(terminal=True, widen_capped=WIDEN_MAX_SECONDS)
+                return commit, None
+            return commit, {"from_run": from_run, "head_sha": sha, "pending_runs": commit.poll["pending_runs"]}
+        own = next((r for r in commit.poll["runs"] if r["id"] == from_run), {})
+        done_at = _epoch(own.get("updated_at"))
+        since = min(float(done_at), wall) if done_at else wall
+        return commit, {"from_run": from_run, "head_sha": sha, "pending_runs": commit.poll["pending_runs"],
+                        "since": since}
+    if watched is not None and len(commit.poll["runs"]) < 2:
+        return watched, None  # the run was the commit's only one: woken exactly as before
+    return commit, None
 
 
 def _cadence(conn: sqlite3.Connection, task_id: str, wall: float) -> tuple[int, int, Any, bool]:
@@ -762,7 +819,6 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
                 for key in [k for k in state if k[0] == db and k not in live]:
                     del state[key]  # re-parked on something else, woken or gone
         from hermes_cli import kanban_external_watch as external_watch
-        from hermes_cli.kanban_external_adapters import github as external_github
         from hermes_cli.kanban_external_state import jitter_factor
         for checked, (_last, task_id, ref, hint, park_id) in enumerate(_due(conn, db, waits, now, wall)):
             if checked >= MAX_CARDS_PER_SWEEP or time.monotonic() >= deadline:
@@ -771,7 +827,7 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
             with _LOCK:
                 _LAST_CHECK[(db, task_id)] = _mono_now()
                 _JITTER[(db, task_id)] = (park_id, jitter_factor(rand))
-            watched = external_github.poll(ref, hint, parked_at=_parked_at(conn, task_id), now=wall, fetch=fetch,
+            watched, widen = _whole_commit(conn, task_id, ref, hint, park_id, wall=wall, fetch=fetch,
                                            fetch_runners=fetch_runners, fetch_run=fetch_run, deadline=deadline)
             p = watched.progress if watched is not None else progress(
                 ref, hint=hint, parked_at=_parked_at(conn, task_id), fetch=fetch, fetch_runners=fetch_runners,
@@ -788,7 +844,7 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
                 woken.append(task_id)
                 continue
             if watched is not None and watched.poll is not None and _record_watch(
-                    conn, task_id, watched, wall, rand, park_id, ref):
+                    conn, task_id, watched, wall, rand, park_id, ref, widen):
                 woken.append(task_id)
     except Exception:
         logger.warning("kanban ci run progress sweep failed", exc_info=True)

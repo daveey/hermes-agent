@@ -39,6 +39,7 @@ BLOCKER_PREFIX = "service-down"
 AUTHOR = "kanban-dispatcher"
 SHELL_DEFAULT_EVERY = 900
 REF_BROKEN = "external_ref_broken"
+CI_WAIT_WIDENED = "ci_wait_widened"  # a run park whose run succeeded now waits for its whole commit
 SERVICE_HEALTHS = ("down", "unreachable", "auth_failed")  # the service's trouble, shared by a scope's cards
 
 
@@ -67,6 +68,20 @@ def latest_record(conn: sqlite3.Connection, task_id: str, after_event: int = 0) 
     row = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND id > ? "
                        "ORDER BY id DESC LIMIT 1", (task_id, WATCH_EVENT, after_event)).fetchone()
     return _json(row[0]) if row else None
+
+
+def widened_scope(conn: sqlite3.Connection, task_id: str, after_event: int) -> Optional[dict]:
+    """The commit the card's current park was widened to (``{from_run, head_sha, pending_runs}``, the
+    ``ci_wait_widened`` event after the park ``after_event``), else None. A park scope, not a new table: the event
+    syncs with the card and a new park drops it."""
+    row = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ? AND id > ? "
+                       "ORDER BY id DESC LIMIT 1", (task_id, CI_WAIT_WIDENED, after_event)).fetchone()
+    got = _json(row[0]) if row else {}
+    if not got.get("head_sha"):
+        return None
+    if not got.get("since") and row[1] is not None:
+        got["since"] = float(row[1])  # when the watched run was seen green
+    return got
 
 
 _HOSTS_LOCK = threading.Lock()
@@ -336,12 +351,14 @@ def _result(rec: dict, derived: dict) -> dict:
 def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float, adapter: str, scope: str = "",
                every: Any = None, service_name: Optional[str] = None, rand: Optional[float] = None,
                cmd: str = "", terminal: Optional[bool] = None, park_id: Optional[int] = None,
-               ref: Optional[str] = None) -> Optional[str]:
+               ref: Optional[str] = None, widen: Optional[dict] = None) -> Optional[str]:
     """Record one poll for a scheduled card and act on it: a finished job wakes the card with ``external_result``
     (``condition_met``; a FAILED job wakes too and is not an outage); a service gone red asserts the shared
     blocker; an ok poll clears it (a finished job's read included). Returns the event kind that woke the card,
     else None. Opens its own write txn. ``park_id`` / ``ref`` are the park the caller read the poll for: a card
-    parked again while the read was in flight (another ref, or the same ref anew) drops the poll untouched."""
+    parked again while the read was in flight (another ref, or the same ref anew) drops the poll untouched.
+    ``widen`` (``{from_run, head_sha, pending_runs}``): the watched run succeeded while other runs of its commit are
+    pending, so the park now waits for the whole commit: one ``ci_wait_widened`` event per park, no comment."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
     with kb.write_txn(conn):
@@ -350,6 +367,12 @@ def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float
             return None
         if not _same_park(conn, task_id, park_id, ref):
             return None
+        if widen and not poll.get("terminal"):
+            ctx = park_context(conn, task_id)
+            if ctx is not None and widened_scope(conn, task_id, ctx["event_id"]) is None:
+                kb._append_event(conn, task_id, CI_WAIT_WIDENED, {
+                    "from_run": widen["from_run"], "head_sha": widen["head_sha"],
+                    "pending_runs": list(widen.get("pending_runs") or []), "since": widen.get("since")})
         got = record_poll(conn, task_id, poll, now=now, adapter=adapter, scope=scope, every=every,
                           service_name=service_name, rand=rand)
         if got is None:
@@ -361,11 +384,17 @@ def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float
             _clear_blocker(conn, rec)  # before a finished job's wake returns: this may be the scope's last card
         if finished or derived.get("wake"):
             kwc.episode.reset(conn, task_id)
+            result = _result(rec, derived)
+            runs = poll.get("runs") if isinstance(poll.get("runs"), list) else None
+            if runs:
+                result.update(head_sha=poll.get("head_sha"), runs=runs)
+            if poll.get("widen_capped"):
+                result.update(outcome="pending", pending_runs=list(poll.get("pending_runs") or []))
             woke = kwc._wake(conn, task_id, kwc.CONDITION_MET_EVENT, {
-                "wake_check": cmd or None, "output": rec.get("detail") or "",
-                "external_result": _result(rec, derived)})
+                "wake_check": cmd or None, "output": rec.get("detail") or "", "external_result": result})
             if woke:
-                kb.add_comment(conn, task_id, AUTHOR, _finished_note(rec, derived))
+                kb.add_comment(conn, task_id, AUTHOR, _finished_note(rec, derived, runs, poll.get("head_sha"),
+                                                                     capped=poll.get("widen_capped")))
             return woke
         if derived["state"] == ks.DOWN and health in SERVICE_HEALTHS and scope and not poll.get("host_only"):
             if _scope_answers(conn, task_id, rec):
@@ -425,10 +454,23 @@ def _wake_ref_broken(conn: sqlite3.Connection, task_id: str, rec: dict, derived:
     return woke
 
 
-def _finished_note(rec: dict, derived: dict) -> str:
+def _finished_note(rec: dict, derived: dict, runs: Optional[list] = None, head_sha: Any = None,
+                   capped: Any = None) -> str:
     res = _result(rec, derived)
     where = f" ({res['url']})" if res.get("url") else ""
-    parts = [f"Woken: the job on {res['service']} finished: {res['outcome']}{where}."]
+    if capped:
+        pending = [r for r in runs or [] if isinstance(r, dict) and r.get("status") != "completed"]
+        still = ", ".join(f"{r.get('name') or 'run'} #{r.get('id')} ({r.get('status') or 'pending'})"
+                          for r in pending) or "none listed"
+        parts = [f"Woken: the run this card waits on succeeded, but other workflow runs of its commit were still "
+                 f"pending {int(capped) // 60} min later{where}: {still}. Waiting on them is capped; check whether "
+                 "they need you (an environment approval, a stuck runner) or finish without them."]
+    else:
+        parts = [f"Woken: the job on {res['service']} finished: {res['outcome']}{where}."]
+    if runs:
+        listed = "; ".join(f"{r.get('name') or 'run'} #{r.get('id')}: "
+                           f"{r.get('conclusion') or r.get('status') or 'unknown'}" for r in runs if isinstance(r, dict))
+        parts.append(f"Workflow runs of commit {str(head_sha or '')[:10]}: {listed}.")
     if res["outcome"] == "failed":
         parts.append("A failed job is a result for this card, not an outage.")
     return " ".join(parts)
