@@ -88,6 +88,25 @@ def test_batch_unknown_part_does_not_poison_other_parts(conn):
     assert values['attention'] is not None and values['links'] is not None
 
 
+def test_batch_content_keys_mixed_unknown_stays_fresh_and_known_stays_stable(conn):
+    from pathlib import Path
+
+    path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    conn.execute("DROP TRIGGER kanban_annotation_counts_task_events_insert")
+    conn.commit()
+    first = rev.content_keys(path)
+    second = rev.content_keys(path)
+    assert first['counts'][0] == second['counts'][0] == 'unknown'
+    assert first['counts'] != second['counts']
+    for part in ('links', 'attention'):
+        assert first[part][0] == 'part'
+        assert first[part] == second[part] == rev.content_key(path, part)
+    rev.ensure_revisions(conn)
+    repaired = rev.content_keys(path)
+    assert repaired['counts'][0] == 'part'
+    assert repaired == rev.content_keys(path)
+
+
 def test_batch_concurrent_commit_stays_in_one_snapshot(conn, monkeypatch):
     path = conn.execute("PRAGMA database_list").fetchone()[2]
     other = sqlite3.connect(path)
