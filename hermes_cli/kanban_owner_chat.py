@@ -275,8 +275,9 @@ def settle(conn, task_id: str, creator_task_id: Optional[str], *, created_by: Op
         sid = ensure(name)  # state.db only; the kanban writes below are not covered by this fallback
     except Exception as exc:  # health: allow BLE001 -- state.db trouble must not stop a monitor filing its card
         if strict:
-            raise kca.CreateAuthorityRefused(
-                f"the owner chat for producer {name!r} could not be made ({exc}); nothing was created.") from exc
+            raise kca.CreateAuthorityRefused(  # state.db trouble passes: a courier create waits, never dropped
+                f"the owner chat for producer {name!r} could not be made ({exc}); nothing was created.",
+                wait="origin_owner_chat_unavailable") from exc
         from hermes_cli.kanban_db import _append_event
         log.warning("kanban owner chat for %s unavailable; card %s created ownerless", name, task_id, exc_info=True)
         _append_event(conn, task_id, UNAVAILABLE, {"producer": name, "error": str(exc)[:500]})

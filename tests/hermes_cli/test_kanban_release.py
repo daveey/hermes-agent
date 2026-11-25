@@ -894,7 +894,7 @@ def test_a_correct_first_guess_of_seen_is_refused_and_prints_the_comment(board, 
     before = written(board, tid)
     out = as_owner(board, tid, seen=said)  # the exact newest id, never printed to this caller
     assert out['refusal'] == 'budget_decision_unread' and out['unread'] == [said]
-    assert 'Hold this until Friday.' in out['message'] and 'was not printed to this session' in out['message']
+    assert 'Hold this until Friday.' in out['message'] and 'printed to this session by an earlier release refusal' in out['message']
     assert written(board, tid) == before and status(board, tid) == 'triage'
     (record,) = shown_events(board, tid)
     assert record['session'] == scope.CHAT and record['comment_ids'] == [said] and record['verb'] == 'release'
@@ -1051,3 +1051,48 @@ def test_an_agent_replacing_an_agents_limit_needs_no_read(board, monkeypatch):
     rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'standing')
     assert rc == 0, err
     assert budget.card_limits(board, tid, budget.limits()) == budget.Limits(0, 0)
+
+
+def test_a_release_refusal_does_not_stand_in_for_the_spend_budget_read(board, monkeypatch):
+    """R1: what release printed (the human comment) leaves out the person's budget note spend-budget must show."""
+    tid = with_person_budget(board, stop=True)
+    scope.link(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Keep it under the cap.', writer_kind='human')
+    assert as_owner(board, tid)['unread'] == [said]  # release's own refusal: printed [said] only
+    person = newest_budget(board, tid)
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(said), '--reason', 'lift')
+    assert rc == 4 and 'small and cheap' in err and newest_budget(board, tid) == person
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--seen', str(said), '--reason', 'lift')
+    assert rc == 0, err  # read through spend-budget's own refusal
+
+
+def test_a_spend_budget_refusal_does_not_stand_in_for_the_release_read(board, monkeypatch):
+    """R2: a person's comment only release requires (after the stop, before the budget) must be printed by release."""
+    tid = kb.create_task(board, title='Budgeted work', assignee='default')
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+        kb._append_event(board, tid, decision.EVENT, {'reason': 'Spend budget: 3 runs'})
+    scope.link(board, tid)
+    legal = kb.add_comment(board, tid, 'default', 'DO NOT RELEASE until legal signs off.', writer_kind='human')
+    budget.set_override(board, tid, runs=3, cache_read_tokens=5_000_000, by='david', reason='small and cheap',
+                        writer_kind='human')
+    rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'lift')
+    assert rc == 4 and 'DO NOT RELEASE' not in err
+    printed = shown_events(board, tid)[-1]['comment_ids']
+    assert legal not in printed
+    out = as_owner(board, tid, seen=max(printed))
+    assert out['refusal'] == 'budget_decision_unread' and 'DO NOT RELEASE until legal signs off.' in out['message']
+    assert status(board, tid) == 'triage'
+    assert as_owner(board, tid, seen=max(out['unread']))['outcome'] == 'released'
+
+
+def test_an_agent_release_keeps_a_persons_run_limit_attribution(board, monkeypatch):
+    tid = with_person_budget(board, stop=True)
+    scope.link(board, tid)
+    assert as_owner(board, tid)['outcome'] == 'released'  # nothing after the stop to read
+    released = newest_budget(board, tid)
+    assert released['writer_kind'] == 'agent' and released['runs_writer_kind'] == 'human'
+    before = newest_budget(board, tid)
+    rc, err = spend_budget(board, monkeypatch, tid, '--runs', '0', '--cache-read-tokens', '5000000',
+                           '--reason', 'unlimited runs')
+    assert rc == 4 and 'budget_decision_unread' in err and newest_budget(board, tid) == before

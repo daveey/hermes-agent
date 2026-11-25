@@ -98,16 +98,14 @@ def _agent_gate(conn, tid: str, writer: tuple, runs, cache, seen, board, args):
     row = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
                        (tid, ksb.OVERRIDE_EVENT)).fetchone()
     anchor = dict(row)
-    note = _person_note(conn, tid, anchor)
-    if note is None:
-        return (f"kanban spend-budget: {tid}: refused: the {' and '.join(loosened)} limit may be a person's and its "
-                "budget comment is not readable here; a human runs `hermes kanban spend-budget`")
+    note = _person_note(conn, tid, anchor)  # None: not readable here; the rest (and the fence's decision) still is
     flags = ("--exempt" if args.exempt else "--clear" if args.clear else
              " ".join(f"--{name} {value}" for name, value in (("runs", runs), ("cache-read-tokens", cache))
                       if value is not None))
     rerun = f"hermes kanban {'--board ' + board + ' ' if board else ''}spend-budget {tid} {flags} --reason ..."
     try:
-        seen = kr.read_first(conn, tid, anchor, writer, seen, board, verb="spend-budget", extra=[note], rerun=rerun)
+        seen = kr.read_first(conn, tid, anchor, writer, seen, board, verb="spend-budget",
+                            extra=[note] if note else [], rerun=rerun)
     except kr.Refusal as exc:
         return (f"kanban spend-budget: {tid}: refused: {exc.code}: raising or removing a {' and '.join(loosened)} "
                 f"limit a person may have set needs a read first. {exc}")

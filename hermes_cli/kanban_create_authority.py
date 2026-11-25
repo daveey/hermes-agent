@@ -13,8 +13,49 @@ CODE = "scope_authority_missing"
 
 
 class CreateAuthorityRefused(ValueError):
-    """The create has no renewable creator-task or owning-chat authority."""
+    """The create has no renewable creator-task or owning-chat authority.
+
+    ``wait``: a reason code when the refusal rests on local state that can still change (``wait_reason``), so a
+    courier create stays ``pending`` and is retried; None when nothing local can change it (terminal)."""
     code = CODE
+
+    def __init__(self, message: str = "", *, wait: str | None = None):
+        super().__init__(message)
+        self.wait = wait
+
+
+def wait_reason(conn, task_id: str, creator_task_id) -> str | None:
+    """Why a refused create may still succeed later on this board, as a reason code naming the wait, else None.
+
+    - ``origin_owner_unsynced``: the board never synced (no Board identity) or has no synced chat-link table,
+      so it cannot hold the origin chat's ``created`` link yet;
+    - ``origin_gateway_unnamed``: this gateway has no name yet (before its first sync);
+    - ``origin_creator_unsynced``: the creator task, or its sessions, have not reached this board yet;
+    - ``origin_chat_provenance_unsynced``: a foreign chat link on the card whose provenance is not proven here
+      yet (the proving rows sync later).
+    """
+    from hermes_cli.kanban_db_sync import sync_state
+    links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone() is not None
+    if not links or not (sync_state(conn) or {}).get("gateway_id"):
+        return "origin_owner_unsynced"
+    me = _gateway(conn)
+    if not me:
+        return "origin_gateway_unnamed"
+    if creator_task_id:
+        from hermes_cli.kanban_scope_renewal_cli import _sessions
+        if conn.execute("SELECT 1 FROM tasks WHERE id=?", (creator_task_id,)).fetchone() is None \
+                or not _sessions(conn, creator_task_id):
+            return "origin_creator_unsynced"
+    from hermes_cli.kanban_creator_chats import _chat_links
+    from hermes_cli.kanban_db_notify import is_machine_session
+    from hermes_cli.kanban_session_provenance import proven_foreign_chats
+    foreign = [f"{r['chat_gateway']}/{r['chat_profile']}/{r['chat_session']}" for r in _chat_links(conn, task_id)
+               if r.get("kind", "created") == "created" and r["chat_gateway"] and r["chat_gateway"] != me
+               and is_machine_session(r["chat_gateway"], r["chat_session"], local_gateway=me,
+                                      profile=r["chat_profile"])]
+    if foreign and not set(foreign) <= set(proven_foreign_chats(conn, (task_id,), local_gateway=me)):
+        return "origin_chat_provenance_unsynced"
+    return None
 
 
 def _accepts(conn, task_id, session, gateway, profile, creator=None):
@@ -142,9 +183,11 @@ def require(conn, task_id: str, creator_task_id) -> None:
         return
     _anchor_registered_session(conn, task_id)
     if not has_authority(conn, task_id, creator_task_id, durable=True):
+        wait = wait_reason(conn, task_id, creator_task_id)
         raise CreateAuthorityRefused(
             "this card would have no renewable scope authority. Create it from a registered owning chat, "
             "pass --origin-session with an unreleased created chat anchor, or create it from a creator "
             "task that descends from a registered owning chat (a running creator alone ends with its run). "
             "A creator name, bare task ID, placeholder or observer "
-            "subscription is not authority; nothing was created.")
+            "subscription is not authority; nothing was created." + (f" (waiting: {wait})" if wait else ""),
+            wait=wait)

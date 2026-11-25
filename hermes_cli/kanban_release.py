@@ -420,14 +420,21 @@ def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple,
     return sorted(items.values(), key=lambda item: (item["id"] is None, item["id"] or 0))
 
 
-def _shown(conn: sqlite3.Connection, tid: str, session: Optional[str], cid: int) -> bool:
-    """A read-first refusal of this board printed comment ``cid`` to agent ``session`` (a ``release_unread_shown``
-    event). Only this board's own events count (:func:`own_events`): a row another gateway pushed proves nothing
-    about what this caller was shown. A caller with no session has no identity to match, so never matches."""
-    if not session:
+def _shown(conn: sqlite3.Connection, tid: str, session: Optional[str], verb: str, ids: Sequence[int]) -> bool:
+    """Every id in ``ids`` (what this verb's caller must read now) was printed to agent ``session`` by a read-first
+    refusal of the same ``verb`` on this board: ``ids`` is a subset of the union of ``comment_ids`` over this
+    board's own ``release_unread_shown`` events for that session and verb. Each verb prints its own required set
+    (``spend-budget`` prints the limit's own budget comment, ``release`` the comments after the stop), so one
+    verb's refusal never stands in for the other's. A row another gateway pushed proves nothing about what this
+    caller was shown (:func:`own_events`); a caller with no session has no identity to match."""
+    if not session or not ids:
         return False
-    return any(e["payload"].get("session") == session and cid in (e["payload"].get("comment_ids") or [])
-               for e in own_events(conn, tid, (SHOWN,)))
+    printed: set = set()
+    for e in own_events(conn, tid, (SHOWN,)):
+        p = e["payload"]
+        if p.get("session") == session and p.get("verb", "release") == verb:
+            printed.update(c for c in (p.get("comment_ids") or []) if isinstance(c, int))
+    return set(ids) <= printed
 
 
 def _record_shown(conn: sqlite3.Connection, tid: str, writer: tuple, ids: Sequence[int], verb: str) -> None:
@@ -450,9 +457,10 @@ def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], write
     An agent authority does not decide over a person's words or a budget decision it has not been shown: the
     refusal prints them (human comments after ``anchor``, the budget fence's decision, other sessions' recent
     comments and ``extra``) and records a ``release_unread_shown`` event naming the caller's session and the ids
-    it printed. ``--seen`` is accepted only as the id of the newest unread item AND only when such an event of
-    this board shows that id was printed to the same session: a correct first guess, another session's refusal,
-    a larger number, or ``--seen`` when nothing needs reading is refused. A human proceeds and acknowledges what
+    it printed. ``--seen`` is accepted only as the id of the newest unread item AND only when this board's own
+    such events show every item this verb requires was printed to the same session by this verb's refusal: a
+    correct first guess, another session's or another verb's refusal, a larger number, or ``--seen`` when nothing
+    needs reading is refused. A human proceeds and acknowledges what
     is on the card now, read before the mandate is written."""
     if writer[0] == "human":
         return conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id=?", (tid,)).fetchone()[0]
@@ -463,7 +471,7 @@ def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], write
         return None
     ids = [item["id"] for item in items if item["id"] is not None]
     newest = max(ids) if len(ids) == len(items) else None
-    if newest is not None and seen == newest and _shown(conn, tid, writer[1], newest):
+    if newest is not None and seen == newest and _shown(conn, tid, writer[1], verb, ids):
         return seen
     shown = "\n".join(f"Comment {item['id']} | {item['who']} | {item['time']}\n{item['body']}" for item in items)
     command = rerun or f"hermes kanban {verb} {tid}"
@@ -475,7 +483,7 @@ def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], write
     wrong = ""
     if seen is not None:
         wrong = (f" (--seen {seen} is not the newest of them)" if seen != newest else
-                 f" (--seen {seen} was not printed to this session by an earlier refusal; it is now)")
+                 f" (not everything here was printed to this session by an earlier {verb} refusal; it is now)")
     _record_shown(conn, tid, writer, ids, verb)
     doing = {"release": "releasing", "spend-budget": "changing the spend budget of"}.get(verb, verb)
     raise _Refusal("budget_decision_unread", f"read these before {doing} {tid}{wrong}:\n{shown}\n{how}", unread=ids)
@@ -574,8 +582,14 @@ def _mandate_and_budget(conn: sqlite3.Connection, out: dict, s) -> None:
             # The cache-read limit's own attribution, always: a kept one keeps what it had (a person's run-only
             # override defers to the board limit, and that deference is kept too); a lifted one is this writer's.
             kept = ksb.carried(s.prior).get("cache_read_writer_kind", "unknown") if s.keeps_limit else who
+            # An agent raises the run count (that is the release) but a person's run limit stays a person's: a
+            # later agent `spend-budget --runs 0` must not read it as agent-set and lift it unread.
+            person_runs = ksb.runs_attribution(s.prior) or "unknown"
+            runs_kind = (person_runs if kind != "human" and ksb.override_set(s.prior) and person_runs != "agent"
+                         else None)
             ksb.set_override(conn, s.tid, runs=runs, cache_read_tokens=cache, by=s.by, reason=s.reason,
-                             seen=s.budget_seen, board=s.board, writer_kind=who, cache_read_writer_kind=kept)
+                             seen=s.budget_seen, board=s.board, writer_kind=who, cache_read_writer_kind=kept,
+                             runs_writer_kind=runs_kind)
         except unread.UnreadComments as exc:  # a budget decision recorded since the check above
             raise _Refusal("budget_decision_unread", f"{exc}{s.kept}")
     out.update(spent_runs=spent, budget_runs=s.budget)

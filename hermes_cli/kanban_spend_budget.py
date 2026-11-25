@@ -147,11 +147,31 @@ def carried(prior: Optional[dict], writer_kind: str = "agent") -> dict:
     return out
 
 
+# Overrides the system itself writes under a fixed ``by``: the spend reviewer's grants and this module's own
+# writer. Before writers were recorded they carried no ``writer_kind``; their run limit is the system's, not a
+# person's. (The operator-courier promote writes ``by: <gateway>/<requester>`` and has always recorded
+# ``writer_kind`` through ``carried``, so it needs no name here.)
+SYSTEM_WRITERS = frozenset({"kanban-spend-reviewer", AUTHOR})
+
+
 def runs_attribution(data: Optional[dict]) -> Optional[str]:
     """Who set an override's run limit: ``runs_writer_kind`` when a later writer only carried (or tightened) it,
-    otherwise the event's writer; None when the event records nothing (read as possibly a person's)."""
+    otherwise the event's writer; a legacy event of a :data:`SYSTEM_WRITERS` writer reads ``agent``; None when
+    the event records nothing (read as possibly a person's)."""
     data = data or {}
-    return data.get("runs_writer_kind") or data.get("writer_kind")
+    if data.get("runs_writer_kind") or data.get("writer_kind"):
+        return data.get("runs_writer_kind") or data.get("writer_kind")
+    return "agent" if data.get("by") in SYSTEM_WRITERS else None
+
+
+def _gate_cache_attribution(data: dict) -> Optional[str]:
+    """:func:`cache_attribution` for the spend-budget gate. A legacy system-writer event that sets no cache-read
+    value only deferred to the board's limit, so it is the system's; one that names a value may have kept a
+    person's number (writers before ``carried`` copied it), so it stays as :func:`cache_attribution` reads it."""
+    found = cache_attribution(data)
+    if found is None and data.get("by") in SYSTEM_WRITERS and _limit_value(data.get("cache_read_tokens")) is None:
+        return "agent"
+    return found
 
 
 def _ceiling(value: Optional[int], board: int) -> Optional[int]:
@@ -179,7 +199,7 @@ def agent_change(prior: Optional[dict], runs: Optional[int], cache_read_tokens: 
         return [], {}
     loosened, carried = [], {}
     for name, attribution, field, new, limit in (
-            ("cache_read_tokens", cache_attribution(prior), "cache_read_writer_kind", cache_read_tokens,
+            ("cache_read_tokens", _gate_cache_attribution(prior), "cache_read_writer_kind", cache_read_tokens,
              board.cache_read_tokens),
             ("runs", runs_attribution(prior), "runs_writer_kind", runs, board.runs)):
         if attribution == "agent":
