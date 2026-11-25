@@ -611,7 +611,7 @@ _pin_launcher_home()
 # and attestation boundaries above. Do not prepare or activate a dependency
 # environment just to read saved dispatcher evidence. All other argv and every
 # missing/stale/fenced snapshot continue through the original bootstrap below.
-if sys.argv[1:3] == ["kanban", "why"] and "--json" in sys.argv[3:] and "--live" not in sys.argv[3:]:
+if sys.argv[1:3] == ["kanban", "why"] and "--live" not in sys.argv[3:]:
     from hermes_cli import _startup_fast
 
     _startup_fast.normalize_hermes_home_env()

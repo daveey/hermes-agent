@@ -256,7 +256,7 @@ def try_fast_readonly(argv: list[str] | None = None) -> bool:
     argv = sys.argv[1:] if argv is None else argv
     if try_fast_version(argv):
         return True
-    if argv[:2] != ["kanban", "why"] or "--json" not in argv or container_mode_may_be_active():
+    if argv[:2] != ["kanban", "why"] or container_mode_may_be_active():
         return False
     from hermes_cli.kanban_why_fast import try_cli
 

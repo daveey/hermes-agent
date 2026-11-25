@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_governors as governors
@@ -14,7 +16,9 @@ board = helpers.board
 clean = helpers.clean
 
 
-def test_snapshot_cli_does_not_import_dispatch(board, monkeypatch):
+@pytest.mark.parametrize("flags", [[], ["--json"], ["--board", "default"],
+                                  ["--board", "default", "--json"], ["--json", "--board", "default"]])
+def test_snapshot_cli_does_not_import_dispatch(board, monkeypatch, flags):
     helpers._usage(monkeypatch, [helpers.RESERVE + 7])
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="snapshot import guard", assignee="default")
@@ -35,17 +39,24 @@ try:
 except SystemExit as exc:
     assert exc.code in (None, 0), exc.code
 for name in ('hermes_cli.kanban', 'hermes_cli.kanban_db', 'hermes_cli.kanban_db_dispatch',
-             'hermes_cli.kanban_governors', 'hermes_cli.kanban_governors_explain'):
+             'hermes_cli.kanban_governors_explain', 'hermes_cli.kanban_governors_cli'):
     assert name not in sys.modules, name
+if '--json' in sys.argv:
+    assert 'hermes_cli.kanban_governors' not in sys.modules
 """
-    result = subprocess.run([sys.executable, "-c", code, "kanban", "why", tid, "--board", "default", "--json"],
+    result = subprocess.run([sys.executable, "-c", code, "kanban", "why", tid, *flags],
                             cwd=Path(__file__).resolve().parents[2], env=env, text=True, capture_output=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
-    assert answer["source"] == "snapshot"
-    assert answer["first_stop"]["governor"] == "llm_pool"
-    assert answer["first_stop"]["label"]
-    assert answer["first_stop"]["source"]
+    if "--json" in flags:
+        answer = json.loads(result.stdout)
+        assert answer["source"] == "snapshot"
+        assert answer["first_stop"]["governor"] == "llm_pool"
+        assert answer["first_stop"]["label"]
+        assert answer["first_stop"]["source"]
+    else:
+        assert f"{tid} (ready, board default): stopped by" in result.stdout
+        assert "(snapshot," in result.stdout
+        assert recorded["label"] in result.stdout
 
 
 def test_snapshot_reader_fallbacks_and_parity(board, monkeypatch):
@@ -86,7 +97,8 @@ def test_snapshot_reader_fallbacks_and_parity(board, monkeypatch):
         assert fast.read_answer(path, tid) is None
 
 
-def test_fast_cli_defers_fences_and_unsupported_flags(monkeypatch, tmp_path):
+@pytest.mark.parametrize("json_flags", [[], ["--json"]])
+def test_fast_cli_defers_fences_and_unsupported_flags(monkeypatch, tmp_path, json_flags):
     from hermes_cli import kanban_why_fast as fast
 
     def unexpected(*args, **kwargs):
@@ -97,15 +109,16 @@ def test_fast_cli_defers_fences_and_unsupported_flags(monkeypatch, tmp_path):
                 "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD"):
         with monkeypatch.context() as m:
             m.setenv(key, "fenced")
-            assert fast.try_cli(["kanban", "why", "task", "--json"]) is False
-    for args in (["kanban", "why", "task"], ["kanban", "why", "task", "--json", "--live"],
+            assert fast.try_cli(["kanban", "why", "task", *json_flags]) is False
+    for args in (["kanban", "why"], ["kanban", "why", "task", "--live"],
+                 ["kanban", "why", "task", "--json", "--live"],
                  ["kanban", "why", "task", "--json", "--unknown"],
                  ["kanban", "why", "task", "--board", "../escape", "--json"]):
         assert fast.try_cli(args) is False
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
     (tmp_path / "kanban").mkdir()
     (tmp_path / "kanban" / "current").write_text("other")
-    assert fast.try_cli(["kanban", "why", "task", "--json"]) is False
+    assert fast.try_cli(["kanban", "why", "task", *json_flags]) is False
 
 
 def test_fast_entry_preserves_container_routing(monkeypatch):

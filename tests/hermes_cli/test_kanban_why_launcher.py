@@ -6,6 +6,8 @@ import shlex
 import subprocess
 import sys
 
+import pytest
+
 from hermes_cli import _launch_template
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -53,15 +55,28 @@ sys.meta_path.insert(0, Guard())
                           text=True, timeout=30, check=False)
 
 
-def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch, tmp_path):
+@pytest.mark.parametrize('json_mode', [False, True])
+def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch, tmp_path, capsys, json_mode):
     helpers._usage(monkeypatch, [helpers.RESERVE + 7])
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='launcher snapshot', assignee='default')
         helpers._tick(conn)
         from hermes_cli.kanban_governors_cli import why
         expected = why(conn, tid)
-    result = _launch(tmp_path, board, ['kanban', 'why', tid, '--board', 'default', '--json'])
+    args = ['kanban', 'why', tid, '--board', 'default'] + (['--json'] if json_mode else [])
+    result = _launch(tmp_path, board, args)
     assert result.returncode == 0, result.stderr
+    if not json_mode:
+        from hermes_cli.kanban_governors_cli import _print_why
+        import re
+
+        capsys.readouterr()
+        _print_why(expected)
+        expected_text = capsys.readouterr().out
+        # Snapshot ages advance between the two reads; all formatting stays identical.
+        normalize = lambda text: re.sub(r'\d+(?:\.\d+)?s old', '<age>s old', text)
+        assert normalize(result.stdout) == normalize(expected_text)
+        return
     actual = json.loads(result.stdout)
     for answer in (actual, expected):
         answer.pop('elapsed_s')
@@ -73,17 +88,18 @@ def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch
     assert actual == expected
 
 
-def test_launcher_falls_back_for_missing_stale_and_other_commands(board, monkeypatch, tmp_path):
+@pytest.mark.parametrize('json_mode', [False, True])
+def test_launcher_falls_back_for_missing_stale_and_other_commands(board, monkeypatch, tmp_path, json_mode):
     helpers._usage(monkeypatch, [helpers.RESERVE + 7])
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='launcher fallback', assignee='default')
         helpers._tick(conn)
         snapshot = governors.snapshot_path(conn)
         original = snapshot.read_text()
-    args = ['kanban', 'why', tid, '--board', 'default', '--json']
+    args = ['kanban', 'why', tid, '--board', 'default'] + (['--json'] if json_mode else [])
     # A tripwire at the unchanged slow-path boundary proves fallback, without running commands.
     for other in ([*args, '--live'], ['--version'], ['chat'], ['kanban', 'governors', '--json'],
-                  ['kanban', 'why', tid], [*args, '--unknown']):
+                  ['kanban', 'why', 'missing'], [*args, '--unknown']):
         result = _launch(tmp_path, board, other)
         assert result.returncode != 0 and 'slow import: pm.environments' in result.stderr, result.stderr
     snapshot.write_text(json.dumps({**json.loads(original), 'tick_at': 0}))

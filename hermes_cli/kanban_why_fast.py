@@ -92,8 +92,8 @@ def answer(recorded: dict, *, started: float) -> dict:
 
 
 def try_cli(argv: list[str]) -> bool:
-    """Handle only unambiguous, unfenced snapshot JSON invocations."""
-    if argv[:2] != ["kanban", "why"] or len(argv) < 4 or "--json" not in argv:
+    """Handle only unambiguous, unfenced snapshot invocations."""
+    if argv[:2] != ["kanban", "why"] or len(argv) < 3:
         return False
     # Do not duplicate the canonical worker/delegation/profile board fences.
     from agent.delegation_context import explicit_board_intent_is_pinned
@@ -103,9 +103,10 @@ def try_cli(argv: list[str]) -> bool:
         return False
     task_id, flags = argv[2], argv[3:]
     board = "default"
-    if flags == ["--json"]:
+    if flags in ([], ["--json"]):
         pass
-    elif len(flags) == 3 and flags[0] == "--board" and flags[2] == "--json":
+    elif (len(flags) == 2 and flags[0] == "--board") or (
+            len(flags) == 3 and flags[0] == "--board" and flags[2] == "--json"):
         board = flags[1]
     elif len(flags) == 3 and flags[0] == "--json" and flags[1] == "--board":
         board = flags[2]
@@ -117,12 +118,17 @@ def try_cli(argv: list[str]) -> bool:
 
     root = Path(os.environ["HERMES_KANBAN_HOME"]).expanduser() if os.environ.get("HERMES_KANBAN_HOME") \
         else get_default_hermes_root()
-    if flags == ["--json"] and (root / "kanban" / "current").exists():
+    if "--board" not in flags and (root / "kanban" / "current").exists():
         return False  # canonical resolver handles current-board metadata and tombstones
     path = root / "kanban.db" if board == "default" else root / "kanban" / "boards" / board / "kanban.db"
     # sqlite-sidecar-open: ok — read_answer opens SQLite through lockguard; plain file read is unrelated JSON
     result = read_answer(path, task_id)
     if result is None or result.get("board") != board:
         return False
-    print(json.dumps(result, ensure_ascii=False, default=str))
+    if "--json" in flags:
+        print(json.dumps(result, ensure_ascii=False, default=str))
+    else:
+        from hermes_cli.kanban_why_render import _print_why
+
+        _print_why(result)
     return True
