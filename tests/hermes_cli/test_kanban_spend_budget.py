@@ -384,7 +384,9 @@ def test_per_card_exemption_is_explicit_and_audited(kanban_home):
         res = kbd.dispatch_once(conn, spawn_fn=spawns)
         assert spawns.ids == [tid] and res.no_progress_held == [(other, "spend_budget:triage")]
         (event,) = _events(conn, tid, ksb.OVERRIDE_EVENT)
-        assert event.payload == {"runs": 0, "cache_read_tokens": 0, "by": "david", "reason": "standing shepherd"}
+        note = next(c for c in kb.list_comments(conn, tid) if "standing shepherd" in c.body)
+        assert event.payload == {"runs": 0, "cache_read_tokens": 0, "by": "david", "reason": "standing shepherd",
+                                 "decision_comment": {"comment_id": note.id, "author": ksb.AUTHOR}}
         assert any("standing shepherd" in c.body and "david" in c.body for c in kb.list_comments(conn, tid))
 
 

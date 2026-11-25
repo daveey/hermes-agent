@@ -54,6 +54,10 @@ def check(conn, task_id, *, seen=None, board=None):
     note = last if isinstance(reference, dict) else (notes[0] if notes else last)
     payload = reference if isinstance(reference, dict) else json.loads(note['payload'] or '{}')
     resolved = comments._resolve(rows, note, payload) if isinstance(reference, dict) or notes else []
+    if not resolved and reference is None and not notes:
+        prior = _prior_comment(events, rows, stop, last, decision, author)
+        if prior is not None:
+            note, payload, resolved = prior
     listing_payload = {**payload, 'writer_session': f"spend decision for episode {episode}"}
     if not resolved:
         unread = [comments._listing(None, 'Budget decision comment unavailable; wait for sync and reread. '
@@ -71,3 +75,30 @@ def check(conn, task_id, *, seen=None, board=None):
             command += ['--seen', str(newest)]
         raise comments.UnreadComments(unread, shlex.join(command))
     return episode
+
+
+def _prior_comment(events, rows, stop, last, decision, author):
+    """Recover only an unambiguous no-visible-stop writer's same-second system comment.
+
+    Explicit references and episode-bearing decisions never fall back. The legacy writer emitted the
+    comment first, but attached its UID only when a stop was already visible. Restoring that stop must
+    still require the actual local comment's read watermark, not a guessed foreign integer.
+    """
+    from hermes_cli.kanban_spend_budget import AUTHOR, _override_text
+
+    if 'episode' in decision or author != AUTHOR or not decision.get('by') or not decision.get('reason'):
+        return None
+    prefix = (f"Spend budget for this card: {_override_text(decision)}, "
+              f"set by {decision['by']}: {decision['reason']}. ")
+    candidates = [e for e in events if e['kind'] == 'commented'
+                  and e['created_at'] == last['created_at']
+                  and _event_order(stop) < _event_order(e) < _event_order(last)
+                  and json.loads(e['payload'] or '{}').get('author') == AUTHOR]
+    if len(candidates) != 1:
+        return None
+    note = candidates[0]
+    payload = json.loads(note['payload'] or '{}')
+    resolved = comments._resolve(rows, note, payload)
+    if len(resolved) != 1 or not str(resolved[0]['body']).startswith(prefix):
+        return None
+    return note, payload, resolved

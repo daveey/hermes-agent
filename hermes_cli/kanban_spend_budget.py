@@ -203,11 +203,11 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
         cid = kb.add_comment(conn, task_id, AUTHOR,
                              f"Spend budget for this card: {_override_text(payload)}, set by {by}: {reason}. "
                              f"{window_text(window)}.", system=True)
-        if episode:
-            note = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
-            payload['decision_comment'] = {'comment_id': cid, 'author': AUTHOR}
-            if 'uid' in note.keys() and note['uid']:
-                payload['decision_comment']['comment_uid'] = note['uid']
+        # A missing prior-home stop may be restored later; retain its read evidence even now.
+        note = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
+        payload['decision_comment'] = {'comment_id': cid, 'author': AUTHOR}
+        if 'uid' in note.keys() and note['uid']:
+            payload['decision_comment']['comment_uid'] = note['uid']
         kb._append_event(conn, task_id, OVERRIDE_EVENT, payload)
     return payload
 
