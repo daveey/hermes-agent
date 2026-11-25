@@ -444,7 +444,9 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
     promotions = [ev for ev in history if ev["kind"] == 'promoted_manual' and _event_order(ev) < after]
     if promotions:
         promoted = max(promotions, key=_event_order)
-        if not conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND started_at >= ? AND started_at <= ? "
+        # Integer timestamps cannot order a run against a promotion in the same second.
+        # Fail closed on either side of that ambiguity; only a strictly later start is evidence.
+        if not conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND started_at > ? AND started_at <= ? "
                             "LIMIT 1", (task_id, promoted["created_at"], stop["created_at"])).fetchone():
             return "the card returned to triage after promotion with zero new runs; the owner must reconcile it"
     for ev in conn.execute("SELECT * FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_valid(payload) "

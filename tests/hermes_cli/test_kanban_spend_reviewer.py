@@ -507,6 +507,42 @@ def test_plain_manual_promotion_with_zero_runs_also_requires_the_owner(
         assert _kinds(conn, tid).count("promoted_manual") == 1
 
 
+@pytest.mark.parametrize("offset, inserted_after, grants", [
+    (-1, False, False), (0, False, False), (0, True, False), (1, True, True),
+])
+def test_promotion_run_boundary_fails_closed_on_same_second(
+        kanban_home, spend_reviewer, inline, monkeypatch, offset, inserted_after, grants):
+    clock = int(time.time())
+    monkeypatch.setattr(ksb.time, "time", lambda: clock)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Promotion boundary", assignee="default")
+        helpers._runs(conn, tid, 1)  # real spend; the boundary row may be a short, already-ended attempt
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+
+        def spent_run():
+            with kb.write_txn(conn):
+                conn.execute("INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, "
+                             "summary) VALUES (?, 'default', 'done', ?, ?, 'continued', ?)",
+                             (tid, clock + offset, clock + offset, PROGRESS))
+
+        if not inserted_after:
+            spent_run()
+        kb.promote_task(conn, tid, actor="owner")
+        if inserted_after:
+            spent_run()
+        clock += 10
+        limits = ksb.Limits(runs=1, cache_read_tokens=0)
+        assert ksb.hold(conn, tid, lim=limits) == "triage"
+        episode = reviewer.episode_of(decision.pending_episode(conn, tid))
+        spend_reviewer.append(_grant(runs=1))
+        for _ in range(3):
+            reviewer.start_due(conn)
+        assert kb.get_task(conn, tid).status == ("ready" if grants else "triage")
+        assert reviewer.state(conn, tid, episode) == (reviewer.GRANTED if grants else reviewer.ESCALATED)
+        assert _kinds(conn, tid).count(reviewer.GRANTED) == int(grants)
+
+
 def test_the_one_shot_dispatch_command_waits_for_its_reviews(kanban_home, monkeypatch):
     from hermes_cli import kanban as kc
     waited = []
