@@ -113,7 +113,7 @@ def _selected(spec, columns: list[str]) -> list[str]:
     return [c for c in columns if (c not in names if mode == "except" else c in names)]
 
 
-def _expected(conn, kind: Kind, master: dict):
+def _expected(conn, kind: Kind, master: dict, columns=None):
     """Exact ``{name: sql}`` the schema must hold, or ``None`` when coverage cannot be certified.
 
     Containment ``containment_*`` tables outside the enumerated sets are refused here, and so is any
@@ -128,7 +128,13 @@ def _expected(conn, kind: Kind, master: dict):
             continue
         if entry[0] != "table":
             return None
-        cols = _selected(spec, _columns(conn, name))
+        if columns is None:
+            live_columns = _columns(conn, name)
+        else:
+            if name not in columns:
+                columns[name] = _columns(conn, name)
+            live_columns = columns[name]
+        cols = _selected(spec, live_columns)
         if not cols or (spec != _ALL and spec[0] == "only" and set(cols) != set(spec[1])):
             return None
         for op in ("INSERT", "DELETE", "UPDATE"):
@@ -198,25 +204,35 @@ def ensure_revisions(conn: sqlite3.Connection) -> None:
 
 
 def _read(conn: sqlite3.Connection, identity: tuple, kind: Kind):
+    return read_revisions(conn, identity, (kind,))[kind.name]
+
+
+def read_revisions(conn: sqlite3.Connection, identity: tuple, kinds) -> dict:
+    """Validate parts in one snapshot; schema/columns are shared only within this call."""
+    values = dict.fromkeys(k.name for k in kinds)
     opened = not conn.in_transaction
     try:
         if opened:
             conn.execute("BEGIN")
         schema = int(conn.execute("PRAGMA schema_version").fetchone()[0])
         master = _master(conn)
-        if (kind in (COUNTS, LINKS) and _foreign_containment(master)) or not _intact_readonly(conn, kind, master):
-            return None
-        row = conn.execute(f"SELECT revision FROM {kind.table} WHERE id = 1").fetchone()
-        return None if row is None else (*identity, int(row[0]), schema)
+        columns = {}
+        foreign = _foreign_containment(master)
+        for kind in kinds:
+            if (kind in (COUNTS, LINKS) and foreign) or not _intact_readonly(conn, kind, master, columns):
+                continue
+            row = conn.execute(f"SELECT revision FROM {kind.table} WHERE id = 1").fetchone()
+            values[kind.name] = None if row is None else (*identity, int(row[0]), schema)
+        return values
     except sqlite3.Error:
-        return None
+        return dict.fromkeys(values)
     finally:
         if opened and conn.in_transaction:
             conn.execute("ROLLBACK")
 
 
-def _intact_readonly(conn, kind: Kind, master: dict) -> bool:
-    wanted = _expected(conn, kind, master)
+def _intact_readonly(conn, kind: Kind, master: dict, columns=None) -> bool:
+    wanted = _expected(conn, kind, master, columns)
     return wanted is not None and _ours(master, kind) == wanted
 
 
@@ -232,11 +248,16 @@ def read_attention_revision(conn: sqlite3.Connection, identity: tuple) -> tuple 
 
 def content_key(path, part: str) -> tuple:
     """Fresh coverage/restore-aware holder key. Unknown never compares equal, and never writes."""
+    return content_keys(path, (part,))[part]
+
+
+def content_keys(path, parts=('counts', 'links', 'attention')) -> dict:
+    """One bounded probe and snapshot for a board's requested independent part keys."""
     from hermes_cli import kanban_activity_revision as revision
     from hermes_cli import kanban_session_activity as activity
 
-    kind = {'counts': COUNTS, 'attention': ATTENTION, 'links': LINKS}[part]
-    unknown = ('unknown', object())
+    kinds = tuple({'counts': COUNTS, 'attention': ATTENTION, 'links': LINKS}[part] for part in parts)
+    unknown = {k.name: ('unknown', object()) for k in kinds}
     lock = revision.probe_lock(path)
     if not lock.acquire(timeout=0.05):
         return unknown
@@ -245,8 +266,11 @@ def content_key(path, part: str) -> tuple:
         if before is None:
             return unknown
         with activity.cached_ro(path, busy_budget=0) as conn:
-            value = _read(conn, (conn, before), kind)
-        return unknown if value is None or revision.file_stat(path)[0] != before else ('part', part, *value)
+            values = read_revisions(conn, (conn, before), kinds)
+        if revision.file_stat(path)[0] != before:
+            return unknown
+        return {part: unknown[part] if value is None else ('part', part, *value)
+                for part, value in values.items()}
     except (OSError, sqlite3.Error):
         return unknown
     finally:

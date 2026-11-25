@@ -47,6 +47,115 @@ def conn(tmp_path, monkeypatch):
     kbc._INITIALIZED_PATHS.discard(str((home / "kanban.db").resolve()))
 
 
+def test_batch_reads_schema_and_each_table_once(conn):
+    expected = {k.name: rev._read(conn, ID, k) for k in rev.KINDS}
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        assert rev.read_revisions(conn, ID, rev.KINDS) == expected
+    finally:
+        conn.set_trace_callback(None)
+    assert statements.count("BEGIN") == statements.count("ROLLBACK") == 1
+    assert statements.count("PRAGMA schema_version") == 1
+    assert statements.count("SELECT name, type, sql FROM sqlite_master") == 1
+    columns = [s for s in statements if s.startswith("PRAGMA table_xinfo")]
+    assert columns and len(columns) == len(set(columns))
+    assert not conn.in_transaction
+
+
+def test_batch_preserves_caller_transaction_and_refreshes_schema(conn):
+    conn.execute("BEGIN")
+    before = rev.read_revisions(conn, ID, rev.KINDS)
+    assert conn.in_transaction
+    conn.rollback()
+    conn.execute("ALTER TABLE tasks ADD COLUMN batch_new TEXT")
+    conn.commit()
+    assert set(rev.read_revisions(conn, ID, rev.KINDS).values()) == {None}
+    rev.ensure_revisions(conn)
+    after = rev.read_revisions(conn, ID, rev.KINDS)
+    assert all(after[k] is not None and after[k] != before[k] for k in before)
+    conn.execute("UPDATE tasks SET batch_new='updated'")
+    conn.commit()
+    newer = rev.read_revisions(conn, ID, rev.KINDS)
+    assert all(newer[k] != after[k] for k in after)
+
+
+def test_batch_unknown_part_does_not_poison_other_parts(conn):
+    conn.execute("DROP TRIGGER kanban_annotation_counts_task_events_insert")
+    conn.commit()
+    values = rev.read_revisions(conn, ID, rev.KINDS)
+    assert values['counts'] is None
+    assert values['attention'] is not None and values['links'] is not None
+
+
+def test_batch_concurrent_commit_stays_in_one_snapshot(conn, monkeypatch):
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    other = sqlite3.connect(path)
+    before = rev.read_revisions(conn, ID, rev.KINDS)
+    original = rev._master
+
+    def racing_master(reader):
+        result = original(reader)
+        other.execute("UPDATE tasks SET title='concurrent batch'")
+        other.commit()
+        return result
+
+    try:
+        with monkeypatch.context() as patcher:
+            patcher.setattr(rev, '_master', racing_master)
+            assert rev.read_revisions(conn, ID, rev.KINDS) == before
+        assert not conn.in_transaction
+        after = rev.read_revisions(conn, ID, rev.KINDS)
+        assert all(after[k] != before[k] for k in before)
+    finally:
+        other.close()
+
+
+def test_batch_content_keys_unchanged_change_and_unknown(conn, monkeypatch):
+    from pathlib import Path
+    from hermes_cli import kanban_activity_revision as activity_revision
+    from hermes_cli import kanban_session_activity as activity
+
+    path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    before = rev.content_keys(path)
+    assert all(v[0] == 'part' for v in before.values())
+    assert before == rev.content_keys(path)
+    assert before == {k: rev.content_key(path, k) for k in before}
+    conn.execute("UPDATE tasks SET title='content changed'")
+    conn.commit()
+    after = rev.content_keys(path)
+    assert all(after[k] != before[k] for k in before)
+    original = activity_revision.file_stat
+    calls = []
+
+    def replaced(p):
+        calls.append(p)
+        return original(p) if len(calls) % 2 else (('replacement',), None)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(activity_revision, 'file_stat', replaced)
+        unknown = rev.content_keys(path)
+        assert all(v[0] == 'unknown' for v in unknown.values())
+        assert all(rev.content_keys(path)[k] != unknown[k] for k in unknown)
+    assert rev.content_keys(path) == after
+    with activity.cached_ro(path) as reader:
+        assert not reader.in_transaction
+
+
+def test_batch_query_error_rolls_back_and_retries(conn, monkeypatch):
+    original = rev._columns
+
+    def broken(*args):
+        raise sqlite3.OperationalError('unavailable')
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(rev, '_columns', broken)
+        assert set(rev.read_revisions(conn, ID, rev.KINDS).values()) == {None}
+        assert not conn.in_transaction
+    assert rev._columns is original
+    assert all(v is not None for v in rev.read_revisions(conn, ID, rev.KINDS).values())
+
+
 def both(conn):
     return rev.read_counts_revision(conn, ID), rev.read_attention_revision(conn, ID)
 

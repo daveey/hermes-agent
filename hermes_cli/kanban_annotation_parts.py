@@ -155,15 +155,19 @@ def _part_fingerprint(part: str, *, shadows: bool = False) -> tuple:
 def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
     """One key per part, read now in ``scope``'s context; None when the inputs cannot be vouched for."""
     from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli import kanban_annotation_revision as revision
 
     wall = time.time()
-    counts_local = _part_fingerprint(COUNTS)
-    links_local = _part_fingerprint(LINKS)
+    local = [(str(p), revision.content_keys(p)) for p in ksa._board_db_paths()]
+    hub = ksa._hub_db_path()
+    hub_key = (ksa._hub_content_signature(hub),) if hub is not None else ()
+    fingerprints = {part: tuple((path, values[part]) for path, values in local) + hub_key
+                    for part in (COUNTS, LINKS, ATTENTION)}
     shadows = _part_fingerprint(COUNTS, shadows=True)
     ledger = ksa._origin_ledger_fingerprint()
     plain = _plain_key(scope)
-    return {COUNTS: (counts_local, shadows, ledger, plain), LINKS: (links_local, ledger),
-            ATTENTION: (_part_fingerprint(ATTENTION), _done_key(scope, wall)), WAITING: _waiting_key()}
+    return {COUNTS: (fingerprints[COUNTS], shadows, ledger, plain), LINKS: (fingerprints[LINKS], ledger),
+            ATTENTION: (fingerprints[ATTENTION], _done_key(scope, wall)), WAITING: _waiting_key()}
 
 
 def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[frozenset, dict[str, object] | None]:

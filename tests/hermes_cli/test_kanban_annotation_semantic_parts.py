@@ -16,6 +16,26 @@ def _install(world):
     revision.ensure_revisions(world.conn)
 
 
+def test_holder_batches_local_parts_with_identical_keys(world, monkeypatch):
+    from hermes_cli import kanban_annotation_parts as parts
+
+    _install(world)
+    expected = {p: parts._part_fingerprint(p) for p in ('counts', 'links', 'attention')}
+    calls = []
+    original = revision.content_keys
+
+    def counted(path, requested=('counts', 'links', 'attention')):
+        calls.append((path, tuple(requested)))
+        return original(path, requested)
+
+    monkeypatch.setattr(revision, 'content_keys', counted)
+    result = parts.keys(helpers.SCOPE)
+    assert result['counts'][0] == expected['counts']
+    assert result['links'][0] == expected['links']
+    assert result['attention'][0] == expected['attention']
+    assert calls == [(world.board, ('counts', 'links', 'attention'))]
+
+
 def test_irrelevant_board_storm_reads_no_part(world):
     _install(world)
     # Complete declaration: this check reads only its card and the explicit file.
