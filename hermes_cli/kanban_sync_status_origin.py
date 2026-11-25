@@ -81,6 +81,8 @@ def bind(conn: sqlite3.Connection, armed: bool) -> None:
             known = counts[task] == 1 and change[1] == 1 and captured and captured[0] == change[0]
             origin = current_origin(conn, task) if known else None
             if known:
+                from hermes_cli.kanban_owner_reassessment_transport import captured_origin
+                origin = captured_origin(conn, op, origin)
                 conn.execute("UPDATE kanban_sync_outbox SET status_origin=? WHERE op_id=? AND wire_json IS NULL",
                              (origin, op))
             conn.execute("INSERT INTO kanban_sync_status_origins(task_id, origin, status) "

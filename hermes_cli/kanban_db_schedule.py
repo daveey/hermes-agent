@@ -20,7 +20,7 @@ def schedule_task(
     clear_blocker: bool = False, comment: Optional[tuple[str, str]] = None,
     blocker_id: Optional[str] = None, blocker_provider: Optional[str] = None,
     blocker_model: Optional[str] = None, blocker_lane: Optional[str] = None, watch: bool = False,
-    count_repeats: bool = False,
+    count_repeats: bool = False, owner_reassessment: Optional[dict] = None, owner_origin: Any = None,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
     (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
@@ -36,7 +36,12 @@ def schedule_task(
     ``count_repeats`` (system re-park loops only): a declared clock still escalates on its third identical park
     (``kanban_awaiting.gate``).
     Triage parks reset the dispatcher failure streak without an intermediate dispatchable
-    status; block-loop recurrence evidence is retained, as on unblock."""
+    status; block-loop recurrence evidence is retained, as on unblock.
+
+    ``owner_reassessment`` (``kanban_owner_reassessment.request``) with the privately captured
+    ``owner_origin`` shortens the final admitted wake and journals an internal pending receipt in
+    this txn; an invalid opt-in raises ``ReassessmentRefused`` rather than being dropped, and
+    grants no health, release or scanner authority."""
     from hermes_cli.kanban_reason_comment import reason_comment
     from hermes_cli import kanban_park_pin as kpp
     pin = kpp.plan(conn, task_id, reason)  # git reads stay outside the write txn
@@ -75,6 +80,16 @@ def schedule_task(
         wake_check, check_every = kwc.validate_park(
             wake_at=payload["wake_at"], wake_check=wake_check,
             check_every=check_every, clock_only=clock_only)
+        from hermes_cli import kanban_owner_reassessment as kor
+        reassess = None
+        if owner_reassessment is not None:
+            # Every ordinary gate above judged the ORIGINAL admitted wake; only now is it shortened.
+            reassess = kor.prepare(
+                conn, task_id, owner_reassessment, captured=owner_origin, record=record, op="schedule",
+                expected_run_id=expected_run_id, now=int(_time.time()), final_backstop=payload["wake_at"],
+                clock_only=clock_only, blocker_id=blocker_id, declared=bool(awaiting))  # BEFORE claims clear
+            payload["wake_at"] = reassess["wake_at"]
+            payload["owner_reassessment_episode_uid"] = reassess["episode_uid"]
         params: list[Any] = [task_id]
         sql = """
             UPDATE tasks
@@ -112,6 +127,8 @@ def schedule_task(
             **payload, **kwc.park_fields(wake_check, check_every, clock_only, conn=conn, probe_host=host),
             "awaiting": record, **meta,
         }, run_id=run_id)
+        if reassess is not None:
+            kor.commit(conn, reassess, kind="scheduled", run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every, register_here=kwc.probe_here(conn, host))
         from hermes_cli.kanban_done_tail import post_notice
         post_notice(conn, task_id, reason=reason, watch=watch, awaiting=record, run_id=run_id)

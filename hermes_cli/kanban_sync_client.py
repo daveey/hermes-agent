@@ -57,6 +57,7 @@ from hermes_cli.kanban_sync_connections import connection, connection_scope, inv
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
 from hermes_cli.kanban_sync_compat import TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
 from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed
+from hermes_cli.kanban_sync_hub_transport import BoundedRedirects, BoundedResponseError, read_response
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
 from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-window state, re-exported
@@ -280,42 +281,23 @@ class Hub(HubRoutesMixin):
         return timeout
 
     @sync_cpu.board_call
-    def _call(self, method: str, path: str, body: Optional[dict] = None, *, replay_safe: bool = False) -> dict:
+    def _call(self, method: str, path: str, body: Optional[dict] = None, *, replay_safe: bool = False,
+              max_response_bytes: Optional[int] = None) -> dict:
+        if max_response_bytes is not None and (type(max_response_bytes) is not int or max_response_bytes <= 0):
+            raise ValueError("max_response_bytes must be a positive integer")
         timeout = self._remaining()
         data = None if body is None else json.dumps(body).encode()
         parts = urllib.parse.urlsplit(self.ident.url)
+        bounded: dict[str, Any] = {} if max_response_bytes is None else {"max_response_bytes": max_response_bytes}
         if parts.scheme not in ("http", "https") or not parts.hostname or self._proxied(parts):
-            return self._call_urlopen(method, path, data, timeout)
-        return self._call_kept_alive(parts, method, path, data, timeout, replay_safe=replay_safe)
+            return self._call_urlopen(method, path, data, timeout, **bounded)
+        return self._call_kept_alive(parts, method, path, data, timeout, replay_safe=replay_safe, **bounded)
 
-    def _call_urlopen(self, method: str, path: str, data: Optional[bytes], timeout: Optional[float] = None) -> dict:
-        import http.client
+    def _call_urlopen(self, method: str, path: str, data: Optional[bytes], timeout: Optional[float] = None, *,
+                      max_response_bytes: Optional[int] = None) -> dict:
+        from hermes_cli.kanban_sync_hub_urlopen import call
 
-        timeout = self._remaining(timeout)
-        req = urllib.request.Request(self.ident.url + path, data=data, method=method, headers=self._headers())
-        # A per-call opener leaves global urllib users alone. Its processor also caps
-        # urllib's internal redirect follows, not merely the initial fallback send.
-        open_request = (urllib.request.build_opener(_DeadlineRequests(self._remaining)).open
-                        if self.deadline is not None else urllib.request.urlopen)
-        started = time.monotonic()
-        try:
-            try:
-                with open_request(req, timeout=timeout) as resp:
-                    return json.loads(resp.read() or b"{}")
-            except urllib.error.HTTPError as exc:
-                text = exc.read().decode("utf-8", "replace")[:500]
-                if exc.code == 410:
-                    raise Resync(text) from exc
-                raise HubError(exc.code, text) from exc
-        except http.client.HTTPException as exc:
-            # urllib does not wrap malformed status lines or truncated bodies,
-            # including failures while reading an HTTPError's response body.
-            error = urllib.error.URLError(exc)
-            note_attempt(error, self.deadline, started, time.monotonic())
-            raise error from exc
-        except Exception as exc:  # health: allow BLE001 -- stamps diagnostics, then re-raises the same error
-            note_attempt(exc, self.deadline, started, time.monotonic())
-            raise
+        return call(self, method, path, data, timeout, max_response_bytes=max_response_bytes)
 
     @staticmethod
     def _proxied(parts: urllib.parse.SplitResult) -> bool:
@@ -371,7 +353,8 @@ class Hub(HubRoutesMixin):
         return conn, False
 
     def _call_kept_alive(self, parts: urllib.parse.SplitResult, method: str, path: str, data: Optional[bytes],
-                         timeout: Optional[float] = None, *, replay_safe: bool = False) -> dict:
+                         timeout: Optional[float] = None, *, replay_safe: bool = False,
+                         max_response_bytes: Optional[int] = None) -> dict:
         import http.client
         target = (parts.path or "") + path
         headers = self._headers()
@@ -404,7 +387,10 @@ class Hub(HubRoutesMixin):
                         continue
                     raise urllib.error.URLError(exc) from exc
                 try:
-                    raw = resp.read()
+                    raw = read_response(resp, max_response_bytes)
+                except BoundedResponseError:
+                    self._drop()  # unread bytes must never become the next response; never replay this refusal
+                    raise
                 except (OSError, http.client.HTTPException) as exc:
                     self._drop()
                     if replay_after_timeout(exc, attempt, replay_safe, self.deadline, time.monotonic()):
@@ -416,7 +402,8 @@ class Hub(HubRoutesMixin):
                     self._local.used = _hub_monotonic()
                 status = resp.status
                 if 300 <= status < 400 and method == "GET":  # the Board service sends none; urlopen follows them
-                    return self._call_urlopen(method, path, data, timeout)
+                    bounded: dict[str, Any] = {} if max_response_bytes is None else {"max_response_bytes": max_response_bytes}
+                    return self._call_urlopen(method, path, data, timeout, **bounded)
                 if 300 <= status < 400:  # never resend a POST the server may have applied
                     raise HubError(status, raw.decode("utf-8", "replace")[:500])
                 if not 200 <= status < 300:
@@ -444,10 +431,11 @@ class Hub(HubRoutesMixin):
         query = urllib.parse.urlencode({"task": task, **({"producer": producer} if producer is not None else {})})
         return self._call("GET", f"/v2/boards/{urllib.parse.quote(board, safe='')}/containment/context?{query}")
 
-    def row_evidence(self, board: str, table: str, uid: str) -> dict:
-        """Exact authoritative row/deletion/history evidence, never a replica lookup."""
+    def row_evidence(self, board: str, table: str, uid: str, *, max_response_bytes: Optional[int] = None) -> dict:
+        """Exact authoritative evidence; optional wire/decoded cap is enforced before JSON parsing."""
         from urllib.parse import urlencode
-        return self._call("GET", f"/v2/boards/{board}/evidence?" + urlencode({"table": table, "uid": uid}))
+        bounded: dict[str, Any] = {} if max_response_bytes is None else {"max_response_bytes": max_response_bytes}
+        return self._call("GET", f"/v2/boards/{board}/evidence?" + urlencode({"table": table, "uid": uid}), **bounded)
 
     def sessions(self, board: str, body: dict) -> dict:
         """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal

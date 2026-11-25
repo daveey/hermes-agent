@@ -238,7 +238,9 @@ def certified_page(conn, hub, board: str, changes) -> list:
     cursor advances. A later apply failure may conservatively retain a quarantine, never lose one.
     """
     from hermes_cli import kanban_containment_replica as replica
+    from hermes_cli import kanban_owner_reassessment_replica as reassessment
     from hermes_cli.kanban_containment_lifecycle import ContainmentConflict
+    reassessment.certify_page(conn, hub, board, changes)
     for change in changes:
         if not protected(change):
             continue

@@ -92,6 +92,7 @@ def continue_task(
     awaiting: Any = None, in_txn: Optional[Callable[[sqlite3.Connection, int], None]] = None,
     blocker_id: Optional[str] = None, blocker_provider: Optional[str] = None,
     blocker_model: Optional[str] = None, blocker_lane: Optional[str] = None,
+    owner_reassessment: Optional[dict] = None, owner_origin: Any = None,
 ) -> dict[str, Any]:
     """End the running run as ``continued`` and re-queue the card.
 
@@ -102,6 +103,9 @@ def continue_task(
     ``in_txn(conn, run_id)`` runs inside the same write transaction once the run has ended
     (:mod:`hermes_cli.kanban_move` rewrites ``runs_on`` there), so the re-queued card is never
     visible with its old placement. [daveey]
+    ``owner_reassessment`` + privately captured ``owner_origin``: delayed continues only; shortens the
+    final admitted wake and journals an internal pending receipt (``kanban_owner_reassessment``) in this
+    txn, else ``{"ok": False, "reason_code": "owner_reassessment_refused"}``. No scanner effect.
     """
     from hermes_cli import kanban_db as kb
 
@@ -148,38 +152,16 @@ def continue_task(
         source_status = kb._retry_status_for_run(conn, task_id)
         new_status = "scheduled" if resume_after > 0 else source_status
         wake_at = now + resume_after if resume_after > 0 else None
-        from hermes_cli import kanban_wake_check as kwc
-        record = None
-        if wake_at is not None:
-            from hermes_cli import kanban_awaiting as kaw
-            try:
-                record = kaw.gate(conn, task_id, awaiting=awaiting, reason=checkpoint, wake_check=wake_check,
-                                  clock_only=clock_only, op="continue", wake_in=resume_after,
-                                  blocker_id=blocker_id or (metadata or {}).get("blocker_id"))
-            except kaw.AwaitingError as exc:
-                return {"ok": False, "error": str(exc), "reason_code": exc.code}
-            except kaw.RepeatedPark as rp:
-                owner = kaw.escalate(conn, task_id, record=rp.record, reason=checkpoint,
-                                     expected_run_id=int(row["current_run_id"]))
-                if owner is None:
-                    return {"ok": False, "error": "task changed state concurrently"}
-                return {"ok": True, "status": "todo", "run_id": None, "continuation": streak,
-                        "wake_at": None, "escalated_to": owner}
-            from hermes_cli import kanban_deploy_window as kdw
-            wake_at, noted = kdw.apply(record, wake_at, checkpoint, now=now)
-            checkpoint = noted or checkpoint
-            noted, check_every = kaw.resource_apply(record, checkpoint, check_every)
-            checkpoint = noted or checkpoint
-            wake_check, clock_only = kaw.park_probe(conn, task_id, record, wake_check, clock_only)
-            why = kaw.park_cycle_error(conn, task_id, record, wake_check)
-            if why:
-                return {"ok": False, "error": why, "reason_code": kaw.INVALID_AWAITING}
-        try:
-            wake_check, check_every = kwc.validate_park(
-                wake_at=wake_at, wake_check=wake_check,
-                check_every=check_every, clock_only=clock_only)
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+        from hermes_cli import kanban_owner_reassessment as kor
+        park, terminal = kor.continuation_park(
+            conn, task_id, checkpoint=checkpoint, wake_at=wake_at, resume_after=resume_after,
+            wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting,
+            blocker_id=blocker_id, metadata=metadata, owner_reassessment=owner_reassessment,
+            owner_origin=owner_origin, expected_run_id=expected_run_id,
+            current_run_id=row["current_run_id"], streak=streak, now=now)
+        if terminal is not None:
+            return terminal
+        record, checkpoint, wake_at, wake_check, check_every, clock_only, reassess, resume_after = park
         # A successful checkpoint supersedes stale auth/quota diagnostics, not counters.
         from hermes_cli.kanban_source_receipt import with_source_receipt
         cur = with_source_receipt(conn, task_id, lambda: conn.execute(
@@ -222,7 +204,11 @@ def continue_task(
             payload["wake_at"] = wake_at
             payload.update(kwc.park_fields(wake_check, check_every, clock_only, conn=conn, probe_host=host))
             payload["awaiting"] = record
+        if reassess is not None:
+            payload["owner_reassessment_episode_uid"] = reassess["episode_uid"]
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)
+        if reassess is not None:
+            kor.commit(conn, reassess, kind=CONTINUED_OUTCOME, run_id=run_id)
         from hermes_cli import kanban_decision_ask  # record is None for a continue that does not park
         kanban_decision_ask.post_notice(conn, task_id, reason=checkpoint, awaiting=record, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now,

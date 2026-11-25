@@ -37,7 +37,7 @@ from tools.kanban_tools_rejection import _tag_rejection
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo, _escalated)
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
-from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca
+from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca, kanban_tools_reassessment as reassessment
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA, KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_MOVE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
@@ -45,6 +45,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA,
     KANBAN_SUPERVISOR_REQUEST_SCHEMA, KANBAN_UNLINK_SCHEMA)
 
+reassessment.install(KANBAN_SCHEDULE_SCHEMA, KANBAN_CONTINUE_SCHEMA)
 logger = logging.getLogger(__name__)
 
 KANBAN_LIST_DEFAULT_LIMIT = 50
@@ -1168,10 +1169,9 @@ def _handle_schedule(args: dict, **kw) -> str:
         register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
                             expected_run_id=_worker_run_id(tid))
         ok = kb.schedule_task(
-            conn, tid, watch=kwatch.resolve(conn, tid, raw_watch), reason=reason,
-            expected_run_id=_worker_run_id(tid),
+            conn, tid, watch=kwatch.resolve(conn, tid, raw_watch), reason=reason, expected_run_id=_worker_run_id(tid),
             wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
-            clear_blocker=clear_blocker, blocker_id=blocker_id, **_blocker_scope_args(args))
+            clear_blocker=clear_blocker, blocker_id=blocker_id, **_blocker_scope_args(args), **reassessment.lifecycle_kwargs(args, tid))
         _check(ok, "" if ok else krc.human_answer_refusal(conn, tid, "schedule")
                or f"could not schedule {tid} (unknown id, or not in todo/ready/running/blocked/triage)")
         escalated = _escalated(kb, conn, tid)
@@ -1217,7 +1217,7 @@ def _handle_continue(args: dict, **kw) -> str:
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),
                             expected_run_id=_worker_run_id(tid), metadata=metadata, awaiting=awaiting,
                             wake_check=wake[0], check_every=wake[1], clock_only=wake[2],
-                            **_blocker_scope_args(args))
+                            **_blocker_scope_args(args), **reassessment.lifecycle_kwargs(args, tid))
         from hermes_cli.kanban_awaiting import CODES
         _check(res.get("ok"), f"could not continue {tid}: {res.get('error')}",
                res.get("reason_code") if res.get("reason_code") in CODES else None)

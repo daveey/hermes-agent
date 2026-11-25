@@ -1,0 +1,69 @@
+{
+  "board": "default",
+  "table": "task_events",
+  "uid": "01a21310-c04d-7cae-85be-2fb6607997ca",
+  "state": "live",
+  "row": {
+    "uid": "01a21310-c04d-7cae-85be-2fb6607997ca",
+    "ord": 6,
+    "task_id": "t_01a21310be8befbc",
+    "run_uid": "01a21310-beaa-7a0c-bc4f-efdf2f97677b",
+    "kind": "scheduled",
+    "payload": "{\"reason\": \"waiting on example queue SCHEDULED_UNTIL=2026-11-25T14:46:34Z\", \"wake_at\": 1795616314, \"owner_reassessment_episode_uid\": \"01a21310-c04a-79fa-b521-e8170959bd78\", \"awaiting\": {\"kind\": \"external\", \"ref\": \"executor:example\", \"why\": \"queue reassessment of the example executor\", \"premise\": \"a37d69f262743f95\"}, \"actionability_parent_ids\": [], \"actionability_parent_states\": [], \"actionability_run_uid\": null, \"actionability_intent\": {\"version\": 1, \"policy\": \"scheduled-wake-grace-v1\", \"status\": \"scheduled\", \"source_kind\": \"scheduled\", \"owner\": {\"kind\": \"assignee\", \"refs\": [\"default\"]}, \"action\": \"wait_for_named_producer\", \"instruction\": \"Recorded external producer executor:example\", \"blocker\": {\"prerequisite\": \"Recorded external producer executor:example\", \"trigger\": \"Recorded external producer executor:example\", \"evidence\": []}, \"first_observed\": 1795616194, \"wake_at\": 1795616314, \"deadline_at\": 1795616914, \"invalid_reason\": null, \"execution_authority\": false}, \"_recovery_history_v1\": {\"identity\": \"7024d63f-e2c3-4230-aad4-5ab55ba7ff5d\", \"predecessors\": [\"f93ba1b0-66f2-428d-a73c-f78934bbb7ca\"]}}",
+    "created_at": 1795616194,
+    "seq": 14,
+    "version": 1,
+    "updated_at": 1795616199000,
+    "hlc": "1795616199009-0001-server",
+    "origin_gateway": "here",
+    "deleted_at": null
+  },
+  "tombstone": null,
+  "floor": 0,
+  "feed_floor": 0,
+  "head": 21,
+  "owner_reassessment_v1": {
+    "backstop_at": 1795617994,
+    "board": "default",
+    "episode_uid": "01a21310-c04a-79fa-b521-e8170959bd78",
+    "evidence_refs": [
+      {
+        "table": "task_events",
+        "uid": "01a21310-bfad-778f-97d3-bc84e563645a"
+      }
+    ],
+    "execution_authority": false,
+    "gateway": "here",
+    "issued_at": 1795616194,
+    "issuer": {
+      "owner_admitted_uid": "01a21310-c007-7f44-95b0-006aa23fd124",
+      "profile": "default",
+      "run_uid": "01a21310-beaa-7a0c-bc4f-efdf2f97677b",
+      "session_id": "local-abababababababababababababababababababababababababababababababab",
+      "worker_bound_uid": "01a21310-bfad-778f-97d3-bc84e563645a"
+    },
+    "park_event": {
+      "created_at": 1795616194,
+      "kind": "scheduled",
+      "payload": "{\"reason\": \"waiting on example queue SCHEDULED_UNTIL=2026-11-25T14:46:34Z\", \"wake_at\": 1795616314, \"owner_reassessment_episode_uid\": \"01a21310-c04a-79fa-b521-e8170959bd78\", \"awaiting\": {\"kind\": \"external\", \"ref\": \"executor:example\", \"why\": \"queue reassessment of the example executor\", \"premise\": \"a37d69f262743f95\"}, \"actionability_parent_ids\": [], \"actionability_parent_states\": [], \"actionability_run_uid\": null, \"actionability_intent\": {\"version\": 1, \"policy\": \"scheduled-wake-grace-v1\", \"status\": \"scheduled\", \"source_kind\": \"scheduled\", \"owner\": {\"kind\": \"assignee\", \"refs\": [\"default\"]}, \"action\": \"wait_for_named_producer\", \"instruction\": \"Recorded external producer executor:example\", \"blocker\": {\"prerequisite\": \"Recorded external producer executor:example\", \"trigger\": \"Recorded external producer executor:example\", \"evidence\": []}, \"first_observed\": 1795616194, \"wake_at\": 1795616314, \"deadline_at\": 1795616914, \"invalid_reason\": null, \"execution_authority\": false}, \"_recovery_history_v1\": {\"identity\": \"7024d63f-e2c3-4230-aad4-5ab55ba7ff5d\", \"predecessors\": [\"f93ba1b0-66f2-428d-a73c-f78934bbb7ca\"]}}",
+      "run_uid": "01a21310-beaa-7a0c-bc4f-efdf2f97677b",
+      "uid": "01a21310-c04d-7cae-85be-2fb6607997ca"
+    },
+    "producer": {
+      "kind": "external",
+      "ref": "executor:example",
+      "why": "queue reassessment of the example executor"
+    },
+    "reassess_at": 1795616314,
+    "suppresses": [
+      "too_long"
+    ],
+    "target": {
+      "identity": "executor:example",
+      "kind": "queue",
+      "revision": "queue-cut:42"
+    },
+    "task_id": "t_01a21310be8befbc",
+    "version": 1
+  }
+}
