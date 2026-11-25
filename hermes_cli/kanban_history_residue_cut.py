@@ -61,6 +61,8 @@ def verify(live, shadow, ledger, hub, board, op_ids, *, started):
     _require(all(not c.in_transaction for c in (live, shadow, ledger)), 'nested_cut_transaction')
     _require(0 < len(op_ids) <= MAX_OPS and len(set(op_ids)) == len(op_ids), 'cut_ops_bound')
     identity = transport.scope(hub, board)
+    from hermes_cli import kanban_sync_refusal_audit as refusal
+    generations = [refusal._generation(c) for c in (live, shadow)]
     _fresh(started)
     records, snapshots = [], []
     with ExitStack() as stack:
@@ -94,6 +96,12 @@ def verify(live, shadow, ledger, hub, board, op_ids, *, started):
             _require(key in current['parent'] and json.dumps(current['parent'][key], sort_keys=True) ==
                      json.dumps(value, sort_keys=True), 'canonical_parent_changed')
         evidence.append({'op_id': op_id, 'source_json': request['source_json'], 'proof_json': raw})
+    # Re-read server verdicts inside this cut, never union a saved earlier report.
+    server = None
+    if any(r['op_id'] not in op_ids and isinstance(r.get('last_error'), str)
+           and r['last_error'].partition(':')[0] in refusal.POLICY_REFUSALS for r in refusal._rows(live)):
+        server = refusal.report(live, shadow, hub, board, started=started)
+        _require(server['server_refusal_evidence']['head'] == head, 'replica_cursor_changed')
     end = _empty(hub, board, head)
     with ExitStack() as stack:
         for conn in (live, shadow, ledger):
@@ -103,10 +111,13 @@ def verify(live, shadow, ledger, hub, board, op_ids, *, started):
             _require(custody.lookup(ledger, identity, op_id) == saved, 'custody_changed')
             _require(_capture(live, shadow, request['source_json'], board, identity[2]) == old,
                      'local_cut_inputs_changed')
+        _require([refusal._generation(c) for c in (live, shadow)] == generations, 'local_cut_inputs_changed')
         _fresh(started)
         from hermes_cli.kanban_sync_client import diff
         report = diff(live, shadow, identity[2])
-        audits = set(report['audited_retain_rejections']) | set(op_ids)
+        if server is not None:
+            report.update({key: server[key] for key in ('audited_server_refusals', 'server_refusal_evidence')})
+        audits = set(report['audited_retain_rejections']) | set(op_ids) | set(report.get('audited_server_refusals', []))
         report['audited_history_rejections'] = list(op_ids)
         report['clean'] = not (report['missing_in_shadow'] or report['extra_in_shadow']
                               or report['field_mismatch'] or report['child_mismatch']

@@ -45,7 +45,7 @@ def server():
                 self.close_connection = True
                 return
             if state.get('slow'):
-                self.send_response(200)
+                self.send_response(state.get('status', 200))
                 self.send_header('Content-Length', '100')
                 self.end_headers()
                 try:
@@ -115,6 +115,25 @@ def test_definitive_post_error_surfaces_status_and_code_without_repost(db, serve
     assert custody.lookup(db, scope(hub), 'op-original')['receipt_json'] is None
     state['status'] = 200
     state['receipt'] = None
+    with pytest.raises(Refused, match='observation_unconfirmed'):
+        transport.observe(db, hub, 'default', raw)
+    assert [c[0] for c in state['calls']] == ['POST', 'GET']
+
+
+def test_error_body_timeout_preserves_status_and_get_only_intent(db, server):
+    from hermes_cli.kanban_sync_client import HubError
+    hub, state, raw = server
+    hub.timeout = 0.15
+    state.update(status=409, slow=True, release=threading.Event(), peer_finished=threading.Event())
+    try:
+        with pytest.raises(HubError) as raised:
+            transport.observe(db, hub, 'default', raw)
+        assert raised.value.status == 409
+        assert custody.lookup(db, scope(hub), 'op-original')['receipt_json'] is None
+    finally:
+        state['release'].set()
+        assert state['peer_finished'].wait(2)
+    state.update(status=200, slow=False, receipt=None)
     with pytest.raises(Refused, match='observation_unconfirmed'):
         transport.observe(db, hub, 'default', raw)
     assert [c[0] for c in state['calls']] == ['POST', 'GET']

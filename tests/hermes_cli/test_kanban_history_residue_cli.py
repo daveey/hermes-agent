@@ -63,6 +63,41 @@ def test_explicit_evidence_flag_keeps_exact_current_per_row_proof(configured, ca
     assert json.loads(audit['evidence'][0]['proof_json'])['receipt']['source_json'] == audit['evidence'][0]['source_json']
 
 
+@pytest.mark.parametrize('fault', [None, 'field', 'unproven', 'race'])
+def test_mixed_history_and_server_audits_share_a_fresh_unchanged_cut(configured, capsys, monkeypatch, fault):
+    from hermes_cli import kanban_sync_refusal_audit as refusal
+    paths, _hub, _calls, _state, connect = configured
+    board.observe_board('default', 'op-original', 'Keep history')
+    live = connect(paths[0])
+    row = dict(live.execute("SELECT * FROM kanban_sync_outbox WHERE op_id='op-original'").fetchone())
+    row['op_id'] = 'server-op'
+    row['row_uid'] = 'server-event'
+    live.execute(f"INSERT INTO kanban_sync_outbox ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
+                 tuple(row.values()))
+    reason, _, detail = row['last_error'].partition(': ')
+    proof = dict(version=1, board='default', gateway='home', execution_authority=False,
+                 historical_identity_certified=False, receipt=dict(client_op_id='server-op',
+                 status='rejected', reason=reason, detail=detail or None))
+    def receipt(*unused):
+        if fault == 'race':
+            other = connect(paths[0])
+            other.execute("UPDATE kanban_sync_outbox SET attempts=attempts+1 WHERE op_id='server-op'")
+        return None if fault == 'unproven' else proof
+    monkeypatch.setattr(refusal, '_receipt', receipt)
+    if fault == 'field':
+        live.execute("UPDATE tasks SET title='real drift'")
+    before = list(live.iterdump())
+    assert cli.cmd_sync(args('diff', '--json')) == (0 if fault is None else 1)
+    result = json.loads(capsys.readouterr().out)
+    if fault is None:
+        assert result['audited_server_refusals'] == ['server-op']
+        assert result['audited_history_rejections'] == ['op-original']
+        assert result['server_refusal_evidence']['head'] == result['history_audit_head'] == 100
+        assert list(live.iterdump()) == before
+    else:
+        assert result['clean'] is False
+
+
 def test_known_refusal_bypasses_unconfirmed_history_intent_without_changing_it(configured, capsys, monkeypatch):
     from hermes_cli import kanban_sync_refusal_audit as refusal
     from hermes_cli.kanban_sync_client import HubError

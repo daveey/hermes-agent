@@ -71,9 +71,9 @@ def _request(hub, method, path, body):
     try:
         return transfer.run(read)
     except urllib.error.HTTPError as exc:
+        detail = 'history observation refused'
         try:
             raw = transfer.run(lambda error=exc: error.read(MAX_RESPONSE + 1))
-            detail = 'history observation refused'
             if len(raw) <= MAX_RESPONSE:
                 try:
                     code = strict_object(raw.decode('utf-8', 'strict')).get('error')
@@ -82,6 +82,8 @@ def _request(hub, method, path, body):
                         detail = code
                 except (ValueError, UnicodeError):
                     pass  # Untrusted error text is never echoed; HTTP status is still preserved.
+        except (OSError, http.client.HTTPException):
+            pass  # Headers already established a definitive status; body failure cannot erase it.
         finally:
             exc.close()
         raise HubError(exc.code, detail) from exc
