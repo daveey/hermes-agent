@@ -1,26 +1,31 @@
 import { useStore } from '@nanostores/react'
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { useEffect } from 'react'
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react'
+import { type ReactNode, useEffect } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $apiRequestScope } from '@/api/client'
+import { useKeybinds } from '@/app/hooks/use-keybinds'
 import { group, split } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { registry } from '@/contrib/registry'
+import { isMacPlatform } from '@/lib/platform'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import {
   $pinnedSessionIds,
   $sidebarMessagingOpenIds,
+  $sidebarOpen,
   $sidebarProjectFilter,
   $sidebarShowArchived,
   $sidebarShowAutomated,
   $sidebarStatusFilter,
+  requestSessionSearchFocus,
   resetSidebarView,
   setSidebarAgentsGrouped,
-  setSidebarGrouping
+  setSidebarGrouping,
+  setSidebarOpen
 } from '@/store/layout'
 import { $activeGatewayProfile, $profiles, setShowAllProfiles } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
@@ -41,7 +46,13 @@ import { $archivedSessions } from '@/store/sidebar-archive'
 import { SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
 import { makeSessionInfo } from '@/test/session-info'
 
-import { type AppView, ROUTES_AREA, SIDEBAR_NAV_AREA, SIDEBAR_SECTIONS_AREA, SIDEBAR_SECTIONS_TOP_AREA } from '../../routes'
+import {
+  type AppView,
+  ROUTES_AREA,
+  SIDEBAR_NAV_AREA,
+  SIDEBAR_SECTIONS_AREA,
+  SIDEBAR_SECTIONS_TOP_AREA
+} from '../../routes'
 
 import { $gatewayGroupCollapsed } from './gateway-group-preferences'
 
@@ -60,8 +71,17 @@ beforeEach(() => {
 })
 
 it('mounts the top SDK section before real Pinned and leaves legacy sections below it', () => {
-  const top = registry.register({ area: SIDEBAR_SECTIONS_TOP_AREA, id: 'lanes-test', render: () => <div>LANES fixture</div> })
-  const legacy = registry.register({ area: SIDEBAR_SECTIONS_AREA, id: 'legacy-test', render: () => <div>Legacy fixture</div> })
+  const top = registry.register({
+    area: SIDEBAR_SECTIONS_TOP_AREA,
+    id: 'lanes-test',
+    render: () => <div>LANES fixture</div>
+  })
+
+  const legacy = registry.register({
+    area: SIDEBAR_SECTIONS_AREA,
+    id: 'legacy-test',
+    render: () => <div>Legacy fixture</div>
+  })
 
   try {
     $sessions.set(sessionRows)
@@ -72,10 +92,17 @@ it('mounts the top SDK section before real Pinned and leaves legacy sections bel
     const old = screen.getByText('Legacy fixture')
     expect(lanes.compareDocumentPosition(pinned) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(pinned.compareDocumentPosition(old) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  } finally { top(); legacy() }
+  } finally {
+    top()
+    legacy()
+  }
 })
 
 const noop = () => {}
+
+vi.mock('@/themes/context', () => ({
+  useTheme: () => ({ resolvedMode: 'light', setMode: vi.fn() })
+}))
 
 const noopAsync = async () => {}
 
@@ -127,6 +154,172 @@ const expectOnlySelectedSession = (title: string | null) => {
 }
 
 const focus = (groupId: null | string) => act(() => noteActiveTreeGroup(groupId))
+
+describe('ChatSidebar search disclosure', () => {
+  const deps = {
+    archiveSelectedSession: vi.fn(),
+    openNewSessionTab: vi.fn(),
+    requestGateway: vi.fn(),
+    startFreshSession: vi.fn(),
+    toggleCommandCenter: vi.fn(),
+    toggleSelectedPin: vi.fn()
+  }
+
+  const search = () => screen.queryByRole('textbox', { name: 'Search sessions' })
+
+  const press = (key: string, shiftKey = false) =>
+    act(() => {
+      fireEvent.keyDown(document.activeElement ?? document.body, {
+        key,
+        code: `Key${key.toUpperCase()}`,
+        shiftKey,
+        metaKey: isMacPlatform(),
+        ctrlKey: !isMacPlatform()
+      })
+    })
+
+  const reveal = async () => {
+    press('f', true)
+    await waitFor(() => expect(search()).toBe(document.activeElement))
+    expect(search()).not.toBeNull()
+
+    return search() as HTMLInputElement
+  }
+
+  beforeEach(() => {
+    resetSidebarView()
+    $sessions.set(sessionRows)
+    $removedSessionIds.set(new Set())
+    $sessionsLoading.set(false)
+    renderHook(() => useKeybinds(deps), {
+      wrapper: ({ children }: { children: ReactNode }) => <MemoryRouter>{children}</MemoryRouter>
+    })
+  })
+  afterEach(() => {
+    cleanup()
+    $sessions.set([])
+    vi.clearAllMocks()
+  })
+
+  it('omits the New session row, its chevron and the initial search field', () => {
+    const { container } = renderSidebar('/', 'chat')
+    expect(container.querySelector('[data-tour="sidebar-nav-new-session"]')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Collapse nav|Expand nav/ })).toBeNull()
+    expect(search()).toBeNull()
+  })
+
+  it('reveals and focuses via the existing shortcut and refocuses one existing input', async () => {
+    renderSidebar('/', 'chat')
+    const input = await reveal()
+    fireEvent.change(input, { target: { value: 'Tile' } })
+    act(() => input.blur())
+    await reveal()
+    expect(search()).toBe(input)
+    expect(input.value).toBe('Tile')
+    expect(screen.getAllByRole('textbox', { name: 'Search sessions' })).toHaveLength(1)
+  })
+
+  it('opens a closed sidebar before revealing and focusing the newly mounted field', async () => {
+    setSidebarOpen(false)
+
+    function ClosedSidebar() {
+      const open = useStore($sidebarOpen)
+
+      return open ? (
+        <ChatSidebar
+          currentView="chat"
+          onArchiveSession={noop}
+          onBranchSession={noop}
+          onDeleteSession={noop}
+          onLoadMoreSessions={noop}
+          onManageCronJob={noop}
+          onNavigate={noop}
+          onNewSessionInWorkspace={noop}
+          onNewSessionSplit={noop}
+          onResumeSession={noop}
+          onRetrySessions={noopAsync}
+          onTriggerCronJob={noopAsync}
+        />
+      ) : null
+    }
+
+    render(
+      <MemoryRouter>
+        <SidebarProvider>
+          <ClosedSidebar />
+        </SidebarProvider>
+      </MemoryRouter>
+    )
+    expect(search()).toBeNull()
+    await reveal()
+    expect($sidebarOpen.get()).toBe(true)
+  })
+
+  it('Escape clears the active query and hides; reopening starts empty', async () => {
+    renderSidebar('/', 'chat')
+    const input = await reveal()
+    fireEvent.change(input, { target: { value: 'Tile one' } })
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    act(() => input.dispatchEvent(escape))
+    expect(escape.defaultPrevented).toBe(true)
+    expect(search()).toBeNull()
+    expect((await reveal()).value).toBe('')
+  })
+
+  it('dismisses empty and whitespace-only search on blur', async () => {
+    renderSidebar('/', 'chat')
+    act(() => requestSessionSearchFocus())
+    await waitFor(() => expect(search()).not.toBeNull())
+    act(() => (search() as HTMLInputElement).blur())
+    expect(search()).toBeNull()
+    const input = await reveal()
+    fireEvent.change(input, { target: { value: '   ' } })
+    act(() => input.blur())
+    expect(search()).toBeNull()
+  })
+
+  it('retains a nonempty filter on blur and keeps the existing results section', async () => {
+    renderSidebar('/', 'chat')
+    const input = await reveal()
+    fireEvent.change(input, { target: { value: 'Tile one' } })
+    act(() => input.blur())
+    expect(search()).toBe(input)
+    expect(input.value).toBe('Tile one')
+    expect(screen.getByText('Results')).toBeTruthy()
+    expect(screen.getByText('Tile one')).toBeTruthy()
+    expect(screen.queryByText('Tile two')).toBeNull()
+  })
+
+  it('still invokes session.new with the default mod+n chord', () => {
+    renderSidebar('/', 'chat')
+    press('n')
+    expect(deps.startFreshSession).toHaveBeenCalledTimes(1)
+    expect(search()).toBeNull()
+  })
+
+  it('can disclose search even in the empty-session blank state', async () => {
+    $sessions.set([])
+    $messagingSessions.set([])
+    renderSidebar('/', 'chat')
+    expect(screen.getByText('No sessions yet')).toBeTruthy()
+    const input = await reveal()
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
+    expect(search()).toBe(input)
+  })
+
+  it('leaves no nav row or bottom padding when the saved nav is collapsed', () => {
+    localStorage.setItem('sidebar.nav.collapsed', '1')
+
+    try {
+      const { container } = renderSidebar('/', 'chat')
+      const menu = container.querySelector('[data-sidebar="menu"]')
+      expect(menu?.children).toHaveLength(0)
+      expect(menu?.closest('[data-sidebar="group"]')?.classList.contains('pb-2')).toBe(false)
+    } finally {
+      localStorage.removeItem('sidebar.nav.collapsed')
+    }
+  })
+})
 
 describe('ChatSidebar navigation activity', () => {
   let disposeContributions: () => void
@@ -815,10 +1008,10 @@ describe('ChatSidebar empty-profile sections', () => {
     // The Telegram platform section renders with its threads…
     expect(screen.getAllByText('Telegram').length).toBeGreaterThan(0)
     expect(screen.getByText('tg-one')).toBeTruthy()
-    // …and the sidebar did not collapse to the blank state: the search field
-    // only renders inside the session area, so its presence proves the area
-    // (and the messaging sections inside it) rendered.
-    expect(screen.getByPlaceholderText('Search sessions…')).toBeTruthy()
+    // The session area still renders even though search is now disclosed only
+    // by its action, not used as an always-visible area sentinel.
+    expect(container.querySelector('[data-sessions-mode]')).not.toBeNull()
+    expect(screen.queryByPlaceholderText('Search sessions…')).toBeNull()
   })
 
   it('still shows the blank state when a profile has nothing at all', () => {
@@ -850,7 +1043,8 @@ describe('ChatSidebar empty-profile sections', () => {
         node => node.dataset.gatewayGroup
       )
 
-      expect(screen.getByPlaceholderText('Search sessions…')).toBeTruthy()
+      expect(container.querySelector('[data-sessions-mode]')).not.toBeNull()
+      expect(screen.queryByPlaceholderText('Search sessions…')).toBeNull()
       expect(groups.some(id => id?.includes('"default"'))).toBe(true)
       expect(groups.some(id => id?.includes('"work"'))).toBe(true)
     } finally {
