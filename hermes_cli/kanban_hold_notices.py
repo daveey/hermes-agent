@@ -85,12 +85,16 @@ def sweep(conn) -> None:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
     from hermes_cli.kanban_hold_effective import current, previous
+    from hermes_cli.kanban_spend_decision import strict_episode
     from hermes_cli.kanban_wake_check import foreign_ids
     foreign = foreign_ids(conn)
     for (tid,) in conn.execute("SELECT id FROM tasks WHERE status='triage'").fetchall():
         if tid in foreign:
             continue
         try:
+            # A malformed historical cause publishes no notice: the strict read raises
+            # here and this card's hold is retained while siblings and dispatch go on.
+            strict_episode(conn, tid)
             hold = current(conn, tid)
             if hold is None:
                 continue

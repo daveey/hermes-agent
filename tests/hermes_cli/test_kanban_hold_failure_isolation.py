@@ -31,7 +31,7 @@ def _decisions(conn, tid):
     return [e for e in kb.list_events(conn, tid) if e.kind == 'spend_budget_decision_ready']
 
 
-@pytest.mark.parametrize('cause', [[], {}])
+@pytest.mark.parametrize('cause', [[], {}, 7])
 def test_reclaim_survives_malformed_historical_cause(kanban_home, cause, monkeypatch, caplog):
     upkeep = []
     monkeypatch.setattr(walls, 'tick_upkeep', lambda *a, **kw: upkeep.append(True))
