@@ -255,6 +255,9 @@ def review(conn, task_id, episode, verdict, ctx):
         # confirmed receipt is the landing; naming it lets the event seam freeze the wait before sync
         # projects the Board's rows, leaving no interval in which the todo card has no clock.
         settled.update(status="todo", parent=receipt["target"])
+    from hermes_cli.kanban_actionability_creation import release_parents
+    if release_parents(task_id, receipt) is not None:
+        settled.update(status='todo', landing=receipt['landing'])
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, reviewer.SETTLED, settled)
     return "settled"  # canonical effect confirmed; normal sync, not this helper, projects clearance

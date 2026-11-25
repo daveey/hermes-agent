@@ -27,6 +27,10 @@ def intent_for(task, kind, payload, *, now):
     """Derive once from source clocks; the same pure function verifies recorded intent."""
     if not isinstance(payload, dict):
         return None
+    if kind == 'spend_review_settled' and payload.get('verdict') == 'release':
+        parents = release_parents(task.get('id'), payload)
+        if parents is None or parents != payload.get('actionability_parent_ids'):
+            return None
     timed = kind == 'scheduled' or (kind == 'continued' and payload.get('status') == 'scheduled')
     todo = _todo_entry(kind, payload)
     if not timed and kind != 'blocked' and not todo:
@@ -94,6 +98,18 @@ def _carried(conn, task_id, task):
     return (intent['deadline_at'], source.get('uid') or str(source['id'])) if intent and intent['status'] == task['status'] else None
 
 
+def release_parents(task_id, payload):
+    """Only a canonical receipt's explicit todo landing can name release-wait parents."""
+    landing = payload.get('landing') if isinstance(payload, dict) and payload.get('verdict') == 'release' else None
+    if not isinstance(landing, dict) or set(landing) != {'status', 'parent_ids'} or landing['status'] != 'todo':
+        return None
+    parents = landing['parent_ids']
+    if (not isinstance(parents, list) or not parents or not all(_text(p) and p != task_id for p in parents)
+            or parents != sorted(set(parents))):
+        return None
+    return parents
+
+
 def stamp(conn, task_id, kind, payload, *, now):
     """Freeze ordinary administrative policy with the actual source event clock."""
     if kind not in ('scheduled', 'blocked', 'continued', 'dependency_wait', 'linked', 'unlinked', 'unblocked', *LANDINGS):
@@ -102,8 +118,10 @@ def stamp(conn, task_id, kind, payload, *, now):
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
     # A confirmed Board wait_on receipt: the Board linked ``parent`` and parked the card in todo in that
     # receipt's transaction, and this replica still shows the triage it left. Freeze the wait as it landed.
-    receipt = bool(kind == 'spend_review_settled' and isinstance(payload, dict) and payload.get('verdict') == 'wait_on'
-                   and payload.get('status') == 'todo' and _text(payload.get('parent')) and payload['parent'] != task_id
+    release = release_parents(task_id, payload) if kind == 'spend_review_settled' else None
+    receipt = bool(kind == 'spend_review_settled' and isinstance(payload, dict) and payload.get('status') == 'todo'
+                   and (release is not None or (payload.get('verdict') == 'wait_on'
+                        and _text(payload.get('parent')) and payload['parent'] != task_id))
                    and row is not None and row['status'] == 'triage')
     if receipt and row is not None:
         row = {**dict(row), 'status': 'todo', 'block_kind': None, 'human_request': None}
@@ -115,7 +133,9 @@ def stamp(conn, task_id, kind, payload, *, now):
         from hermes_cli.kanban_db_sync import run_uid
         from hermes_cli.kanban_actionability_parents import snapshot
         parents = [r[0] for r in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (task_id,))]
-        if receipt:
+        if release is not None:
+            parents = release  # frozen canonical edges, never guessed from this replica
+        elif receipt:
             parents = sorted({*parents, payload['parent']})
         if kind in ('linked', 'unlinked', 'unblocked', *LANDINGS) and not parents:
             return original  # no parent to wait on: not a dependency wait, so nothing to freeze
