@@ -10,6 +10,8 @@ often enough mid-FTS5-write to corrupt ``state.db``.
 from __future__ import annotations
 
 import subprocess
+import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,10 +19,13 @@ import hermes_cli.web_server_gateway as _web_server_gateway
 
 
 @pytest.fixture(autouse=True)
-def reset_restart_cooldown():
-    """Keep the module-level cooldown state out of neighbouring tests."""
+def reset_restart_cooldown(monkeypatch):
+    """Keep restart state and fake clock local to the consumer module."""
     from hermes_cli import web_server
 
+    # Patching time.monotonic on the shared stdlib module also changes unrelated
+    # scheduler threads; they consume finite side_effect samples and raise StopIteration.
+    monkeypatch.setattr(web_server, 'time', SimpleNamespace(monotonic=time.monotonic))
     web_server._LAST_GATEWAY_RESTART = None
     yield
     web_server._LAST_GATEWAY_RESTART = None
@@ -82,10 +87,15 @@ class TestRepeatRestartWithinCooldown:
         # anchoring it to the previous request would let a 3.5s-spaced storm
         # walk the deadline forward forever and never restart at all.
         clock = [100.0, 103.5, 107.0]
+        real_monotonic = time.monotonic
 
         with patch("hermes_cli.gateway._reap_unsupervised_gateway_orphans"), patch(
             "hermes_cli.web_server.time.monotonic", side_effect=clock
         ):
+            # Unrelated schedulers must not consume the restart clock's finite samples.
+            # Read more times than the mock contains, as an interleaved scheduler can.
+            before = real_monotonic()
+            assert all(time.monotonic() >= before for _ in range(4))
             _spawn_gateway_restart()
             _spawn_gateway_restart()
             _spawn_gateway_restart()
