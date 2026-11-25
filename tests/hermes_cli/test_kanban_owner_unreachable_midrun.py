@@ -160,7 +160,7 @@ def test_modern_receipt_midrun_owner_unreachable_requeues_without_spending_budge
             assert not helpers._notices(conn)
 
 
-def test_unreachable_owner_streak_still_reaches_the_breaker(home):
+def test_unreachable_owner_streak_still_reaches_the_breaker(isolate_usage_accounting, home):
     from hermes_cli import kanban_owner_unavailable as ou
     with kbc.connect() as conn:
         tid = None
@@ -172,6 +172,19 @@ def test_unreachable_owner_streak_still_reaches_the_breaker(home):
         assert [r["outcome"] for r in runs[:-1]] == ["owner_unavailable"] * ou.NEUTRAL_STREAK_LIMIT
         assert runs[-1]["outcome"] == "crashed"
         assert kb.get_task(conn, tid).consecutive_failures == 1
+
+
+def test_unknown_midrun_usage_holds_retry_but_not_a_healthy_neighbor(home):
+    from hermes_cli import kanban_db_sync as sync
+    with kbc.connect() as conn:
+        tid, _ = helpers._admitted_run(conn)
+        _result(conn, tid)
+        kbd.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.claim_task(conn, tid) is None
+        assert sync.pop_claim_deferral(tid) == "usage_accounting_pending"
+        neighbor = kb.create_task(conn, title="healthy accounting control", assignee="default")
+        assert kb.claim_task(conn, neighbor) is not None
 
 
 def test_storage_and_unreachable_proofs_are_distinct_kinds(home):
@@ -209,7 +222,7 @@ def test_exhausted_resend_requeues_without_spending_budget(home, code):
 
 
 @pytest.mark.parametrize("code", _SILENT_RESEND)
-def test_exhausted_resend_streak_still_reaches_the_breaker(home, code):
+def test_exhausted_resend_streak_still_reaches_the_breaker(isolate_usage_accounting, home, code):
     from hermes_cli import kanban_owner_unavailable as ou
     with kbc.connect() as conn:
         tid = None

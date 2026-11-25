@@ -155,7 +155,7 @@ def test_owner_still_alive_is_not_an_owner_death(board, monkeypatch):
         assert "owner_restart_lost" not in _kinds(conn, tid)
 
 
-def test_a_card_in_flight_at_two_consecutive_unclean_deaths_is_charged(board, monkeypatch):
+def test_a_card_in_flight_at_two_consecutive_unclean_deaths_is_charged(isolate_usage_accounting, board, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", "0")
     second_owner = 50001
     _ledger(board, DEAD_OWNER)
@@ -344,7 +344,7 @@ def test_a_bound_run_with_no_receipt_does_not_trust_the_refusal_in_the_shared_lo
         assert not _last_payload(conn, tid, "crashed").get("worker_output")
 
 
-def test_a_late_refusal_from_run_a_never_lands_on_run_b(board, monkeypatch):
+def test_a_late_refusal_from_run_a_never_lands_on_run_b(isolate_usage_accounting, board, monkeypatch):
     _ledger(board, DEAD_OWNER)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="card", assignee="default")

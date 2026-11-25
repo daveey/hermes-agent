@@ -108,7 +108,7 @@ def test_missing_identity_on_both_receipts_cannot_agree(home, field):
         assert storage.proven(conn, tid, task.current_run_id, claim) is None
 
 
-def test_midrun_notice_shared_and_streak_bounded(home):
+def test_midrun_notice_shared_and_streak_bounded(isolate_usage_accounting, home):
     from hermes_cli import kanban_owner_unavailable as ou
     with kbc.connect() as conn:
         tid = None

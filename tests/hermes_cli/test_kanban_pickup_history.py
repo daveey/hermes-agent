@@ -77,7 +77,7 @@ def _replica(worker) -> sqlite3.Connection:
     return replica
 
 
-def test_pickup_copies_the_whole_history_so_early_admissions_survive(gws):
+def test_pickup_copies_the_whole_history_so_early_admissions_survive(isolate_usage_accounting, gws):
     hub, worker = gws
     tid = _long_card_repicked_up(hub, worker)
     replica = _replica(worker)
@@ -108,7 +108,7 @@ def _truncate(worker, tid, keep):
         conn.execute("UPDATE kanban_sync_state SET applying = 0")
 
 
-def test_refill_restores_a_truncated_running_copy_from_the_replica(gws):
+def test_refill_restores_a_truncated_running_copy_from_the_replica(isolate_usage_accounting, gws):
     hub, worker = gws
     tid = _long_card_repicked_up(hub, worker)
     conn = worker.conn
@@ -143,7 +143,7 @@ def test_refill_restores_a_truncated_running_copy_from_the_replica(gws):
     assert task is not None and task.status == "running"
 
 
-def test_refill_never_invents_a_missing_admission(gws):
+def test_refill_never_invents_a_missing_admission(isolate_usage_accounting, gws):
     """An admission the Board itself lacks stays missing, so the land gate still refuses."""
     hub, worker = gws
     tid = _long_card_repicked_up(hub, worker)
@@ -164,7 +164,7 @@ def test_refill_never_invents_a_missing_admission(gws):
     assert run1 in _unadmitted_runs(worker.conn, tid)
 
 
-def test_refill_history_cli(gws, capsys):
+def test_refill_history_cli(isolate_usage_accounting, gws, capsys):
     hub, worker = gws
     tid = _long_card_repicked_up(hub, worker)
     _truncate(worker, tid, 200)
@@ -179,7 +179,7 @@ def test_refill_history_cli(gws, capsys):
     assert json.loads(capsys.readouterr().out) == {tid: {"filled": 0, "unresolved": 0}}
 
 
-def test_pickup_tick_refills_open_copies(gws):
+def test_pickup_tick_refills_open_copies(isolate_usage_accounting, gws):
     hub, worker = gws
     tid = _long_card_repicked_up(hub, worker)
     _truncate(worker, tid, 200)

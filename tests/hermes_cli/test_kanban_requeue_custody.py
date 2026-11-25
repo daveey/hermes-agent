@@ -228,7 +228,7 @@ def test_custody_of_a_silent_host_stops_holding_after_the_grace(board, procs, mo
     assert custody.claim_refusal(board, row, now=until + custody.RELEASE_GRACE_SECONDS) is None
 
 
-def test_bound_spares_the_job_while_the_custody_hosts_retry_runs(board, procs, monkeypatch):
+def test_bound_spares_the_job_while_the_custody_hosts_retry_runs(isolate_usage_accounting, board, procs, monkeypatch):
     """Review of 478094ef: the bound must not kill a persist_on_release job the same host's re-claimed retry
     runs with (another host can't claim a running card, so killing prevents nothing). Once that run ends
     while the job still lives, the bound applies again."""
@@ -254,6 +254,7 @@ def test_bound_spares_the_job_while_the_custody_hosts_retry_runs(board, procs, m
 @pytest.mark.parametrize("status", ["done", "archived"])
 @pytest.mark.parametrize("bound_offset", [-1, 1])
 def test_terminal_card_releases_custody_without_signalling_job(
+        isolate_usage_accounting,
         board, procs, monkeypatch, status, bound_offset):
     tid = _running_card(board, max_runtime=60)
     ship = _ready(procs(SLEEPER))

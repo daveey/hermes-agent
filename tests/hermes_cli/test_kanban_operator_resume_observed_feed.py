@@ -20,7 +20,7 @@ gws = support.gws
 clock = copy.clock
 
 
-def test_real_worker_hold_fed_home_lets_home_resume_and_worker_claim(gws, clock, monkeypatch, capsys):
+def test_real_worker_hold_fed_home_lets_home_resume_and_worker_claim(isolate_usage_accounting, gws, clock, monkeypatch, capsys):
     hub, worker = gws
     tid = copy._held_on_worker(gws, clock)  # the worker's dispatch_once recorded the hold
     hub.enter()

@@ -88,7 +88,7 @@ def _held_on_worker(gws, clock):
     return tid
 
 
-def test_home_resume_releases_the_workers_kept_copy_at_its_next_tick(gws, clock, imports):
+def test_home_resume_releases_the_workers_kept_copy_at_its_next_tick(isolate_usage_accounting, gws, clock, imports):
     hub, worker = gws
     tid = _held_on_worker(gws, clock)
     copied = imports.count(tid)
@@ -118,7 +118,7 @@ def test_home_resume_releases_the_workers_kept_copy_at_its_next_tick(gws, clock,
     assert _status(worker.conn, tid) == "ready"
 
 
-def test_home_resume_accepts_worker_only_observation(gws, clock, monkeypatch):
+def test_home_resume_accepts_worker_only_observation(isolate_usage_accounting, gws, clock, monkeypatch):
     """Real synced worker observation qualifies even when home's guard releases."""
     hub, worker = gws
     tid = _held_on_worker(gws, clock)
@@ -133,7 +133,7 @@ def test_home_resume_accepts_worker_only_observation(gws, clock, monkeypatch):
     assert _status(worker.conn, tid) == "running"
 
 
-def test_home_resume_accepts_a_worker_hold_recorded_after_a_reassign(gws, clock, monkeypatch):
+def test_home_resume_accepts_a_worker_hold_recorded_after_a_reassign(isolate_usage_accounting, gws, clock, monkeypatch):
     """t_01a1d120e7d7c686, 2026-11-12: a same-profile reassign on the hub, the workers re-held the card 3 s later,
     and hub ``resume`` refused with "guard: none". The hub's DB holds only the replicated worker events."""
     hub, worker = gws
@@ -162,6 +162,25 @@ def test_home_resume_accepts_a_worker_hold_recorded_after_a_reassign(gws, clock,
     assert _status(worker.conn, tid) == "running"
 
 
+def test_home_resume_does_not_settle_unknown_crash_usage(gws, clock):
+    """An active-PR resume spends its own hold, not missing accounting evidence."""
+    from hermes_cli import kanban_usage_accounting as accounting
+    hub, worker = gws
+    tid = _held_on_worker(gws, clock)
+    hub.enter()
+    clock[0] += 60
+    resume.resume(hub.conn, tid, reason="isolated operator hold control", actor="default")
+    hub.round()
+    worker.round()
+    worker.enter()
+    assert kbd.check_respawn_guard(worker.conn, tid) is None
+    assert accounting.pending(worker.conn, tid)
+    clock[0] += 5
+    worker.tick()
+    assert _status(worker.conn, tid) == "ready"
+    assert accounting.pending(worker.conn, tid)
+
+
 def test_without_a_resume_the_kept_copy_stays_held(gws, clock):
     hub, worker = gws
     tid = _held_on_worker(gws, clock)
@@ -174,7 +193,7 @@ def test_without_a_resume_the_kept_copy_stays_held(gws, clock):
     assert kbd.check_respawn_guard(worker.conn, tid) == "active_pr"
 
 
-def test_home_resume_releases_a_fresh_import_by_run_uid(gws, clock):
+def test_home_resume_releases_a_fresh_import_by_run_uid(isolate_usage_accounting, gws, clock):
     """worker-1's path on 2026-11-12: no copy yet, the pickup imports the whole history and the guard releases."""
     hub, worker = gws
     tid = _held_on_worker(gws, clock)

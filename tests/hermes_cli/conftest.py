@@ -74,6 +74,19 @@ def _isolate_kanban_worker_process_registries(monkeypatch):
 
 
 @pytest.fixture
+def isolate_usage_accounting(monkeypatch):
+    """Exercise unrelated retry/hold policy without inventing usage for lost turns.
+
+    Opt-in only: these lifecycle fixtures deliberately lose worker results. Their
+    next claim is now correctly accounting-held; accounting/admission integration
+    is exercised without this double in test_kanban_usage_accounting{,_sync}.py.
+    All decision, custody, failure and ordinary spend-budget gates stay real.
+    """
+    from hermes_cli import kanban_usage_accounting
+    monkeypatch.setattr(kanban_usage_accounting, "pending", lambda conn, task_id: [])
+
+
+@pytest.fixture
 def all_assignees_spawnable(monkeypatch):
     """Pretend every assignee maps to a real Hermes profile.
 

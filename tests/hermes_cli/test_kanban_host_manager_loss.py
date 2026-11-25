@@ -141,7 +141,7 @@ def _attested(monkeypatch, tmp_path, owner_pid):
         _ORIGINAL, root=root, uid=os.getuid(), boot_id=BOOT, host=HOST, now=NOW, check_ancestors=False))
 
 
-def test_a_repeat_at_an_attested_manager_loss_is_waived_once_then_charged(owner_board, monkeypatch, tmp_path):
+def test_a_repeat_at_an_attested_manager_loss_is_waived_once_then_charged(isolate_usage_accounting, owner_board, monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", "0")
     owners = [DEAD_OWNER, 50001, 50002]
     with kbc.connect() as conn:
@@ -167,7 +167,7 @@ def test_a_repeat_at_an_attested_manager_loss_is_waived_once_then_charged(owner_
         assert "gave_up" not in _kinds(conn, tid)
 
 
-def test_a_repeat_without_root_evidence_is_still_charged(owner_board, monkeypatch, tmp_path):
+def test_a_repeat_without_root_evidence_is_still_charged(isolate_usage_accounting, owner_board, monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", "0")
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="card", assignee="default")
@@ -216,6 +216,7 @@ def test_a_huge_receipt_number_fails_closed(tmp_path):
 
 
 def test_a_repeat_whose_receipt_breaks_the_parser_is_charged_without_breaking_the_sweep(
+        isolate_usage_accounting,
         owner_board, monkeypatch, tmp_path):
     """Any error reading the root evidence fails closed: the repeat is charged as before and the
     dead-worker sweep carries on (2026-11-12 review of PR #1231: OverflowError escaped ``note()``)."""

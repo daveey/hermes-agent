@@ -534,7 +534,7 @@ def test_legacy_followup_schema_gets_full_orphan_retention(conn, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 0
 
 
-def test_followup_review_reblock_reaches_triage_and_keeps_review_resume(conn):
+def test_followup_review_reblock_reaches_triage_and_keeps_review_resume(isolate_usage_accounting, conn):
     """Same-cause accounting (route_block): unblock -> re-refuse of a review card climbs to triage; each
     unblock below the limit resumes in review."""
     from hermes_cli.kanban_source_refusal_block import _block_released_review

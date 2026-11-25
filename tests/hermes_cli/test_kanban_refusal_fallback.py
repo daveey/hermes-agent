@@ -70,7 +70,7 @@ def events(conn, tid, kind):
         'SELECT payload FROM task_events WHERE task_id=? AND kind=? ORDER BY id', (tid, kind))]
 
 
-def test_one_refusal_returns_card_ready_and_next_claim_uses_another_provider(board, pools, monkeypatch):
+def test_one_refusal_returns_card_ready_and_next_claim_uses_another_provider(isolate_usage_accounting, board, pools, monkeypatch):
     conn, context = board
     tid = context['task_id']
     before = kb.get_task(conn, tid)
@@ -111,7 +111,7 @@ def test_refusal_record_and_events_preserved_after_fallback(board, pools, monkey
     assert fallback['run_id'] == run_id  # the event belongs to the refused run
 
 
-def test_retried_run_receives_identical_card_and_no_refusal_note(board, pools, monkeypatch):
+def test_retried_run_receives_identical_card_and_no_refusal_note(isolate_usage_accounting, board, pools, monkeypatch):
     conn, context = board
     tid = context['task_id']
     with kb.write_txn(conn):
@@ -129,7 +129,7 @@ def test_retried_run_receives_identical_card_and_no_refusal_note(board, pools, m
     assert seen[0][4] != 'anthropic'
 
 
-def test_every_eligible_provider_refused_triages_with_safety_restriction(board, pools, monkeypatch):
+def test_every_eligible_provider_refused_triages_with_safety_restriction(isolate_usage_accounting, board, pools, monkeypatch):
     conn, context = board
     tid = context['task_id']
     refuse(conn, context, monkeypatch, 'anthropic')
