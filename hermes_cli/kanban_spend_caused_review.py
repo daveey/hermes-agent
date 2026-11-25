@@ -210,7 +210,7 @@ def review(conn, task_id, episode, verdict, ctx):
     from hermes_cli import kanban_spend_review_request as journal
     frozen = journal.get(conn, task_id, episode)
     try:
-        stop = decision.pending_episode(conn, task_id)
+        stop = decision.strict_episode(conn, task_id)
         enabled, cap = reviewer.settings()
         allowed = (stop is not None and reviewer.episode_of(stop) == episode and not fenced(conn, task_id)
                    and not foreign_copy(conn, task_id) and not reviewer._disposed(conn, task_id, episode)

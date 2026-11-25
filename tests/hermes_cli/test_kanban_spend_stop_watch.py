@@ -231,7 +231,7 @@ def _malformed(conn, cause):
         kb._append_event(conn, tid, decision.EVENT, {'cause': cause})
         conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (NOW - 7200, tid))
     with pytest.raises(ValueError, match='cause'):
-        decision.pending_episode(conn, tid)
+        decision.strict_episode(conn, tid)
     return tid
 
 

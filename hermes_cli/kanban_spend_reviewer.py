@@ -128,8 +128,11 @@ def holds(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
     """While a review is queued or running the stop needs no other decision route. With the reviewer off, a
     queued or running review holds nothing: the stop routes as usual."""
     from hermes_cli.kanban_spend_caused_review import CAUSES, effective_cause
-    from hermes_cli.kanban_spend_decision import pending_episode
-    stop = pending_episode(conn, task_id)
+    from hermes_cli.kanban_spend_decision import MalformedStop, strict_episode
+    try:
+        stop = strict_episode(conn, task_id)
+    except MalformedStop:
+        return False  # an unreadable stop is never under review: it routes as usual
     cause = effective_cause(conn, task_id, stop) if stop else None
     if cause and cause not in CAUSES:
         return False
@@ -170,7 +173,10 @@ def eligible(conn: sqlite3.Connection, task_id: str, episode: str, cfg: Optional
         return False
     if restricted(conn, task_id) or _disposed(conn, task_id, episode):
         return False
-    stop = decision.pending_episode(conn, task_id)
+    try:
+        stop = decision.strict_episode(conn, task_id)
+    except decision.MalformedStop:
+        return False  # never queued or granted; the hold and its owner route are retained
     if stop is None or episode_of(stop) != episode or _human_after_stop(conn, task_id, stop):
         return False
     cause = caused.effective_cause(conn, task_id, stop)
@@ -199,7 +205,7 @@ def queue(conn: sqlite3.Connection, task_id: str, episode: str, *, backlog: bool
     if not eligible(conn, task_id, episode, cfg):
         return False
     from hermes_cli import kanban_spend_caused_review as caused
-    from hermes_cli.kanban_spend_decision import pending_episode
+    from hermes_cli.kanban_spend_decision import strict_episode as pending_episode
     if caused.effective_cause(conn, task_id, pending_episode(conn, task_id)) in caused.CAUSES:
         noticed = _notice_at(conn, task_id, episode)
         clock = int(time.time()) if now is None else now
@@ -273,7 +279,7 @@ def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]
             continue
         try:
             from hermes_cli import kanban_spend_caused_review as caused
-            from hermes_cli.kanban_spend_decision import pending_episode
+            from hermes_cli.kanban_spend_decision import strict_episode as pending_episode
             stop = pending_episode(conn, task_id)
             cause = caused.effective_cause(conn, task_id, stop) if stop else None
             if cause in caused.CAUSES and not journal.get(conn, task_id, episode):
@@ -308,7 +314,7 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     db, started = _db_path(conn), []
     for task_id, episode, attempts in _due(conn, now, skip):
         from hermes_cli.kanban_spend_caused_review import CAUSES, effective_cause
-        from hermes_cli.kanban_spend_decision import pending_episode
+        from hermes_cli.kanban_spend_decision import strict_episode as pending_episode
         try:
             stop = pending_episode(conn, task_id)
             cause = effective_cause(conn, task_id, stop) if stop else None
@@ -384,7 +390,10 @@ def context(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[di
     """What the judge reads, and the window text a progress quote must come from."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_spend_decision as decision
-    task, stop = kb.get_task(conn, task_id), decision.pending_episode(conn, task_id)
+    try:
+        task, stop = kb.get_task(conn, task_id), decision.strict_episode(conn, task_id)
+    except decision.MalformedStop:
+        return None  # nothing the judge may read: the review is moot and the hold retained
     if task is None or episode_of(stop) != episode:
         return None
     payload = _payload(stop["payload"])
@@ -553,7 +562,10 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
     from hermes_cli.kanban_sync_divergence import _event_order
     from hermes_cli.kanban_wake_check import foreign_copy
     row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    stop = decision.pending_episode(conn, task_id)
+    try:
+        stop = decision.strict_episode(conn, task_id)
+    except decision.MalformedStop:
+        return "the stop's cause is malformed; hold retained"
     if row is None or stop is None or row[0] != "triage" or episode_of(stop) != episode or state(conn, task_id, episode) != STARTED:
         return "the stop was decided or changed while the reviewer read it"
     enabled, max_grants = settings()

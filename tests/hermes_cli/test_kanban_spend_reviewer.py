@@ -465,7 +465,7 @@ def test_malformed_cause_does_not_block_healthy_reviews(kanban_home, spend_revie
         with kb.write_txn(conn):
             kb._append_event(conn, bad, decision.EVENT, {"cause": cause})
         with pytest.raises(ValueError, match="cause"):
-            decision.pending_episode(conn, bad)
+            decision.strict_episode(conn, bad)
         good, good_episode = _stopped(conn)
         routed, routed_episode = _routed_with_reviewer_off(conn, monkeypatch)
         now = int(time.time()) + reviewer.review_after_seconds() + 5

@@ -24,7 +24,7 @@ def _recorded(conn, tid):
             or foreign_copy(conn, tid) or contained(conn, tid) or decision.execution_refusal(conn, tid)
             or current_park(conn, tid) or open_recovery_card(conn, tid)):
         return None
-    stop = decision.pending_episode(conn, tid)
+    stop = decision.strict_episode(conn, tid)
     if stop is None or stop['kind'] != decision.EVENT:
         return None
     from hermes_cli.kanban_sync_divergence import _event_order
@@ -57,15 +57,22 @@ def _recorded(conn, tid):
             mandates.add(note['id'])
     # Require the budget producer's episode-bound decision/comment written by a
     # human: an agent preparing a budget is not authorization. Lookalikes and
-    # overrides predating this stop never count.
+    # overrides predating this stop never count. A budget is a decision about
+    # spend only: it settles an ordinary budget stop, and only when it sets a
+    # limit. Clearing an override decides nothing, and no budget edit releases
+    # a stop the worker made itself (capability, scope, safety): that needs the
+    # authenticated renewal/release above.
+    from hermes_cli.kanban_spend_caused_review import effective_cause
+    # The card's newest override must still set a limit: a later clear withdraws it.
+    ordinary = effective_cause(conn, tid, stop) is None and budget.override_set(budget.card_override(conn, tid))
     from hermes_cli.kanban_release_comments import _resolve
     comments = conn.execute('SELECT * FROM task_comments WHERE task_id=?', (tid,)).fetchall()
     for r in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='spend_budget_set'", (tid,)):
         event = dict(r)
         p = kb._json_dict(event['payload'])
         ref = p.get('decision_comment')
-        if (_event_order(event) > after and p.get('episode') == episode and p.get('writer_kind') == 'human'
-                and isinstance(ref, dict) and _resolve(comments, event, ref)):
+        if (ordinary and budget.override_set(p) and _event_order(event) > after and p.get('episode') == episode
+                and p.get('writer_kind') == 'human' and isinstance(ref, dict) and _resolve(comments, event, ref)):
             records.append(event)
     if not records:
         return None

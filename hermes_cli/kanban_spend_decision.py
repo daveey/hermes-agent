@@ -122,8 +122,20 @@ def safe_ensure_producer(conn, task_id: str) -> None:
         logging.getLogger(__name__).exception("spend decision producer failed for %s; hold retained", task_id)
 
 
-def pending_episode(conn, task_id: str):
-    """Same existing episode as canonical Board, including safety annotations."""
+class MalformedStop(ValueError):
+    """A stop whose ``cause`` is not text: unreadable evidence, never authority to release."""
+
+
+def strict_episode(conn, task_id: str):
+    """``pending_episode`` for automated decision makers (reviewer, watch, decided-triage repair): a
+    malformed cause raises ``MalformedStop`` so the caller retains that card's hold at its per-card boundary."""
+    return pending_episode(conn, task_id, strict=True)
+
+
+def pending_episode(conn, task_id: str, *, strict: bool = False):
+    """Same existing episode as canonical Board, including safety annotations. Dispatch, readiness and
+    every other batch reader call this non-strict form, which never raises on a malformed historical
+    cause: that event reads as carrying no cause, exactly as before causes were validated."""
     import json
     from hermes_cli.kanban_sync_divergence import _event_order
     events = [dict(r) for r in conn.execute(
@@ -138,10 +150,12 @@ def pending_episode(conn, task_id: str):
             payload = json.loads(event['payload'] or '{}')
         except (TypeError, ValueError):
             continue
-        # A malformed cause cannot be interpreted as an ordinary budget stop:
-        # callers must retain the hold rather than infer permission to release.
+        # A malformed cause is never grounds for an automated release (strict readers
+        # raise and retain the hold); it must not abort a batch reader either.
         if isinstance(payload, dict) and payload.get('cause') is not None and not isinstance(payload['cause'], str):
-            raise ValueError('Malformed spend stop cause')
+            if strict:
+                raise MalformedStop('Malformed spend stop cause')
+            payload = {**payload, 'cause': None}
         if (renewal.key(event) in renewed and isinstance(payload, dict) and (
                 payload.get('superseded_by_safety_stop') is not True if event['id'] in receipts
                 else payload.get('cause') == 'scope_stopped')):

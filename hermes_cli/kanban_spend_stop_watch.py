@@ -27,7 +27,7 @@ def stale_stops(conn: sqlite3.Connection, *, now: float, older_than: int = 1800)
         if tid in copies or row['created_by'] in (AUTHOR, 'kanban-spend-budget'):
             continue
         try:
-            stop = decision.pending_episode(conn, tid)
+            stop = decision.strict_episode(conn, tid)
             if stop is None or stop['created_at'] >= now - older_than:
                 continue
             episode = cast(str, reviewer.episode_of(stop))

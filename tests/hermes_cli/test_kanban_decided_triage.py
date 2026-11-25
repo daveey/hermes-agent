@@ -127,7 +127,7 @@ def test_malformed_cause_retains_hold_and_sweeps_healthy_neighbor(kanban_home, c
         assert kb.get_task(conn, good).status == 'ready'
         assert not decision.pending(conn, good)
         with pytest.raises(ValueError, match='cause'):
-            decision.pending_episode(conn, bad)
+            decision.strict_episode(conn, bad)
 
 
 @pytest.mark.parametrize('failure', ['observation', 'revalidation', 'write'])
@@ -270,3 +270,27 @@ def test_renewal_with_budget_waits_for_parent_then_claims(board, monkeypatch):
     assert kb.get_task(board, tid).status == 'ready'
     assert not claim_check(board, tid)()
     assert kb.claim_task(board, tid) is not None
+
+
+def _clear(conn, tid):
+    seen = conn.execute('SELECT MAX(id) FROM task_comments WHERE task_id=?', (tid,)).fetchone()[0]
+    budget.set_override(conn, tid, runs=None, cache_read_tokens=None, by='default',
+                        reason='Clear budget override only', writer_kind='human', seen=seen)
+
+
+@pytest.mark.parametrize('cause', [None, 'capability_unavailable', 'scope_stopped', 'safety_refusal', 'unknown_cause'])
+@pytest.mark.parametrize('edit', ['clear', 'set', 'set_then_clear'])
+def test_budget_edit_is_a_decision_only_for_an_ordinary_stop_and_only_when_it_sets_a_limit(kanban_home, cause, edit):
+    from hermes_cli.kanban_triage_sweep import sweep_stale_triage
+    with connect.connect_closing() as conn:
+        tid = stopped(conn, cause)
+        if edit != 'clear':
+            authorize(conn, tid)
+        if edit != 'set':
+            _clear(conn, tid)
+        released = cause is None and edit == 'set'
+        assert sweep_stale_triage(conn, older_than=999999) == []
+        assert kb.get_task(conn, tid).status == ('ready' if released else 'triage')
+        assert decision.pending(conn, tid) is not released
+        assert bool(conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='promoted_manual'",
+                                 (tid,)).fetchone()) is released

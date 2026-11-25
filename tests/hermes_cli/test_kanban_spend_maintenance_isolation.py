@@ -25,7 +25,10 @@ def test_malformed_stop_isolated_from_stale_neighbor(kanban_home, own_gateway, c
             assert good in result
             assert kb.get_task(conn, good).status == "ready"
         else:
-            assert helpers._sweep(conn, now=helpers._later(3)) == [good]
-            assert kb.get_task(conn, good).human_request
+            # The backstop reads the unreadable cause as none: it asks the owner about both cards, as it
+            # did before causes were validated. Asking is never a release.
+            assert sorted(helpers._sweep(conn, now=helpers._later(3))) == sorted([bad, good])
+            assert kb.get_task(conn, good).human_request and kb.get_task(conn, bad).human_request
         assert kb.get_task(conn, bad).status == "triage"
-        assert not kb.get_task(conn, bad).human_request
+        if consumer == "stale":
+            assert not kb.get_task(conn, bad).human_request
