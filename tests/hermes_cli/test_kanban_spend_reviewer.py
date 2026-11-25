@@ -237,40 +237,121 @@ def test_an_ineligible_stalled_stop_never_takes_the_write_lock(kanban_home, spen
         assert txns == [] and kb.get_task(conn, tid).status == "triage"
 
 
-@pytest.mark.parametrize("route, ok", [
-    ({"provider": "anthropic", "model": "claude-opus-5-5", "billing_group": "subscription"}, True),
-    ({"provider": "openai-codex", "model": "gpt-6.1-sol", "billing_group": "subscription"}, True),
-    ({"provider": "anthropic", "model": "claude-opus-5-5"}, False),  # no billing evidence
-    ({"provider": "openai-codex", "model": "gpt-6.1-sol", "billing_group": "metered"}, False),
-])
-def test_the_judge_answers_only_through_the_subscription_route(monkeypatch, route, ok):
+def _routing(*routes, allow_metered=False):
+    """A managed subscription-only registry whose ``standard`` class lists ``routes``."""
+    return {"model_routing": {
+        "enabled": True, "policy_version": 1, "allow_metered": allow_metered, "enforce_subscription_only": True,
+        "routes": {"deep": [], "fast": [], "standard": [
+            {"provider": p, "model": m, "billing": b, "eligible": True, "funding_verified": True, "weight": 1,
+             "capabilities": {"context_tokens": 200000, "tools": True, "streaming": True, "json": True}}
+            for p, m, b in routes]}}}
+
+
+_REGISTRY = (("anthropic", "claude-sonnet-5-5", "subscription"), ("openai-codex", "gpt-5.5", "subscription"),
+             ("openrouter", "paid-model", "metered"))
+
+
+def _meta(provider, model, billing="subscription", level="standard"):
+    return {"provider": provider, "model": model, "requested_class": level, "selected_provider": provider,
+            "selected_model": model, "billing_group": billing, "policy_version": 1}
+
+
+def _judge_with(monkeypatch, route, config):
     from agent import auxiliary_client as aux
+    from agent import model_routing_managed as managed
+    calls = []
 
     def call_llm(**kw):
         assert kw["model"] == "class:standard" and "provider" not in kw
         assert kw["task"] == "kanban_spend_review"
+        calls.append(kw)
         kw["route_info"].update(route)
         message = types.SimpleNamespace(content='{"decision": "escalate", "reason": "same wait"}')
         return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
 
     monkeypatch.setattr(aux, "call_llm", call_llm)
-    verdict = reviewer.judge({"_cap": 3, "_corpus": "", "title": "t"})
-    assert (verdict == {"decision": "escalate", "reason": "same wait"}) is ok
+    monkeypatch.setattr(managed, "managed_config", lambda config_=None: config)
+    return reviewer.judge({"_cap": 3, "_corpus": "", "title": "t"}), calls
+
+
+@pytest.mark.parametrize("route", [
+    _meta("anthropic", "claude-sonnet-5-5"),
+    _meta("openai-codex", "gpt-5.5"),  # any eligible subscription route of the class, not one concrete model
+])
+def test_the_judge_accepts_any_eligible_subscription_route_of_its_class(monkeypatch, route):
+    verdict, calls = _judge_with(monkeypatch, route, _routing(*_REGISTRY))
+    assert verdict == {"decision": "escalate", "reason": "same wait"}
+    assert [(c["model"], c.get("provider")) for c in calls] == [(reviewer.ROUTE_CLASS, None)]
+
+
+@pytest.mark.parametrize("route", [
+    {"provider": "anthropic", "model": "claude-sonnet-5-5"},  # no billing evidence
+    _meta("openrouter", "paid-model", "metered"),  # a paid route never answers
+    _meta("anthropic", "claude-sonnet-5-5", level="deep"),  # another class
+    _meta("anthropic", "unlisted-model"),  # claims subscription but is not in the registry
+    {**_meta("openai-codex", "gpt-5.5"), "selected_model": "claude-sonnet-5-5"},  # identity mismatch
+])
+def test_the_judge_refuses_a_route_that_is_not_an_eligible_subscription_member(monkeypatch, route):
+    assert _judge_with(monkeypatch, route, _routing(*_REGISTRY))[0] is None
+
+
+def test_the_judge_refuses_a_route_withdrawn_from_the_registry(monkeypatch):
+    route = _meta("openai-codex", "gpt-5.5")
+    assert _judge_with(monkeypatch, route, _routing(("anthropic", "claude-sonnet-5-5", "subscription")))[0] is None
+
+
+def test_without_subscription_only_routing_the_judge_never_invokes_a_model(monkeypatch):
+    verdict, calls = _judge_with(monkeypatch, _meta("anthropic", "claude-sonnet-5-5"), None)
+    assert verdict is None and calls == []
+
+
+def test_an_unavailable_subscription_class_escalates(monkeypatch):
+    from agent import auxiliary_client as aux
+    from agent import model_routing_managed as managed
+    from agent.model_routing import ModelRoutingError
+
+    def call_llm(**kw):
+        raise ModelRoutingError("No eligible standard routes under billing/capability policy")
+
+    monkeypatch.setattr(aux, "call_llm", call_llm)
+    monkeypatch.setattr(managed, "managed_config", lambda config=None: _routing())
+    with pytest.raises(ModelRoutingError):  # review() turns any judge exception into an escalation
+        reviewer.judge({"_cap": 3, "_corpus": "", "title": "t"})
+
+
+def test_the_class_allocator_offers_only_subscription_routes_before_any_call():
+    from agent.model_routing import eligible_routes
+    policy = _routing(*_REGISTRY, allow_metered=True)["model_routing"]  # enforce_subscription_only wins
+    assert {r["billing"] for r in eligible_routes(policy, "standard")} == {"subscription"}
 
 
 @pytest.mark.parametrize("failure", ["paid", "missing-billing", "unavailable", "timeout", "non-json"])
 def test_real_judge_failure_escalates_without_a_grant(kanban_home, monkeypatch, failure):
     from agent import auxiliary_client as aux
+    from agent import model_routing_managed as managed
     monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (True, 2))
+    monkeypatch.setattr(managed, "managed_config", lambda config=None: _routing(*_REGISTRY))
+    calls, parsed = [], []
+    real_parse = reviewer.parse
+
+    def parse(content):
+        parsed.append(content)
+        return real_parse(content)
+
+    monkeypatch.setattr(reviewer, "parse", parse)
 
     def call_llm(**kwargs):
+        calls.append((kwargs["task"], kwargs["model"], kwargs.get("provider")))
         if failure == "unavailable":
             raise RuntimeError("no eligible route")
         if failure == "timeout":
             raise TimeoutError("deadline")
-        kwargs["route_info"].update(provider="openai-codex", model="gpt-6.1-sol")
-        if failure != "missing-billing":
-            kwargs["route_info"]["billing_group"] = "paid" if failure == "paid" else "subscription"
+        route = _meta("openai-codex", "gpt-5.5")
+        if failure == "missing-billing":
+            route.pop("billing_group")
+        elif failure == "paid":
+            route["billing_group"] = "paid"
+        kwargs["route_info"].update(route)
         content = "not json" if failure == "non-json" else json.dumps(_grant())
         return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))])
 
@@ -280,6 +361,8 @@ def test_real_judge_failure_escalates_without_a_grant(kanban_home, monkeypatch, 
         with kb.write_txn(conn):
             kb._append_event(conn, tid, reviewer.STARTED, {"episode": episode})
         assert reviewer.review(conn, tid, episode) == "escalated"
+        assert calls == [("kanban_spend_review", reviewer.ROUTE_CLASS, None)]
+        assert parsed == (["not json"] if failure == "non-json" else [])
         assert kb.get_task(conn, tid).status == "triage"
         assert reviewer.GRANTED not in _kinds(conn, tid)
         assert reviewer.state(conn, tid, episode) == reviewer.ESCALATED
@@ -287,9 +370,11 @@ def test_real_judge_failure_escalates_without_a_grant(kanban_home, monkeypatch, 
 
 def test_a_hung_judge_is_abandoned_at_the_deadline(monkeypatch):
     from agent import auxiliary_client as aux
+    from agent import model_routing_managed as managed
     import threading
     release = threading.Event()
     monkeypatch.setattr(reviewer, "TIMEOUT", 1)
+    monkeypatch.setattr(managed, "managed_config", lambda config=None: _routing(*_REGISTRY))
     monkeypatch.setattr(aux, "call_llm", lambda **kw: release.wait(30))
     try:
         assert reviewer.judge({"_cap": 3, "_corpus": "", "title": "t"}) is None

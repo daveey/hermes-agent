@@ -61,6 +61,7 @@ ESCALATED = "spend_review_escalated"
 SETTLED = "spend_review_settled"
 KINDS = (QUEUED, STARTED, GRANTED, ESCALATED, SETTLED)
 AUTHOR = "kanban-spend-reviewer"
+ROUTE_CLASS = "class:standard"  # model-neutral: the managed subscription registry picks the concrete route
 TIMEOUT = 90
 LEASE_SECONDS = 300
 MAX_ATTEMPTS = 2
@@ -396,30 +397,53 @@ Answer with JSON only:
 
 def judge(ctx: dict) -> Optional[dict]:
     """One subscription call bounded end to end by ``TIMEOUT``, route and credential resolution included.
-    None when it is unavailable, late, routed outside subscription billing, or not JSON."""
+
+    Model-neutral: the judge asks for ``ROUTE_CLASS`` and the managed subscription registry allocates any
+    eligible route of that class. Subscription-only holds before the paid invocation: with managed routing
+    off (``model_routing.enforce_subscription_only``) no call is made, and under it class allocation
+    (``eligible_routes``) offers only subscription routes and the auxiliary transmit fence
+    (``verify_managed_auxiliary``) refuses anything else. The answer is accepted only from a route the
+    registry still lists as an eligible subscription member of that class (``verify_selected_route``).
+    None when it is unavailable, late, routed anywhere but such a route, or not JSON."""
     from agent import auxiliary_client as aux
+    from agent.model_routing import ModelRoutingError
+    from agent.model_routing_managed import managed_config, verify_selected_route
     from hermes_cli.kanban_hub_admission import _bounded, _owner_scope
     from hermes_cli.kanban_spend_caused_review import PROMPT as CAUSED_PROMPT
     prompt = CAUSED_PROMPT if ctx.get("cause") else PROMPT
     user = {k: v for k, v in ctx.items() if not k.startswith("_")}
     route: dict = {}
+    managed: dict = {}
     deadline = time.monotonic() + TIMEOUT
 
     def ask():
+        config = managed_config()
+        if config is None:
+            return False  # no subscription-only fence on this host: never invoke
+        managed["config"] = config
         with aux.aux_stream_deadline(deadline):
             return aux.call_llm(
-                task="kanban_spend_review", model="class:standard", timeout=TIMEOUT, max_tokens=800,
+                task="kanban_spend_review", model=ROUTE_CLASS, timeout=TIMEOUT, max_tokens=800,
                 temperature=0, route_info=route,
                 messages=[{"role": "system", "content": prompt.replace("CAP", str(ctx["_cap"]))},
                           {"role": "user", "content": json.dumps(user, ensure_ascii=False)}])
 
     with _owner_scope():
         response = _bounded(ask, deadline)
+    if response is False:
+        logger.warning("kanban: spend review needs managed subscription-only routing; escalating")
+        return None
     if response is None:
         logger.warning("kanban: spend review judge did not answer within %ss; escalating", TIMEOUT)
         return None
-    if route.get("billing_group") != "subscription":
-        logger.warning("kanban: spend review route %s is not the subscription judge; escalating", route)
+    try:
+        if (route.get("billing_group") != "subscription"
+                or route.get("requested_class") != ROUTE_CLASS.removeprefix("class:")):
+            raise ModelRoutingError("not a subscription route of the judge class")
+        verify_selected_route(route.get("model"), route.get("provider"), route, managed["config"])
+    except ModelRoutingError as exc:
+        logger.warning("kanban: spend review route %s is not an eligible subscription route (%s); escalating",
+                       route, exc)
         return None
     return parse(response.choices[0].message.content)
 
