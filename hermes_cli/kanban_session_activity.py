@@ -155,7 +155,14 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
     """
     ph = ",".join("?" for _ in statuses)
     cols = table_columns(conn, "tasks")
-    conn.create_function("kanban_open_ask", 3, card_is_open_human_ask, deterministic=True)
+    # Re-registering an unchanged UDF fails if SQLite still has an active statement.
+    # Retained managed connections carry their own callback identity, never a global id cache.
+    if getattr(conn, "_kanban_open_ask", None) is not card_is_open_human_ask:
+        conn.create_function("kanban_open_ask", 3, card_is_open_human_ask, deterministic=True)
+        try:
+            conn._kanban_open_ask = card_is_open_human_ask
+        except AttributeError:  # Plain third-party sqlite connections cannot retain attributes.
+            pass
     evidence = "t.human_request" if "human_request" in cols else "NULL"
     kind = "t.block_kind" if "block_kind" in cols else "NULL"
     human = f"kanban_open_ask(t.status, {kind}, {evidence})"
