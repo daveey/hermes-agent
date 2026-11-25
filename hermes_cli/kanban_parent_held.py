@@ -50,6 +50,7 @@ def _pending(conn, child):
 def sweep(conn) -> None:
     """Canonical-home publication before capacity admission; unchanged ticks are read-only."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
     from hermes_cli.kanban_hold_notices import bind, creator
     from hermes_cli.kanban_wake_check import foreign_ids
     copies = foreign_ids(conn)
@@ -68,6 +69,8 @@ def sweep(conn) -> None:
                     bind(conn, child)
                     kb._append_event(conn, child, 'parent_held', signal)
                     creator(conn, child, 'parent:' + signal['revision'], text(signal))
+        except DispatchWriteContended:
+            raise
         except Exception:  # health: allow BLE001 -- rollback this advisory and retry; never satisfy its edge
             kb._log.warning('kanban: parent-held publication failed for %s', child, exc_info=True)
 

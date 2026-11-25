@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
 
 PREFIX = 'scope-renewal-loop:'
 THRESHOLD = 5
@@ -66,5 +67,7 @@ def sweep(conn):
             continue
         try:
             _file(conn, tid)
+        except DispatchWriteContended:
+            raise
         except Exception:  # health: allow BLE001 -- rollback this incident and preserve unrelated upkeep
             kb._log.warning('kanban: scope renewal alarm failed for %s', tid, exc_info=True)

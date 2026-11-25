@@ -1,6 +1,7 @@
 """Own-hold decision and provider upkeep before dispatcher capacity admission. [daveey]"""
 from hermes_cli import kanban_db as kb
 from hermes_cli import loop_accounting as la
+from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
 
 
 def run(conn, result, *, board, dry_run):
@@ -18,5 +19,7 @@ def run(conn, result, *, board, dry_run):
     from hermes_cli import kanban_db_dispatch_quota as quota
     try:
         result.quota_block_released = la.timed('dispatch.release_recovered_quota_blocks', quota.release_recovered_quota_blocks, conn)
+    except DispatchWriteContended:
+        raise
     except Exception:  # health: allow BLE001 -- retain existing best-effort provider maintenance
         kb._log.warning('kanban: releasing recovered quota-wall blocks failed', exc_info=True)
