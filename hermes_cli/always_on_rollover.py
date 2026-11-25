@@ -48,7 +48,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -539,21 +539,9 @@ class Roller:
 
     # -- probes --
     def _http_get(self, port: int, path: str, timeout: float) -> tuple[Optional[int], float, Optional[dict]]:
-        started = time.monotonic()
-        request = urllib.request.Request(f"http://127.0.0.1:{int(port)}{path}",
-                                         headers={"X-Hermes-Session-Token": self.token})
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                body = response.read()
-                status = response.status
-        except urllib.error.HTTPError as exc:
-            return exc.code, time.monotonic() - started, None
-        except (OSError, ValueError, http.client.HTTPException):
-            return None, time.monotonic() - started, None
-        parsed = None
-        with contextlib.suppress(ValueError):
-            parsed = json.loads(body) if body[:1] in (b"{", b"[") else None
-        return status, time.monotonic() - started, parsed if isinstance(parsed, dict) else None
+        from hermes_cli.always_on_http import get_json
+
+        return get_json(port, path, self.token, timeout)
 
     def _http_post(self, port: int, path: str, payload: dict) -> Optional[dict]:
         request = urllib.request.Request(f"http://127.0.0.1:{int(port)}{path}", method="POST",
@@ -567,16 +555,16 @@ class Roller:
             return None
         return parsed if isinstance(parsed, dict) else None
 
-    def unit_active(self, port: int) -> bool:
+    def unit_active(self, port: int, timeout: float = 15) -> bool:
         try:
-            state = (self.systemctl("is-active", backend_unit(port), timeout=15).stdout or "").strip()
+            state = (self.systemctl("is-active", backend_unit(port), timeout=timeout).stdout or "").strip()
         except (OSError, subprocess.SubprocessError):
             return False
         return state in ("active", "activating", "reloading")
 
-    def unit_pid(self, port: int) -> int:
+    def unit_pid(self, port: int, timeout: float = 15) -> int:
         with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError):
-            out = self.systemctl("show", "-p", "MainPID", "--value", backend_unit(port), timeout=15).stdout
+            out = self.systemctl("show", "-p", "MainPID", "--value", backend_unit(port), timeout=timeout).stdout
             return int((out or "0").strip() or 0)
         return 0
 
@@ -672,23 +660,52 @@ class Roller:
         log(f"roll ({reason}): {'adopting' if adopted else 'starting'} backend :{port}"
             f" (active :{active_port or '-'}, HEAD {(head or '?')[:10]})")
         if active_port is None:
-            write_active(port, home=self.home, reason=reason)  # nothing serves: point the proxy at it now
+            write_active(port, home=self.home, reason=reason, pendingPromotion=True)  # initial clients may connect
         else:
-            write_active(active_port, warming=[port], home=self.home, reason=reason)
+            write_active(active_port, warming=[port], home=self.home, reason=reason,
+                         pendingPromotion=bool(record and record.get("pendingPromotion")))
+        deadline = self.clock() + self.boot_timeout_s
         if not adopted:
             with contextlib.suppress(OSError, subprocess.SubprocessError):
                 self.systemctl("reset-failed", backend_unit(port), timeout=15)
             started = self.systemctl("start", "--no-block", backend_unit(port), timeout=30)
             if started.returncode != 0:
                 log(f"roll: could not start {backend_unit(port)}: {(started.stderr or '').strip()[-200:]}")
-                self._abandon(port, active_port)
+                self._abandon(port, active_port, may_have_served=adopted or active_port is None)
                 return False
-        body = self._await_health(port)
+        body = self._await_health(port, deadline=deadline)
         if body is None:
             log(f"roll: backend :{port} did not answer within {self.boot_timeout_s:.0f}s; keeping"
                 f" :{active_port or '-'}")
-            self._abandon(port, active_port)
+            self._abandon(port, active_port, may_have_served=adopted or active_port is None)
             return False
+        if body.get("sessions_early_owner") is True:
+            from hermes_cli.always_on_sessions import await_sessions, incarnation, PROBE_S
+
+            before = incarnation(self, port, deadline)
+            if before is None or not await_sessions(self, port, deadline):
+                log(f"roll: backend :{port} canonical sessions unavailable; keeping :{active_port or '-'}")
+                self._abandon(port, active_port, may_have_served=adopted or active_port is None)
+                return False
+            after = incarnation(self, port, deadline)
+            left = deadline - self.clock()
+            status, _, final = self.get(port, "/api/health", min(PROBE_S, left)) if left > 0 else (None, 0, None)
+            if (after != before or status != 200 or not final or final.get("ok") is not True
+                    or final.get("sessions_early_owner") is not True or final.get("commit") != body.get("commit")
+                    or self.clock() >= deadline or self.admission_deferred(reason) or self.update_in_progress()):
+                self._abandon(port, active_port, may_have_served=adopted or active_port is None)
+                return False
+            write_active(port, home=self.home, pid=before[0], commit=final.get("commit") or "", reason=reason)
+            log(f"roll: switched native sessions to :{port}; broad warming follows synchronously")
+            try:
+                warm_deadline = self.clock() + self.warm_cap_s
+                paths = self.replay_paths(record.get("pid") if record else None)
+                paths += [p for p in self.board_paths(port, deadline=warm_deadline) if p not in paths]
+                warm = self.warm(port, paths, deadline=warm_deadline)
+                log(f"roll: native :{port} warm {warm}")
+            except Exception:  # health: allow BLE001 -- post-publication best effort; never abandon an advertised PID
+                log(f"roll: native :{port} warm failed:\n{traceback.format_exc()}")
+            return True
         paths = self.replay_paths(record.get("pid") if record else None)
         paths += [p for p in self.board_paths(port) if p not in paths]
         warm = self.warm(port, paths)
@@ -703,28 +720,37 @@ class Roller:
             f" :{active_port or '-'} retires when idle")
         return True
 
-    def _abandon(self, port: int, active_port: Optional[int]) -> None:
+    def _abandon(self, port: int, active_port: Optional[int], *, may_have_served: bool = False) -> None:
         if active_port is not None:
-            write_active(active_port, home=self.home)
+            record = read_active(self.home)
+            write_active(active_port, home=self.home,
+                         pendingPromotion=bool(record and record.get("pendingPromotion")))
+        if may_have_served:
+            return  # first-boot routing/adoption may hold clients; idle supervision owns retirement
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)  # never served a client
 
-    def _await_health(self, port: int) -> Optional[dict]:
-        deadline = self.clock() + self.boot_timeout_s
+    def _await_health(self, port: int, *, deadline: Optional[float] = None) -> Optional[dict]:
+        deadline = self.clock() + self.boot_timeout_s if deadline is None else deadline
+        timeout = .25  # original legacy allowance follows a missed fast listener probe
         while self.clock() < deadline:
-            body = self.health(port)
-            if body is not None:
+            status, _, body = self.get(port, "/api/health", min(timeout, deadline - self.clock()))
+            if status == 200 and body and body.get("ok"):
                 return body
-            self.sleep(1.0)
+            timeout = 10.0
+            self.sleep(max(0, min(.05, deadline - self.clock())))
         return None
 
     # -- warming --
-    def board_paths(self, port: int) -> list[str]:
+    def board_paths(self, port: int, *, deadline: Optional[float] = None) -> list[str]:
         """GET /board for every unarchived board the successor lists. Desktop reads the rarely-polled boards
         on reconnect, and board reads share 2 admission slots, so one cold board queues the warm ones behind
         its first read (live 18:41Z: board=default waited 18-22 s). Best effort: no list, no extra paths."""
+        timeout = WARM_REQUEST_TIMEOUT_S if deadline is None else min(WARM_REQUEST_TIMEOUT_S, deadline - self.clock())
+        if timeout <= 0:
+            return []
         try:
-            status, _elapsed, body = self.get(port, "/api/plugins/kanban/boards", WARM_REQUEST_TIMEOUT_S)
+            status, _elapsed, body = self.get(port, "/api/plugins/kanban/boards", timeout)
         except Exception:  # health: allow BLE001 -- warming is best effort: no list, no extra paths
             return []
         if status != 200 or not isinstance(body, dict) or not isinstance(body.get("boards"), list):
@@ -764,27 +790,13 @@ class Roller:
                 paths.append(url)
         return paths
 
-    def warm(self, port: int, paths: list[str]) -> dict:
+    def warm(self, port: int, paths: list[str], *, deadline: Optional[float] = None) -> dict:
         """Two rounds of the paths, concurrently, inside ``warm_cap_s``: the first pays the cold caches, the
         second shows what Desktop will see. Returns a summary for the log."""
-        deadline = self.clock() + self.warm_cap_s
-        summary: dict = {"paths": len(paths)}
-        with ThreadPoolExecutor(max_workers=WARM_WORKERS) as pool:
-            for round_no in (1, 2):
-                left = deadline - self.clock()
-                if left <= 0:
-                    summary[f"round{round_no}"] = "skipped (cap)"
-                    break
-                timeout = min(WARM_REQUEST_TIMEOUT_S, left)
-                futures = [pool.submit(self.get, port, path, timeout) for path in paths]
-                results = []
-                for future in futures:
-                    with contextlib.suppress(Exception):
-                        results.append(future.result(timeout=max(0.1, deadline - self.clock())))
-                times = sorted(elapsed for _status, elapsed, _body in results)
-                summary[f"round{round_no}"] = {"done": len(results), "max_s": round(times[-1], 2) if times else None,
-                                               "errors": sum(1 for status, *_ in results if status != 200)}
-        return summary
+        from hermes_cli.always_on_warm import warm
+
+        deadline = self.clock() + self.warm_cap_s if deadline is None else deadline
+        return warm(self, port, paths, deadline, workers=WARM_WORKERS, request_timeout=WARM_REQUEST_TIMEOUT_S)
 
     # -- supervision --
     def drift(self) -> Optional[str]:
@@ -797,6 +809,8 @@ class Roller:
             return f"active backend :{port} is not running"
         if self.update_in_progress():
             return None
+        if record.get("pendingPromotion"):
+            return f"active backend :{port} promotion incomplete"
         body = self.health(port)
         if body is None:
             # Running but not answering (a starved threadpool, 2026-11-21): every Desktop call through the proxy

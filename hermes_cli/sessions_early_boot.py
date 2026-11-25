@@ -25,6 +25,13 @@ class EarlySessions:
             self.closed = True  # failed drain retains custody for the outer retry
 
 
+def adopted_early_owner(state):
+    """Startup policy only, independent of capture readiness or environment flags."""
+    owner = getattr(state, 'early_sessions_owner', None)
+    return (isinstance(owner, EarlySessions) and owner.adopted and not owner.closed
+            and getattr(state, 'sessions_facts', None) is owner.runtime)
+
+
 @contextmanager
 def early_sessions(*, headless, isolated):
     # Preserve legacy/embedded/non-Linux ordering and the supported rollback.

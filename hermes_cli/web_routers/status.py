@@ -180,9 +180,12 @@ async def get_health():
     ``web_server`` import): Desktop refuses to attach to a backend whose commit differs from
     its checkout, so a serve that outlived ``hermes update`` is never re-adopted.
     """
+    from hermes_cli.sessions_early_boot import adopted_early_owner
+
     info = get_version_info()
     return {"ok": True, "version": info.base_version, "displayVersion": info.display_version,
             "commit": info.commit,
+            "sessions_early_owner": adopted_early_owner(app.state),
             "auth_required": bool(getattr(app.state, "auth_required", False)),
             # Per-lane thread counters (counts only); in-memory, so this route still never waits. [daveey]
             "thread_lanes": _lane_stats()}
