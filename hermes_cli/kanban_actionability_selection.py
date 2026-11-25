@@ -34,5 +34,13 @@ def select(status, events, *, order_key, episode=None):
         # An unblock is a todo source only when parents re-gated it there; a release to ready is not.
         return status != 'todo' or event['kind'] != 'unblocked' or (_data(event) or {}).get('status') == 'todo'
 
+    if status == 'running' and not episode:
+        # The owning run's stamped dependency handoff (link before park) outranks its claim. A later
+        # claim, or a later unstamped edge change, returns the row to the claim source.
+        edges = [e for e in events if e['kind'] in ('claimed', 'linked', 'unlinked')]
+        last = max(edges, key=order_key) if edges else None
+        intent = (_data(last) or {}).get('actionability_intent') if last and last['kind'] != 'claimed' else None
+        if isinstance(intent, dict) and intent.get('status') == 'running':
+            return last
     candidates = [e for e in events if e.get('uid') == episode] if episode else [e for e in events if matches(e)]
     return max(candidates, key=order_key) if candidates else None

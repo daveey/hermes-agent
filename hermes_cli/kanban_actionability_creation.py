@@ -29,7 +29,11 @@ def intent_for(task, kind, payload, *, now):
     todo = _todo_entry(kind, payload)
     if not timed and kind != 'blocked' and not todo:
         return None
-    status = 'scheduled' if timed else ('todo' if todo or payload.get('kind') == 'assignment' else 'blocked')
+    # link_tasks admits an edge on a running child only from its owning run (dependency handoff
+    # before the park): that edge is a dependency wait with its own clock, never an exemption.
+    handoff = kind in ('linked', 'unlinked') and task.get('status') == 'running'
+    status = 'scheduled' if timed else ('running' if handoff else (
+        'todo' if todo or payload.get('kind') == 'assignment' else 'blocked'))
     if task.get('status') != status:
         return None
     wake = positive_time(payload.get('wake_at')) if timed else None
@@ -71,8 +75,8 @@ def _carried(conn, task_id, task):
     events = [dict(r) for r in conn.execute(
         'SELECT * FROM task_events WHERE task_id=? ORDER BY id', (task_id,))]
     key = lambda e: (e['created_at'], e['id'])  # the census source order
-    source = select('todo', events, order_key=key)
-    if source is None or any(e['kind'] in EPISODE_EXITS and key(e) > key(source) for e in events):
+    source = select(task['status'], events, order_key=key)
+    if source is None or source['kind'] == 'claimed' or any(e['kind'] in EPISODE_EXITS and key(e) > key(source) for e in events):
         return None
     try:
         data = json.loads(source['payload'] or 'null')
@@ -82,7 +86,7 @@ def _carried(conn, task_id, task):
         return None
     intent = validated_intent(task, {'kind': source['kind'], 'created_at': source['created_at'], 'data': data})
     # Provenance: the synced event uid, or the local event id on an unsynced board.
-    return (intent['deadline_at'], source.get('uid') or str(source['id'])) if intent and intent['status'] == 'todo' else None
+    return (intent['deadline_at'], source.get('uid') or str(source['id'])) if intent and intent['status'] == task['status'] else None
 
 
 def stamp(conn, task_id, kind, payload, *, now):
@@ -91,8 +95,10 @@ def stamp(conn, task_id, kind, payload, *, now):
         return payload
     original = payload
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
-    if kind in ('linked', 'unlinked', 'unblocked') and (row is None or row['status'] != 'todo' or not isinstance(payload, dict)):
-        return payload  # only a todo entry; every other status keeps its own source
+    handoff = row is not None and row['status'] == 'running' and kind in ('linked', 'unlinked')
+    if kind in ('linked', 'unlinked', 'unblocked') and (
+            row is None or not (row['status'] == 'todo' or handoff) or not isinstance(payload, dict)):
+        return payload  # a todo entry or the owning run's handoff edge; every other status keeps its own source
     if isinstance(payload, dict):
         from hermes_cli.kanban_db_sync import run_uid
         from hermes_cli.kanban_actionability_parents import snapshot
@@ -105,6 +111,8 @@ def stamp(conn, task_id, kind, payload, *, now):
         carried = _carried(conn, task_id, dict(row)) if kind in ('linked', 'unlinked') and row else None
         if carried:
             payload['actionability_carried_deadline'], payload['actionability_carried_from'] = carried
+        elif handoff and kind == 'unlinked':
+            return original  # unlink has no owning-run check: it keeps a handoff clock, never starts one
     intent = intent_for(dict(row), kind, payload, now=now) if row else None
     return {**payload, 'actionability_intent': intent} if intent is not None else original
 
