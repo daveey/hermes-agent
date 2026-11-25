@@ -1,6 +1,7 @@
 """Unrelated generic reader retention cannot cool serialized waiting evidence."""
 import contextlib
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -101,6 +102,43 @@ def test_domain_body_sqlite_error_retires_entry(board):
         original.execute('SELECT 1')
     with domain.reading(board) as current:
         assert current is not original
+        assert current.execute('SELECT v FROM t').fetchone() == (1,)
+
+
+def test_domain_budget_restore_failure_retires_entry(board):
+    with domain.reading(board, busy_budget=0) as original:
+        original.close()  # Restore's PRAGMA must now fail, not the caller's body.
+    assert not domain._cache
+    with domain.reading(board, busy_budget=0) as current:
+        assert current is not original
+        assert current.execute('SELECT v FROM t').fetchone() == (1,)
+
+
+def test_domain_registered_generation_recovery_retires_foreign_reader(board):
+    connections, failures = [], []
+
+    def opener():
+        try:
+            with domain.reading(board) as conn:
+                connections.append(conn)
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=opener)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert not failures
+    conn, = connections
+    assert conn._hermes_generation_thread != threading.get_ident()
+    conn._hermes_generation_shm = (-1, -1)
+    generation.recover(board)  # Use the registry, never domain.evict directly.
+    assert not domain._cache
+    assert not safe.has_live_connection(board)
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute('SELECT 1')
+    with domain.reading(board) as current:
+        assert current is not conn
         assert current.execute('SELECT v FROM t').fetchone() == (1,)
 
 
