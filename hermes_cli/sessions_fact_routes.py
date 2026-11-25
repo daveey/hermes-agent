@@ -150,8 +150,8 @@ class SessionsFactRoutes:
             self._condition.notify_all()
 
     def response(self, name, selector):
-        # The legacy reader's own span never runs in facts mode. Account the read that
-        # replaced it, or a facts-served route looks like zero requests and zero CPU.
+        # The legacy reader's span never runs in facts mode: account the read replacing it.
+        # `runs` counts reads, not HTTP requests: a cold request reads twice (one fallback).
         with _la.pass_(f"route/profiles.{name}.facts") as accounted:
             touch = getattr(self._handle, 'touch', None)
             if touch is not None:

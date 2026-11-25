@@ -156,9 +156,27 @@ def test_child_cpu_is_accounted_outside_the_owner_thread():
     assert owner_accounted() - owner_before < .1
 
 
+def test_reaped_grandchild_cpu_is_accounted():
+    # The capture child may fork helpers (git); CPU of those it reaped is the child's cost too.
+    grandchild = ('import time\nend = time.process_time() + .4\n'
+                  'while time.process_time() < end:\n    pass\n')
+    code = ('import subprocess, sys\nsys.stdin.buffer.read()\n'
+            f'subprocess.run([sys.executable, "-I", "-c", {grandchild!r}], check=True)\n' + frame())
+    before = _capture_child_stat()
+    capture = CaptureProcess(command=command(code))
+    try:
+        assert json.loads(capture('sessions', {}))['sessions'][0]['id'] == 'real-row'
+    finally:
+        capture.close()
+    after = _capture_child_stat()
+    assert after['errors'] == before.get('errors', 0)
+    assert after['cpu_s'] - before.get('cpu_s', 0) >= .35
+
+
 def test_failed_child_cpu_is_accounted_as_an_error():
     before = _capture_child_stat()
-    capture = CaptureProcess(seconds=.5, command=command(_burn(30, '')))
+    # A 2 s budget: on a loaded runner a 0.5 s child can get under 0.1 CPU-s.
+    capture = CaptureProcess(seconds=2, command=command(_burn(30, '')))
     with pytest.raises(CaptureUnavailable) as error:
         capture('sessions', {})
     assert error.value.reason == 'timeout'
