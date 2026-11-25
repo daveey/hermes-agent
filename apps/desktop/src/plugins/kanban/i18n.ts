@@ -68,6 +68,7 @@ type KanbanMessages = {
   unassignAction: string
   archive: string
   clearSelection: string
+  clearCardFilter: string
   refused: string
   bulkFailed: (failed: number, total: number, err: string) => string
   titlePlaceholderTriage: string
@@ -322,6 +323,7 @@ export const en: KanbanMessages = {
   unassignAction: 'Unassign',
   archive: 'Archive',
   clearSelection: 'Clear selection (Esc)',
+  clearCardFilter: 'Clear card filter',
   refused: 'refused',
   bulkFailed: (failed, total, err) => `${failed} of ${total} failed — ${err}. Failed cards stay selected.`,
   titlePlaceholderTriage: 'Rough idea — a specifier will flesh it out',
@@ -574,6 +576,7 @@ const ja: KanbanMessages = {
   unassignAction: '割り当て解除',
   archive: 'アーカイブ',
   clearSelection: '選択をクリア（Esc）',
+  clearCardFilter: 'カードの絞り込みを解除',
   refused: '拒否されました',
   bulkFailed: (failed, total, err) => `${total} 件中 ${failed} 件が失敗 — ${err}。失敗したカードは選択されたままです。`,
   titlePlaceholderTriage: '大まかなアイデア — スペシファイアが具体化します',
@@ -825,6 +828,7 @@ const zh: KanbanMessages = {
   unassignAction: '取消分配',
   archive: '归档',
   clearSelection: '清除选择（Esc）',
+  clearCardFilter: '清除卡片筛选',
   refused: '被拒绝',
   bulkFailed: (failed, total, err) => `${total} 个中有 ${failed} 个失败 — ${err}。失败的卡片仍保持选中。`,
   titlePlaceholderTriage: '大致想法 — 细化代理会补全',
@@ -1073,6 +1077,7 @@ const zhHant: KanbanMessages = {
   unassignAction: '取消指派',
   archive: '封存',
   clearSelection: '清除選取（Esc）',
+  clearCardFilter: '清除卡片篩選',
   refused: '被拒絕',
   bulkFailed: (failed, total, err) => `${total} 個中有 ${failed} 個失敗 — ${err}。失敗的卡片仍保持選取。`,
   titlePlaceholderTriage: '大致想法 — 細化代理會補全',

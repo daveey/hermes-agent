@@ -41,7 +41,7 @@ import { $archivedSessions } from '@/store/sidebar-archive'
 import { SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
 import { makeSessionInfo } from '@/test/session-info'
 
-import { type AppView, ROUTES_AREA, SIDEBAR_NAV_AREA } from '../../routes'
+import { type AppView, ROUTES_AREA, SIDEBAR_NAV_AREA, SIDEBAR_SECTIONS_AREA, SIDEBAR_SECTIONS_TOP_AREA } from '../../routes'
 
 import { $gatewayGroupCollapsed } from './gateway-group-preferences'
 
@@ -57,6 +57,22 @@ vi.mock('@/api/sessions', async importOriginal => ({
 
 beforeEach(() => {
   listAllProfileSessions.mockReset().mockResolvedValue({ sessions: [], total: 0 })
+})
+
+it('mounts the top SDK section before real Pinned and leaves legacy sections below it', () => {
+  const top = registry.register({ area: SIDEBAR_SECTIONS_TOP_AREA, id: 'lanes-test', render: () => <div>LANES fixture</div> })
+  const legacy = registry.register({ area: SIDEBAR_SECTIONS_AREA, id: 'legacy-test', render: () => <div>Legacy fixture</div> })
+
+  try {
+    $sessions.set(sessionRows)
+    $pinnedSessionIds.set(['tile-one'])
+    renderSidebar('/chat', 'chat')
+    const lanes = screen.getByText('LANES fixture')
+    const pinned = screen.getByText('Pinned')
+    const old = screen.getByText('Legacy fixture')
+    expect(lanes.compareDocumentPosition(pinned) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(pinned.compareDocumentPosition(old) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  } finally { top(); legacy() }
 })
 
 const noop = () => {}

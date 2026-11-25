@@ -21,8 +21,8 @@ import { SidebarRowBody, SidebarRowLabel, SidebarRowLead, SidebarRowShell, Sideb
 import { SidebarLoadMoreRow } from './load-more-row'
 
 /** Renders every `sidebar.sections` contribution in order. */
-export function SidebarContributedSections() {
-  const items = useContributions(SIDEBAR_SECTIONS_AREA)
+export function SidebarContributedSections({ area = SIDEBAR_SECTIONS_AREA }: { area?: string }) {
+  const items = useContributions(area)
 
   if (!items.length) {
     return null

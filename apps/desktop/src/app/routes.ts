@@ -146,6 +146,8 @@ export interface SidebarNavContribution {
 // Return null to hide the section entirely (e.g. nothing blocked).
 
 export const SIDEBAR_SECTIONS_AREA = 'sidebar.sections'
+/** Additive mount above Pinned; existing sections retain their placement. */
+export const SIDEBAR_SECTIONS_TOP_AREA = 'sidebar.sections.top'
 
 // ── Contributed profile-group header — the `sidebar.profileGroup.header` area ─
 // A RENDER contribution mounted at the top of each gateway/profile group in the

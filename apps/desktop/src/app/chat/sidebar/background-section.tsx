@@ -1,10 +1,12 @@
 import { useStore } from '@nanostores/react'
 import type { ComponentProps } from 'react'
 
+import { SIDEBAR_SECTIONS_TOP_AREA } from '@/app/routes'
 import { useI18n } from '@/i18n'
 import { Codecs, persistentAtom } from '@/lib/persisted'
 
 import { CardCountsContext } from './card-counts-context'
+import { SidebarContributedSections } from './contributed-sections'
 import { ownerChatPolicy } from './owner-chats'
 import { aggregateCardColours, CardSquares } from './session-row-card-squares'
 import { SidebarSessionsSection } from './sessions-section'
@@ -20,6 +22,7 @@ export function SidebarPinnedAndBackgroundSections(props: ComponentProps<typeof 
 
   return (
     <>
+      <SidebarContributedSections area={SIDEBAR_SECTIONS_TOP_AREA} />
       <SidebarSessionsSection {...props} sessions={pinned} sortable={pinned.length > 1} />
       {background.length > 0 && (
         <CardCountsContext value>

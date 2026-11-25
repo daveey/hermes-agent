@@ -34,6 +34,7 @@ import {
 import { $boardSlug, bindApi, boardPoll, boardPollMs, fetchBoard, rememberTaskOwner, useKanbanScope } from './api'
 import { $blockedSectionOpen, BlockedTasksSection } from './blocked-section'
 import { KanbanBoardPage } from './board'
+import { $cardSet, CardSetBoard, installCardSetHook } from './card-set'
 import { chipClickOpensBoard } from './chip-click'
 import { KANBAN_LOCALES } from './i18n'
 import { installOpenTaskHook } from './open-task'
@@ -111,7 +112,10 @@ const plugin: HermesPlugin = {
     )
 
     // [daveey] window.__hermesKanbanOpenTask(id, board?, gateway?) for disk plugins.
-    ctx.onDispose(installOpenTaskHook({ navigate: path => host.navigate(path), rememberOwner: rememberTaskOwner }))
+    ctx.onDispose(installOpenTaskHook({ navigate: path => { $cardSet.set(null); host.navigate(path) }, rememberOwner: rememberTaskOwner }))
+    ctx.onDispose(installCardSetHook({ navigate: path => host.navigate(path) }))
+    ctx.onDispose(() => $cardSet.set(null))
+    const BoardPage = () => useValue($cardSet) ? <CardSetBoard rest={ctx.rest} /> : <KanbanBoardPage />
 
     $blockedSectionOpen.set(ctx.storage.get('blockedSectionOpen', true))
     ctx.onDispose($blockedSectionOpen.listen(value => ctx.storage.set('blockedSectionOpen', value)))
@@ -138,7 +142,7 @@ const plugin: HermesPlugin = {
         id: 'page',
         area: ROUTES_AREA,
         data: { path: '/kanban' } satisfies RouteContribution,
-        render: () => <KanbanBoardPage />
+        render: () => <BoardPage />
       },
       {
         id: 'blocked',
