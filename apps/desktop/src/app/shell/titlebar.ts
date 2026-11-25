@@ -81,6 +81,21 @@ export const titlebarButtonClass =
 export const titlebarToolClusterClass =
   'fixed z-70 flex flex-row items-center pointer-events-auto select-none [-webkit-app-region:no-drag]'
 
+/** Most titlebar cells one tool may take (a wide plugin chip); larger spans are clamped. */
+export const TITLEBAR_TOOL_MAX_SPAN = 8
+
+/** Titlebar cells one tool takes: its `span` (whole cells, 1..TITLEBAR_TOOL_MAX_SPAN), else 1. */
+export function titlebarToolSpan(tool: { span?: number }): number {
+  const span = Math.floor(Number(tool.span))
+
+  return Number.isFinite(span) ? Math.min(TITLEBAR_TOOL_MAX_SPAN, Math.max(1, span)) : 1
+}
+
+/** Cells a row of tools takes, so the header padding reserves a wide tool's real width. */
+export function titlebarToolCells(tools: readonly { span?: number }[]): number {
+  return tools.reduce((cells, tool) => cells + titlebarToolSpan(tool), 0)
+}
+
 /** Width reserved for N abutting titlebar tool buttons. */
 export function titlebarToolsWidthCss(toolCount: number): string {
   return `calc(${toolCount} * var(--titlebar-control-size))`

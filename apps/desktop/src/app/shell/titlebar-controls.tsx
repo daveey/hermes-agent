@@ -43,7 +43,9 @@ import {
   TITLEBAR_ICON_BADGE_SCALE,
   titlebarButtonClass,
   titlebarIconSizeCss,
-  titlebarToolClusterClass
+  titlebarToolClusterClass,
+  titlebarToolSpan,
+  titlebarToolsWidthCss
 } from './titlebar'
 import { TitlebarIcon } from './titlebar-icon'
 
@@ -64,6 +66,9 @@ export interface TitlebarTool extends Tiered {
   badge?: number
   title?: string
   to?: string
+  /** Titlebar cells (of `--titlebar-control-size`) this tool is wide; default 1. A plugin chip with text uses
+   *  more, and the header padding reserves that width. */
+  span?: number
   /** Durable `data-tour` handle. Tools are addressed by icon and translated
    *  label otherwise, and neither survives a theme or a locale change. */
   tour?: string
@@ -410,6 +415,8 @@ function TitlebarToolButton({ navigate, tool }: { navigate: ReturnType<typeof us
   // icon itself (e.g. the mute/unmute glyph). aria-pressed still carries it
   // for a11y.
   const className = cn(titlebarButtonClass, 'bg-transparent select-none', tool.className)
+  const cells = titlebarToolSpan(tool)
+  const style = cells > 1 ? { width: titlebarToolsWidthCss(cells) } : undefined
 
   const tooltipLabel = tool.actionId ? (
     <TipKeybindLabel actionId={tool.actionId} text={tool.title ?? tool.label} />
@@ -420,7 +427,7 @@ function TitlebarToolButton({ navigate, tool }: { navigate: ReturnType<typeof us
   if (tool.href) {
     return (
       <Tip label={tooltipLabel} placement="toolbar">
-        <Button asChild className={className} size="icon-titlebar" variant="ghost">
+        <Button asChild className={className} size="icon-titlebar" style={style} variant="ghost">
           <a
             aria-label={tool.label}
             data-tour={tool.tour}
@@ -458,6 +465,7 @@ function TitlebarToolButton({ navigate, tool }: { navigate: ReturnType<typeof us
         }}
         onPointerDown={event => event.stopPropagation()}
         size="icon-titlebar"
+        style={style}
         type="button"
         variant="ghost"
       >

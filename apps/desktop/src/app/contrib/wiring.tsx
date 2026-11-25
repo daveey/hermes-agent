@@ -153,6 +153,7 @@ import {
   TITLEBAR_CHROME_CHANGED_EVENT,
   titlebarControlsPosition,
   titlebarControlsYNudge,
+  titlebarToolCells,
   titlebarToolsRightCss,
   titlebarToolsWidthCss,
   TOUCH_TITLEBAR_HEIGHT
@@ -1259,8 +1260,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const appActionsSide = useStore($titlebarAppActionsSide)
   const interfaceMode = useStore($interfaceMode)
   const shownTool = shownInMode(interfaceMode)
-  const paneToolCount = rightTitlebarTools.filter(tool => !tool.hidden && shownTool(tool)).length
-  const leftExtraCount = leftTitlebarTools.filter(tool => !tool.hidden && shownTool(tool)).length
+  const paneToolCount = titlebarToolCells(rightTitlebarTools.filter(tool => !tool.hidden && shownTool(tool)))
+  const leftExtraCount = titlebarToolCells(leftTitlebarTools.filter(tool => !tool.hidden && shownTool(tool)))
   const clusters = titlebarAppActionsClusterCounts(appActionsSide, leftExtraCount, 0, interfaceMode)
   const systemToolsWidth = titlebarToolsWidthCss(clusters.right)
 
