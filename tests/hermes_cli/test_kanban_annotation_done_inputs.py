@@ -127,6 +127,30 @@ def test_portable_declarations_preserve_all_data_and_copy_mutable_values(value):
         d()
 
 
+@pytest.mark.parametrize('before,after', [(True, 1), (False, 0), (1, 1.0), (0.0, -0.0)])
+def test_key_preserves_scalar_types(before, after):
+    box = [before]
+    d = ksa.register_done_check('c', _check, inputs=lambda: {'nested': [box[0]]})
+    try:
+        old = di.key(dict(ksa._done_checks))
+        box[0] = after
+        assert di.key(dict(ksa._done_checks)) != old
+    finally:
+        d()
+
+
+def test_serialization_failure_forces_fresh_key(monkeypatch):
+    d = ksa.register_done_check('c', _check, inputs=list)
+    try:
+        # Exercise the actual serialization failure class, not provider failure.
+        def fail(*args, **kwargs):
+            raise ValueError('cannot encode')
+        monkeypatch.setattr(di.json, 'dumps', fail)
+        assert di.key(dict(ksa._done_checks)) != di.key(dict(ksa._done_checks))
+    finally:
+        d()
+
+
 def test_closure_identity_distinguishes_same_code():
     def make():
         return lambda card: False

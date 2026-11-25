@@ -77,6 +77,31 @@ def test_complete_done_inputs_preserve_stat_tagged_arrays(world, wrap):
         dispose()
 
 
+@pytest.mark.parametrize('before,after', [(True, 1), (False, 0), (1, 1.0)],
+                         ids=['bool-int-true', 'bool-int-false', 'int-float'])
+def test_done_inputs_scalar_types_refresh_real_holder(world, before, after):
+    box = [before]
+
+    def check(card):
+        world.checks += 1
+        return type(box[0]) is type(before)
+
+    dispose = ksa.register_done_check('fixture', check,
+        watch_paths=lambda: [world.declared], next_deadline=lambda: None,
+        inputs=lambda: {'nested': [box[0]]})
+    try:
+        helpers._refresh()
+        assert helpers._published()[10] == {'s1': 1}
+        reads = world.checks
+        box[0] = after
+        world.declared.write_text('changed type')
+        helpers._refresh()
+        assert world.checks > reads
+        assert helpers._published()[10] == {}
+    finally:
+        dispose()
+
+
 def test_missing_revision_forces_fresh_read(world):
     _install(world)
     helpers._refresh()

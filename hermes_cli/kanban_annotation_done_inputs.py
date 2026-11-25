@@ -11,6 +11,7 @@ closure under the same name is undeclared until it declares itself.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from typing import Any
@@ -82,4 +83,10 @@ def key(checks: dict[str, Any]) -> object:
     """Comparable key when every check is explicitly declared and portable, else a fresh unequal object."""
     values, complete = inputs(dict(checks))
     # Code identity alone does not distinguish two closures from the same source: keep the fn objects too.
-    return (tuple(sorted(checks.items(), key=lambda kv: kv[0])), values) if complete else object()
+    # JSON spelling preserves bool/int/float (including signed zero) distinctions
+    # that Python container equality erases; sort object keys for stable snapshots.
+    try:
+        data = json.dumps(values, sort_keys=True, ensure_ascii=True, allow_nan=False) if complete else None
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        return object()
+    return (tuple(sorted(checks.items(), key=lambda kv: kv[0])), data) if complete else object()
