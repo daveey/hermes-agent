@@ -51,7 +51,11 @@ def upload(hub, board: str, uid: str, digest: str, data: bytes) -> dict:
     if len(data) > KANBAN_ATTACHMENT_MAX_BYTES:
         raise ValueError("attachment exceeds size limit")
     body = _request(hub, "PUT", _path(board, uid) + "/blobs/" + digest, data, 4096)
-    return json.loads(body)
+    from hermes_cli.kanban_sync_client import HubError
+    try:
+        return json.loads(body)
+    except (ValueError, RecursionError) as exc:
+        raise HubError(502, "invalid JSON response") from exc
 
 
 def download(hub, board: str, uid: str) -> bytes:

@@ -18,6 +18,12 @@ from tests.hermes_cli.test_kanban_replay_http_session import AckReceiver, servin
 
 live = helpers.live
 
+BAD_REPLIES = [
+    b'{', b'\xff',
+    pytest.param(b'[' * 100000 + b'0' + b']' * 100000, id='depth-limit'),
+    pytest.param(b'9' * 100000, id='integer-limit'),
+]
+
 
 @pytest.mark.parametrize('proxied', [False, True])
 @pytest.mark.parametrize('raw', [b'{', b'\xff', b'{}'])
@@ -40,12 +46,15 @@ def test_response_decode_failure_is_typed_and_not_retried(live, monkeypatch, pro
 
 
 @pytest.mark.parametrize('proxied', [False, True])
-@pytest.mark.parametrize('raw', [b'{', b'\xff'])
-@pytest.mark.parametrize('endpoint', ['capability', 'inspect', 'session'])
+@pytest.mark.parametrize('raw', BAD_REPLIES)
+@pytest.mark.parametrize('endpoint', ['capability', 'inspect', 'session', 'ops', 'ack'])
 def test_strict_raw_reply_preserves_custody_and_other_board_progress(live, tmp_path, monkeypatch,
                                                                    proxied, raw, endpoint):
     monkeypatch.setattr(client.Hub, '_proxied', staticmethod(lambda parts: proxied))
     kb.create_task(live, title='strict raw reply', assignee='worker')
+    if endpoint in ('ops', 'ack'):
+        with kbc.write_txn(live):
+            live.execute("DELETE FROM kanban_sync_outbox WHERE table_name != 'tasks'")
     broken_path = Path(live.execute('PRAGMA database_list').fetchone()[2])
     custody = [row[0] for row in live.execute('SELECT op_id FROM kanban_sync_outbox ORDER BY op_id')]
     healthy_path = tmp_path / 'healthy.db'
@@ -71,19 +80,27 @@ def test_strict_raw_reply_preserves_custody_and_other_board_progress(live, tmp_p
         try:
             results = client.sync_all_once(hub, boards=[('default', broken_path), ('healthy', healthy_path)])
             assert [result.board for result in results] == ['default', 'healthy']
-            assert results[0].error and 'HubError' in results[0].error
-            assert 'invalid JSON response' in results[0].error
+            if endpoint in ('ops', 'ack'):
+                # The next cooperative send can inspect and reconcile the
+                # already-applied mutation. That is success, not a lost fault.
+                assert results[0].error is None
+                assert journal.pending_wire(live) is None
+                assert journal.snapshot(live)['settled'] == '1'
+                assert sum(path.endswith('/replay/ops') for _, path, _, _ in requests) == 1
+            else:
+                assert results[0].error and 'HubError' in results[0].error
+                assert 'invalid JSON response' in results[0].error
+                assert [row[0] for row in live.execute(
+                    'SELECT op_id FROM kanban_sync_outbox ORDER BY op_id')] == custody
             assert results[1].error is None
             assert any('/default/changes?' in path for _, path, _, _ in requests)
             assert any('/healthy/changes?' in path for _, path, _, _ in requests)
-            assert [row[0] for row in live.execute(
-                'SELECT op_id FROM kanban_sync_outbox ORDER BY op_id')] == custody
         finally:
             hub.close()
 
 
 @pytest.mark.parametrize('proxied', [False, True])
-@pytest.mark.parametrize('raw', [b'{', b'\xff'])
+@pytest.mark.parametrize('raw', BAD_REPLIES)
 @pytest.mark.parametrize('endpoint', ['ops', 'ack'])
 def test_strict_mutation_decode_failure_keeps_durable_progress(live, monkeypatch, proxied, raw, endpoint):
     monkeypatch.setattr(client.Hub, '_proxied', staticmethod(lambda parts: proxied))

@@ -452,7 +452,7 @@ class Hub(HubRoutesMixin):
                 raise
             try:
                 res = json.loads(exc.detail)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise exc from None
             if not isinstance(res, dict) or not res.get("reason"):
                 raise

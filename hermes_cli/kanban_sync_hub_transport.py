@@ -11,7 +11,7 @@ def decode_json(raw):
     from hermes_cli.kanban_sync_client import HubError
     try:
         return json.loads(raw or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
         # Do not include raw bytes: replies may carry private Board contents.
         raise HubError(502, 'invalid JSON response') from exc
 

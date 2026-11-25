@@ -20,7 +20,11 @@ from tests.hermes_cli import kanban_sync_support as support
 
 
 @pytest.mark.parametrize('proxied', [False, True])
-@pytest.mark.parametrize('capability', [None, [], 'unsupported', {}, b'{', b'\xff'])
+@pytest.mark.parametrize('capability', [
+    None, [], 'unsupported', {}, b'{', b'\xff',
+    pytest.param(b'[' * 100000 + b'0' + b']' * 100000, id='depth-limit'),
+    pytest.param(b'9' * 100000, id='integer-limit'),
+])
 def test_legacy_malformed_capability_does_not_abort_later_board(tmp_path, monkeypatch, capability, proxied):
     monkeypatch.setattr(client.Hub, '_proxied', staticmethod(lambda parts: proxied))
     home = support.kanban_home(tmp_path, monkeypatch)
