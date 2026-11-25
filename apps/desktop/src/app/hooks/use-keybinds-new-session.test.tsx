@@ -75,6 +75,7 @@ describe('⌘N / ⌘⇧N new session gateway targeting', () => {
     $defaultProfileRoute.set(null)
     $newChatRoute.set(null)
     vi.mocked(ensureGatewayAgent).mockClear()
+    window.history.replaceState(null, '', '/')
   })
 
   it('⌘N starts a new session and switches the gateway to This device', () => {
@@ -91,6 +92,25 @@ describe('⌘N / ⌘⇧N new session gateway targeting', () => {
     expect(event.defaultPrevented).toBe(true)
     expect(deps.startFreshSession).toHaveBeenCalledOnce()
     expect(mocks.selectThisDeviceForNewChat).not.toHaveBeenCalled()
+  })
+
+  it('ordinary peer same-gateway creation does not re-home to local or its boot seed', () => {
+    window.history.replaceState(null, '', '/?peer=1&profile=default&connectionId=boot-owner')
+    pressN(true)
+    expect(deps.startFreshSession).toHaveBeenCalledOnce()
+    expect(mocks.selectThisDeviceForNewChat).not.toHaveBeenCalled()
+    expect(ensureGatewayAgent).not.toHaveBeenCalled()
+    expect($newChatRoute.get()).toBeNull()
+  })
+
+  it('explicit profile-window creation returns to its boot owner rather than local or saved default', () => {
+    window.history.replaceState(null, '', '/?peer=1&profileWindow=1&profile=ai-dev&connectionId=boot-owner')
+    $defaultProfileRoute.set({ connectionId: 'saved-elsewhere', profile: 'default' })
+    pressN(false)
+    expect(deps.startFreshSession).toHaveBeenCalledOnce()
+    expect(mocks.selectThisDeviceForNewChat).not.toHaveBeenCalled()
+    expect($newChatRoute.get()).toEqual({ connectionId: 'boot-owner', profile: 'ai-dev' })
+    expect(ensureGatewayAgent).toHaveBeenCalledWith('boot-owner', 'ai-dev')
   })
 
   // [daveey] A gateway saved with "Use for new sessions" wins over This device.

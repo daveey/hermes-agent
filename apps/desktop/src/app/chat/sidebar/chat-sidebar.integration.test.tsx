@@ -277,6 +277,7 @@ describe('ChatSidebar search disclosure', () => {
     fireEvent.change(input, { target: { value: '   ' } })
     act(() => input.blur())
     expect(search()).toBeNull()
+    expect((await reveal()).value).toBe('')
   })
 
   it('retains a nonempty filter on blur and keeps the existing results section', async () => {
@@ -321,6 +322,24 @@ describe('ChatSidebar search disclosure', () => {
       expect(container.querySelector('[data-tour="sidebar-nav-new-session"]')).toBeNull()
     } finally {
       localStorage.removeItem('sidebar.nav.collapsed')
+    }
+  })
+
+  it('retains only the protected setup row and its spacing when preferences hide every nav id', () => {
+    const dispose = registry.register({
+      area: SIDEBAR_NAV_PREFS_AREA,
+      id: 'hide-all-chrome-test',
+      data: { hide: ['new-session', 'capabilities', 'messaging', 'artifacts', 'cron'] }
+    })
+
+    try {
+      const { container } = renderSidebar('/', 'chat')
+      const capabilities = screen.getByRole('button', { name: 'Capabilities' })
+      expect(capabilities.closest('[data-slot="sidebar-group"]')?.classList.contains('pb-2')).toBe(true)
+      expect(container.querySelectorAll('[data-slot="sidebar-menu-item"]')).toHaveLength(1)
+      expect(screen.queryByRole('button', { name: 'Messaging' })).toBeNull()
+    } finally {
+      dispose()
     }
   })
 

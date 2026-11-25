@@ -1315,12 +1315,9 @@ export function ChatSidebar({
       data-tour="sessions-sidebar"
     >
       <SidebarContent className="gap-0 overflow-hidden bg-transparent px-2.5">
-        <SidebarGroup
-          className={cn(
-            'shrink-0 p-0 pt-[calc(var(--titlebar-height)+0.375rem)]',
-            visibleNavItems.length > 0 && 'pb-2'
-          )}
-        >
+        {/* Capabilities is never hidden by nav preferences, so this group is
+            always populated. Its padding is independent of search disclosure. */}
+        <SidebarGroup className="shrink-0 p-0 pt-[calc(var(--titlebar-height)+0.375rem)] pb-2">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
               {visibleNavItems.map(item => {

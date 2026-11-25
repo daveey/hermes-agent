@@ -138,8 +138,10 @@ async function switchTo(page: Page, label: string): Promise<void> {
   await expectReady(page, label)
 }
 
-async function newSession(page: Page, label: string): Promise<void> {
-  await page.keyboard.press('ControlOrMeta+n')
+async function newSession(page: Page, label: string, profilePinned = false): Promise<void> {
+  // Ordinary peers retain the selected gateway; explicit profile windows use
+  // session.new's boot-owner routing. Neither action stacks a sidebar + tab.
+  await page.keyboard.press(profilePinned ? 'ControlOrMeta+n' : 'ControlOrMeta+Shift+n')
   await expectReady(page, label)
   // Query the menu after the reset as well: the checked connection must agree
   // with the ready statusbar, not merely retain its pre-click text for a frame.
@@ -308,6 +310,6 @@ peerTest('explicit profile window returns to its boot owner on New session', asy
   installErrorBannerGuard(pinned)
   await expectReady(pinned, REMOTE_LABEL)
   await switchTo(pinned, LOCAL_LABEL)
-  await newSession(pinned, REMOTE_LABEL)
+  await newSession(pinned, REMOTE_LABEL, true)
   await expectReady(source, LOCAL_LABEL)
 })

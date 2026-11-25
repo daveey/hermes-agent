@@ -22,13 +22,6 @@ import type { SidebarNavItem } from '../../types'
 // Advanced adds the readouts); the list filters once, nothing is passed down.
 const SIDEBAR_NAV: SidebarNavItem[] = [
   {
-    id: 'new-session',
-    label: '',
-    icon: props => <Codicon name="robot" {...props} />,
-    action: 'new-session',
-    keybindActionId: 'session.new'
-  },
-  {
     id: 'capabilities',
     label: '',
     icon: props => <Codicon name="symbol-misc" {...props} />,
