@@ -40,18 +40,19 @@ class _ReadFaults:
     def __init__(self, monkeypatch, path):
         import utils
         self.path, self.count, self.fail_at, real = str(path), 0, 0, utils.fast_safe_load
+        self.persistent = False
 
         def flaky(stream):
             if getattr(stream, "name", None) == self.path:
                 self.count += 1
-                if self.count == self.fail_at:
+                if self.count == self.fail_at or (self.persistent and self.fail_at and self.count > self.fail_at):
                     raise OSError(errno.EMFILE, "Too many open files")
             return real(stream)
         # Every config read parses through the file config backend, which calls utils.fast_safe_load.
         monkeypatch.setattr(utils, "fast_safe_load", flaky)
 
-    def arm(self, fail_at=0):
-        self.count, self.fail_at = 0, fail_at
+    def arm(self, fail_at=0, *, persistent=False):
+        self.count, self.fail_at, self.persistent = 0, fail_at, persistent
 
 
 def _fresh_process(home, text, *, keep_last_known_good=False):
@@ -142,10 +143,17 @@ def test_transient_read_error_is_not_recorded_as_a_corrupt_config(read, home, mo
     _fresh_process(home, _CONFIG)
     _CONFIG_PARSE_WARNED.clear()
     faults = _ReadFaults(monkeypatch, path)
-    faults.arm(1)
+    # Keep the transient outage active until recovery is explicitly allowed.
+    # A one-shot fault already permits another config reader to clear the shared
+    # failure record before this assertion (the sidebar also reads config).
+    faults.arm(1, persistent=True)
 
-    read()
+    from hermes_cli.config_read_errors import FailedConfigRead
+    assert isinstance(read(), FailedConfigRead)
+    # Force the competing-reader ordering instead of relying on a poller's timing.
+    assert isinstance(read_raw_config(), FailedConfigRead)
     assert get_active_config_parse_failure() is not None  # unreadable right now: the refusal holds
+    faults.arm()
     assert read()["display"]["skin"] == "mono"
 
     assert get_active_config_parse_failure() is None

@@ -16,6 +16,7 @@ from hermes_cli import kanban_session_activity as ksa
 from hermes_cli.annotation_event_loop import run
 from hermes_cli.annotation_file_events import FileEvents
 from tests.hermes_cli import test_kanban_annotation_host as helpers
+from tests.hermes_cli.annotation_holder_fixture import PrivateHolderEvents
 
 
 def _no_confirmations(monkeypatch, delays=()):
@@ -578,6 +579,7 @@ def test_real_projection_idle_and_changed_source(tmp_path, monkeypatch):
     monkeypatch.setattr(ksa, '_done_checks', {})
     monkeypatch.setattr(host, 'core_sha', lambda: 'a' * 40)
     monkeypatch.setattr(host, '_watch_paths', lambda scope: ([str(path)], []))
+    monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
     ksa._reset_cache_for_tests()
     monkeypatch.setattr(host, '_known', {
         scope: contextvars.copy_context(),
@@ -595,7 +597,7 @@ def test_real_projection_idle_and_changed_source(tmp_path, monkeypatch):
             updated.set()
         return result
     monkeypatch.setattr(ksa, '_refresh_annotation_locked', record)
-    with FileEvents() as events:
+    with PrivateHolderEvents() as events:
         usage = []
         def worker():
             before = resource.getrusage(resource.RUSAGE_THREAD)
@@ -614,6 +616,7 @@ def test_real_projection_idle_and_changed_source(tmp_path, monkeypatch):
             stop.wait(max(host.SETTLE_S) + .5)
             assert len(calls) <= 1 + len(host.SETTLE_S)
             updated.clear()
+            os.utime(tmp_path)  # owned reproduction of an unrelated ancestor IN_ATTRIB
             idle_until = time.monotonic() + 61
             while time.monotonic() < idle_until:
                 disk.touch_demand(scope)
@@ -677,7 +680,7 @@ def test_wal_commit_racing_its_notification_is_confirmed(tmp_path, monkeypatch):
         return result
     monkeypatch.setattr(ksa, '_refresh_annotation_locked', record)
     settle = max(host.SETTLE_S) + .5
-    with FileEvents() as events:
+    with PrivateHolderEvents() as events:
         thread = threading.Thread(target=run, args=(
             events, stop, SimpleNamespace(held=lambda: True, beat=lambda: None),
             lambda: host._event_refresh(events)))
@@ -696,6 +699,7 @@ def test_wal_commit_racing_its_notification_is_confirmed(tmp_path, monkeypatch):
                   f'{sum(d > .2 for d in delays)} of {len(delays)} needed a confirmation read')
             stop.wait(settle)
             quiet = len(calls)
+            os.utime(tmp_path)  # ancestor metadata is not a new WAL commit
             stop.wait(3)
             assert len(calls) == quiet, f'WAL source did not settle: {quiet} -> {len(calls)}'
         finally:
@@ -762,7 +766,7 @@ def test_foreign_reader_sessions_do_not_project(tmp_path, monkeypatch, wal, mode
         return result
     monkeypatch.setattr(ksa, '_refresh_annotation_locked', record)
     settle = max(host.SETTLE_S) + .5
-    with FileEvents() as events:
+    with PrivateHolderEvents() as events:
         thread = threading.Thread(target=run, args=(
             events, stop, SimpleNamespace(held=lambda: True, beat=lambda: None),
             lambda: host._event_refresh(events)))
@@ -771,6 +775,7 @@ def test_foreign_reader_sessions_do_not_project(tmp_path, monkeypatch, wal, mode
             assert ready.wait(5)
             stop.wait(settle)
             quiet = len(calls)
+            os.utime(tmp_path)  # ancestor metadata must not be blamed on the readers
             subprocess.run([sys.executable, '-c', _READER, f'file:{path}{mode}'], check=True, timeout=30)
             stop.wait(settle)
             assert len(calls) == quiet, f'{len(calls) - quiet} projections followed 12 reader sessions'

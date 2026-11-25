@@ -45,6 +45,16 @@ def test_native_failure_and_recovery_through_public_read(profiles_on_disk, monke
         runtime.start()
         bound = runtime.provider('default')
         key = runtime.owner.source.input_key(view, selector)
+        retained = []
+        fail = runtime.owner.source._fail
+
+        def record_failure(failed_key):
+            prior = runtime.owner.store.snapshot(runtime.scope).get(failed_key)
+            if failed_key == key and prior is not None and prior.health == 'fresh':
+                retained.append(prior)
+            return fail(failed_key)
+
+        monkeypatch.setattr(runtime.owner.source, '_fail', record_failure)
         bound.read(view, selector)
         previous = None
         if warm:
@@ -52,6 +62,12 @@ def test_native_failure_and_recovery_through_public_read(profiles_on_disk, monke
             previous = runtime.owner.store.snapshot(runtime.scope).get(key)
             payload = projects_fact_routes.read(view, selector, decoded=True)
             assert 'retained-project' in json.dumps(payload)
+            # Force a healthy recapture after the first Ready observation. Its
+            # volatile annotation timestamps may advance; failure retains the
+            # last committed success, not necessarily that first observation.
+            runtime.owner.source._invalidate()
+            assert wait_until(lambda: runtime.owner.store.snapshot(runtime.scope).get(key).rev > previous.rev,
+                              timeout=10)
             failing.set()
             runtime.owner.source._invalidate()
         # The same native legacy input boundary propagates the failure rather
@@ -64,6 +80,8 @@ def test_native_failure_and_recovery_through_public_read(profiles_on_disk, monke
         failed = runtime.owner.store.snapshot(runtime.scope).get(key)
         assert failed.health == ('stale' if warm else 'unknown')
         if warm:
+            assert retained
+            previous = retained[-1]
             assert failed.value == previous.value
             assert failed.observed_at == previous.observed_at
             assert failed.source_vector == previous.source_vector

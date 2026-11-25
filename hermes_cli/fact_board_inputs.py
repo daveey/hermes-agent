@@ -141,7 +141,7 @@ class BoardInputSource:
                 self._active, self._last_start[key], self._began, self._deadline = key, now, None, None
                 view, selector = self._wanted[key]
                 self._worker = submit(lambda: self._context.run(self._build, key, view, selector, budget),
-                                      lane=self._lane)
+                                      lane=self._lane, on_complete=self._capture_completed)
             if self._deadline is not None and time.monotonic() >= self._deadline:
                 self._deadline = None
                 return BoardCapture(key=self._active, after=cursor, failed=True, observed_at=time.time())
@@ -180,8 +180,14 @@ class BoardInputSource:
             # Disarm with the result: the queue marks the job done only after this returns, and a capture() in
             # between must not read this capture's deadline as still running (a stale wait, or a late failure).
             self._result, self._began, self._deadline = result, None, None
-            wake = self._wake
-        wake()
+
+    def _capture_completed(self):
+        # Result-ready is not admission-ready: the saved Context.run must have
+        # returned and the queue job must be retired before waking pending work.
+        with self._lock:
+            wake = None if self._closed else self._wake
+        if wake is not None:
+            wake()
 
     def commit(self, capture):
         if capture.key is None:

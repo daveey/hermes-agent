@@ -655,8 +655,15 @@ def test_browse_budget_is_armed_before_the_macos_durability_pragmas(tmp_path, mo
     executed = []
     original = ssr.connect_tracked
     monkeypatch.setattr(wal, "_darwin_pragma", darwin_pragma)
-    monkeypatch.setattr(ssr, "connect_tracked",
-                        lambda *a, **kw: _ArmTrackingConnection(original(*a, **kw), executed))
+    def tracked(database, **kwargs):
+        conn = original(database, **kwargs)
+        # This assertion owns the reconcile connection, not concurrent board
+        # readers using the same process-global SQLite facade.
+        if kwargs.get('tracking_path', database) == path:
+            return _ArmTrackingConnection(conn, executed)
+        return conn
+
+    monkeypatch.setattr(ssr, "connect_tracked", tracked)
     budget = reconcile._Budget(60)
     deadline = budget.deadline
     expires = deadline_hits == "during_macos_pragma"
@@ -675,6 +682,10 @@ def test_browse_budget_is_armed_before_the_macos_durability_pragmas(tmp_path, mo
     else:
         reconcile._apply_additive_schema(path, budget)
         assert "last_read_at" in _session_columns(path)
+    # Deterministically interleave the unrelated unarmed connection seen in CI.
+    with closing(ssr.connect_tracked(tmp_path / 'unrelated-board.db')) as other:
+        other.execute('PRAGMA busy_timeout=0')
+        other.execute('SELECT 1')
     assert [sql for sql, _ in executed][:2] == ["PRAGMA checkpoint_fullfsync=1", "PRAGMA synchronous=FULL"]
     assert [sql for sql, armed in executed if not armed] == []
 

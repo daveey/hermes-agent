@@ -120,7 +120,7 @@ def test_view_owner_binds_content_sources_clock_only():
 
 
 @pytest.mark.platforms("linux")
-def test_clock_only_session_owner_advances_state_without_rows(store):
+def test_clock_only_session_owner_advances_state_without_rows(store, monkeypatch):
     db, _reader, path = store
     db.create_session("a", "cli")
     db.create_session("b", "cli")
@@ -135,8 +135,19 @@ def test_clock_only_session_owner_advances_state_without_rows(store):
         before = facts.snapshot(scope).get(state_key)
         db._execute_write(lambda conn: conn.execute("UPDATE sessions SET input_tokens=37 WHERE id='a'"))
         assert wait_until(lambda: facts.snapshot(scope).get(state_key).rev > before.rev, timeout=10)
-        db.create_session("c", "cli")
+        create = db.create_session
+
+        def observed_create(*args, **kwargs):
+            prior = facts.snapshot(scope).get(state_key)
+            result = create(*args, **kwargs)
+            # Force the real feed to win before the writer returns. The old
+            # post-write baseline then waits for a nonexistent second change.
+            assert wait_until(lambda: facts.snapshot(scope).get(state_key).rev > prior.rev, timeout=10)
+            return result
+
+        monkeypatch.setattr(db, 'create_session', observed_create)
         mid = facts.snapshot(scope).get(state_key)
+        db.create_session("c", "cli")
         assert wait_until(lambda: facts.snapshot(scope).get(state_key).rev > mid.rev, timeout=10)
         assert {key.kind for key in facts._facts} == {"SourceState"}
     finally:

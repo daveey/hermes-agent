@@ -17,8 +17,9 @@ _workers: dict[str, threading.Thread] = {}
 
 
 class CaptureJob:
-    def __init__(self, callback):
+    def __init__(self, callback, on_complete=None):
         self.callback = callback
+        self.on_complete = on_complete
         self.done = threading.Event()
         self.started = False
         self.cancelled = False
@@ -30,13 +31,13 @@ class CaptureJob:
         with _lock:
             if not self.started:
                 self.cancelled = True
-                self.callback = None
+                self.callback = self.on_complete = None
                 self.done.set()
         self.done.wait(timeout)
 
 
-def submit(callback, lane=DEFAULT_LANE):
-    job = CaptureJob(callback)
+def submit(callback, lane=DEFAULT_LANE, *, on_complete=None):
+    job = CaptureJob(callback, on_complete)
     with _lock:
         pending = _pending.setdefault(lane, deque())
         pending.append(job)
@@ -78,6 +79,9 @@ def _run(lane):
             finally:
                 job.callback = None
                 job.done.set()
+                complete, job.on_complete = job.on_complete, None
+                if complete is not None:
+                    complete()
     except BaseException:
         # A callback that escapes with a non-Exception (SystemExit, KeyboardInterrupt) ends this worker: release
         # the lane so the next submission starts a fresh one, instead of leaving it registered and dead forever.
