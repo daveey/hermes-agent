@@ -80,22 +80,26 @@ def repair_decided_triage(conn) -> list[str]:
     repaired = []
     rows = conn.execute("SELECT id FROM tasks WHERE status='triage'").fetchall()
     for tid, in rows:
-        observed = _recorded(conn, tid)
-        if observed is None:
-            continue
-        with kb.write_txn(conn):
-            if _recorded(conn, tid) != observed:
+        try:
+            observed = _recorded(conn, tid)
+            if observed is None:
                 continue
-            parents = [pid for pid, status in kb.parent_states(conn, tid) if status not in ('done', 'archived')]
-            window = ({'spend_budget': budget.card_limits(conn, tid, budget.limits())._asdict()}
-                      if budget.limit_window(conn, tid) == 'next_promote' else {})
-            # Same decision boundary as release._decide, with placement in the
-            # same transaction so an open dependency cannot leave triage stuck.
-            kb._append_event(conn, tid, 'promoted_manual', {
-                'actor': 'kanban-decided-triage', 'reason': 'Finish already recorded stop decision',
-                'from_status': 'triage', 'episode': observed[0], 'decision_event': observed[1],
-                'waiting_on_parents': parents, **window})
-            conn.execute("UPDATE tasks SET status=? WHERE id=? AND status='triage'",
-                         ('todo' if parents else 'ready', tid))
+            with kb.write_txn(conn):
+                if _recorded(conn, tid) != observed:
+                    continue
+                parents = [pid for pid, status in kb.parent_states(conn, tid) if status not in ('done', 'archived')]
+                window = ({'spend_budget': budget.card_limits(conn, tid, budget.limits())._asdict()}
+                          if budget.limit_window(conn, tid) == 'next_promote' else {})
+                # Same decision boundary as release._decide, with placement in the
+                # same transaction so an open dependency cannot leave triage stuck.
+                kb._append_event(conn, tid, 'promoted_manual', {
+                    'actor': 'kanban-decided-triage', 'reason': 'Finish already recorded stop decision',
+                    'from_status': 'triage', 'episode': observed[0], 'decision_event': observed[1],
+                    'waiting_on_parents': parents, **window})
+                conn.execute("UPDATE tasks SET status=? WHERE id=? AND status='triage'",
+                             ('todo' if parents else 'ready', tid))
             repaired.append(tid)
+        except Exception:  # health: allow BLE001 -- per-card maintenance boundary; rollback retains hold and siblings proceed
+            import logging
+            logging.getLogger(__name__).exception('decided triage repair failed for %s; hold retained', tid)
     return repaired

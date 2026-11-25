@@ -110,6 +110,64 @@ def test_maintenance_hook_handles_fresh_decision_without_stale_sweep(kanban_home
         assert not decision.pending(conn, tid)
 
 
+@pytest.mark.parametrize('cause', [[], {}, ['scope_stopped'], {'safety_refusal': True}],
+                         ids=['list', 'dict', 'nested-scope', 'nested-safety'])
+def test_malformed_cause_retains_hold_and_sweeps_healthy_neighbor(kanban_home, cause):
+    from hermes_cli.kanban_triage_sweep import sweep_stale_triage
+    with connect.connect_closing() as conn:
+        bad = stopped(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, bad, 'spend_budget_triaged', {'cause': cause})
+        good = stopped(conn)
+        authorize(conn, good)
+        assert sweep_stale_triage(conn, older_than=999999) == []
+        assert kb.get_task(conn, bad).status == 'triage'
+        assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='promoted_manual'",
+                                (bad,)).fetchone()
+        assert kb.get_task(conn, good).status == 'ready'
+        assert not decision.pending(conn, good)
+        with pytest.raises(ValueError, match='cause'):
+            decision.pending_episode(conn, bad)
+
+
+@pytest.mark.parametrize('failure', ['observation', 'revalidation', 'write'])
+def test_card_failure_does_not_abort_healthy_neighbor(kanban_home, monkeypatch, caplog, failure):
+    from hermes_cli import kanban_decided_triage as maintenance
+    from hermes_cli.kanban_triage_sweep import sweep_stale_triage
+    with connect.connect_closing() as conn:
+        bad = stopped(conn)
+        good = stopped(conn)
+        for tid in (bad, good):
+            authorize(conn, tid)
+        original_read, original_append = maintenance._recorded, kb._append_event
+        reads = []
+
+        def read(c, tid):
+            if tid == bad:
+                reads.append(tid)
+                if failure == 'observation' or (failure == 'revalidation' and len(reads) == 2):
+                    raise RuntimeError('Injected per-card read failure')
+            return original_read(c, tid)
+
+        def append(c, tid, kind, payload, **kw):
+            result = original_append(c, tid, kind, payload, **kw)
+            if tid == bad and kind == 'promoted_manual' and failure == 'write':
+                raise RuntimeError('Injected per-card write failure')
+            return result
+
+        monkeypatch.setattr(maintenance, '_recorded', read)
+        monkeypatch.setattr(kb, '_append_event', append)
+        assert sweep_stale_triage(conn, older_than=999999) == []
+        assert kb.get_task(conn, bad).status == 'triage'
+        assert decision.pending(conn, bad)
+        assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='promoted_manual'",
+                                (bad,)).fetchone()
+        assert kb.get_task(conn, good).status == 'ready'
+        assert not decision.pending(conn, good)
+        assert bad in caplog.text
+        assert not conn.in_transaction
+
+
 def test_writer_rechecks_independent_hold(kanban_home, monkeypatch):
     from contextlib import contextmanager
     with connect.connect_closing() as conn:

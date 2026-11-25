@@ -138,6 +138,10 @@ def pending_episode(conn, task_id: str):
             payload = json.loads(event['payload'] or '{}')
         except (TypeError, ValueError):
             continue
+        # A malformed cause cannot be interpreted as an ordinary budget stop:
+        # callers must retain the hold rather than infer permission to release.
+        if isinstance(payload, dict) and payload.get('cause') is not None and not isinstance(payload['cause'], str):
+            raise ValueError('Malformed spend stop cause')
         if (renewal.key(event) in renewed and isinstance(payload, dict) and (
                 payload.get('superseded_by_safety_stop') is not True if event['id'] in receipts
                 else payload.get('cause') == 'scope_stopped')):
