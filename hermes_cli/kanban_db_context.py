@@ -48,7 +48,7 @@ def _ctx_standing(lines: list[str], task: Task, comments: list) -> None:
 _RELEASED_BY = {"human": "a human operator", "chat": "the card's owning chat", "delegate": "a delegate chat"}
 
 
-def _ctx_release(lines: list[str], conn: sqlite3.Connection, task_id: str) -> None:
+def _ctx_release(lines: list[str], conn: sqlite3.Connection, task_id: str, now: Optional[int] = None) -> None:
     """The release that governs this run, ahead of the prior attempts and the comment thread. [daveey]
 
     On 2026-11-24/25, 70 of 137 releases were followed by another stop (median 158 min). The mandate sat under
@@ -59,7 +59,7 @@ def _ctx_release(lines: list[str], conn: sqlite3.Connection, task_id: str) -> No
     from hermes_cli.kanban_scope_renewal import MAX_MANDATE
     released = current_mandate(conn, task_id)
     if not released:
-        _ctx_human(lines, conn, task_id)
+        _ctx_human(lines, conn, task_id, now, released=False)
         return
     who = _RELEASED_BY.get(str(released.get("authority_kind")), "an authorized releaser")
     lines += ["## Release mandate (governs this run)",
@@ -71,18 +71,16 @@ def _ctx_release(lines: list[str], conn: sqlite3.Connection, task_id: str) -> No
               "the acceptance is met, finish with `kanban_complete` (or `kanban_request_review`), not "
               "`kanban_retain`.",
               _ctx_cap(released["body"], MAX_MANDATE), ""]
-    _ctx_human(lines, conn, task_id)
+    _ctx_human(lines, conn, task_id, now, released=True)
 
 
 _HUMAN_MAX, _HUMAN_BYTES = 10, 1024
 
 
 def _human_comments(conn: sqlite3.Connection, task_id: str, comments: list) -> list:
-    """Those of ``comments`` a person wrote after the card was created: the ``commented`` event says neither
-    ``writer_kind='agent'`` nor a writer run or task (a worker's own note), and the author is no kernel writer."""
-    from hermes_cli.kanban_comment_origin import is_system_author
-    task = _kb.get_task(conn, task_id)
-    created = int(getattr(task, "created_at", 0) or 0)
+    """Those of ``comments`` whose ``commented`` event proves David's words (``kanban_release.by_person``).
+    A comment with no such event, or a kind-less one, stays in the ordinary thread only."""
+    from hermes_cli.kanban_release import by_person
     by_id, by_uid = {}, {}
     for (raw,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='commented'", (task_id,)):
         try:
@@ -95,30 +93,35 @@ def _human_comments(conn: sqlite3.Connection, task_id: str, comments: list) -> l
                 by_uid.setdefault(p["comment_uid"], p)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(task_comments)")}
     uids = dict(conn.execute("SELECT id, uid FROM task_comments WHERE task_id=?", (task_id,))) if "uid" in cols else {}
-    out = []
-    for c in comments:  # a synced comment binds by uid (its comment_id is the writer board's local id)
-        p = by_uid.get(uids[c.id], {}) if uids.get(c.id) else by_id.get(c.id, {})
-        if (p.get("writer_kind") == "agent" or p.get("writer_run_id") is not None or p.get("writer_run_uid")
-                or p.get("writer_task") or is_system_author(c.author) or int(c.created_at or 0) < created):
-            continue
-        out.append(c)
-    return out
+    # A synced comment binds by uid (its comment_id is the writer board's local id).
+    return [c for c in comments if by_person(by_uid.get(uids[c.id], {}) if uids.get(c.id) else by_id.get(c.id, {}))]
 
 
-def _ctx_human(lines: list[str], conn: sqlite3.Connection, task_id: str) -> None:
-    """Human comments older than the comment thread's tail (``_CTX_MAX_COMMENTS``), newest ``_HUMAN_MAX`` at
+def _scope_history(conn: sqlite3.Connection, task_id: str) -> bool:
+    """The card was ever scope-stopped, renewed or released."""
+    return conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND (kind IN ('scope_renewed','stop_released') OR "
+        "(kind='spend_budget_triaged' AND json_valid(payload) AND json_extract(payload,'$.cause')='scope_stopped')) "
+        "LIMIT 1", (task_id,)).fetchone() is not None
+
+
+def _ctx_human(lines: list[str], conn: sqlite3.Connection, task_id: str, now: Optional[int], *,
+               released: bool) -> None:
+    """David's comments older than the comment thread's tail (``_CTX_MAX_COMMENTS``), newest ``_HUMAN_MAX`` at
     ``_HUMAN_BYTES`` each, so an early "do not deploy" stays in view under the release mandate that says a
-    human's stop instructions still hold. [daveey]"""
+    human's stop instructions still hold. Only on a released or scope-stopped card: ordinary prompts are
+    unchanged. [daveey]"""
+    if not released and not _scope_history(conn, task_id):
+        return
     older = _kb.list_comments(conn, task_id)[:-_CTX_MAX_COMMENTS]
     human = _human_comments(conn, task_id, older) if older else []
     if not human:
         return
     shown = human[-_HUMAN_MAX:]
-    lines.append("## Human instructions on this card")
-    lines.append("Comments a person wrote that are older than the comment thread below; they still apply.")
+    lines.append("## Instructions David wrote on this card (older than the thread below)")
     if len(human) > len(shown):
-        lines.append(f"_({len(human) - len(shown)} more human comments not shown)_")
-    now = int(time.time())
+        lines.append(f"_({len(human) - len(shown)} more not shown)_")
+    now = int(time.time()) if now is None else now
     for c in shown:
         lines.append(f"comment from `{(c.author or '').replace('`', '')}` at {_ctx_stamp(c.created_at, now)}:")
         lines.append(_ctx_cap(c.body, _HUMAN_BYTES))

@@ -262,9 +262,16 @@ def _untouched_since(conn: sqlite3.Connection, tid: str, record: dict) -> bool:
     """Nothing moved the card after its release was recorded: every later event is a quiet one, or the
     ``promoted_manual`` the same release wrote for a dependency wait. A card a block loop, the respawn guard or
     anyone else put back in triage afterwards is there for their reason, and is not ours to promote."""
-    for kind, raw in conn.execute("SELECT kind, payload FROM task_events WHERE task_id=? AND id>?",
-                                  (tid, record["_id"])):
-        if kind not in _QUIET and not (kind == "promoted_manual" and "waiting_on_parents" in _payload(raw)):
+    from hermes_cli.kanban_sync_divergence import _event_order
+    rows = [dict(r) for r in conn.execute("SELECT * FROM task_events WHERE task_id=?", (tid,))]
+    released = next((r for r in rows if r["id"] == record["_id"]), None)
+    if released is None:
+        return False
+    for event in rows:  # later by creation (``_event_order``), as ``_release_event`` orders the release itself
+        if _event_order(event) <= _event_order(released):
+            continue
+        if event["kind"] not in _QUIET and not (event["kind"] == "promoted_manual"
+                                                and "waiting_on_parents" in _payload(event["payload"])):
             return False
     return True
 
@@ -294,6 +301,16 @@ def _decision_cards(conn: sqlite3.Connection, tid: str, episode: str) -> list[st
         "AND json_extract(e.payload,'$.root_episode')=?) ORDER BY t.created_at, t.id", (tid, episode))]
 
 
+def by_person(commented: Mapping[str, Any]) -> bool:
+    """A ``commented`` payload with positive evidence that David's words are in it: he typed it
+    (``writer_kind='human'``), a chat relayed his message (``relayed_human``) or recorded his answer to an ask
+    (``recorded_decision``). A comment with no writer kind (legacy agent notes, kernel writers, operator verbs)
+    is not his. One definition for the release read-first check and the worker context
+    (``kanban_db_context._ctx_human``)."""
+    return (commented.get("writer_kind") == "human" or commented.get("relayed_human") is not None
+            or commented.get("recorded_decision") is not None)
+
+
 def _unread_human(conn: sqlite3.Connection, tid: str, stop: dict, seen: Optional[int]) -> list[int]:
     """Ids of comments a person wrote (or a chat relayed for one) after the stop, newer than ``seen``."""
     from hermes_cli.kanban_sync_divergence import _event_order
@@ -302,7 +319,7 @@ def _unread_human(conn: sqlite3.Connection, tid: str, stop: dict, seen: Optional
         event = dict(row)
         p = _payload(event["payload"])
         cid = p.get("comment_id")
-        if ((p.get("writer_kind") == "human" or p.get("relayed_human") is not None) and _event_order(event) > after
+        if (by_person(p) and _event_order(event) > after
                 and isinstance(cid, int) and cid > (seen or 0)):
             out.append(cid)
     return sorted(out)

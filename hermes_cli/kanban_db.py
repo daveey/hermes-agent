@@ -3552,7 +3552,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
     from hermes_cli.kanban_containment_authority import render_context
     lines += [n for n in (render_context(conn, task_id),) if n]  # containment authority notice
     _ctx_standing(lines, task, list_comments(conn, task_id))  # [daveey]
-    _ctx_release(lines, conn, task_id)  # the newest release mandate, above older stops [daveey]
+    _ctx_release(lines, conn, task_id, now)  # the newest release mandate, above older stops [daveey]
     from hermes_cli.kanban_continuation import render_checkpoint_context
     checkpoint = render_checkpoint_context(conn, task_id)
     if checkpoint:

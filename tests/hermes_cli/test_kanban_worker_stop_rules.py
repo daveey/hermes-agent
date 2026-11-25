@@ -210,33 +210,103 @@ def test_rejected_retain_source_still_matches_a_tagged_call():
 # --- follow-up: human instructions stay in view; creation order; brief keeps the tag -------------------------
 
 
-def test_an_old_human_do_not_deploy_comment_stays_in_the_prompt(board, monkeypatch):
+HUMAN_SECTION = '## Instructions David wrote on this card (older than the thread below)'
+
+
+def _no_worker_env(monkeypatch):
     for name in ('HERMES_KANBAN_TASK', 'HERMES_KANBAN_RUN_ID'):
         monkeypatch.delenv(name, raising=False)
+
+
+def _mark(board, tid, cid, **fields):
+    """Add ``fields`` to comment ``cid``'s ``commented`` event (as the relay/decision writers record them)."""
+    row = board.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='commented' "
+                        "AND json_extract(payload,'$.comment_id')=?", (tid, cid)).fetchone()
+    with kb.write_txn(board):
+        board.execute('UPDATE task_events SET payload=? WHERE id=?', (json.dumps({**json.loads(row[1]), **fields}), row[0]))
+
+
+def _filler(board, tid, n=40):
+    for i in range(n):
+        kb.add_comment(board, tid, 'default', f'progress note {i}', writer_kind='agent', writer_session='s')
+
+
+def test_an_old_human_do_not_deploy_comment_stays_in_the_prompt(board, monkeypatch):
+    _no_worker_env(monkeypatch)
     tid = rel.spend_stopped(board)
     kb.add_comment(board, tid, 'david', 'Do not deploy to production until I say so.', writer_kind='human')
-    kb.add_comment(board, tid, 'default', 'Agent plan: deploy after CI.', writer_kind='agent', writer_session='s')
-    kb.add_comment(board, tid, 'kanban-dispatcher', 'Woken: CI finished.')
-    for i in range(40):
-        kb.add_comment(board, tid, 'default', f'progress note {i}', writer_kind='agent', writer_session='s')
+    _filler(board, tid)
     rel.run(board, tid)
     context = kb.build_worker_context(board, tid)
-    assert 'Do not deploy to production until I say so.' in context
-    section = _section(context, '## Human instructions on this card')
-    assert 'Do not deploy' in section and 'Agent plan' not in section and 'Woken' not in section
-    assert context.index('## Release mandate') < context.index('## Human instructions on this card') \
-        < context.index('## Comment thread')
+    section = _section(context, HUMAN_SECTION)
+    assert 'Do not deploy to production until I say so.' in section and 'still apply' not in section
+    assert context.index('## Release mandate') < context.index(HUMAN_SECTION) < context.index('## Comment thread')
+
+
+def test_relayed_and_recorded_answers_are_davids_words(board, monkeypatch):
+    _no_worker_env(monkeypatch)
+    tid = rel.spend_stopped(board)
+    relayed = kb.add_comment(board, tid, 'default', 'Relayed: keep the old schema.', writer_kind='agent',
+                             writer_session='s')
+    _mark(board, tid, relayed, relayed_human={'session': 's', 'message_id': 'm1', 'at': 1})
+    decided = kb.add_comment(board, tid, 'default', 'Recorded answer: option B.', writer_kind='agent',
+                             writer_session='s')
+    _mark(board, tid, decided, recorded_decision={'ask': 'a1'})
+    _filler(board, tid)
+    rel.run(board, tid)
+    section = _section(kb.build_worker_context(board, tid), HUMAN_SECTION)
+    assert 'keep the old schema' in section and 'option B' in section
+
+
+@pytest.mark.parametrize('author,body,kind', [
+    ('default', 'Legacy agent note: stop if CI is red.', None),                    # pre-writer_kind agent note
+    ('default', 'CHANGES REQUESTED: stop after this round.', 'agent'),             # operator verb by a chat
+    ('default', 'REOPENED by the owning chat.', None),
+    ('default', 'Closed by hermes kanban release.', None),
+    ('update-pause', 'Updates paused; do not restart.', None),                     # system writers outside
+    ('upstream-merge', 'Upstream merge staged.', None),                            # is_system_author
+    ('hub-cpu-advisory', 'Hub CPU high; stop heavy work.', None),
+    ('lane-planner', 'Lane planned.', None),
+    ('pickup-stall-detector', 'Pickup stalled.', None),
+])
+def test_comments_without_proof_of_david_stay_out(board, monkeypatch, author, body, kind):
+    _no_worker_env(monkeypatch)
+    tid = rel.spend_stopped(board)
+    kb.add_comment(board, tid, author, body, writer_kind=kind, writer_session='s' if kind == 'agent' else None)
+    _filler(board, tid)
+    rel.run(board, tid)
+    assert body not in kb.build_worker_context(board, tid)
+
+
+def test_a_synced_comment_with_no_commented_event_stays_out(board, monkeypatch):
+    _no_worker_env(monkeypatch)
+    tid = rel.spend_stopped(board)
+    with kb.write_txn(board):
+        board.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?,?,?,?)",
+                      (tid, 'david', 'Orphan: stop everything.', 2))
+    _filler(board, tid)
+    rel.run(board, tid)
+    assert 'Orphan: stop everything.' not in kb.build_worker_context(board, tid)
+
+
+def test_an_ordinary_card_prompt_is_unchanged(board, monkeypatch):
+    _no_worker_env(monkeypatch)
+    tid = kb.create_task(board, title='Plain work', assignee='default')
+    kb.add_comment(board, tid, 'david', 'Do not deploy.', writer_kind='human')
+    _filler(board, tid)
+    context = kb.build_worker_context(board, tid)
+    assert HUMAN_SECTION not in context and 'Do not deploy.' not in context  # 40 back: out of the thread tail
 
 
 def test_human_instructions_are_bounded_and_count_the_rest(board, monkeypatch):
-    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    _no_worker_env(monkeypatch)
     tid = rel.spend_stopped(board)
     for i in range(13):
         kb.add_comment(board, tid, 'david', f'human rule {i} ' + 'x' * 2000, writer_kind='human')
-    for i in range(30):
-        kb.add_comment(board, tid, 'default', f'note {i}', writer_kind='agent', writer_session='s')
-    section = _section(kb.build_worker_context(board, tid), '## Human instructions on this card')
-    assert '_(3 more human comments not shown)_' in section
+    _filler(board, tid, 30)
+    rel.run(board, tid)
+    section = _section(kb.build_worker_context(board, tid), HUMAN_SECTION)
+    assert '_(3 more not shown)_' in section
     assert 'human rule 12 ' in section and 'human rule 2 ' not in section
     assert section.count('x' * 1000) == 10 and 'x' * 1100 not in section  # 1 KiB each
 
@@ -271,3 +341,27 @@ def test_stranded_brief_keeps_the_stop_on_tag():
     entry = {'kind': 'decision_retained', 'payload': {'disposition': {
         'summary': '[stop_on=same_error_three_times] the ship_ledger write failed three times'}}}
     assert reason(entry) == '[stop_on=same_error_three_times] the ship ledger write failed three times'
+
+
+def test_untouched_since_reads_creation_order_on_a_reordered_replica(board):
+    tid = rel.spend_stopped(board)
+    rel.run(board, tid)
+    record = release._release_event(board, tid)
+    rts = board.execute('SELECT created_at FROM task_events WHERE id=?', (record['_id'],)).fetchone()[0]
+    with kb.write_txn(board):  # the state a refused promotion leaves: the decision recorded, nothing after it
+        board.execute("DELETE FROM task_events WHERE task_id=? AND id>? AND kind NOT IN ('commented')",
+                      (tid, record['_id']))
+    assert release._untouched_since(board, tid, record)
+    with kb.write_txn(board):  # a block created after the release that arrived before it
+        kb._append_event(board, tid, 'blocked', {'reason': 'later block'})
+        bid = board.execute('SELECT MAX(id) FROM task_events').fetchone()[0]
+        board.execute('UPDATE task_events SET created_at=? WHERE id=?', (rts + 10, bid))
+    _swap_ids(board, record['_id'], bid)
+    record = release._release_event(board, tid)
+    assert record is not None and not release._untouched_since(board, tid, record)
+
+
+def test_the_read_first_check_and_the_context_share_one_definition():
+    assert release.by_person({'writer_kind': 'human'}) and release.by_person({'recorded_decision': {}})
+    assert release.by_person({'writer_kind': 'agent', 'relayed_human': {'session': 's'}})
+    assert not release.by_person({}) and not release.by_person({'writer_kind': 'agent'})
