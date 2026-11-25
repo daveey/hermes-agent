@@ -268,12 +268,14 @@ def _episode_or_none(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 
 def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]:
     from hermes_cli import kanban_spend_review_request as journal
-    frozen = journal.requests(conn)
+    # Only requests whose review is not known to have ended: the journal keeps every request for good, so
+    # reading all of it here would grow each dispatcher tick with history.
+    frozen = set(journal.open_keys(conn))
     rows = conn.execute("SELECT DISTINCT e.task_id FROM task_events e JOIN tasks t ON t.id = e.task_id "
                         "WHERE e.kind = ? AND t.status = 'triage'", (QUEUED,)).fetchall()
     candidates = {(task_id, _episode_or_none(conn, task_id)) for (task_id,) in rows if task_id not in skip}
-    candidates.update((r["wire"]["task"], r["wire"]["episode"]) for r in frozen)
-    due = []
+    candidates.update(frozen)
+    due, ended = [], []
     for task_id, episode in sorted(candidates, key=str):
         if task_id in skip or episode is None:
             continue
@@ -291,11 +293,18 @@ def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]
             logger.exception("kanban: spend review skipped %s; hold retained", task_id)
             continue
         if not events or events[-1]["kind"] not in (QUEUED, STARTED):
+            if events and (task_id, episode) in frozen:
+                ended.append((task_id, episode))
             continue
         last = events[-1]
         if last["kind"] == STARTED and int(last["payload"].get("deadline") or 0) > now:
             continue
         due.append((task_id, episode, sum(1 for e in events if e["kind"] == STARTED)))
+    if ended and not conn.in_transaction:
+        try:
+            journal.close(conn, ended)
+        except Exception:  # health: allow BLE001 -- bookkeeping only; an unmarked request is read again next tick
+            logger.exception("kanban: could not mark %d ended spend review requests", len(ended))
     return due
 
 

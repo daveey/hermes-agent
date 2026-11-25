@@ -762,6 +762,15 @@ or proof that no operation was submitted: the immutable journal and all executio
 holds remain. The administrator must reconcile the exact Board receipt, not choose
 a replacement verdict or infer clearance from an absent receipt. The reviewer no
 longer suppresses the stale-stop backstop while administrative reconciliation is pending.
+The journal keeps every request; once a request's review has ended it is marked closed, and the
+per-tick due scan reads only open requests, so its cost does not grow with history.
+
+Dispatcher maintenance also finishes a stop decision that was recorded but never promoted
+(`hermes_cli/kanban_decided_triage.py`): a triage card whose current stop has a later scope renewal,
+or an ordinary budget stop on which a person then set a limit that is still in force, is promoted,
+or parked in `todo` while a parent is open. An agent-written limit, a cleared override, and any
+budget edit on a scope, capability or safety stop release nothing; an agent's renewal still waits
+for that session's unread comments.
 
 Every card has an owning chat. A card created from a chat is owned by that
 chat, and a worker's card by its creator's. Any other card gets its producer's

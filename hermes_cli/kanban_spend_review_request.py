@@ -11,6 +11,7 @@ TABLE = "spend_review_requests"
 # Separate from judge retries: allow receipt recovery after the model budget ends,
 # but never monopolize reviewer custody indefinitely when no receipt is reachable.
 MAX_RECONCILE_ATTEMPTS = 4
+OPEN_INDEX = f"CREATE INDEX IF NOT EXISTS {TABLE}_open ON {TABLE}(task, episode) WHERE closed = 0"
 
 
 def exists(conn):
@@ -21,6 +22,33 @@ def requests(conn):
     if not exists(conn):
         return []
     return [json.loads(row[0]) for row in conn.execute(f"SELECT request FROM {TABLE}")]
+
+
+def _has_closed(conn):
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone()
+    return None if row is None else "closed INTEGER" in (row[0] or "")
+
+
+def open_keys(conn):
+    """(task, episode) of requests whose review is not yet known terminal. One indexed read whose cost does not
+    grow with closed history; a table from before the marker reads as all open until the first close."""
+    marked = _has_closed(conn)
+    if marked is None:
+        return []
+    where = " WHERE closed = 0" if marked else ""
+    return [(row[0], row[1]) for row in conn.execute(f"SELECT task, episode FROM {TABLE}{where}")]
+
+
+def close(conn, keys):
+    """Mark requests whose review ended so later ticks skip them. The frozen bytes are kept unchanged."""
+    from hermes_cli import kanban_db as kb
+    if not keys:
+        return
+    with kb.write_txn(conn):
+        if _has_closed(conn) is False:
+            conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN closed INTEGER NOT NULL DEFAULT 0")
+            conn.execute(OPEN_INDEX)
+        conn.executemany(f"UPDATE {TABLE} SET closed = 1 WHERE task = ? AND episode = ?", list(keys))
 
 
 def get(conn, task, episode):
@@ -37,9 +65,11 @@ def freeze(conn, board, gateway, wire):
         raise ValueError("cannot freeze a review inside another transaction")
     with kb.write_txn(conn):
         conn.execute(f"CREATE TABLE IF NOT EXISTS {TABLE} (task TEXT NOT NULL, episode TEXT NOT NULL, "
-                     "request TEXT NOT NULL, PRIMARY KEY(task,episode))")
+                     "request TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(task,episode))")
+        if _has_closed(conn):
+            conn.execute(OPEN_INDEX)
         request = {"board": board, "gateway": gateway, "wire": wire}
-        conn.execute(f"INSERT OR IGNORE INTO {TABLE} VALUES (?,?,?)",
+        conn.execute(f"INSERT OR IGNORE INTO {TABLE} (task, episode, request) VALUES (?,?,?)",
                      (wire["task"], wire["episode"], json.dumps(request, ensure_ascii=False)))
         frozen = get(conn, wire["task"], wire["episode"])
         assert frozen is not None

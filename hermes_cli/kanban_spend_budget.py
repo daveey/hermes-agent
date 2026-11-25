@@ -228,7 +228,8 @@ def limit_window(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def window_text(window: str) -> str:
-    return ('this limit applies to a fresh window starting at promote; setting it does not release the stop'
+    return ('this limit applies to a fresh window starting at promote; an agent setting it does not release the stop, '
+            'and a limit a person sets on an ordinary budget stop is promoted by the next dispatcher maintenance pass'
             if window == 'next_promote' else 'this limit counts the current window, including spend already recorded')
 
 
