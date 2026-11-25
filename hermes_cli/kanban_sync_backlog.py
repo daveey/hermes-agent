@@ -20,7 +20,7 @@ from typing import Any, Iterable
 
 _log = logging.getLogger(__name__)
 PULL_PAGE_BUDGET = 20  # 20 pages x 500 changes = 10k changes per database per round
-BUSY_RETRY_S = 0.5  # a round skipped because a dispatcher tick held the board (wait_for_work's tick)
+BUSY_RETRY_S = 0.5  # a round skipped because a dispatcher tick held the board (half of wait_for_work's tick)
 RECONCILE_BUSY_WAIT_S = 600.0  # a reconcile waits this long in all for rounds holding the board between its chunks
 _sleep = time.sleep  # tests
 

@@ -1447,7 +1447,7 @@ def outbox_pending(paths: Iterable[Path]) -> bool:
 
 
 def wait_for_work(wake: threading.Event, paths: Iterable[Path], period: float,
-                  keep_running: Callable[[], bool], tick: float = 0.5) -> str:
+                  keep_running: Callable[[], bool], tick: float = 1.0) -> str:
     """Block until there is sync work: a Board change frame (``wake``), a local change in an outbox, or the poll
     period ran out. Returns which, so a local write is pushed within ``tick`` and a remote one pulled at once."""
     paths = list(paths)
