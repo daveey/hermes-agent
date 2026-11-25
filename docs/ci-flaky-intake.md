@@ -651,3 +651,74 @@ One immutable source record, one page and one exact test are preserved separatel
 Source run45644573502 attempt1/job139312608655, actual source68ff324cb940486f0923391c7f9105f466d97369; exact test `tests/tools/test_mcp_child_filter_supervisor.py::test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor`. Frozen disposition: `existing_owner_pending_review_and_landing`; repair owner t_01a2117deceffea3. No fixed or environmental disposition is inferred.
 
 The intake reports ordinary-child inclusion failed before positive-control exec argv readiness, not supervisor exclusion. The repair owner reports source qualification, deterministic RED/GREEN and twenty whole-file rounds at PR4445 head5fbe628f97586c84f653769eb87966db69506c26. Those proofs were not rerun by this docs consolidation. Historical argv scheduling is unknown. At the frozen intake snapshot fresh changed-head review, CI acceptance and canonical landing remained owed, and that intake granted no release of its reported decision/spend hold. These historical dispositions are preserved unchanged, not assertions of current execution or landing.
+
+
+## November 25 supplemental intake — occurrences904–916
+
+# CI intake 2026-11-25: occurrences904–916
+
+Frozen 10 immutable pages; 13 unique occurrences; 4 exact tests. Metadata observations remain unchanged. Intake closes routing only, not repairs. No timeout/retry/skip/xfail policy changes.
+
+Canonical docs export remains with `t_01a2117e043cbca0`; add this as a supplement to `docs/ci-flaky-intake.md`, not a rewrite of earlier frozen batches. Repository publication is pending that existing owner.
+
+## tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile
+
+Occurrences: [904, 910, 911]; count=3.
+Disposition: **existing_owner_unresolved_recurrences**.
+Follow-up: `t_01a2117deceffea3` (triage; decision_pending/spend hold; not released).
+
+Original910 log lines1905-1913: PATCH rename succeeds, gamma still exists, assertion line102. Metadata904/911 retained without independent log qualification. Historical closed owner t_01a1b8f8ac4ac8e8 repaired an earlier writer in PR946; not a new occurrence owner. Exact historical filesystem writer remains unknown. Gateway owner retains remaining repair/source qualification.
+
+## tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach
+
+Occurrences: [907, 913]; count=2.
+Disposition: **existing_owner_merged_related_repair_source_qualified**.
+Follow-up: `t_01a2117e043cbca0` (running).
+
+Original913 log lines1875-1879: contract.params.model_validate(params) raises AttributeError because contract is None. PR4446 independently GitHub-read MERGED at9e8355668e0bef82a72d48fe8958a86ee8b2e34e. Actual source913 is ancestor of landing (behind5); source907 diverged before landing (behind14/ahead1), so neither establishes a descendant post-fix recurrence. Source907 patch-content coverage and original log remain unread. Existing owner retains causal repair proof; intake does not independently reproduce import ordering or declare every observation fixed.
+
+## tests/hermes_state/test_session_status_checkpoint_fences.py::test_structured_receipt_outranks_stale_checkpoint
+
+Occurrences: [915]; count=1.
+Disposition: **existing_PR4478_owner_first_attempt_failure**.
+Follow-up: `t_01a2143fcfb27f95` (running).
+
+Original915 PR4478 merge-source log lines1116-1139: [3-unresolved] returns done instead of unresolved at line51; isolated retry lines1142-1156 passes. Existing PR4478 author t_01a2143fcfb27f95 owns exact added test/receipt precedence. Original manifest node ID remains unparameterized; log suffix is annotation only. Mechanism not established; qualify before landing. Direct comment143545 readback requested.
+
+## tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes
+
+Occurrences: [905, 906, 908, 909, 912, 914, 916]; count=7.
+Disposition: **existing_owner_post_PR4439_recurrence_confirmed**.
+Follow-up: `t_01a2117deceffea3` (triage; decision_pending/spend hold; not released).
+
+Actual sources914=97a2682811aa3487e10d49fc7f4f339f60a9fac6 and916=b0a91e3585298c85071a9dac86b9ee16f6820437 descend from landed PR4439 67876b0fd11bb585442e60c57f3f1b30ed3598eb (behind0). First-attempt logs914 lines1856-1861 and916 lines1299-1304 fail assert started.is_set() at line210, not old started.wait(timeout=2). Source916 confirms queued_probe parameterized fixture. This is a recurrence on repaired source, not delayed pre-fix metadata; causal mechanism unproven. Other five sources remain individually unqualified. Preserve existing held owner; this note grants no execution/budget release.
+
+## Evidence boundaries
+
+Raw original logs: readiness914/916, upload913, registry910, checkpoint915. Other individual sources/logs are explicitly unqualified, not silently presumed pre-fix or same-cause. Original filesystem/scheduler/contract import telemetry is unavailable in these observations.
+
+No new repair cards, no ownership transfers, no release of gateway decision/spend hold. Downloadable JSON contains every run/job/attempt/slice/source/head field and original owner hints.
+
+### Subsequent owner qualification (append-only; original input above unchanged)
+
+Upload907 independently fetched original run45680546732/job139440104309: lines1806–1838 show an existing legacy `SessionResumeResult` rejecting the canonical result (`info.title=None` and eight extra canonical fields), **not** `None.params`. Its actual checkout is `b5898d1fea1176e3067b7c8047861a728268939a` (checkout receipt line168). Both913 actualsource `97a2682811aa3487e10d49fc7f4f339f60a9fac6` and907 lack the package-completion import barrier landed by PR4446; relevant contract/package definitions are byte-identical to that landing. Fresh913 original lines1875–1879 confirm missing-contract `None.params`. Neither observation establishes a descendant post-repair recurrence.
+
+A controlled import held **after** legacy sessions registration but **before** canonical registration reproduces907’s same `SessionResumeResult`/`extra_forbidden` class when only the landed barrier is reverted; restoring it passes the complete28-test upload file. This proves the additional product susceptibility, not the unrecorded historical thread schedule. Additional permanent ordering regression is published in [PR4484](https://github.com/softmax-universe/daveey-hermes/pull/4484), pending final twenty-run qualification, independent review, required CI and canonical landing at this snapshot. Existing PR4446 remains independently verified merged at `9e8355668e0bef82a72d48fe8958a86ee8b2e34e`; previous completed proofs are preserved, not rerun.
+
+Readiness914/916 remain **POST-REPAIR RECURRENCE, cause unknown** per intake-qualified actual source and repaired assertion. Registry904/910/911 and readiness905/906/908/909/912/914/916 retain gateway owner `t_01a2117deceffea3` and its decision/spend hold; this supplement grants no release. Checkpoint915 retains existing PR4478 owner `t_01a2143fcfb27f95`. Other individual logs remain unqualified exactly as original input states. No competing repair owners, retry/timeout changes, skip or xfail.
+
+### Original run provenance904–916
+
+- Occurrence 904: https://github.com/softmax-universe/daveey-hermes/actions/runs/45668265235/job/139396862002; attempt 1; source `c4d8b9c8dcf858a6408a192a3d6e73c4b01f34b0`; head `88e587feb641ad61fa63536e6e5d178b9e505ee3`; slice 9/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [{'candidate': 't_01a1b8f8ac4ac8e8', 'reason': 'closed_history_incomplete', 'status': 'done'}].
+- Occurrence 905: https://github.com/softmax-universe/daveey-hermes/actions/runs/45677703052/job/139430092531; attempt 1; source `6f6b4201087267b3d4beb87b380e839b28977430`; head `273abc82b89a0bdd6804c54d5956118091e0107b`; slice 12/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 906: https://github.com/softmax-universe/daveey-hermes/actions/runs/45679711209/job/139437644775; attempt 1; source `b6e636ac96b08d4864acc69adc93350fa079790d`; head `8f71956e7dd3386b922e0338884b2c141341d4b4`; slice 3/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 907: https://github.com/softmax-universe/daveey-hermes/actions/runs/45680546732/job/139440104309; attempt 1; source `b5898d1fea1176e3067b7c8047861a728268939a`; head `2b49dbf72c9ec285f9fc2bb161a10ecf5efd17b4`; slice 10/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 908: https://github.com/softmax-universe/daveey-hermes/actions/runs/45685512540/job/139457463435; attempt 1; source `c5353d888e017723ac80ebec03c1892708db7bf6`; head `df6df9311474ea889fccb4e1e480762b0085ffb4`; slice 12/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 909: https://github.com/softmax-universe/daveey-hermes/actions/runs/45687071801/job/139462888984; attempt 1; source `00e0e74f07c3e10f3d2b11a2cc2ae3efad77e54b`; head `70d99a537fae8d86b9788a791a0351780fa4d195`; slice 1/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 910: https://github.com/softmax-universe/daveey-hermes/actions/runs/45686951716/job/139462423521; attempt 1; source `674e70951123c85860f2f05c80c575d7d5912c21`; head `ad4df1f3dcd1383c6d0b11dde4b38510a5d7c5b3`; slice 10/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [{'candidate': 't_01a1b8f8ac4ac8e8', 'reason': 'closed_history_incomplete', 'status': 'done'}].
+- Occurrence 911: https://github.com/softmax-universe/daveey-hermes/actions/runs/45686924650/job/139462381457; attempt 1; source `18862a2a3e34ba17d6275cda04e57af1bc625175`; head `a0a77addfacb0898b23e3e79e5626a61d54134ec`; slice 4/5; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [{'candidate': 't_01a1b8f8ac4ac8e8', 'reason': 'closed_history_incomplete', 'status': 'done'}].
+- Occurrence 912: https://github.com/softmax-universe/daveey-hermes/actions/runs/45695722693/job/139493028425; attempt 1; source `1bfeff84ea1e69d3dc0884a7e13249a987236b60`; head `12c50c4a721304cb17187a4fb2241731346033a8`; slice 11/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 913: https://github.com/softmax-universe/daveey-hermes/actions/runs/45700200503/job/139512282705; attempt 1; source `97a2682811aa3487e10d49fc7f4f339f60a9fac6`; head `97a2682811aa3487e10d49fc7f4f339f60a9fac6`; slice 1/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 914: https://github.com/softmax-universe/daveey-hermes/actions/runs/45700200503/job/139512282519; attempt 1; source `97a2682811aa3487e10d49fc7f4f339f60a9fac6`; head `97a2682811aa3487e10d49fc7f4f339f60a9fac6`; slice 3/12; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 915: https://github.com/softmax-universe/daveey-hermes/actions/runs/45703651162/job/139520417730; attempt 1; source `d84329e7aea74940921c62887b51dd7b6a495883`; head `29fcb82ab298ddb36ed5a4590f4326fa4fd62e8b`; slice 2/2; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].
+- Occurrence 916: https://github.com/softmax-universe/daveey-hermes/actions/runs/45706485481/job/139530190320; attempt 1; source `b0a91e3585298c85071a9dac86b9ee16f6820437`; head `9c74365e4ff2eb2c936018c8a9edfd8fa3530c3c`; slice 4/11; observed_day 2026-11-25; status needs_triage; retried tests; owner_check [].

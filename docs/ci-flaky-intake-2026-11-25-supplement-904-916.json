@@ -1,0 +1,609 @@
+{
+  "task_id": "t_01a213e6e5cabd7b",
+  "pages": [
+    {
+      "digest": "b3a195bd1feaf0a70ef83b982e680470dc6e93d985a1714c6f5b8b9d6a644c07",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "88e587feb641ad61fa63536e6e5d178b9e505ee3",
+            "job_id": 139396862002,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 904,
+            "owner_check": [
+              {
+                "candidate": "t_01a1b8f8ac4ac8e8",
+                "reason": "closed_history_incomplete",
+                "status": "done"
+              }
+            ],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45668265235,
+            "slice": 9,
+            "slices": 12,
+            "source_sha": "c4d8b9c8dcf858a6408a192a3d6e73c4b01f34b0",
+            "status": "needs_triage",
+            "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "79da6ab26284654a82f3c5f5b75af117099878af01a8aa693b5c20192e05fde7",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "273abc82b89a0bdd6804c54d5956118091e0107b",
+            "job_id": 139430092531,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 905,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45677703052,
+            "slice": 12,
+            "slices": 12,
+            "source_sha": "6f6b4201087267b3d4beb87b380e839b28977430",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "633746fac1020736ca4ed2b52e00fbed00b84366fd3bc60fd375d664202a6130",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "8f71956e7dd3386b922e0338884b2c141341d4b4",
+            "job_id": 139437644775,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 906,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45679711209,
+            "slice": 3,
+            "slices": 12,
+            "source_sha": "b6e636ac96b08d4864acc69adc93350fa079790d",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "0bac7b78fcaf5ea9ce6677d63c33324b9649ff3f3f358be46dd9343bfbec881f",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "2b49dbf72c9ec285f9fc2bb161a10ecf5efd17b4",
+            "job_id": 139440104309,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 907,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45680546732,
+            "slice": 10,
+            "slices": 12,
+            "source_sha": "b5898d1fea1176e3067b7c8047861a728268939a",
+            "status": "needs_triage",
+            "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "1454fec1804b0ec50344adb428109bd640b35fd291f3db9247b87d274791ace1",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "df6df9311474ea889fccb4e1e480762b0085ffb4",
+            "job_id": 139457463435,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 908,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45685512540,
+            "slice": 12,
+            "slices": 12,
+            "source_sha": "c5353d888e017723ac80ebec03c1892708db7bf6",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "b84997735ab48c57d171fc7aeccf5fc2bb2ebc1ced4178dc43bf3100ddbacef3",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "70d99a537fae8d86b9788a791a0351780fa4d195",
+            "job_id": 139462888984,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 909,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45687071801,
+            "slice": 1,
+            "slices": 12,
+            "source_sha": "00e0e74f07c3e10f3d2b11a2cc2ae3efad77e54b",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          },
+          {
+            "head_sha": "ad4df1f3dcd1383c6d0b11dde4b38510a5d7c5b3",
+            "job_id": 139462423521,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 910,
+            "owner_check": [
+              {
+                "candidate": "t_01a1b8f8ac4ac8e8",
+                "reason": "closed_history_incomplete",
+                "status": "done"
+              }
+            ],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45686951716,
+            "slice": 10,
+            "slices": 12,
+            "source_sha": "674e70951123c85860f2f05c80c575d7d5912c21",
+            "status": "needs_triage",
+            "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+          },
+          {
+            "head_sha": "a0a77addfacb0898b23e3e79e5626a61d54134ec",
+            "job_id": 139462381457,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 911,
+            "owner_check": [
+              {
+                "candidate": "t_01a1b8f8ac4ac8e8",
+                "reason": "closed_history_incomplete",
+                "status": "done"
+              }
+            ],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45686924650,
+            "slice": 4,
+            "slices": 5,
+            "source_sha": "18862a2a3e34ba17d6275cda04e57af1bc625175",
+            "status": "needs_triage",
+            "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "776b93884f01064eaf695cd8060c51c927bfc55bcd6294133814866c29c0d604",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "12c50c4a721304cb17187a4fb2241731346033a8",
+            "job_id": 139493028425,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 912,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45695722693,
+            "slice": 11,
+            "slices": 12,
+            "source_sha": "1bfeff84ea1e69d3dc0884a7e13249a987236b60",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "574d6036d7d887a6d8059cf830e2a043e753b5b49c8998ddf749934ef3c069a2",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+            "job_id": 139512282705,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 913,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45700200503,
+            "slice": 1,
+            "slices": 12,
+            "source_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+            "status": "needs_triage",
+            "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+          },
+          {
+            "head_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+            "job_id": 139512282519,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 914,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45700200503,
+            "slice": 3,
+            "slices": 12,
+            "source_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "3318b935f7c0e5af60dc8282dca200a075e0ce764faa40c6e18fda992c24328b",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "29fcb82ab298ddb36ed5a4590f4326fa4fd62e8b",
+            "job_id": 139520417730,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 915,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45703651162,
+            "slice": 2,
+            "slices": 2,
+            "source_sha": "d84329e7aea74940921c62887b51dd7b6a495883",
+            "status": "needs_triage",
+            "test_id": "tests/hermes_state/test_session_status_checkpoint_fences.py::test_structured_receipt_outranks_stale_checkpoint"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "digest": "e738667454299b4d6d0269a54c7bcb2a450b217edd72e96ac36f0c72096888a9",
+      "manifest": {
+        "occurrences": [
+          {
+            "head_sha": "9c74365e4ff2eb2c936018c8a9edfd8fa3530c3c",
+            "job_id": 139530190320,
+            "observed_day": "2026-11-25",
+            "occurrence_id": 916,
+            "owner_check": [],
+            "retried": "tests",
+            "run_attempt": 1,
+            "run_id": 45706485481,
+            "slice": 4,
+            "slices": 11,
+            "source_sha": "b0a91e3585298c85071a9dac86b9ee16f6820437",
+            "status": "needs_triage",
+            "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+          }
+        ],
+        "version": 1
+      }
+    }
+  ],
+  "occurrences": [
+    {
+      "head_sha": "88e587feb641ad61fa63536e6e5d178b9e505ee3",
+      "job_id": 139396862002,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 904,
+      "owner_check": [
+        {
+          "candidate": "t_01a1b8f8ac4ac8e8",
+          "reason": "closed_history_incomplete",
+          "status": "done"
+        }
+      ],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45668265235,
+      "slice": 9,
+      "slices": 12,
+      "source_sha": "c4d8b9c8dcf858a6408a192a3d6e73c4b01f34b0",
+      "status": "needs_triage",
+      "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+    },
+    {
+      "head_sha": "273abc82b89a0bdd6804c54d5956118091e0107b",
+      "job_id": 139430092531,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 905,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45677703052,
+      "slice": 12,
+      "slices": 12,
+      "source_sha": "6f6b4201087267b3d4beb87b380e839b28977430",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "8f71956e7dd3386b922e0338884b2c141341d4b4",
+      "job_id": 139437644775,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 906,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45679711209,
+      "slice": 3,
+      "slices": 12,
+      "source_sha": "b6e636ac96b08d4864acc69adc93350fa079790d",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "2b49dbf72c9ec285f9fc2bb161a10ecf5efd17b4",
+      "job_id": 139440104309,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 907,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45680546732,
+      "slice": 10,
+      "slices": 12,
+      "source_sha": "b5898d1fea1176e3067b7c8047861a728268939a",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+    },
+    {
+      "head_sha": "df6df9311474ea889fccb4e1e480762b0085ffb4",
+      "job_id": 139457463435,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 908,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45685512540,
+      "slice": 12,
+      "slices": 12,
+      "source_sha": "c5353d888e017723ac80ebec03c1892708db7bf6",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "70d99a537fae8d86b9788a791a0351780fa4d195",
+      "job_id": 139462888984,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 909,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45687071801,
+      "slice": 1,
+      "slices": 12,
+      "source_sha": "00e0e74f07c3e10f3d2b11a2cc2ae3efad77e54b",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "ad4df1f3dcd1383c6d0b11dde4b38510a5d7c5b3",
+      "job_id": 139462423521,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 910,
+      "owner_check": [
+        {
+          "candidate": "t_01a1b8f8ac4ac8e8",
+          "reason": "closed_history_incomplete",
+          "status": "done"
+        }
+      ],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45686951716,
+      "slice": 10,
+      "slices": 12,
+      "source_sha": "674e70951123c85860f2f05c80c575d7d5912c21",
+      "status": "needs_triage",
+      "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+    },
+    {
+      "head_sha": "a0a77addfacb0898b23e3e79e5626a61d54134ec",
+      "job_id": 139462381457,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 911,
+      "owner_check": [
+        {
+          "candidate": "t_01a1b8f8ac4ac8e8",
+          "reason": "closed_history_incomplete",
+          "status": "done"
+        }
+      ],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45686924650,
+      "slice": 4,
+      "slices": 5,
+      "source_sha": "18862a2a3e34ba17d6275cda04e57af1bc625175",
+      "status": "needs_triage",
+      "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile"
+    },
+    {
+      "head_sha": "12c50c4a721304cb17187a4fb2241731346033a8",
+      "job_id": 139493028425,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 912,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45695722693,
+      "slice": 11,
+      "slices": 12,
+      "source_sha": "1bfeff84ea1e69d3dc0884a7e13249a987236b60",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+      "job_id": 139512282705,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 913,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45700200503,
+      "slice": 1,
+      "slices": 12,
+      "source_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach"
+    },
+    {
+      "head_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+      "job_id": 139512282519,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 914,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45700200503,
+      "slice": 3,
+      "slices": 12,
+      "source_sha": "97a2682811aa3487e10d49fc7f4f339f60a9fac6",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    },
+    {
+      "head_sha": "29fcb82ab298ddb36ed5a4590f4326fa4fd62e8b",
+      "job_id": 139520417730,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 915,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45703651162,
+      "slice": 2,
+      "slices": 2,
+      "source_sha": "d84329e7aea74940921c62887b51dd7b6a495883",
+      "status": "needs_triage",
+      "test_id": "tests/hermes_state/test_session_status_checkpoint_fences.py::test_structured_receipt_outranks_stale_checkpoint"
+    },
+    {
+      "head_sha": "9c74365e4ff2eb2c936018c8a9edfd8fa3530c3c",
+      "job_id": 139530190320,
+      "observed_day": "2026-11-25",
+      "occurrence_id": 916,
+      "owner_check": [],
+      "retried": "tests",
+      "run_attempt": 1,
+      "run_id": 45706485481,
+      "slice": 4,
+      "slices": 11,
+      "source_sha": "b0a91e3585298c85071a9dac86b9ee16f6820437",
+      "status": "needs_triage",
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes"
+    }
+  ],
+  "version": 1,
+  "observed_at": "2026-11-25T22:13:58.908674+00:00",
+  "scope": "intake/routing only; not repair acceptance or complete producer backlog",
+  "dispositions": [
+    {
+      "test_id": "tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile",
+      "occurrence_count": 3,
+      "occurrence_ids": [
+        904,
+        910,
+        911
+      ],
+      "disposition": "existing_owner_unresolved_recurrences",
+      "follow_up_owner": {
+        "task": "t_01a2117deceffea3",
+        "gateway": "hub",
+        "status_observed": "triage; decision_pending/spend hold; not released"
+      },
+      "detail": "Original910 log lines1905-1913: PATCH rename succeeds, gamma still exists, assertion line102. Metadata904/911 retained without independent log qualification. Historical closed owner t_01a1b8f8ac4ac8e8 repaired an earlier writer in PR946; not a new occurrence owner. Exact historical filesystem writer remains unknown. Gateway owner retains remaining repair/source qualification."
+    },
+    {
+      "test_id": "tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach",
+      "occurrence_count": 2,
+      "occurrence_ids": [
+        907,
+        913
+      ],
+      "disposition": "existing_owner_merged_related_repair_source_qualified",
+      "follow_up_owner": {
+        "task": "t_01a2117e043cbca0",
+        "gateway": "hub",
+        "status_observed": "running"
+      },
+      "detail": "Original913 log lines1875-1879: contract.params.model_validate(params) raises AttributeError because contract is None. PR4446 independently GitHub-read MERGED at9e8355668e0bef82a72d48fe8958a86ee8b2e34e. Actual source913 is ancestor of landing (behind5); source907 diverged before landing (behind14/ahead1), so neither establishes a descendant post-fix recurrence. Source907 patch-content coverage and original log remain unread. Existing owner retains causal repair proof; intake does not independently reproduce import ordering or declare every observation fixed."
+    },
+    {
+      "test_id": "tests/hermes_state/test_session_status_checkpoint_fences.py::test_structured_receipt_outranks_stale_checkpoint",
+      "occurrence_count": 1,
+      "occurrence_ids": [
+        915
+      ],
+      "disposition": "existing_PR4478_owner_first_attempt_failure",
+      "follow_up_owner": {
+        "task": "t_01a2143fcfb27f95",
+        "gateway": "worker-a1",
+        "status_observed": "running"
+      },
+      "detail": "Original915 PR4478 merge-source log lines1116-1139: [3-unresolved] returns done instead of unresolved at line51; isolated retry lines1142-1156 passes. Existing PR4478 author t_01a2143fcfb27f95 owns exact added test/receipt precedence. Original manifest node ID remains unparameterized; log suffix is annotation only. Mechanism not established; qualify before landing. Direct comment143545 readback requested."
+    },
+    {
+      "test_id": "tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes",
+      "occurrence_count": 7,
+      "occurrence_ids": [
+        905,
+        906,
+        908,
+        909,
+        912,
+        914,
+        916
+      ],
+      "disposition": "existing_owner_post_PR4439_recurrence_confirmed",
+      "follow_up_owner": {
+        "task": "t_01a2117deceffea3",
+        "gateway": "hub",
+        "status_observed": "triage; decision_pending/spend hold; not released"
+      },
+      "detail": "Actual sources914=97a2682811aa3487e10d49fc7f4f339f60a9fac6 and916=b0a91e3585298c85071a9dac86b9ee16f6820437 descend from landed PR4439 67876b0fd11bb585442e60c57f3f1b30ed3598eb (behind0). First-attempt logs914 lines1856-1861 and916 lines1299-1304 fail assert started.is_set() at line210, not old started.wait(timeout=2). Source916 confirms queued_probe parameterized fixture. This is a recurrence on repaired source, not delayed pre-fix metadata; causal mechanism unproven. Other five sources remain individually unqualified. Preserve existing held owner; this note grants no execution/budget release."
+    }
+  ],
+  "docs_export_owner": {
+    "task": "t_01a2117e043cbca0",
+    "gateway": "hub",
+    "status_observed": "running"
+  },
+  "source_qualifications": {
+    "914": {
+      "ahead_by": 32,
+      "behind_by": 0,
+      "merge_base": "67876b0fd11bb585442e60c57f3f1b30ed3598eb",
+      "status": "ahead"
+    },
+    "916": {
+      "ahead_by": 37,
+      "behind_by": 0,
+      "merge_base": "67876b0fd11bb585442e60c57f3f1b30ed3598eb",
+      "status": "ahead"
+    }
+  },
+  "upload_repair_status": {
+    "head": "02717dd5ebbe58ac6f2de43083ef377b4fb71a3f",
+    "merge_commit_sha": "9e8355668e0bef82a72d48fe8958a86ee8b2e34e",
+    "merged": true,
+    "state": "closed"
+  },
+  "policy_changes": []
+}
