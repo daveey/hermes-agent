@@ -258,3 +258,40 @@ def test_positive_other_portable_source_changes(stores, change):
         for sql in statements[change]:
             conn.execute(sql)
     assert drift.audited_rejection(live, shadow, op)
+
+
+@pytest.mark.parametrize('dependency', [
+    {'id': 't_parent', 'status': 'running', 'extra': 1},
+    {'id': 1, 'status': 'running'},
+])
+def test_unknown_dependency_shapes_stay_dirty(stores, dependency):
+    live, shadow, op = stores
+    facts = json.loads(op['fields'])['payload']['facts']
+    facts['dependencies'] = [dependency]
+    _refreeze(live, op, facts)
+    assert not drift.audited_rejection(live, shadow, op)
+
+
+@pytest.mark.parametrize('sql', [
+    "UPDATE tasks SET status=NULL WHERE id='t_parent'",
+    "INSERT INTO task_links VALUES ('t_parent','t_card')",
+    "INSERT INTO task_events VALUES (0,'','t_card','created',122,'{}',NULL)",
+])
+def test_invalid_unselected_or_derived_facts_stay_dirty(stores, sql):
+    live, shadow, op = stores
+    for conn in (live, shadow):
+        conn.execute(sql)
+    assert not drift.audited_rejection(live, shadow, op)
+
+
+@pytest.mark.parametrize('current,frozen', [
+    ('done', 'triage'), ('archived', 'triage'), ('running', 'running'),
+])
+def test_contained_parent_effective_status_is_not_a_false_change(stores, current, frozen):
+    live, shadow, op = stores
+    facts = json.loads(op['fields'])['payload']['facts']
+    facts['dependencies'][0]['status'] = frozen
+    _refreeze(live, op, facts)
+    for conn in (live, shadow):
+        conn.execute("UPDATE tasks SET status=?,containment_episode='held' WHERE id='t_parent'", (current,))
+    assert not drift.audited_rejection(live, shadow, op)
