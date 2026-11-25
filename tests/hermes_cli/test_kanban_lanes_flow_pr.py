@@ -138,3 +138,26 @@ def test_slow_brokered_gh_fits_budget_across_many_prs(tmp_path, monkeypatch):
     assert time.monotonic() - start < 9
     for url in urls:
         assert reader.get(url) == {"merged": False, "approved": True, "checks": "green"}
+
+
+def test_child_attribution_and_terminal_state_are_observed_without_global_env(tmp_path, monkeypatch):
+    import os
+    script = tmp_path / 'attributed_gh.py'
+    script.write_text(
+        "import os,json\n"
+        "assert os.environ['GH_SHIM_PARENT'] == 'lanes-flow'\n"
+        "print(json.dumps({'state':'CLOSED'}))\n")
+    monkeypatch.setenv('GH_SHIM_PARENT', 'unrelated-parent')
+    monkeypatch.setattr(shared, '_gh_argv', lambda: [sys.executable, str(script)])
+    reader = Reader()
+    url = 'https://github.com/example/repo/pull/7'
+    assert reader.get(url) == {}
+    assert reader.states[url] == 'CLOSED'
+    assert os.environ['GH_SHIM_PARENT'] == 'unrelated-parent'
+
+
+def test_failed_or_unconfirmed_observation_has_no_success_state(monkeypatch):
+    monkeypatch.setattr(Reader, '_read', lambda self, argv: None)
+    reader = Reader()
+    assert reader.get('https://github.com/example/repo/pull/8') == {}
+    assert reader.states == {}

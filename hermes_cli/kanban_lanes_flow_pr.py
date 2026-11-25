@@ -59,6 +59,7 @@ class Reader:
     def __init__(self, budget=BUDGET_S):
         self.deadline = time.monotonic() + budget
         self.cache = {}
+        self.states = {}  # successful provider states, including unclassified CLOSED
 
     def _read(self, argv):
         from hermes_cli.kanban_db_dispatch_pr_state import _gh_argv
@@ -73,7 +74,7 @@ class Reader:
             result = subprocess.run(
                 [*gh, *argv], stdin=subprocess.DEVNULL, capture_output=True,
                 text=True, encoding="utf-8", errors="replace", timeout=remaining,
-                env=build_subprocess_env(), check=False)
+                env={**build_subprocess_env(), "GH_SHIM_PARENT": "lanes-flow"}, check=False)
             return json.loads(result.stdout) if result.returncode in (0, 8) else None
         except (OSError, subprocess.SubprocessError, ValueError):
             return None
@@ -112,5 +113,7 @@ class Reader:
                     out["checks"] = "red"
                 elif "pending" in buckets:
                     out["checks"] = "pending"
+        if state in ("OPEN", "MERGED", "CLOSED"):
+            self.states[url] = state
         self.cache[url] = out
         return out
