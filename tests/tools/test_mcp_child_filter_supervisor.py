@@ -16,7 +16,8 @@ from tools import mcp_tool_lifecycle
 pytestmark = pytest.mark.platforms("posix")
 
 
-def test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor(monkeypatch):
+@pytest.mark.parametrize("empty_snapshots", [0, 3])
+def test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor(monkeypatch, empty_snapshots):
     monkeypatch.setattr(process_identity, "_SUPERVISOR_IDLE_EXIT_S", 0.0)
     monkeypatch.setattr(process_identity, "_supervisor", None)
     monkeypatch.setattr(process_identity, "_supervised_pgids", set())
@@ -27,6 +28,26 @@ def test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor(mo
                                           purpose="test", stdin=subprocess.PIPE)
     mcp_server = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
     try:
+        import psutil
+
+        original_cmdline = psutil.Process.cmdline
+        remaining_empty = empty_snapshots
+
+        def cmdline(proc):
+            nonlocal remaining_empty
+            if proc.pid == mcp_server.pid and remaining_empty:
+                remaining_empty -= 1
+                return []
+            return original_cmdline(proc)
+
+        monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
+        # Popen returning is not an inspectable-argv publication receipt. The
+        # positive control must have exec'd before asking the fail-closed filter
+        # to retain it; the supervisor's spawn-delta race remains unchanged.
+        from tests.waiting import wait_until
+
+        wait_until(lambda: psutil.Process(mcp_server.pid).cmdline() == mcp_server.args,
+                   timeout=10, what="ordinary MCP child exec argv published")
         supervisor = process_identity._supervisor
         assert supervisor is not None
         delta = mcp_tool_lifecycle._snapshot_child_pids() - before
