@@ -28,13 +28,24 @@ def stale_stops(conn: sqlite3.Connection, *, now: float, older_than: int = 1800)
         if stop is None or stop['created_at'] >= now - older_than:
             continue
         episode = cast(str, reviewer.episode_of(stop))
-        if reviewer.state(conn, tid, episode) is not None or decision.episode_route(conn, tid, episode) is not None:
+        if reviewer.state(conn, tid, episode) is not None or _routed(conn, tid, episode):
             continue
         if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
                         "AND json_extract(payload,'$.episode')=?", (tid, FILED, episode)).fetchone():
             continue
         result.append({**dict(row), 'episode': episode, 'stop': stop})
     return result
+
+
+def _routed(conn: sqlite3.Connection, tid: str, episode: str) -> bool:
+    """A decision card, or the notice's live chat route. ``unavailable`` means nobody was told."""
+    route = decision.episode_route(conn, tid, episode)
+    if route is None:
+        row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
+                           "AND json_extract(payload,'$.episode')=? ORDER BY id DESC LIMIT 1",
+                           (tid, decision.NOTICE, episode)).fetchone()
+        route = kb._json_dict(row[0]).get('producer') if row else None
+    return isinstance(route, dict) and route.get('kind') != 'unavailable' and decision._live_route(conn, route)
 
 
 def _file(conn: sqlite3.Connection, card: dict, now: float) -> str:

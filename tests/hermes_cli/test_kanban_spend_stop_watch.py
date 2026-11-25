@@ -169,3 +169,29 @@ def test_cli_reports_exact_receipt(kanban_home, capsys, monkeypatch):
     with kbc.connect_closing() as conn:
         card, = filed(conn)
     assert capsys.readouterr().out == f"filed {card['id']} for {tid} stop {ep}\n"
+
+
+def _notice(conn, tid, ep, producer):
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, decision.NOTICE, {'episode': ep, 'producer': producer})
+
+
+@pytest.mark.parametrize('producer,files', [
+    ({'kind': 'chats', 'sessions': ['s1']}, False), ({'kind': 'dismissed'}, False),
+    ({'kind': 'unavailable'}, True), ('chats', True), (None, True)])
+def test_notice_route_counts_only_when_somebody_was_told(kanban_home, producer, files):
+    with kbc.connect_closing() as conn:
+        tid, ep = stop(conn)
+        _notice(conn, tid, ep, producer)
+        assert len(watchdog.watch(conn, now=NOW)) == (1 if files else 0)
+
+
+def test_notice_route_of_another_episode_or_a_closed_decision_card_does_not_count(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid, ep = stop(conn)
+        _notice(conn, tid, 'another-episode', {'kind': 'chats'})
+        closed = kb.create_task(conn, title='Old decision desk', assignee='default')
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (closed,))
+        _notice(conn, tid, ep, {'kind': 'supervisor', 'task_id': closed})
+        assert len(watchdog.watch(conn, now=NOW)) == 1
