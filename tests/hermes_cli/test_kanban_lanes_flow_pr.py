@@ -6,6 +6,7 @@ import pytest
 
 from hermes_cli import kanban_db_dispatch_pr_state as shared
 from hermes_cli.kanban_lanes_flow_pr import Reader
+from tests.hermes_cli.test_kanban_lanes_flow_pr_snapshot import snapshot
 
 
 @pytest.mark.parametrize("state,decision,buckets,expected", [
@@ -19,9 +20,9 @@ from hermes_cli.kanban_lanes_flow_pr import Reader
 def test_real_executable_observations(tmp_path, monkeypatch, state, decision, buckets, expected):
     script = tmp_path / "fixture_gh.py"
     view = {"state": state, "reviewDecision": decision, "headRefOid": "a" * 40}
-    checks = [{"bucket": b} for b in buckets]
+    payload = snapshot(view, buckets)
     script.write_text("import json,sys\n" +
-                      f"print(json.dumps({view!r} if 'view' in sys.argv else {checks!r}))\n")
+                      f"print(json.dumps({view!r} if 'view' in sys.argv else {payload!r}))\n")
     monkeypatch.setattr(shared, "_gh_argv", lambda: [sys.executable, str(script)])
     reader = Reader()
     assert reader.get("https://github.com/example/repo/pull/1") == expected
@@ -64,7 +65,8 @@ def test_changed_head_or_review_during_checks_is_unknown(monkeypatch, change):
     views = iter([first, last])
 
     def read(self, argv):
-        return [{"bucket": "pass"}] if "checks" in argv else next(views)
+        view = next(views)
+        return view if "view" in argv else snapshot(view)
     monkeypatch.setattr(Reader, "_read", read)
     assert Reader().get("https://github.com/example/repo/pull/1") == {}
 
@@ -89,7 +91,7 @@ def test_fleet_comment_verdict_same_github_identity(monkeypatch, body, oid, bot,
     review = dict(_review("author", "COMMENTED", oid, bot), body=body)
     view = {"state": "OPEN", "headRefOid": "a" * 40, "reviewDecision": "",
             "author": {"login": "author"}, "reviews": [review]}
-    monkeypatch.setattr(Reader, "_read", lambda self, argv: [{"bucket": "pass"}] if "checks" in argv else view)
+    monkeypatch.setattr(Reader, "_read", lambda self, argv: view if "view" in argv else snapshot(view))
     from hermes_cli.kanban_lanes_flow import classify_step
     observed = Reader().get("https://github.com/example/repo/pull/1")
     assert observed["approved"] is expected
@@ -102,7 +104,7 @@ def test_fleet_comment_change_request_supersedes_approval(monkeypatch):
                for v in ("APPROVE", "REQUEST_CHANGES")]
     view = {"state": "OPEN", "headRefOid": "a" * 40, "reviewDecision": "",
             "author": {"login": "author"}, "reviews": reviews}
-    monkeypatch.setattr(Reader, "_read", lambda self, argv: [{"bucket": "pass"}] if "checks" in argv else view)
+    monkeypatch.setattr(Reader, "_read", lambda self, argv: view if "view" in argv else snapshot(view))
     assert Reader().get("https://github.com/example/repo/pull/1")["approved"] is False
 
 
@@ -119,7 +121,7 @@ def test_fleet_comment_change_request_supersedes_approval(monkeypatch):
 def test_empty_review_decision_still_reaches_merge_via_independent_approval(monkeypatch, reviews, approved):
     view = {"state": "OPEN", "headRefOid": "a" * 40, "reviewDecision": "", "author": {"login": "author"},
             "reviews": reviews}
-    monkeypatch.setattr(Reader, "_read", lambda self, argv: [{"bucket": "pass"}] if "checks" in argv else view)
+    monkeypatch.setattr(Reader, "_read", lambda self, argv: view if "view" in argv else snapshot(view))
     assert Reader().get("https://github.com/example/repo/pull/1")["approved"] is approved
 
 
@@ -129,9 +131,9 @@ def test_slow_brokered_gh_fits_budget_across_many_prs(tmp_path, monkeypatch):
     view = {"state": "OPEN", "reviewDecision": "", "headRefOid": "a" * 40, "author": {"login": "x"},
             "reviews": [_review("rev", "APPROVED", "a" * 40)]}
     script.write_text("import json,sys,time\ntime.sleep(1.2)\n"
-                      f"print(json.dumps({view!r} if 'view' in sys.argv else [{{'bucket': 'pass'}}]))\n")
+                      f"print(json.dumps({view!r} if 'view' in sys.argv else {snapshot(view)!r}))\n")
     monkeypatch.setattr(shared, "_gh_argv", lambda: [sys.executable, str(script)])
-    urls = [f"https://github.com/example/repo/pull/{n}" for n in range(6)]
+    urls = [f"https://github.com/example/repo/pull/{n}" for n in range(1, 7)]
     reader = Reader(budget=10)
     start = time.monotonic()
     reader.prefetch(urls)
@@ -146,7 +148,7 @@ def test_child_attribution_and_terminal_state_are_observed_without_global_env(tm
     script.write_text(
         "import os,json\n"
         "assert os.environ['GH_SHIM_PARENT'] == 'lanes-flow'\n"
-        "print(json.dumps({'state':'CLOSED'}))\n")
+        f"print(json.dumps({snapshot({'state': 'CLOSED'})!r}))\n")
     monkeypatch.setenv('GH_SHIM_PARENT', 'unrelated-parent')
     monkeypatch.setattr(shared, '_gh_argv', lambda: [sys.executable, str(script)])
     reader = Reader()

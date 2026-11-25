@@ -10,7 +10,7 @@ from tools.environments.local import build_subprocess_env
 # Brokered gh calls measure 3-4.5 s each on the fleet, so the budget is wall-clock for the whole
 # report and PRs are read concurrently (``prefetch``), not as one call chain after another.
 BUDGET_S = 30
-_VIEW = "state,headRefOid,reviewDecision,author,reviews"
+
 
 
 def _login(person):
@@ -90,12 +90,13 @@ class Reader:
         if url in self.cache:
             return self.cache[url]
         self.cache[url] = {}
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            view = pool.submit(self._read, ["pr", "view", url, "--json", _VIEW])
-            checks = pool.submit(self._read, ["pr", "checks", url, "--required", "--json", "bucket"])
-            data, checks = view.result(), checks.result()
-        if not isinstance(data, dict):
+        from hermes_cli.kanban_lanes_flow_pr_snapshot import argv, parse
+
+        request = argv(url)
+        observed = parse(self._read(request)) if request else None
+        if observed is None:
             return {}
+        data, checks = observed
         state = data.get("state")
         out = {"merged": state == "MERGED"} if state in ("OPEN", "MERGED") else {}
         if state == "OPEN":
