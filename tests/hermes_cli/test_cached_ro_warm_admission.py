@@ -131,6 +131,42 @@ def test_replaced_main_file_declines_warm_admission(board, tmp_path):
         assert conn.execute("SELECT v FROM t").fetchone() == (99,)
 
 
+def test_error_cleanup_retains_tracking_until_lifecycle_owner_releases(board):
+    from hermes_cli import sqlite_safe_read as safe
+
+    with activity.cached_ro(board):
+        pass
+    entered, finished = threading.Event(), threading.Event()
+    errors = []
+
+    def fail_read():
+        try:
+            with activity.cached_ro(board, busy_budget=0):
+                entered.set()
+                raise sqlite3.OperationalError("fixture body failed")
+        except sqlite3.OperationalError as exc:
+            errors.append(str(exc))
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=fail_read)
+    try:
+        with held_elsewhere(generation.lifecycle_lock(board)):
+            thread.start()
+            assert entered.wait(10)
+            assert not finished.is_set()  # close still owes lifecycle custody
+            # A failed read cannot untrack its descriptor before the actual close.
+            assert safe.has_live_connection(board)
+        thread.join(10)
+        assert not thread.is_alive()
+        assert errors == ["fixture body failed"]
+        assert finished.is_set()
+        assert not safe.has_live_connection(board)
+        assert str(board) not in activity._RO_CACHE
+    finally:
+        thread.join(10)
+
+
 def test_warm_custody_excludes_raw_probe_without_acquiring_tracking_mutex(board):
     from hermes_cli import sqlite_safe_read as safe
 

@@ -58,6 +58,22 @@ def _held(path: Path):
         t.join(5)
 
 
+@contextmanager
+def _native_held(path: Path):
+    """Block actual reads on this DELETE-journal fixture, not just new opens.
+
+    A warm attested reader can now read through an unrelated lifecycle hold;
+    stale-row and last-count fallback still must work when SQLite itself is busy.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("BEGIN EXCLUSIVE")
+        yield
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 def test_lifecycle_busy_error_carries_sqlite_busy(tmp_path):
     db = tmp_path / "kanban.db"
     _make_board(db, [])
@@ -93,7 +109,7 @@ def test_one_held_board_keeps_every_row_known_and_reuses_its_last_counts(kanban_
     with sqlite3.connect(free_db) as conn:  # the free board moves, so the counts are recomputed
         conn.execute("INSERT INTO tasks VALUES ('t3', 'running', 's_free')")
     rows = [{"id": "s_busy"}, {"id": "s_free"}]
-    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_session_activity"), _held(busy_db):
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_session_activity"), _native_held(busy_db):
         ksa._cache = None  # past the counts TTL
         ksa.annotate_kanban_activity(rows)
     assert not any(r.get("kanban_unknown") for r in rows), rows
@@ -111,7 +127,7 @@ def test_session_tasks_on_a_held_board_reuse_the_last_rows_marked_stale(kanban_r
     _make_board(busy_db, [("t1", "running", "s1")])
     _make_board(free_db, [("t2", "running", "s1")])
     assert {t["id"] for t in ksa.session_tasks(["s1"])} == {"t1", "t2"}
-    with _held(busy_db):
+    with _native_held(busy_db):
         tasks = {t["id"]: t for t in ksa.session_tasks(["s1"])}
     assert set(tasks) == {"t1", "t2"}
     assert tasks["t1"].get("stale") is True

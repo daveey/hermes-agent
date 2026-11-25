@@ -34,13 +34,14 @@ def busy_board(tmp_path, monkeypatch):
 
 def _spy_budgets(monkeypatch):
     budgets = []
-    original = lifecycle.cached_entry
+    original = activity.cached_ro
 
-    def spy(path, busy_budget=0.5):
+    def spy(path, *, busy_budget=0.5):
         budgets.append(busy_budget)
-        return original(path, busy_budget)
+        return original(path, busy_budget=busy_budget)
 
-    monkeypatch.setattr(lifecycle, "cached_entry", spy)
+    # Measure caller budgets on warm borrows too, not only cold admissions.
+    monkeypatch.setattr(activity, "cached_ro", spy)
     return budgets
 
 
