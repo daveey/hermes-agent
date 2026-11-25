@@ -791,6 +791,7 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
     from hermes_cli.kanban_blocker_rows import foreign_among
 
     now = int(time.time()) if now is None else int(now)
+    from hermes_cli.kanban_home_transfer import frozen
     if interval is None:
         interval = probe_interval_seconds()
     probed: list[str] = []
@@ -801,7 +802,7 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
             continue
         if st.blocker_provider and due_out is not None:
             due_out.append(now + ROUTE_RECHECK_SECONDS)
-        ids = sorted(t for t in st.behind if task_applies(conn, st, t))
+        ids = sorted(t for t in st.behind if task_applies(conn, st, t) and not frozen(conn, t))
         if not ids:
             continue
         marks = ",".join("?" * len(ids))
@@ -824,6 +825,8 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
             if not kb.unblock_task(conn, tid):
                 continue
             with kb.write_txn(conn):
+                if frozen(conn, tid):
+                    continue
                 kb._append_event(conn, tid, PROBE_RELEASED_EVENT, {
                     "blocker_id": st.blocker_id, "idle_seconds": now - last})
             probed.append(tid)

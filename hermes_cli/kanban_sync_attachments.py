@@ -17,6 +17,7 @@ import time
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_db_attachment_names import _safe_attachment_name
 from hermes_cli.kanban_db_connect import write_txn
+from hermes_cli.kanban_home_transfer import frozen
 
 _log = logging.getLogger(__name__)
 _now = time.time
@@ -83,17 +84,25 @@ def _publish_file(path, data):
             temporary.unlink(missing_ok=True)
 
 
-def _record_local(conn, row, path, key):
+def _record_local(conn, row, path, key, *, data=None):
     # stored_path is local-only. Suppress echo of the service's verified receipt.
     # A deleted/rebound row must not be resurrected after network I/O.
     # Read current metadata, not the pre-I/O snapshot: another writer may have
     # cleared the path while these bytes were being verified.
-    current = conn.execute("SELECT stored_path,blob_key FROM task_attachments WHERE uid=? "
-                           "AND task_id=? AND size=? AND blob_key IS ?",
-                           (row["uid"], row["task_id"], row["size"], row["blob_key"])).fetchone()
-    if current is None or (current["stored_path"] == str(path) and current["blob_key"] == key):
-        return
     with write_txn(conn):
+        if frozen(conn, row["task_id"]):
+            return False
+        current = conn.execute("SELECT stored_path,blob_key FROM task_attachments WHERE uid=? "
+                               "AND task_id=? AND size=? AND blob_key IS ?",
+                               (row["uid"], row["task_id"], row["size"], row["blob_key"])).fetchone()
+        if current is None:
+            return False
+        if data is not None:
+            # Byte publication and local metadata share the custody reservation.
+            # No network is performed under this writer lock.
+            _publish_file(path, data)
+        if current["stored_path"] == str(path) and current["blob_key"] == key:
+            return True
         previous = conn.execute("SELECT applying FROM kanban_sync_state").fetchone()[0]
         conn.execute("UPDATE kanban_sync_state SET applying=1")
         try:
@@ -102,9 +111,12 @@ def _record_local(conn, row, path, key):
                          (str(path), key, row["uid"], row["task_id"], row["size"], row["blob_key"]))
         finally:
             conn.execute("UPDATE kanban_sync_state SET applying=?", (previous,))
+    return True
 
 
 def _transfer(conn, hub, board, row, *, expected_sha256=None):
+    if frozen(conn, row["task_id"]):
+        return False
     key = row["blob_key"]
     if expected_sha256 is not None and key and key != "sha256:" + expected_sha256:
         raise ValueError("attachment differs from selected digest")
@@ -120,9 +132,9 @@ def _transfer(conn, hub, board, row, *, expected_sha256=None):
         if (not isinstance(receipt, dict) or receipt.get("blob_key") != "sha256:" + digest
                 or receipt.get("sha256") != digest or receipt.get("size") != len(data)):
             raise ValueError("invalid attachment storage receipt")
-        _record_local(conn, row, path, receipt["blob_key"])
-        return True
+        return _record_local(conn, row, path, receipt["blob_key"])
     path = Path(row["stored_path"]) if row["stored_path"] else _destination(row, board)
+    downloaded = None
     if path.is_file():
         try:
             data = _read(path, row, board)
@@ -137,9 +149,8 @@ def _transfer(conn, hub, board, row, *, expected_sha256=None):
         if len(data) != row["size"] or len(data) > kb.KANBAN_ATTACHMENT_MAX_BYTES:
             raise ValueError("attachment size mismatch")
         _valid(data, key)
-        _publish_file(path, data)
-    _record_local(conn, row, path, key)
-    return True
+        downloaded = data
+    return _record_local(conn, row, path, key, data=downloaded)
 
 
 def transfer_pending(conn, hub, board, *, limit=2):
@@ -161,20 +172,34 @@ def transfer_pending(conn, hub, board, *, limit=2):
         # First transfers and newly available/retryable bytes precede maintenance.
         "ORDER BY CASE WHEN r.uid IS NULL OR r.blob_key IS NOT a.blob_key "
         "OR (r.error IS NOT NULL AND (a.blob_key IS NOT NULL OR a.stored_path <> '')) THEN 0 ELSE 1 END, "
-        "coalesce(r.retry_at,0),a.id LIMIT ?", (now, limit)).fetchall()
+        "coalesce(r.retry_at,0),a.id", (now,))
+    selected = []
+    try:
+        for raw in rows:
+            if len(selected) >= limit:
+                break
+            if not frozen(conn, raw["task_id"]):
+                selected.append(dict(raw))
+    finally:
+        rows.close()  # Never retain a read snapshot across network I/O / writer upgrade.
     transferred = 0
     stamps = []
-    for raw in rows:
-        row, error, done = dict(raw), None, False
+    for row in selected:
+        error, done = None, False
         try:
             done = _transfer(conn, hub, board, row)
             transferred += int(done)
         except (OSError, ValueError, HubError) as exc:
             error = type(exc).__name__  # no remote response bodies/credentials in durable state
             _log.warning("kanban attachment %s transfer pending (%s)", row["uid"], error)
-        stamps.append((row["uid"], row["blob_key"], now + (600 if done else 30), error))
+        stamps.append((row["uid"], row["blob_key"], now + (600 if done else 30), error, row))
     if stamps:
         with write_txn(conn):
+            stamps = [stamp[:4] for stamp in stamps if not frozen(conn, stamp[4]["task_id"])
+                      and conn.execute("SELECT 1 FROM task_attachments WHERE uid=? AND task_id=? "
+                                       "AND size=? AND filename=? AND created_at=?",
+                                       (stamp[0], stamp[4]["task_id"], stamp[4]["size"],
+                                        stamp[4]["filename"], stamp[4]["created_at"])).fetchone()]
             conn.executemany("INSERT INTO kanban_attachment_retry(uid,blob_key,attempts,retry_at,error) "
                              "VALUES (?,?,1,?,?) ON CONFLICT(uid) DO UPDATE SET blob_key=excluded.blob_key, "
                              "attempts=attempts+1,retry_at=excluded.retry_at,error=excluded.error", stamps)

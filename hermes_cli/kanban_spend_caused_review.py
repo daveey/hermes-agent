@@ -53,12 +53,13 @@ def effective_cause(conn, task_id, stop):
 
 
 def fenced(conn, task_id):
+    from hermes_cli.kanban_home_transfer import frozen
     from hermes_cli.kanban_containment_guard import pending
     from hermes_cli.kanban_stop_ended import stopped_at
     from hermes_cli.kanban_continuation import HUMAN_BLOCK_KINDS
     row = conn.execute("SELECT status,human_request,block_kind,current_run_id FROM tasks WHERE id=?",
                        (task_id,)).fetchone()
-    return (row is None or row[0] != "triage" or bool(row[1]) or row[2] in HUMAN_BLOCK_KINDS
+    return (frozen(conn, task_id) or row is None or row[0] != "triage" or bool(row[1]) or row[2] in HUMAN_BLOCK_KINDS
             or row[3] is not None or pending(conn, task_id) or stopped_at(conn, task_id) is not None)
 
 
@@ -174,6 +175,7 @@ def canonical(conn, task_id, episode, fields, max_grants, *, resend=True):
         raise Refused(prior["refused"])
     hub = client.Hub(client.load_identity(), deadline=time.monotonic() + 90)
     try:
+        owned = prior
         if prior:
             if prior["board"] != board or prior["gateway"] != hub.ident.gateway:
                 raise Unconfirmed("frozen request belongs to another Board or gateway")
@@ -182,7 +184,8 @@ def canonical(conn, task_id, episode, fields, max_grants, *, resend=True):
             capability = hub.decision_retain_capability(board)
             if not isinstance(capability, dict) or type(capability.get("spend_review")) is not int or capability["spend_review"] != 1:
                 raise ValueError("Board spend_review v1 unavailable")
-            wire = journal.freeze(conn, board, hub.ident.gateway, wire)["wire"]
+            owned = journal.freeze(conn, board, hub.ident.gateway, wire)
+            wire = owned["wire"]
         uid = wire["event_uid"]
         fields = wire
         digest = hashlib.sha256(json.dumps(wire, sort_keys=True, separators=(",", ":"),
@@ -192,7 +195,11 @@ def canonical(conn, task_id, episode, fields, max_grants, *, resend=True):
             if not resend:
                 raise Unconfirmed("frozen request readback pending; current holds prohibit resubmission")
             client.push(conn, hub, board, hub.ident.gateway, primary=True)
-            reply = hub.ops(board, [wire])
+            from hermes_cli.kanban_home_transfer import frozen as home_frozen
+            if home_frozen(conn, task_id):
+                raise Unconfirmed("home transfer owns this card; request retained without resubmission")
+            from hermes_cli import kanban_home_command as home
+            reply = hub.ops(board, [home.outbound(owned, wire)])
             results = reply.get("results") if isinstance(reply, dict) else None
             if (not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict)
                     or results[0].get("client_op_id") != uid):
@@ -230,6 +237,7 @@ def review(conn, task_id, episode, verdict, ctx):
     from hermes_cli.kanban_wake_check import foreign_copy
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_spend_review_request as journal
+    from hermes_cli.kanban_home_transfer import frozen as home_frozen
     frozen = journal.get(conn, task_id, episode)
     try:
         stop = decision.strict_episode(conn, task_id)
@@ -253,6 +261,8 @@ def review(conn, task_id, episode, verdict, ctx):
         result = reviewer.escalate(conn, task_id, episode, str(exc))
         if result == "moot":
             with kb.write_txn(conn):
+                if home_frozen(conn, task_id):
+                    return "pending"
                 kb._append_event(conn, task_id, reviewer.ESCALATED, {"episode": episode, "reason": str(exc)})
         return result
     except (ValueError, OSError, RuntimeError) as exc:
@@ -267,6 +277,8 @@ def review(conn, task_id, episode, verdict, ctx):
             # moot; otherwise the frozen request stays STARTED and is due forever. Record settlement only: the
             # newer episode's hold, routing and budget are untouched.
             with kb.write_txn(conn):
+                if home_frozen(conn, task_id):
+                    return "pending"
                 if reviewer.state(conn, task_id, episode) in (reviewer.QUEUED, reviewer.STARTED):
                     kb._append_event(conn, task_id, reviewer.SETTLED, {"episode": episode,
                                      "receipt_uid": receipt["request_uid"], "verdict": receipt["verdict"]})
@@ -282,5 +294,7 @@ def review(conn, task_id, episode, verdict, ctx):
     if release_parents(task_id, receipt) is not None:
         settled.update(status='todo', landing=receipt['landing'])
     with kb.write_txn(conn):
+        if home_frozen(conn, task_id):
+            return "pending"
         kb._append_event(conn, task_id, reviewer.SETTLED, settled)
     return "settled"  # canonical effect confirmed; normal sync, not this helper, projects clearance

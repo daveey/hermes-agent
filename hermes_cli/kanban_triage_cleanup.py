@@ -38,6 +38,9 @@ def archive_requested_fixture(conn, tid: str) -> bool:
     if tid in foreign_ids(conn) or not eligible(conn, tid):
         return False
     def precondition(c):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(c, tid):
+            return "home transfer owns this card; scratch cleanup deferred"
         if not eligible(c, tid):
             return "scratch cleanup conditions changed"
         kb.add_comment(c, tid, "triage-sweep", "Archived scratch card of a finished creator: the latest comment "

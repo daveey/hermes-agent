@@ -127,12 +127,14 @@ def release_recovered_quota_blocks(conn: sqlite3.Connection) -> list[str]:
             continue
         if not _kb.unblock_task(conn, task_id):
             continue
-        _kb.add_comment(
-            conn, task_id, "kanban-dispatcher",
-            f"{RELEASE_NOTE_MARKER} Released automatically. This block was the respawn guard's "
-            f"hold cap ({guard_reason}) on a quota/rate-limit error ({err[:200]}), which clears on its "
-            f"own and never needed a person. Card {proof['task_id']} completed after the block, so the "
-            f"provider is answering again; back to ready.",
-        )
+        with _kb.write_txn(conn):
+            if not frozen(conn, task_id):
+                _kb.add_comment(
+                    conn, task_id, "kanban-dispatcher",
+                    f"{RELEASE_NOTE_MARKER} Released automatically. This block was the respawn guard's "
+                    f"hold cap ({guard_reason}) on a quota/rate-limit error ({err[:200]}), which clears on its "
+                    f"own and never needed a person. Card {proof['task_id']} completed after the block, so the "
+                    f"provider is answering again; back to ready.",
+                )
         released.append(task_id)
     return released

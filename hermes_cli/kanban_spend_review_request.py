@@ -45,6 +45,10 @@ def close(conn, keys):
     if not keys:
         return
     with kb.write_txn(conn):
+        from hermes_cli.kanban_home_transfer import frozen
+        keys = [key for key in keys if not frozen(conn, key[0])]
+        if not keys:
+            return
         if _has_closed(conn) is False:
             conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN closed INTEGER NOT NULL DEFAULT 0")
             conn.execute(OPEN_INDEX)
@@ -64,11 +68,17 @@ def freeze(conn, board, gateway, wire):
     if conn.in_transaction:
         raise ValueError("cannot freeze a review inside another transaction")
     with kb.write_txn(conn):
+        prior = get(conn, wire["task"], wire["episode"])
+        if prior is not None:
+            return prior  # Immutable legacy/current wire; never enrich on replay.
+        from hermes_cli import kanban_home_command as home
+        # wait_on can install a dependency; fence its target as well as the source.
+        epoch = home.capture(conn, {**wire, "parent": wire.get("target")})
         conn.execute(f"CREATE TABLE IF NOT EXISTS {TABLE} (task TEXT NOT NULL, episode TEXT NOT NULL, "
                      "request TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(task,episode))")
         if _has_closed(conn):
             conn.execute(OPEN_INDEX)
-        request = {"board": board, "gateway": gateway, "wire": wire}
+        request = {"board": board, "gateway": gateway, "wire": wire, "home_generations": epoch}
         conn.execute(f"INSERT OR IGNORE INTO {TABLE} (task, episode, request) VALUES (?,?,?)",
                      (wire["task"], wire["episode"], json.dumps(request, ensure_ascii=False)))
         frozen = get(conn, wire["task"], wire["episode"])
@@ -85,6 +95,9 @@ def escalate_unconfirmed(conn, task, episode):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_spend_reviewer as reviewer
     with kb.write_txn(conn):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(conn, task):
+            return
         request = get(conn, task, episode)
         if request is None or reviewer.state(conn, task, episode) not in (reviewer.QUEUED, reviewer.STARTED):
             return
@@ -114,6 +127,9 @@ def escalate_unconfirmed(conn, task, episode):
 def refuse(conn, task, episode, reason):
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(conn, task):
+            return
         request = get(conn, task, episode)
         assert request is not None
         request["refused"] = reason
