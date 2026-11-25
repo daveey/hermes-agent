@@ -49,15 +49,24 @@ def transaction_budget(conn):
         return
     deadline = time.monotonic() + limit
     token = _DEADLINE.set(deadline)
+    interrupted = False
     def expired():
         return time.monotonic() >= deadline
-    conn.set_progress_handler(expired, 1000)
+    def progress():
+        nonlocal interrupted
+        if expired():
+            interrupted = True
+            return True
+        return False
+    conn.set_progress_handler(progress, 1000)
     try:
         yield
         if expired():
             raise ApplyBudgetExceeded("feed transaction exceeded writer budget")
     except sqlite3.OperationalError as exc:
-        if expired() and "interrupted" in str(exc):
+        # Nested SQL interrupted inside a Python UDF loses SQLite's outer
+        # 'interrupted' message. Retain the progress handler's actual decision.
+        if interrupted or (expired() and "interrupted" in str(exc)):
             raise ApplyBudgetExceeded("feed transaction exceeded SQLite VM budget") from exc
         raise
     finally:
