@@ -47,7 +47,7 @@ def retire(conn: sqlite3.Connection, hub, board: str, op: dict) -> dict:
     """
     report = dict(op_id=op['op_id'], table=op['table_name'], row_uid=op['row_uid'],
                   classification='unresolved', action='retained', proof='retain custody not proven')
-    if not audited_rejection(conn, conn, op):
+    if op.get('op') != 'retain' or not audited_rejection(conn, conn, op):
         return report
     wire = frozen_wire(op)
     before = _snapshot(conn, op, wire)

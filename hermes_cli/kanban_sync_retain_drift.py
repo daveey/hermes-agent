@@ -1,7 +1,8 @@
-"""Read-only separation of rejected retain audit from replica drift. [daveey]
+"""Read-only separation of rejected command audit from replica drift. [daveey]
 
 No transport retirement, retention confirmation, or custody/fence change occurs.
-The original run must be closed on both copies; ordinary row diff still gates clean.
+Retain runs must be closed; diagnostics must be superseded on both copies.
+Ordinary row diff still gates clean.
 """
 from __future__ import annotations
 
@@ -18,6 +19,10 @@ def rejected_summary(live: sqlite3.Connection, shadow: sqlite3.Connection) -> tu
 def audited_rejection(live: sqlite3.Connection, shadow: sqlite3.Connection, op: dict) -> bool:
     """Fail closed unless immutable custody attests this definitive rejection."""
     from hermes_cli.kanban_retain_transport import canonical, command, frozen_wire
+
+    if op.get('op') == 'actionability_record':
+        from hermes_cli.kanban_sync_actionability_drift import audited_rejection as diagnostic_audit
+        return diagnostic_audit(live, shadow, op)
 
     if (op.get('op') != 'retain' or op.get('table_name') != 'tasks'
             or op.get('state') != 'rejected' or op.get('last_error') != 'missing_decision_episode'):
