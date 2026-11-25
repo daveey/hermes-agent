@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 
-KINDS = {'todo': ('created', 'linked', 'unlinked', 'dependency_wait', 'unblocked'),
+# A wake or lane admission that found an open parent lands its card in todo and says so in ``status``.
+LANDINGS = ('condition_met', 'continuation_woken', 'wake_check_broken', 'wake_check_lost', 'wake_check_stale',
+            'wake_probe_stale', 'lane_admitted')
+KINDS = {'todo': ('created', 'linked', 'unlinked', 'dependency_wait', 'unblocked', *LANDINGS),
          'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
          'review': ('review_requested', 'created'), 'blocked': ('blocked',),
          'scheduled': ('scheduled', 'continued'),
@@ -31,8 +34,14 @@ def select(status, events, *, order_key, episode=None):
     def matches(event):
         if event['kind'] not in KINDS.get(status, ()):
             return assignment(event)
-        # An unblock is a todo source only when parents re-gated it there; a release to ready is not.
-        return status != 'todo' or event['kind'] != 'unblocked' or (_data(event) or {}).get('status') == 'todo'
+        data = _data(event) or {}
+        if event['kind'] in LANDINGS:
+            # Only a landing its writer stamped: an older unstamped wake keeps the row's existing source.
+            intent = data.get('actionability_intent')
+            return data.get('status') == 'todo' and isinstance(intent, dict) and intent.get('status') == 'todo'
+        # An unblock is a source only for the status it landed in: parents re-gate one to todo, and that
+        # frozen dependency wait is not the source of the ready card the parents later release.
+        return event['kind'] != 'unblocked' or (data.get('status') == 'todo') == (status == 'todo')
 
     if status == 'running' and not episode:
         # The owning run's stamped dependency handoff (link before park) outranks its claim. A later

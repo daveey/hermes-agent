@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from hermes_cli.kanban_actionability import owner, positive_time, project, valid_awaiting
+from hermes_cli.kanban_actionability_selection import LANDINGS
 
 
 def _text(value):
@@ -18,7 +19,8 @@ EPISODE_EXITS = frozenset({'promoted', 'promoted_manual', 'claimed', 'reclaimed'
 
 def _todo_entry(kind, payload):
     """Sources that put (or keep) a card waiting in todo on its parents."""
-    return kind in ('dependency_wait', 'linked', 'unlinked') or (kind == 'unblocked' and payload.get('status') == 'todo')
+    return kind in ('dependency_wait', 'linked', 'unlinked') or (
+        kind in ('unblocked', *LANDINGS) and payload.get('status') == 'todo')
 
 
 def intent_for(task, kind, payload, *, now):
@@ -91,19 +93,19 @@ def _carried(conn, task_id, task):
 
 def stamp(conn, task_id, kind, payload, *, now):
     """Freeze ordinary administrative policy with the actual source event clock."""
-    if kind not in ('scheduled', 'blocked', 'continued', 'dependency_wait', 'linked', 'unlinked', 'unblocked'):
+    if kind not in ('scheduled', 'blocked', 'continued', 'dependency_wait', 'linked', 'unlinked', 'unblocked', *LANDINGS):
         return payload
     original = payload
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
     handoff = row is not None and row['status'] == 'running' and kind in ('linked', 'unlinked')
-    if kind in ('linked', 'unlinked', 'unblocked') and (
+    if kind in ('linked', 'unlinked', 'unblocked', *LANDINGS) and (
             row is None or not (row['status'] == 'todo' or handoff) or not isinstance(payload, dict)):
         return payload  # a todo entry or the owning run's handoff edge; every other status keeps its own source
     if isinstance(payload, dict):
         from hermes_cli.kanban_db_sync import run_uid
         from hermes_cli.kanban_actionability_parents import snapshot
         parents = [r[0] for r in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (task_id,))]
-        if kind in ('linked', 'unlinked', 'unblocked') and not parents:
+        if kind in ('linked', 'unlinked', 'unblocked', *LANDINGS) and not parents:
             return original  # no parent to wait on: not a dependency wait, so nothing to freeze
         payload = {**payload, 'actionability_parent_ids': parents,
                    'actionability_parent_states': snapshot(conn, parents),

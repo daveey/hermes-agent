@@ -588,12 +588,13 @@ def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -
             return False
         waiting = any(state not in ("done", "archived") for _pid, state in kb.parent_states(conn, task_id))
         # Pinned to triage: an admit only ever moves a parked card, never a running one.
+        landing = "todo" if waiting else "ready"
         conn.execute("UPDATE tasks SET status = ?, block_kind = NULL WHERE id = ? AND status = 'triage'",
-                     ("todo" if waiting else "ready", task_id))
+                     (landing, task_id))
         pol = safe_policy()
         lane = row["tenant"] if pol is None else pol.lane_of(row["tenant"])  # the lane whose budget this spends
         kb._append_event(conn, task_id, ADMITTED, {"lane": lane, "actor": actor, "reason": reason,
-                                                   "budget": 1 if budget else 0})
+                                                   "budget": 1 if budget else 0, "status": landing})
     return True
 
 

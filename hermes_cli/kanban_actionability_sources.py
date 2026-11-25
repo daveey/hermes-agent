@@ -7,7 +7,7 @@ import time
 
 from hermes_cli.kanban_actionability import owner, positive_time, project, valid_awaiting
 from hermes_cli.kanban_actionability_evidence import EVIDENCE_ERRORS, effective
-from hermes_cli.kanban_actionability_selection import KINDS as SOURCE_KINDS, select
+from hermes_cli.kanban_actionability_selection import KINDS as SOURCE_KINDS, LANDINGS, select
 
 KINDS = tuple(dict.fromkeys((*('created', 'blocked', 'dependency_wait', 'scheduled', 'continued', 'spend_budget_triaged',
          'decision_hold_restricted', 'decision_retained', 'decision_protected_stopped',
@@ -324,7 +324,7 @@ def _describe(conn, tid, *, now, reader):
         # Decision notices are not material clocks. Preserve legacy triage
         # diagnostics; confirmed ordinary custody selects its source separately.
         source = next((e for e in events if e['kind'] not in (
-            'spend_budget_decision_ready', 'decision_retained', 'decision_protected_stopped')), None)
+            'spend_budget_decision_ready', 'decision_retained', 'decision_protected_stopped', *LANDINGS)), None)
     deps, missing = _dependencies(reader, tid)
     episode = (stop['data'].get('episode') or stop['data'].get('episode_uid') or reader.uid(stop)) if stop else None
     episode = episode if isinstance(episode, str) and episode else None
