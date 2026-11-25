@@ -28,7 +28,9 @@ def stale_stops(conn: sqlite3.Connection, *, now: float, older_than: int = 1800)
         if stop is None or stop['created_at'] >= now - older_than:
             continue
         episode = cast(str, reviewer.episode_of(stop))
-        if reviewer.state(conn, tid, episode) is not None or _routed(conn, tid, episode):
+        if (reviewer.holds(conn, tid, episode)
+                or reviewer.state(conn, tid, episode) in (reviewer.GRANTED, reviewer.SETTLED)
+                or _routed(conn, tid, episode)):
             continue
         if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
                         "AND json_extract(payload,'$.episode')=?", (tid, FILED, episode)).fetchone():

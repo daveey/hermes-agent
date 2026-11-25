@@ -51,12 +51,50 @@ def test_late_annotation_cannot_inherit_immediate_start(kanban_home, spend_revie
         with kb.write_txn(conn):
             assert reviewer.queue(conn, tid, ep)
             kb._append_event(conn, tid, "decision_hold_restricted", {"episode": ep, "cause": cause})
-        assert reviewer._due(conn, noticed + 299, set()) == []
         if cause == "safety_refusal":
-            assert reviewer._due(conn, noticed + 300, set()) == []
+            # Due for model-free retirement, not a review thread.
+            assert reviewer._due(conn, noticed + 299, set()) == [(tid, ep, 0)]
             assert not reviewer.holds(conn, tid, ep)
         else:
+            assert reviewer._due(conn, noticed + 299, set()) == []
             assert reviewer._due(conn, noticed + 300, set()) == [(tid, ep, 0)]
+
+
+@pytest.mark.parametrize("cause", ["decision_pending", "safety_refusal"])
+@pytest.mark.parametrize("capacity", [0, 3])
+def test_excluded_queue_retires_and_remains_discoverable(kanban_home, spend_reviewer, monkeypatch, cause, capacity):
+    from hermes_cli import kanban_spend_stop_watch as watch
+    monkeypatch.setattr(reviewer, "MAX_CONCURRENT", capacity)
+    monkeypatch.setattr(reviewer, "judge", lambda ctx: pytest.fail("excluded stop reached judge"))
+    routes = []
+    monkeypatch.setattr(decision, "safe_ensure_producer", lambda conn, tid: routes.append(tid))
+    with kbc.connect_closing() as conn:
+        tid, ep = stop(conn, None)
+        now = reviewer._notice_at(conn, tid, ep)
+        assert now is not None
+        with kb.write_txn(conn):
+            assert reviewer.queue(conn, tid, ep)
+            if cause == "decision_pending":
+                kb._append_event(conn, tid, "decision_retained", {
+                    "episode_uid": ep, "disposition": {"reason": cause}})
+            else:
+                kb._append_event(conn, tid, "decision_hold_restricted", {"episode": ep, "cause": cause})
+        assert not reviewer.holds(conn, tid, ep)
+        assert [c['id'] for c in watch.stale_stops(conn, now=now + 3600)] == [tid]
+        for elapsed in (3600, 86400):
+            assert reviewer.start_due(conn, now=now + elapsed) == []
+            reviewer.wait_for_reviews()
+            assert reviewer.state(conn, tid, ep) == reviewer.ESCALATED
+            assert [c['id'] for c in watch.stale_stops(conn, now=now + elapsed)] == [tid]
+        assert routes == [tid]
+        assert kb.get_task(conn, tid).status == "triage"
+        assert caused.effective_cause(conn, tid, decision.pending_episode(conn, tid)) == cause
+        assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind IN "
+                                "('spend_review_started','scope_renewed','promoted_manual','spend_budget_set')",
+                                (tid,)).fetchone()
+        kb.create_task(conn, title="Decide held stop", assignee="default", created_by="kanban-spend-budget",
+                       idempotency_key=f"spend-budget-decision:{tid}:{ep}")
+        assert watch.stale_stops(conn, now=now + 86400) == []
 
 
 def test_annotation_on_ordinary_episode_and_safety_precedence(kanban_home, spend_reviewer):
@@ -230,12 +268,13 @@ def test_review_escalates_fail_closed(kanban_home, spend_reviewer, board, monkey
             assert calls == []
 
 
-def test_safety_added_after_queue_never_calls_judge(kanban_home, spend_reviewer, monkeypatch):
+@pytest.mark.parametrize("cause", ["safety_refusal", "decision_pending"])
+def test_safety_added_after_queue_never_calls_judge(kanban_home, spend_reviewer, monkeypatch, cause):
     with kbc.connect_closing() as conn:
-        tid, ep = stop(conn)
+        tid, ep = stop(conn, None)
         with kb.write_txn(conn):
             kb._append_event(conn, tid, reviewer.STARTED, {"episode": ep})
-            kb._append_event(conn, tid, "decision_hold_restricted", {"episode": ep, "cause": "safety_refusal"})
+            kb._append_event(conn, tid, "decision_hold_restricted", {"episode": ep, "cause": cause})
         monkeypatch.setattr(reviewer, "judge", lambda ctx: pytest.fail("safety must not reach judge"))
         monkeypatch.setattr(decision, "safe_ensure_producer", lambda *a: None)
         assert reviewer.review(conn, tid, ep) == "escalated"

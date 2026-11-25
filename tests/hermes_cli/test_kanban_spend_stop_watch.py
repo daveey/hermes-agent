@@ -87,12 +87,23 @@ def test_safety_watch_only_escalates_without_release_advice(kanban_home):
         assert watchdog.watch(conn, now=NOW) == []
 
 
-def test_reviewed_episode(kanban_home):
+@pytest.mark.parametrize('state', [reviewer.QUEUED, reviewer.STARTED, reviewer.GRANTED, reviewer.SETTLED])
+def test_reviewed_episode(kanban_home, spend_reviewer, state):
     with kbc.connect_closing() as conn:
         tid, ep = stop(conn)
         with kb.write_txn(conn):
-            kb._append_event(conn, tid, reviewer.QUEUED, {'episode': ep})
+            kb._append_event(conn, tid, state, {'episode': ep})
         assert watchdog.watch(conn, now=NOW) == []
+
+
+@pytest.mark.parametrize('state', [reviewer.QUEUED, reviewer.STARTED, reviewer.ESCALATED])
+def test_abandoned_custody_does_not_hide_unrouted_stop(kanban_home, state):
+    # The default fixture disables the reviewer: queued/started are not custody.
+    with kbc.connect_closing() as conn:
+        tid, ep = stop(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, state, {'episode': ep})
+        assert [c['id'] for c in watchdog.stale_stops(conn, now=NOW)] == [tid]
 
 
 def test_real_decision_route(kanban_home):

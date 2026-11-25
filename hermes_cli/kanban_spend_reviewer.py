@@ -127,10 +127,11 @@ def state(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[str]
 def holds(conn: sqlite3.Connection, task_id: str, episode: str) -> bool:
     """While a review is queued or running the stop needs no other decision route. With the reviewer off, a
     queued or running review holds nothing: the stop routes as usual."""
-    from hermes_cli.kanban_spend_caused_review import effective_cause
+    from hermes_cli.kanban_spend_caused_review import CAUSES, effective_cause
     from hermes_cli.kanban_spend_decision import pending_episode
     stop = pending_episode(conn, task_id)
-    if stop and effective_cause(conn, task_id, stop) == "safety_refusal":
+    cause = effective_cause(conn, task_id, stop) if stop else None
+    if cause and cause not in CAUSES:
         return False
     return state(conn, task_id, episode) in (QUEUED, STARTED) and settings()[0]
 
@@ -263,9 +264,9 @@ def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]
         from hermes_cli.kanban_spend_decision import pending_episode
         stop = pending_episode(conn, task_id)
         cause = caused.effective_cause(conn, task_id, stop) if stop else None
-        if cause and not journal.get(conn, task_id, episode):
+        if cause in caused.CAUSES and not journal.get(conn, task_id, episode):
             noticed = _notice_at(conn, task_id, episode)
-            if cause not in caused.CAUSES or noticed is None or noticed > now - review_after_seconds():
+            if noticed is None or noticed > now - review_after_seconds():
                 continue  # an annotation cannot inherit an ordinary stop's immediate start
         events = _review_events(conn, task_id, episode)
         if not events or events[-1]["kind"] not in (QUEUED, STARTED):
@@ -291,12 +292,21 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     _THREADS[:] = [t for t in _THREADS if t.is_alive()]  # a long-lived dispatcher keeps only running reviews
     db, started = _db_path(conn), []
     for task_id, episode, attempts in _due(conn, now, skip):
+        from hermes_cli.kanban_spend_caused_review import CAUSES, effective_cause
+        from hermes_cli.kanban_spend_decision import pending_episode
+        stop = pending_episode(conn, task_id)
+        cause = effective_cause(conn, task_id, stop) if stop else None
+        if cause and cause not in CAUSES and not journal.get(conn, task_id, episode):
+            # Exclusions retire custody, never retry work. Frozen Board requests
+            # still reconcile their exact receipt instead of losing custody.
+            escalate(conn, task_id, episode, f"{cause} stops are excluded from spend review; hold retained")
+            continue
         if attempts >= MAX_ATTEMPTS and not journal.get(conn, task_id, episode):
             escalate(conn, task_id, episode, f"the spend reviewer did not finish after {attempts} attempts")
             continue
         with _LOCK:
             if len(_INFLIGHT) >= MAX_CONCURRENT:
-                break
+                continue  # later excluded stops still need model-free retirement
             if (db, task_id) in _INFLIGHT:
                 continue
             _INFLIGHT.add((db, task_id))
@@ -476,8 +486,9 @@ def review(conn: sqlite3.Connection, task_id: str, episode: str) -> str:
     ctx = context(conn, task_id, episode)
     if ctx is None or state(conn, task_id, episode) != STARTED:
         return "moot"
-    if ctx.get("cause") == "safety_refusal":
-        return escalate(conn, task_id, episode, "safety stops are excluded from spend review")
+    from hermes_cli.kanban_spend_caused_review import CAUSES
+    if ctx.get("cause") and ctx["cause"] not in CAUSES:
+        return escalate(conn, task_id, episode, f"{ctx['cause']} stops are excluded from spend review; hold retained")
     try:
         verdict = judge(ctx)
     except Exception as exc:  # health: allow BLE001 -- an unavailable judge escalates, never grants
