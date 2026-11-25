@@ -112,7 +112,7 @@ def _git(repo, *args):
         if proc.poll() is None:
             proc.kill()
         try:
-            proc.wait(timeout=GIT_TIMEOUT)
+            proc.wait(timeout=max(1.0, GIT_TIMEOUT))
         finally:
             proc.stdout.close()
 
