@@ -42,7 +42,10 @@ export function installCardSetHook(
 export function CardSetBoard({ rest }: { rest: Rest }) {
   const k = useKanban()
   const request = useValue($cardSet)
-  const [task, setTask] = useState<OpenTaskRequest | null>(null)
+  const [drawer, setDrawer] = useState<{ selection: CardSetRequest; task: OpenTaskRequest } | null>(null)
+  // A replacement selection cannot keep an actionable drawer from its previous owner.
+  const task = drawer?.selection === request ? drawer?.task : null
+  const setTask = (value: OpenTaskRequest | null) => setDrawer(value && request ? { selection: request, task: value } : null)
 
   const { data, error } = useQuery({
     queryKey: ['kanban-card-set', request],

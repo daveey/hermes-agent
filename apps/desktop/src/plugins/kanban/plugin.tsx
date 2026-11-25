@@ -37,7 +37,7 @@ import { KanbanBoardPage } from './board'
 import { $cardSet, CardSetBoard, installCardSetHook } from './card-set'
 import { chipClickOpensBoard } from './chip-click'
 import { KANBAN_LOCALES } from './i18n'
-import { installOpenTaskHook } from './open-task'
+import { $openTaskRequest, installOpenTaskHook } from './open-task'
 import { meterCounts, meterTotal, TaskMeter } from './status-meter'
 import { $newTaskLane, useKanban } from './ui'
 import { useExternalRunClock } from './use-external-run-clock'
@@ -112,7 +112,10 @@ const plugin: HermesPlugin = {
     )
 
     // [daveey] window.__hermesKanbanOpenTask(id, board?, gateway?) for disk plugins.
-    ctx.onDispose(installOpenTaskHook({ navigate: path => { $cardSet.set(null); host.navigate(path) }, rememberOwner: rememberTaskOwner }))
+    ctx.onDispose(installOpenTaskHook({ navigate: path => host.navigate(path), rememberOwner: rememberTaskOwner }))
+    // All existing intent producers (Blocked, notification Open, and New task) win over a card set.
+    ctx.onDispose($openTaskRequest.listen(request => { if (request) { $cardSet.set(null) } }))
+    ctx.onDispose($newTaskLane.listen(lane => { if (lane) { $cardSet.set(null) } }))
     ctx.onDispose(installCardSetHook({ navigate: path => host.navigate(path) }))
     ctx.onDispose(() => $cardSet.set(null))
     const BoardPage = () => useValue($cardSet) ? <CardSetBoard rest={ctx.rest} /> : <KanbanBoardPage />

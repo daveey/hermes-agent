@@ -4,6 +4,7 @@ import type { ComponentType } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import type * as API from './api'
+import type * as OpenTask from './open-task'
 import plugin from './plugin'
 
 const { board } = vi.hoisted(() => ({
@@ -33,7 +34,7 @@ vi.mock('./api', async importOriginal => ({
   bindApi: () => () => {},
   useKanbanScope: () => 'clock-fixture'
 }))
-vi.mock('./open-task', () => ({ installOpenTaskHook: () => () => {} }))
+vi.mock('./open-task', async original => ({ ...await original<typeof OpenTask>(), installOpenTaskHook: () => () => {} }))
 
 afterEach(() => {
   cleanup()
