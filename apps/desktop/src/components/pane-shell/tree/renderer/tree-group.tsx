@@ -102,6 +102,7 @@ import { KeepAlivePaneSlot, useStablePaneHosts } from './keep-alive-panes'
 import { MainPaneTop } from './main-pane-top'
 import { PaneBody } from './pane-body'
 import { usePanelTitlebar } from './panel-titlebar'
+import { SessionsTabStripSlot } from './sessions-tab-strip'
 import { tabStripVisibleForZone } from './strip-visibility'
 import { useActiveTabVisible } from './tab-strip-scroll'
 import { paneChrome } from './track-model'
@@ -782,20 +783,13 @@ export function TreeGroup({
                 style={{ cursor: 'grab', WebkitAppRegion: dragging ? 'no-drag' : undefined } as CSSProperties}
                 titlebar={tabsInTitlebar}
                 trailing={
-                  <>
-                    {minimizable && (
-                      <button
-                        aria-label={node.minimized ? t.zones.restore : minimizeLabel}
-                        className="mx-1 grid size-5 shrink-0 place-items-center self-center [-webkit-app-region:no-drag] rounded-md text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground focus-visible:opacity-100 group-hover/pane-header:opacity-100"
-                        onClick={toggleCollapse}
-                        onPointerDown={e => e.stopPropagation()}
-                        type="button"
-                      >
-                        <Codicon name={node.minimized ? 'chevron-up' : 'chevron-down'} size="0.75rem" />
-                      </button>
-                    )}
-                    <StripDropCaret groupId={node.id} stripRef={stripRef} />
-                  </>
+                  <StripTrailing
+                    minimizeLabel={minimizable ? (node.minimized ? t.zones.restore : minimizeLabel) : undefined}
+                    node={node}
+                    onToggleCollapse={toggleCollapse}
+                    shown={shown}
+                    stripRef={stripRef}
+                  />
                 }
               >
                 {shown.map((paneId, index) => {
@@ -1075,6 +1069,40 @@ export function TreeGroup({
  * #FFF on dark. Split out so per-pointermove `$dropHint` churn re-renders
  * only this node (same isolation contract as ZoneDropOverlay).
  */
+/** The strip's pinned right end: plugin chrome beside the Sessions tabs, the
+ *  minimize chevron (when `minimizeLabel` is set) and the drop caret. */
+function StripTrailing({
+  minimizeLabel,
+  node,
+  onToggleCollapse,
+  shown,
+  stripRef
+}: {
+  minimizeLabel?: string
+  node: GroupNode
+  onToggleCollapse: () => void
+  shown: readonly string[]
+  stripRef: RefObject<HTMLDivElement | null>
+}) {
+  return (
+    <>
+      {!node.minimized && <SessionsTabStripSlot panes={shown} />}
+      {minimizeLabel !== undefined && (
+        <button
+          aria-label={minimizeLabel}
+          className="mx-1 grid size-5 shrink-0 place-items-center self-center [-webkit-app-region:no-drag] rounded-md text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground focus-visible:opacity-100 group-hover/pane-header:opacity-100"
+          onClick={onToggleCollapse}
+          onPointerDown={e => e.stopPropagation()}
+          type="button"
+        >
+          <Codicon name={node.minimized ? 'chevron-up' : 'chevron-down'} size="0.75rem" />
+        </button>
+      )}
+      <StripDropCaret groupId={node.id} stripRef={stripRef} />
+    </>
+  )
+}
+
 function StripDropCaret({ groupId, stripRef }: { groupId: string; stripRef: RefObject<HTMLDivElement | null> }) {
   const hint = useStore($dropHint)
   const strip = stripRef.current

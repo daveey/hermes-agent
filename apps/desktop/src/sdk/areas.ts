@@ -9,6 +9,11 @@ export const TOP_STRIP_AREA = 'shell.topStrip'
 /** Persistent strip inside the workspace zone, below its titlebar/header and
  * above the active chat/page. Ordered guests returning null take no space. */
 export const MAIN_PANE_TOP_AREA = 'workspace.mainTop'
+/** [daveey] Right end of the tab strip of the zone that shows the Sessions
+ *  pane, after its tabs (Sessions / Bots). Render contributions in order; the
+ *  slot shrinks and scrolls sideways before it ever pushes the tabs away, and
+ *  an empty area takes no space. Not mounted while that strip is hidden. */
+export const SESSIONS_TAB_STRIP_AREA = 'sessions.tabStrip'
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
 /** Titlebar slots are PERMANENT mount points: a component registered here
  *  stays mounted across chat ↔ page navigation, so `useEffect` setup/cleanup
