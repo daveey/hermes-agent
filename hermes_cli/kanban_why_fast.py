@@ -6,6 +6,8 @@ selectors retain the canonical CLI's resolution and admission checks.
 from __future__ import annotations
 
 import json
+from itertools import pairwise
+import math
 import os
 from pathlib import Path
 import re
@@ -15,6 +17,31 @@ import time
 VERSION = 1
 STALE_SECONDS = 180
 SUFFIX = ".governors.json"
+MAX_FRESHNESS_SECONDS = 600
+GAP_HEADROOM_SECONDS = 60
+RECENT_COMPLETIONS = 21  # twenty completed gaps; nearest-rank p95
+
+
+def freshness_bound(doc: dict) -> float:
+    """Legacy snapshots retain 180 s; malformed tolerances fail closed."""
+    value = doc.get("freshness_bound_s", STALE_SECONDS)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return 0.0
+    return min(float(value), MAX_FRESHNESS_SECONDS)
+
+
+def completion_policy(previous: dict, now: float, interval: float) -> dict:
+    """Only the real post-dispatch recorder may append a completion timestamp."""
+    raw = previous.get("tick_completions", [previous.get("tick_at")])
+    times = [v for v in raw[-RECENT_COMPLETIONS:] if isinstance(v, (int, float))
+             and not isinstance(v, bool) and math.isfinite(v) and 0 < v < now] if isinstance(raw, list) else []
+    times = sorted(set(times + [now]))[-RECENT_COMPLETIONS:]
+    gaps = sorted(b - a for a, b in pairwise(times))
+    p95 = gaps[math.ceil(.95 * len(gaps)) - 1] if gaps else 0.0
+    interval = interval if math.isfinite(interval) and interval > 0 else 60.0
+    bound = min(MAX_FRESHNESS_SECONDS, max(3 * interval, p95 + GAP_HEADROOM_SECONDS))
+    return {"tick_completions": times, "tick_gap_p95_s": p95, "dispatch_interval_s": interval,
+            "freshness_bound_s": bound}
 
 
 def read_answer(path: Path, task_id: str, *, now: float | None = None) -> dict | None:
@@ -30,7 +57,7 @@ def read_answer(path: Path, task_id: str, *, now: float | None = None) -> dict |
         if not isinstance(doc, dict) or doc.get("version") != VERSION:
             return None
         age = now - float(doc.get("tick_at") or 0)
-        if not 0 <= age <= STALE_SECONDS:
+        if not 0 <= age <= freshness_bound(doc):
             return None
         saved = doc.get("cards", {}).get(task_id)
         if not isinstance(saved, dict) or not saved.get("label") or not saved.get("source"):
@@ -45,7 +72,8 @@ def read_answer(path: Path, task_id: str, *, now: float | None = None) -> dict |
         if row is None or row[0] != saved.get("status"):
             return None
         recorded = {**saved, "task_id": task_id, "board": doc.get("board"), "tick_at": doc["tick_at"],
-                    "age_s": round(age, 1), "stale": False, "globals": doc.get("globals")}
+                    "age_s": round(age, 1), "freshness_bound_s": freshness_bound(doc),
+                    "stale": False, "globals": doc.get("globals")}
         return answer(recorded, started=started)
     except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
         return None
@@ -54,9 +82,10 @@ def read_answer(path: Path, task_id: str, *, now: float | None = None) -> dict |
 def answer(recorded: dict, *, started: float) -> dict:
     """Shared rendering shape for cached and connected consumers."""
     first = {k: recorded.get(k) for k in ("governor", "label", "scope", "reading", "threshold", "since", "until",
-                                         "detail", "source", "age_s")}
+                                         "detail", "source", "age_s", "freshness_bound_s")}
     first["verdict"] = "stop"
     return {"task_id": recorded["task_id"], "board": recorded.get("board"), "source": "snapshot",
+            "age_s": recorded.get("age_s"), "freshness_bound_s": recorded.get("freshness_bound_s"),
             "status": recorded.get("status"), "first_stop": first, "overlaps": recorded.get("overlaps"),
             "overlaps_unknown": recorded.get("overlaps_unknown"), "globals": recorded.get("globals"),
             "chain": [first], "recorded": recorded, "elapsed_s": round(time.monotonic() - started, 3)}

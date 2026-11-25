@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from hermes_cli.kanban_why_fast import STALE_SECONDS, SUFFIX, VERSION
+from hermes_cli.kanban_why_fast import STALE_SECONDS, SUFFIX, VERSION, completion_policy, freshness_bound
 
 _log = logging.getLogger(__name__)
 
@@ -891,7 +891,7 @@ def build(conn: Any, result: Any, capture: Optional[Tick], *, board: str, update
 def _same(doc: dict[str, Any], previous: Optional[dict[str, Any]]) -> bool:
     if previous is None:
         return False
-    strip = lambda d: {k: v for k, v in d.items() if k != "tick_at"}
+    strip = lambda d: {k: v for k, v in d.items() if k not in ("tick_at", "tick_completions", "tick_gap_p95_s")}
     return strip(doc) == strip(previous)
 
 
@@ -905,6 +905,9 @@ def record_tick(conn: Any, result: Any, *, dry_run: bool = False, update_drain: 
         path = snapshot_path(conn)
         previous = _read(path)
         doc = build(conn, result, capture, board=_board(conn), update_drain=update_drain, previous=previous)
+        from hermes_cli.kanban_suspend_ledger import _configured_interval_seconds
+
+        doc.update(completion_policy(previous or {}, doc["tick_at"], _configured_interval_seconds()))
         age = doc["tick_at"] - float(previous.get("tick_at") or 0) if previous else None
         if not (_same(doc, previous) and age is not None and age < UNCHANGED_WRITE_SECONDS):
             _write(path, doc)
@@ -927,8 +930,9 @@ def snapshot(conn: Any, *, now: Optional[float] = None) -> dict[str, Any]:
         return {"version": VERSION, "board": board, "available": False, "stale": True, "age_s": None,
                 "governors": _all_governors([]), "globals": None, "cards": {}, "idle_total": None,
                 "charged_total": None}
-    age = max(0.0, now - float(doc.get("tick_at") or 0))
-    return {**doc, "available": True, "age_s": round(age, 1), "stale": age > STALE_SECONDS,
+    age = now - float(doc.get("tick_at") or 0)
+    return {**doc, "available": True, "age_s": round(age, 1), "freshness_bound_s": freshness_bound(doc),
+            "stale": not 0 <= age <= freshness_bound(doc),
             "governors": _all_governors(doc.get("governors") or [])}
 
 
@@ -946,10 +950,11 @@ def card(conn: Any, task_id: str, *, now: Optional[float] = None) -> Optional[di
     now = time.time() if now is None else now
     doc = _read(snapshot_path(conn))
     found = (doc.get("cards") or {}).get(task_id) if doc else None
-    if not isinstance(found, dict):
+    if doc is None or not isinstance(found, dict):
         return None
-    age = max(0.0, now - float(doc.get("tick_at") or 0))
+    age = now - float(doc.get("tick_at") or 0)
     known = _BY_ID.get(found.get("governor"))
     return {**found, "task_id": task_id, "board": doc.get("board"), "tick_at": doc.get("tick_at"),
-            "age_s": round(age, 1), "stale": age > STALE_SECONDS, "label": known.label if known else None,
+            "age_s": round(age, 1), "freshness_bound_s": freshness_bound(doc),
+            "stale": not 0 <= age <= freshness_bound(doc), "label": known.label if known else None,
             "source": known.source if known else None, "globals": (doc or {}).get("globals")}

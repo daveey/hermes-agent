@@ -127,7 +127,9 @@ def _print_why(answer: dict[str, Any]) -> None:
     else:
         measure = f" {_measure(first)}" if _measure(first) else ""
         print(f"{head}: stopped by {_name(first)}{measure}, since {_ago(first.get('since'), now)}")
-        print(f"  source: {first.get('source')}  ({answer['source']}, {first.get('age_s')}s old)")
+        tolerance = f"; tolerance {answer.get('freshness_bound_s'):g}s; recorded decision, not live" \
+            if answer.get("source") == "snapshot" and answer.get("freshness_bound_s") is not None else ""
+        print(f"  source: {first.get('source')}  ({answer['source']}, {first.get('age_s')}s old{tolerance})")
         if first.get("detail"):
             print(f"  detail: {_value(first['detail'])}")
     overlaps = answer.get("overlaps")
