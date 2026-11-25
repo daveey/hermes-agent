@@ -15,12 +15,13 @@ print('RUNTIME', sys.version, sqlite3.sqlite_version, flush=True)
 conn = sqlite3.connect(':memory:', check_same_thread=False)
 lock = threading.Lock()
 entered = threading.Event()
+release = threading.Event()
 errors = []
 
 def authorize(*args):
     if not entered.is_set():
         entered.set()
-        threading.Event().wait(.5)
+        assert release.wait(2), 'revision reader never released the writer'
     return sqlite3.SQLITE_OK
 
 conn.set_authorizer(authorize)
@@ -38,7 +39,10 @@ assert entered.wait(2)
 db = SimpleNamespace(db_path=Path('unused.db'), _lock=lock, _conn=conn)
 kanban_replica_observer.fingerprint = lambda path: 'committed-revision'
 print('REVISION_START', flush=True)
-assert state_revision(db) is None
+try:
+    assert state_revision(db) is None
+finally:
+    release.set()
 thread.join(2)
 assert not thread.is_alive()
 assert not errors, errors
