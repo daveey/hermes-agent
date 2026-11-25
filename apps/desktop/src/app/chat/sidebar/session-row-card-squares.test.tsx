@@ -6,6 +6,7 @@ import { I18nProvider } from '@/i18n'
 import { $kanbanObservationTick } from '@/store/kanban-observation'
 
 import {
+  aggregateCardColours,
   BackgroundCardSquares,
   flatRowCardMarks,
   runningCardCount,
@@ -25,8 +26,50 @@ it('refreshes retained-state badges on ticks with stable props and no parent rer
     $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
   })
   expect(container.querySelector('[data-card-colour="blue"]')).toBeNull()
-  expect(container.querySelector('[data-card-colour="grey"]')?.textContent).toBe('2')
+  expect(container.querySelector('[data-card-colour="unknown"]')?.textContent).toBe('2')
 })
+
+it.each(['expired', 'unstamped', 'future'] as const)(
+  'keeps %s asks separate from unknown work and excludes completed receipts on row and header',
+  stamp => {
+    vi.useFakeTimers()
+    const now = Date.now() / 1000
+
+    const row = session({
+      kanban_observed_at: stamp === 'unstamped' ? undefined : now + (stamp === 'expired' ? -181 : 3600),
+      kanban_active: 3,
+      kanban_held: 1,
+      kanban_blocked: 9,
+      needs_you: [{ kind: 'card', question: 'Go?', ref: 'ask' }],
+      kanban_attention: 2,
+      kanban_unseen: 5
+    })
+
+    expect(aggregateCardColours([row])).toEqual([
+      { colour: 'red', count: 1 },
+      { colour: 'unknown', count: 3 }
+    ])
+
+    const { container } = render(
+      <I18nProvider configClient={null} initialLocale="en">
+        <div data-testid="row-marks">{flatRowCardMarks(row, 0, null, undefined, true)}</div>
+        <BackgroundCardSquares sessions={[row, { ...row, needs_you: [], kanban_active: 0, kanban_held: 0 }]} />
+      </I18nProvider>
+    )
+
+    const marks = container.querySelectorAll('[data-testid="session-row-card-squares"]')
+    expect(marks).toHaveLength(2)
+
+    for (const mark of marks) {
+      expect(mark.getAttribute('aria-label')).toBe('Needs you 1 · Unknown 3')
+      expect(mark.querySelector('[data-card-colour="red"]')?.textContent).toBe('1')
+      expect(mark.querySelector('[data-card-colour="unknown"]')?.textContent).toBe('3')
+      expect(
+        mark.querySelector('[data-card-colour="amber"], [data-card-colour="violet"], [data-card-colour="grey"]')
+      ).toBeNull()
+    }
+  }
+)
 
 const draw = (fields: Partial<SessionInfo> = {}, executionUnknown = 0) =>
   render(

@@ -77,7 +77,7 @@ it('retains unchanged positive work through observation expiry until an authorit
   expect(screen.getByText('Background')).toBeTruthy()
   const retained = screen.getByText('Owner kanban_owner_expiring').closest('.group.row-hover')!
   expect(retained.querySelector('[data-card-colour="blue"]')).toBeNull()
-  expect(retained.querySelector('[data-card-colour="grey"]')?.textContent).toBe('1')
+  expect(retained.querySelector('[data-card-colour="unknown"]')?.textContent).toBe('1')
   expect(within(section('Pinned')).getByText('Owner ordinary')).toBeTruthy()
   act(() => $sessions.set([{ ...pending, kanban_active: 0, kanban_observed_at: Date.now() / 1000 }, owner('ordinary')]))
   expect(screen.queryByText('Background')).toBeNull()
@@ -107,11 +107,11 @@ it('filters historical-only work and strips owner prefixes only in Background', 
   const header = within(background).getByRole('button', { expanded: true })
   expect(within(header).getByText('3')).toBeTruthy()
   const counts = within(header.parentElement!).getByTestId('session-row-card-squares')
-  expect(counts.getAttribute('aria-label')).toBe('Running 1 · Waiting 209')
+  expect(counts.getAttribute('aria-label')).toBe('Running 1 · Waiting 110 · Unknown 99')
   expect(header.contains(counts)).toBe(false)
   expect(counts.closest('[data-background-counts]')?.className).toContain('justify-end')
   const badge = counts.querySelector('[data-card-colour="grey"]')!
-  expect(badge.textContent).toBe('209')
+  expect(badge.textContent).toBe('110')
   expect(badge.children).toHaveLength(0)
   expect(badge.className).toContain('border-zinc-400')
 })

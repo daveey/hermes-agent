@@ -23,7 +23,8 @@ const COLOURS = {
   amber: 'bg-amber-500',
   blue: 'bg-sky-400 dark:bg-sky-500',
   grey: 'bg-zinc-400 dark:bg-zinc-500',
-  violet: 'bg-violet-500'
+  violet: 'bg-violet-500',
+  unknown: 'bg-zinc-400 dark:bg-zinc-500'
 } as const
 
 type CardColour = keyof typeof COLOURS
@@ -36,7 +37,8 @@ const OUTLINES: Record<CardColour, string> = {
   amber: 'border-amber-500',
   blue: 'border-sky-400 dark:border-sky-500',
   grey: 'border-zinc-400 dark:border-zinc-500',
-  violet: 'border-violet-500'
+  violet: 'border-violet-500',
+  unknown: 'border-zinc-400 dark:border-zinc-500'
 }
 
 /** One entry per distinct card colour, in urgency order. No backend reads. */
@@ -59,7 +61,8 @@ export function sessionCardColours(
     amber: session.kanban_attention ?? 0,
     blue: live - queued - quiet,
     grey: Math.max(0, parked - stalled) + executionUnknown + Number(Boolean(session.kanban_unknown)),
-    violet: session.kanban_unseen ?? 0
+    violet: session.kanban_unseen ?? 0,
+    unknown: 0
   }
 
   return (Object.keys(COLOURS) as CardColour[]).flatMap(colour =>
@@ -76,10 +79,13 @@ function backgroundCardColours(session: SessionInfo): ReturnType<typeof sessionC
   }
 
   const count = colours
-    .filter(item => item.colour !== 'amber' && item.colour !== 'violet')
+    .filter(item => item.colour !== 'amber' && item.colour !== 'violet' && item.colour !== 'red')
     .reduce((sum, item) => sum + item.count, 0)
 
-  return count > 0 ? [{ colour: 'grey', count }] : []
+  return [
+    ...colours.filter(item => item.colour === 'red'),
+    ...(count > 0 ? [{ colour: 'unknown' as const, count }] : [])
+  ]
 }
 
 export function aggregateCardColours(sessions: SessionInfo[]): ReturnType<typeof sessionCardColours> {
@@ -139,7 +145,12 @@ export function CardSquares({
     return null
   }
 
-  const label = colours.map(({ colour, count }) => `${t.sidebar.row.cardColours[colour]} ${count}`).join(' · ')
+  const label = colours
+    .map(
+      ({ colour, count }) =>
+        `${colour === 'unknown' ? t.messaging.unknown : t.sidebar.row.cardColours[colour]} ${count}`
+    )
+    .join(' · ')
 
   return (
     <Tip label={label} side="top">
