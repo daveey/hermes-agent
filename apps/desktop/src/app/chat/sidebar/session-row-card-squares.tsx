@@ -25,6 +25,16 @@ const COLOURS = {
 
 type CardColour = keyof typeof COLOURS
 
+const OUTLINES: Record<CardColour, string> = {
+  red: 'border-red-500',
+  pink: 'border-pink-500',
+  green: 'border-emerald-500',
+  amber: 'border-amber-500',
+  blue: 'border-sky-400 dark:border-sky-500',
+  grey: 'border-zinc-400 dark:border-zinc-500',
+  violet: 'border-violet-500'
+}
+
 /** Counts do not distinguish ready from running; only current card evidence can refine that fallback. */
 function queuedCards(session: SessionInfo): number {
   const values = Array.isArray(session.execution_observations) ? session.execution_observations : []
@@ -129,15 +139,21 @@ export function CardSquares({
     <Tip label={label} side="top">
       <span
         aria-label={label}
-        className="pointer-events-auto ml-1 inline-flex items-center gap-[2px] align-middle"
+        className={cn(
+          'pointer-events-auto ml-1 inline-flex items-center gap-[2px] align-middle',
+          counts && 'flex-wrap justify-end'
+        )}
         data-testid="session-row-card-squares"
         role="img"
       >
         {colours.map(({ colour, count }) =>
           counts ? (
-            <span className="inline-flex items-center gap-[2px]" data-card-colour={colour} key={colour}>
-              <span aria-hidden="true" className={`size-[6px] shrink-0 rounded-[1.5px] ${COLOURS[colour]}`} />
-              <span className="text-[0.625rem] tabular-nums text-(--ui-text-tertiary)">{count}</span>
+            <span
+              className={`inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-[2px] border px-[2px] text-[0.625rem] leading-none tabular-nums text-(--ui-text-secondary) ${OUTLINES[colour]}`}
+              data-card-colour={colour}
+              key={colour}
+            >
+              {count}
             </span>
           ) : (
             <span

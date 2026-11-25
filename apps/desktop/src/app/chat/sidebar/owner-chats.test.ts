@@ -16,7 +16,12 @@ it('keeps normal pins in order, omits closed owners and sorts every open-card st
   const fields = ['kanban_active', 'kanban_blocked', 'kanban_held', 'kanban_parked'] as const
 
   const rows = fields.map((field, i) =>
-    makeSessionInfo({ id: `kanban_owner_${field}`, [field]: 1, last_active: i + 1 })
+    makeSessionInfo({
+      id: `kanban_owner_${field}`,
+      [field]: 1,
+      last_active: i + 1,
+      kanban_observed_at: Date.now() / 1000
+    })
   )
 
   const normal = makeSessionInfo({ id: 'normal' })

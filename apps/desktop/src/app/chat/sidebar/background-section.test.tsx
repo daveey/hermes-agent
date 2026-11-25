@@ -3,6 +3,7 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { SidebarProvider } from '@/components/ui/sidebar'
+import { $kanbanObservationTick } from '@/store/kanban-observation'
 import { $pinnedSessionIds, resetSidebarView, setSidebarAgentsGrouped } from '@/store/layout'
 import { $projectTree } from '@/store/projects'
 import { $sessions } from '@/store/session'
@@ -42,6 +43,7 @@ const owner = (id: string, extra = {}) =>
     pinned: true,
     message_count: 1,
     last_active: 100,
+    kanban_observed_at: Date.now() / 1000,
     ...extra
   })
 
@@ -55,10 +57,58 @@ beforeEach(() => {
   resume.mockClear()
 })
 afterEach(() => {
+  vi.useRealTimers()
   cleanup()
   $sessions.set([])
   $projectTree.set([])
   $pinnedSessionIds.set([])
+})
+
+it('expires the unchanged cached input on observation ticks and recovers on a fresh row', () => {
+  vi.useFakeTimers()
+  const pending = owner('kanban_owner_expiring', { kanban_active: 1 })
+  $sessions.set([pending, owner('ordinary')])
+  mount()
+  expect(screen.getByText('Background')).toBeTruthy()
+  act(() => {
+    vi.setSystemTime(Date.now() + 181_000)
+    $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
+  })
+  expect(screen.queryByText('Background')).toBeNull()
+  expect(within(section('Pinned')).getByText('Owner ordinary')).toBeTruthy()
+  act(() => $sessions.set([{ ...pending, kanban_observed_at: Date.now() / 1000 }, owner('ordinary')]))
+  expect(screen.getByText('Background')).toBeTruthy()
+})
+
+it('filters historical-only work and strips owner prefixes only in Background', () => {
+  const prefixed = owner('kanban_owner_prefixed', { title: 'Kanban owner:   terminal', kanban_active: 1 })
+  $sessions.set([
+    prefixed,
+    owner('kanban_owner_custom', { title: 'Custom name', kanban_parked: 110 }),
+    owner('kanban_owner_done', { kanban_unseen: 8, kanban_attention: 4 }),
+    owner('kanban_owner_archived'),
+    owner('kanban_owner_stale', { kanban_active: 99, kanban_observed_at: Date.now() / 1000 - 181 }),
+    owner('ordinary', { title: 'Kanban owner: ordinary' })
+  ])
+  mount()
+  const background = section('Background')
+  expect(within(background).getByText('terminal')).toBeTruthy()
+  expect(within(background).getByText('Custom name')).toBeTruthy()
+  expect(within(background).queryByText('Owner kanban_owner_done')).toBeNull()
+  expect(within(background).queryByText('Owner kanban_owner_archived')).toBeNull()
+  expect(within(background).queryByText('Owner kanban_owner_stale')).toBeNull()
+  expect(within(section('Pinned')).getByText('Kanban owner: ordinary')).toBeTruthy()
+  expect(prefixed.title).toBe('Kanban owner:   terminal')
+  fireEvent.click(within(background).getByText('terminal'))
+  expect(resume).toHaveBeenCalledWith(prefixed.id, prefixed)
+  const header = within(background).getByRole('button', { expanded: true })
+  expect(within(header).getByText('2')).toBeTruthy()
+  const counts = within(header.parentElement!).getByTestId('session-row-card-squares')
+  expect(counts.getAttribute('aria-label')).toBe('Running 1 · Waiting 110')
+  const badge = counts.querySelector('[data-card-colour="grey"]')!
+  expect(badge.textContent).toBe('110')
+  expect(badge.children).toHaveLength(0)
+  expect(badge.className).toContain('border-zinc-400')
 })
 
 it('moves only owners with open cards below Pinned and excludes all owners from Projects', () => {
@@ -132,7 +182,7 @@ it('counts every Background card colour on rows and the header without changing 
   expect(running.querySelector('[data-card-colour="blue"]')?.textContent).toBe('1')
   const header = within(background).getByRole('button', { expanded: true })
   expect(within(header).getByText('2')).toBeTruthy()
-  const aggregate = squares(header)
+  const aggregate = squares(header.parentElement!)
   expect(aggregate.querySelector('[data-card-colour="grey"]')?.textContent).toBe('5')
   expect(aggregate.querySelector('[data-card-colour="blue"]')?.textContent).toBe('3')
   expect([...aggregate.querySelectorAll('[data-card-colour]')].map(el => el.getAttribute('data-card-colour'))).toEqual([
@@ -149,10 +199,10 @@ it('counts every Background card colour on rows and the header without changing 
       owner('ordinary', { kanban_active: 7, kanban_parked: 5 })
     ])
   )
-  expect(squares(header).getAttribute('aria-label')).toBe('Running 4 · Waiting 6')
+  expect(squares(header.parentElement!).getAttribute('aria-label')).toBe('Running 4 · Waiting 6')
   fireEvent.click(header)
   expect(within(background).queryByText('Owner kanban_owner_terminal')).toBeNull()
-  expect(squares(header).getAttribute('aria-label')).toBe('Running 4 · Waiting 6')
+  expect(squares(header.parentElement!).getAttribute('aria-label')).toBe('Running 4 · Waiting 6')
   fireEvent.click(header)
 })
 
@@ -193,7 +243,7 @@ it('aggregates every colour in urgency order and omits zero totals', () => {
   $sessions.set([owner('kanban_owner_one', fields), owner('kanban_owner_two', fields)])
   mount()
   const header = within(section('Background')).getByRole('button', { expanded: true })
-  const marks = within(header).getByTestId('session-row-card-squares')
+  const marks = within(header.parentElement!).getByTestId('session-row-card-squares')
   expect(
     [...marks.querySelectorAll('[data-card-colour]')].map(el => [el.getAttribute('data-card-colour'), el.textContent])
   ).toEqual([
@@ -207,10 +257,9 @@ it('aggregates every colour in urgency order and omits zero totals', () => {
   ])
   act(() => $sessions.set([owner('kanban_owner_one', { kanban_active: 1 })]))
   expect(
-    [...within(header).getByTestId('session-row-card-squares').querySelectorAll('[data-card-colour]')].map(el => [
-      el.getAttribute('data-card-colour'),
-      el.textContent
-    ])
+    [
+      ...within(header.parentElement!).getByTestId('session-row-card-squares').querySelectorAll('[data-card-colour]')
+    ].map(el => [el.getAttribute('data-card-colour'), el.textContent])
   ).toEqual([['blue', '1']])
 })
 

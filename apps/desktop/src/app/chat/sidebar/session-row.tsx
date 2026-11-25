@@ -14,7 +14,6 @@ import { RowButton } from '@/components/ui/row-button'
 import { OverflowTip, Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
-import { sessionTitle } from '@/lib/chat-runtime'
 import { pathLeaf } from '@/lib/display-path'
 import { triggerHaptic } from '@/lib/haptics'
 import { middleClickHandlers } from '@/lib/middle-click'
@@ -44,6 +43,7 @@ import { $todoProgressBySession } from '@/store/todos'
 import { SessionStatusDot } from '../session-status-dot'
 
 import { BackgroundProcessBadge } from './background-process-badge'
+import { useSessionTitle } from './card-counts-context'
 import {
   SIDEBAR_FOCUS_VISIBLE,
   SIDEBAR_ROW_CARD_MIN_H,
@@ -190,7 +190,7 @@ function SidebarSessionRowImpl({
   const { t } = useI18n()
   const r = t.sidebar.row
   const { cancelPrewarm, notePointerMove, startPrewarm } = useProfilePrewarm(session.profile)
-  const title = sessionTitle(session)
+  const title = useSessionTitle(session)
   const density = useStore($sessionListDensity)
   const fmt = t.sidebar
 

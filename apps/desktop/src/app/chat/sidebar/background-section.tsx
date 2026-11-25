@@ -1,9 +1,10 @@
 import { useStore } from '@nanostores/react'
-import type { ComponentProps } from 'react'
+import { type ComponentProps, useMemo } from 'react'
 
 import { SIDEBAR_SECTIONS_TOP_AREA } from '@/app/routes'
 import { useI18n } from '@/i18n'
 import { Codecs, persistentAtom } from '@/lib/persisted'
+import { $kanbanObservationTick } from '@/store/kanban-observation'
 
 import { CardCountsContext } from './card-counts-context'
 import { SidebarContributedSections } from './contributed-sections'
@@ -18,7 +19,14 @@ const $backgroundOpen = persistentAtom('hermes.desktop.sidebarBackgroundOpen', t
 export function SidebarPinnedAndBackgroundSections(props: ComponentProps<typeof SidebarSessionsSection>) {
   const { t } = useI18n()
   const open = useStore($backgroundOpen)
-  const { pinned, background } = ownerChatPolicy.partition(props.sessions)
+  const observationTick = useStore($kanbanObservationTick)
+
+  const { pinned, background } = useMemo(
+    () => ownerChatPolicy.partition(props.sessions),
+    // Counts expire even if the owner stops answering and the input array is unchanged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.sessions, observationTick]
+  )
 
   return (
     <>
@@ -29,13 +37,13 @@ export function SidebarPinnedAndBackgroundSections(props: ComponentProps<typeof 
           <SidebarSessionsSection
             {...props}
             emptyState={null}
-            label={t.sidebar.background}
-            labelMeta={
-              <>
-                {background.length}
+            headerAction={
+              <div className="flex min-w-0 max-w-[calc(100%-7rem)] justify-end pr-2" data-background-counts>
                 <CardSquares colours={aggregateCardColours(background)} counts />
-              </>
+              </div>
             }
+            label={t.sidebar.background}
+            labelMeta={background.length}
             onReorderSessions={undefined}
             onToggle={() => $backgroundOpen.set(!open)}
             open={open}
