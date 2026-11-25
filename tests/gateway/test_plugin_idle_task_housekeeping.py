@@ -198,11 +198,27 @@ def test_a_run_that_ends_before_the_stop_is_recorded(gw):
     assert not loop.is_alive() and not gw.lock.exists()
 
 
-def test_after_an_in_process_restart_only_the_new_housekeeping_records(gw):
+def test_after_an_in_process_restart_only_the_new_housekeeping_records(gw, monkeypatch):
+    from agent import idle_schedule
+
+    # A removed disk claim does not mean the worker retired its in-process claim.
+    # Force that gap instead of depending on which thread gets the next timeslice.
+    claim_released, retire = threading.Event(), threading.Event()
+    release_run = idle_schedule.release_run
+
+    def release_before_retirement(lock):
+        release_run(lock)
+        if threading.current_thread() is old_worker:
+            claim_released.set()
+            assert retire.wait(10)
+
+    monkeypatch.setattr(idle_schedule, "release_run", release_before_retirement)
     entered, release, calls = _register_blocking(gw)
     old_stop = _Stop(61)
     old = _serve(old_stop)
     assert old_stop.held.wait(10) and entered.wait(5)
+    (old_fence,) = gw.fences
+    (old_worker,) = old_fence._workers
     old_stop.set()
     old.join(BUDGET + 10)
     assert not old.is_alive()
@@ -213,9 +229,14 @@ def test_after_an_in_process_restart_only_the_new_housekeeping_records(gw):
         assert new_stop.held.wait(10)
         assert calls == [0]  # its curator tick did not start a second run beside the old one
         release.set()
+        assert claim_released.wait(10)
         wait_until(lambda: not gw.lock.exists(), what="the old run's claim released")
         assert load_state(gw.state_path)["run_count"] == 0  # the old run's write never landed
 
+        # Join the old worker too: release_run unlinks before _in_flight is cleared.
+        # Housekeeping's bounded shutdown already returned while this worker was blocked.
+        retire.set()
+        assert old_fence.close(timeout=10)
         _old_fence, new_fence = gw.fences
         started = run_plugin_idle_tasks(idle_for_seconds=float("inf"), manager=gw.manager, fence=new_fence)
         started["wisdom:promote"].join(10)
@@ -223,5 +244,7 @@ def test_after_an_in_process_restart_only_the_new_housekeeping_records(gw):
         assert (state["run_count"], state["last_summary"]) == (1, "promoted 2 skills")
     finally:
         release.set()
+        retire.set()
+        old_fence.close(timeout=10)
         new_stop.set()
         new.join(BUDGET + 10)
