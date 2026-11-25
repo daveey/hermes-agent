@@ -152,7 +152,8 @@ def _refreeze(live, op, facts):
     ('source_uids', [{'uid': 'source'}]), ('source_uids', [{'uid': '', 'version': 1}]),
     ('source_uids', [{'uid': 1, 'version': 1}]), ('source_uids', [{'uid': 'source', 'version': True}]),
     ('source_uids', [{'uid': 'source', 'version': 0}]), ('dependencies', None),
-    ('dependencies', ['parent']), ('dependencies', [{'id': 't_parent'}]),
+    ('dependencies', ['parent']), ('dependencies', {}), ('dependencies', [{'id': 't_parent'}]),
+    ('source_uids', [{'uid': 'source', 'version': 1, 'extra': 'unknown'}]),
     ('dependencies', [{'id': '', 'status': 'running'}]),
     ('dependencies', [{'id': 't_parent', 'status': None}]),
     ('dependencies', [{'id': 't_parent', 'status': 'running'}] * 2),
@@ -186,6 +187,22 @@ def test_version_only_difference_cannot_prove_supersession(stores):
     facts['dependencies'][0]['status'] = 'scheduled'
     facts['source_uids'][0]['version'] = 2
     _refreeze(live, op, facts)
+    assert not drift.audited_rejection(live, shadow, op)
+
+
+def test_parent_fact_bound_is_independent_of_custody(stores):
+    live, shadow, op = stores
+    facts = json.loads(op['fields'])['payload']['facts']
+    facts['dependencies'] = [{'id': f'p{i:03}', 'status': 'done'} for i in range(129)]
+    _refreeze(live, op, facts)
+    assert not drift.audited_rejection(live, shadow, op)
+
+
+def test_resolved_run_without_portable_identity_stays_dirty(stores):
+    live, shadow, op = stores
+    for conn in (live, shadow):
+        conn.execute("INSERT INTO task_runs VALUES (9,'','t_card')")
+        conn.execute("UPDATE tasks SET current_run_id=9 WHERE id='t_card'")
     assert not drift.audited_rejection(live, shadow, op)
 
 
