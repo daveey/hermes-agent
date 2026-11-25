@@ -13,7 +13,8 @@ KINDS = {'todo': ('created', 'linked', 'unlinked', 'dependency_wait', 'unblocked
          'ready': ('created', 'promoted_manual', 'unblocked', 'reclaimed'),
          'review': ('review_requested', 'created'), 'blocked': ('blocked',),
          'scheduled': ('scheduled', 'continued'),
-         'triage': ('failure_finalized', 'spend_budget_decision_ready', 'created'), 'running': ('claimed',)}
+         'triage': ('failure_finalized', 'spend_budget_decision_ready', 'created', 'linked', 'unlinked'),
+         'running': ('claimed',)}
 
 
 def _data(event):

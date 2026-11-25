@@ -31,10 +31,13 @@ def intent_for(task, kind, payload, *, now):
     todo = _todo_entry(kind, payload)
     if not timed and kind != 'blocked' and not todo:
         return None
-    # link_tasks admits an edge on a running child only from its owning run (dependency handoff
-    # before the park): that edge is a dependency wait with its own clock, never an exemption.
-    handoff = kind in ('linked', 'unlinked') and task.get('status') == 'running'
-    status = 'scheduled' if timed else ('running' if handoff else (
+    # link_tasks admits a running child's handoff only from its owner. Ordinary triage edges
+    # are also dependency waits; neither clock changes status or supplies release authority.
+    if (kind in ('linked', 'unlinked') and task.get('status') == 'triage'
+            and task.get('block_kind') == 'lane_gate'):
+        return None  # the lane has its own source-fixed clock; an edge must not replace it
+    handoff = kind in ('linked', 'unlinked') and task.get('status') in ('running', 'triage')
+    status = 'scheduled' if timed else (task['status'] if handoff else (
         'todo' if todo or payload.get('kind') == 'assignment' else 'blocked'))
     if task.get('status') != status:
         return None
@@ -104,7 +107,7 @@ def stamp(conn, task_id, kind, payload, *, now):
                    and row is not None and row['status'] == 'triage')
     if receipt and row is not None:
         row = {**dict(row), 'status': 'todo', 'block_kind': None, 'human_request': None}
-    handoff = row is not None and row['status'] == 'running' and kind in ('linked', 'unlinked')
+    handoff = row is not None and row['status'] in ('running', 'triage') and kind in ('linked', 'unlinked')
     if kind in ('linked', 'unlinked', 'unblocked', *LANDINGS) and (
             row is None or not (row['status'] == 'todo' or handoff) or not isinstance(payload, dict)):
         return payload  # a todo entry or the owning run's handoff edge; every other status keeps its own source
