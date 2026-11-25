@@ -264,9 +264,9 @@ def test_bindings_subs_and_unqualified_link_prove_nothing(home):
     with kbc.connect_closing() as conn:
         parent = _bound(conn, "create")
         other = kb.create_task(conn, title="other")
-        # The courier binding itself, a link with no profile, origin subs (qualified, ``<gw>:<id>``, malformed)
-        # and a ``tui`` row.
-        _raw_link(conn, other, "macbook", None, MAC)
+        # The courier binding itself, a link with an invalid empty profile (NULL means default),
+        # origin subs (qualified, ``<gw>:<id>``, malformed) and a ``tui`` row.
+        _raw_link(conn, other, "macbook", "", MAC)
         _raw_sub(conn, other, REF, "origin")
         _raw_sub(conn, other, f"macbook:{MAC}", "origin")
         _raw_sub(conn, other, f"macbook/default/x/{MAC}", "origin")

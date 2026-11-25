@@ -336,9 +336,14 @@ def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]
     except (ImportError, OSError, ValueError):
         my_profile = "default"
     worker = bool((env.get("HERMES_KANBAN_TASK") or "").strip())
+    # Execution placement is not card custody: a pool worker may run a hub-home card.
+    # Only a unique replica owner may populate an adoption destination.
+    owners = _replica_task_owners(task_id, board)
+    unknown_owner = len(owners) != 1
+    owner_gw, owner_profile = ((_safe(owners[0][0], "<owner-gateway>"), _safe(owners[0][1], "<owner-profile>"))
+                               if len(owners) == 1 else ("<owner-gateway>", "<owner-profile>"))
     if worker:
-        # The card lives here; the adoption request must be queued FROM the origin chat's gateway.
-        owner_gw, owner_profile = me or "<owner-gateway>", my_profile
+        # The adoption request must be queued FROM the origin chat's gateway.
         try:
             origin = parse_origin(ambient_origin_ref()) if ambient_origin_ref() else None
         except OriginError:
@@ -346,12 +351,7 @@ def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]
         run_on = _safe(origin and origin.gateway, "<origin-gateway>")
         session = _safe(origin and origin.session, "<origin-session-id>")
         origin_profile = _safe(origin and origin.profile, "<origin-profile>")
-        unknown_owner = False
     else:
-        owners = _replica_task_owners(task_id, board)
-        unknown_owner = len(owners) != 1
-        owner_gw, owner_profile = ((_safe(owners[0][0], "<owner-gateway>"), _safe(owners[0][1], "<owner-profile>"))
-                                   if len(owners) == 1 else ("<owner-gateway>", "<owner-profile>"))
         run_on = me or "<this-gateway>"
         session = _safe(_turn_session_id(env, explicit_env), "<origin-session-id>")
         # "custom" = a HERMES_HOME outside ~/.hermes: no profile name to pass; the CLI resolves its own.

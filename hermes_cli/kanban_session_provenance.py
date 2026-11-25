@@ -260,7 +260,8 @@ def proven_foreign_chats(conn, task_ids: Iterable[str], *, local_gateway=None, m
     The row is synced, so worker replicas see it. A courier binding (``origin_creation_intents``) or a
     ``reason: origin`` hub sub proves nothing alone: ``hermes-hub create-task``/``adopt-task`` default the origin
     to the caller's ``$HERMES_SESSION_ID`` (a worker's own hash inside a Kanban worker), and neither row is ever
-    released. Observer links, released links, an unqualified id or a missing profile prove nothing; this
+    released. Legacy NULL profiles mean default, as in the renewal reader; an empty profile remains invalid.
+    Observer links, released links and an unqualified id prove nothing; this
     gateway's own sessions keep their state.db verdict; no network read. [daveey]"""
     if local_gateway is None:
         from hermes_cli.kanban_origin import gateway_names
@@ -272,5 +273,6 @@ def proven_foreign_chats(conn, task_ids: Iterable[str], *, local_gateway=None, m
     refs = conn.execute(
         f"SELECT chat_gateway, chat_profile, chat_session FROM task_chat_links WHERE task_id IN ({q}) "
         "AND kind='created' AND released=0", ids).fetchall() if ids else []
-    return frozenset(f"{gw}/{prof}/{sid}" for gw, prof, sid in refs
-                     if gw and prof and gw != local_gateway and _HEADLESS_SESSION.fullmatch(str(sid or "")))
+    return frozenset(f"{gw}/{prof if prof is not None else 'default'}/{sid}" for gw, prof, sid in refs
+                     if gw and (prof is None or prof) and gw != local_gateway
+                     and _HEADLESS_SESSION.fullmatch(str(sid or "")))

@@ -114,7 +114,8 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str, *, verdicts: L
             return True
         if task_id not in proofs:
             proofs[task_id] = proven_foreign_chats(conn, (task_id,), local_gateway=me)
-        return f"{row['chat_gateway']}/{row['chat_profile']}/{row['chat_session']}" in proofs[task_id]
+        profile = row['chat_profile'] if row['chat_profile'] is not None else 'default'
+        return f"{row['chat_gateway']}/{profile}/{row['chat_session']}" in proofs[task_id]
 
     from hermes_cli.kanban_owner_chat import PREFIX
     frontier, seen, fallback = [creator_task_id], set(), []

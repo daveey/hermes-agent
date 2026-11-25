@@ -71,7 +71,8 @@ def has_authority(conn, task_id: str, creator_task_id, *, durable: bool = False)
             gateway, chat_profile = row["chat_gateway"], row["chat_profile"]
             if is_machine_session(gateway or None, session, local_gateway=me, profile=chat_profile):
                 proven = proven if proven is not None else proven_foreign_chats(conn, (task_id,), local_gateway=me)
-                if f"{gateway}/{chat_profile}/{session}" not in proven:
+                profile_ref = chat_profile if chat_profile is not None else "default"
+                if f"{gateway}/{profile_ref}/{session}" not in proven:
                     continue
             if _accepts(conn, task_id, session, gateway, chat_profile or "default"):
                 return True

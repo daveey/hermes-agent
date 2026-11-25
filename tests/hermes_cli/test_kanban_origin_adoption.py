@@ -317,6 +317,24 @@ def test_worker_refusal_points_at_origin_gateway_cli(board, tmp_path, monkeypatc
     assert "kanban_origin_adopt" not in refused["next_step"]
 
 
+@pytest.mark.parametrize("owners", [[("hub", "default/default/t_remote")], [],
+                                   [("hub", "default/default/t_remote"),
+                                    ("worker-a1", "default/default/t_remote")]])
+def test_pool_worker_hint_never_infers_card_home_from_executor(board, tmp_path, monkeypatch, owners):
+    _hub_state(tmp_path, monkeypatch, "worker-a1", owners)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_remote")
+    monkeypatch.setenv("HERMES_ORIGIN_SESSION", "@session:default@hub/s_chat")
+    refused = _refuse("t_remote")
+    if len(owners) == 1:
+        assert refused["next_step"].startswith("hermes-hub adopt-task hub default/default/t_remote ")
+        assert refused["complete"] is True
+    else:
+        assert "adopt-task <owner-gateway> <owner-profile>/default/t_remote " in refused["next_step"]
+        assert refused["complete"] is False
+    assert "adopt-task worker-a1 " not in refused["next_step"]
+    assert "adopt-task worker-a1 " not in refused.get("delegate", "")
+
+
 def test_worker_refusal_carries_non_default_profiles(board, tmp_path, monkeypatch):
     """Owner card on profile bb-dev, origin chat on profile personal: both must survive into the command and the
     links check (a 3-part --expect ref means the default profile)."""

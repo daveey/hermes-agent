@@ -266,7 +266,8 @@ def test_registered_chat_is_renewable_immediately_without_later_reconcile(home, 
 @pytest.mark.parametrize("kind,released,session,profile,gateway,expected", [
     ("created", 0, "platform-chat", "research", "away", True),
     ("created", 0, "local-" + "a" * 64, "research", "away", True),
-    ("created", 0, "local-" + "a" * 64, None, "away", False),
+    ("created", 0, "local-" + "a" * 64, None, "away", True),
+    ("created", 0, "local-" + "a" * 64, "", "away", False),
     ("created", 1, "platform-chat", "research", "away", False),
     ("shepherd", 0, "platform-chat", "research", "away", False),
     ("touch", 0, "platform-chat", "research", "away", False),
@@ -291,7 +292,7 @@ def test_link_authority_matches_renewal_and_foreign_provenance(home, monkeypatch
         conn.commit()
         assert has_authority(conn, tid, None) is expected
         if expected:
-            assert _actor(conn, tid, session, gateway=gateway, profile=profile).authority == "chat"
+            assert _actor(conn, tid, session, gateway=gateway, profile=profile or "default").authority == "chat"
 
 
 def test_foreign_origin_sub_without_link_is_not_renewable_on_legacy_board(home, monkeypatch):
@@ -338,6 +339,45 @@ def test_legacy_observer_subscriptions_are_not_authority(home, reason):
                      "(task_id,platform,chat_id,thread_id,delivery_metadata,created_at,last_event_id) "
                      "VALUES (?,'tui','observer','',?,1,0)", (tid, json.dumps({"reason": reason})))
         assert not has_authority(conn, tid, None)
+
+
+@pytest.mark.parametrize("profile", [None, "default", "research"])
+@pytest.mark.parametrize("kind,released", [("created", 0), ("created", 1), ("shepherd", 0)])
+def test_pool_creator_inherits_foreign_owning_chat(home, monkeypatch, profile, kind, released):
+    from hermes_cli import kanban_origin
+    from hermes_cli.kanban_chat_links import link_uid
+    from hermes_cli.kanban_create_authority import has_authority
+
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("worker-a1", {"hub", "worker-a1"}))
+    session = "local-" + "d" * 64  # absent from the worker's local session store
+    with kbc.connect_closing() as conn:
+        _links_schema(conn)
+        creator = kb.create_task(conn, title="hub-owned implementation", assignee="default",
+                                 settle_owner_chat=False)
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (creator,))
+        kb._append_event(conn, creator, "owner_admitted", {"session_id": "worker-session"})
+        conn.execute("INSERT INTO task_chat_links "
+                     "(uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,created_at) "
+                     "VALUES (?,?,?,?,?,?,?,1)",
+                     (link_uid(creator, "hub", profile, session, kind), creator, "hub", profile, session, kind, released))
+        conn.commit()
+        if kind != "created" or released:
+            before = list(conn.iterdump())
+            with pytest.raises(CreateAuthorityRefused) as err:
+                kb.create_task(conn, title="review", assignee="default", creator_task_id=creator,
+                               require_scope_authority=True)
+            assert err.value.code == "scope_authority_missing"
+            assert list(conn.iterdump()) == before
+            return
+        child = kb.create_task(conn, title="review", assignee="default", creator_task_id=creator,
+                               require_scope_authority=True)
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (creator,))
+        assert has_authority(conn, child, creator, durable=True)
+        assert _actor(conn, child, session, gateway="hub", profile=profile or "default").authority == "chat"
+        link = conn.execute("SELECT * FROM task_chat_links WHERE task_id=? AND chat_session=?",
+                            (child, session)).fetchone()
+        assert link is not None and link["kind"] == "created" and not link["released"]
+        assert link["chat_gateway"] == "hub"
 
 
 def test_creator_argument_must_match_recorded_creator_and_not_childs_own_session(home):
