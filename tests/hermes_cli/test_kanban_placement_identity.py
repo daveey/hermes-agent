@@ -183,6 +183,11 @@ def test_later_run_retry_after_terminal_forward_rejection_gets_own_transport_ide
     monkeypatch.setattr(kp, "hub_carries_options", lambda cli: True)
     monkeypatch.setattr(kp, "hub_runner", courier)
     monkeypatch.setattr(kp, "remote_state", lambda rid: states.get(rid))
+    monkeypatch.setattr(kp, "_sent_row", lambda rid: (
+        states.get(rid), json.dumps({"status": "rejected", "code": "origin_forward_binding_missing", "handoff_complete": False}),
+        json.dumps({"coll": "sessions", "action": "origin-forward", "args": {
+            "origin": {"gateway": "hub", "profile": "default", "session": "s1"},
+            "creator": creator, "run_uid": stored[rid][0], "create": {"idempotency_key": "product-key"}}})))
     creator = {"gateway": "w", "profile": "default", "board": "default", "task_id": "t_0123456789abcdef"}
     call = lambda run: kp.create_remote(
         {"title": "B3a", "idempotency_key": "product-key"}, target="hub", self_gw="w", origin_session="s1",

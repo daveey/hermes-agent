@@ -1308,10 +1308,10 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     transport_args = {**args, "idempotency_key": transport_key} if transport_key else args
     rid = request_id(self_gw, transport_args, origin_session or "", options)
     prior = remote_state(rid)
-    if foreign_origin and prior in FAILED_STATES:
-        # A forwarded envelope carries the creating run's uid, and a terminally failed request is immutable, so a
-        # later run's retry of the same product key would only collide (request_id_conflict). Give that run its own
-        # transport identity. The product idempotency_key still travels in ``options``, so the receiver dedupes.
+    if foreign_origin and prior == "rejected" and _forward_binding_retry(rid, options, origin_gateway, origin_profile, origin_session,
+                                                creator, run_uid):
+        # Only a definitive pre-create binding refusal permits a later authenticated run's new envelope.
+        # Keep the product key on the wire; receiver creation idempotency still arbitrates duplicate deliveries.
         rid = request_id(self_gw, {**transport_args, "idempotency_key": f"{transport_args.get('idempotency_key') or rid}:run:{run_uid}"},
                          origin_session or "", options)
         prior = remote_state(rid)
@@ -1349,13 +1349,39 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
             "error": (err or out)[-400:]}
 
 
+def _forward_binding_retry(rid, options, gateway, profile, session, creator, run_uid) -> bool:
+    """A new transport is allowed only for a later run after the exact pre-create binding refusal.
+
+    This is identity selection, not authority: the courier still authenticates the current run and origin.
+    Missing/malformed history, ambiguous failures and keyless creates must retain the original obligation.
+    """
+    if not options.get("idempotency_key"):
+        return False
+    row = _sent_row(rid)
+    try:
+        if not row or row[0] != "rejected":
+            return False
+        result, body = json.loads(row[1]), json.loads(row[2])
+        args = body["args"]
+        return (result.get("code") == "origin_forward_binding_missing"
+                and result.get("status") == "rejected" and result.get("handoff_complete") is False
+                and body.get("action") == "origin-forward" and body.get("coll") == "sessions"
+                and args.get("origin") == {"gateway": gateway, "profile": profile, "session": session}
+                and args.get("creator") == creator
+                and isinstance(args.get("run_uid"), str) and bool(args["run_uid"])
+                and args["run_uid"] != run_uid
+                and args.get("create", {}).get("idempotency_key") == options["idempotency_key"])
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+        return False
+
+
 def _sent_row(rid: str) -> Optional[tuple]:
     try:
         db = reg._ro(reg.hub_db_path())
     except Exception:
         return None
     try:
-        return db.execute("SELECT state, result FROM sent WHERE id = ?", (rid,)).fetchone()
+        return db.execute("SELECT state, result, body FROM sent WHERE id = ?", (rid,)).fetchone()
     except Exception:
         return None
     finally:
