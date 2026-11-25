@@ -18,11 +18,11 @@ def check(conn, task_id, *, seen=None, board=None):
 
     Use portable event order and comment UID resolution, never a wire-local id as
     the receiving board's read watermark. Legacy decisions resolve through their
-    following system comment. Incomplete evidence refuses rather than grants.
+    following system comment, or their same-second immediate predecessor.
+    Incomplete evidence refuses rather than grants.
     """
     events = [dict(r) for r in conn.execute(
-        "SELECT * FROM task_events WHERE task_id=? AND kind IN "
-        "('spend_budget_triaged','spend_budget_set','commented')", (task_id,))]
+        "SELECT * FROM task_events WHERE task_id=?", (task_id,))]
     events.sort(key=_event_order)
     stops = [e for e in events if e['kind'] == 'spend_budget_triaged']
     if not stops:
@@ -41,6 +41,15 @@ def check(conn, task_id, *, seen=None, board=None):
               else 'kanban-spend-budget')
     notes = [e for e in events if e['kind'] == 'commented' and _event_order(e) > _event_order(last)
              and json.loads(e['payload'] or '{}').get('author') == author]
+    if not notes and reference is None and 'episode' not in decision:
+        # Legacy set_override wrote its comment first in the same transaction.
+        # Inspect ALL task events: filtering kinds would hide an intervening event.
+        index = events.index(last)
+        previous = events[index - 1] if index else None
+        if (previous and previous['kind'] == 'commented'
+                and previous['created_at'] == last['created_at']
+                and json.loads(previous['payload'] or '{}').get('author') == author):
+            notes = [previous]
     rows = conn.execute("SELECT * FROM task_comments WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
     note = last if isinstance(reference, dict) else (notes[0] if notes else last)
     payload = reference if isinstance(reference, dict) else json.loads(note['payload'] or '{}')
