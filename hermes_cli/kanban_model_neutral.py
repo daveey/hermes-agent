@@ -115,9 +115,9 @@ MANDATORY_FLAGS = ('pin_mandatory', 'model_pin_mandatory', 'require_model')
 
 
 def validate_update_flags(payload):
-    """Opt-in for local REST update/bulk only: null/false/integer zero are inert; anything else refuses.
+    """Opt-in for local REST writes: null/false/integer zero are inert; anything else refuses.
 
-    Raises ordinary ``ValueError(ERROR)``; no typed wire protocol. Not used by create/DB/selfwork admission.
+    Raises ordinary ``ValueError(ERROR)``; no typed wire protocol. Not used by DB/selfwork admission.
     """
     metadata = getattr(payload, 'metadata', None) or {}
     values = [getattr(payload, key, None) for key in MANDATORY_FLAGS]

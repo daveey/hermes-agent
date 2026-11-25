@@ -1,4 +1,4 @@
-"""E3 local PATCH/bulk only. REST create remains unchanged and unprotected by the new flags."""
+"""E3 PATCH/bulk controls, plus retained create compatibility after mandatory-flag refusal."""
 
 from __future__ import annotations
 if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
@@ -137,9 +137,9 @@ def _record_board_conn(monkeypatch) -> list:
     return opened
 
 
-# --- REST create: BASELINE NO-CHANGE CONTROLS ONLY -------------------------------------------------
-# E3 deliberately leaves REST create unchanged. These assert base behaviour is retained; they are NOT
-# evidence that REST create is protected by the new flags or the exact-class predicate.
+# --- REST create compatibility controls ------------------------------------------------------------
+# Mandatory-flag refusal is covered in test_kanban_create_flags265; preserve overlap,
+# idempotency and the existing prefix-class behavior independently of that refusal.
 
 def test_create_baseline_overlap_still_refused_and_recorded(client):  # baseline control
     b1 = _other_board_card()
@@ -155,10 +155,10 @@ def test_create_baseline_idempotency_unchanged(client):  # baseline control
     assert first.json()["task"]["id"] == second.json()["task"]["id"]
 
 
-def test_create_baseline_ignores_flags_and_prefix_class(client, monkeypatch):  # baseline, NOT compliance
+def test_create_baseline_prefix_class_unchanged_with_inert_flags(client, monkeypatch):
     seen = _record_create_kwargs(monkeypatch)
     r = client.post("/tasks", json={"title": "baseline card", "assignee": "worker",
-                                    "model_override": "class:bogus", **{flag: True for flag in FLAGS}})
+                                    "model_override": "class:bogus", **{flag: False for flag in FLAGS}})
     assert r.status_code == 200, r.text
     [kwargs] = seen
     assert not set(FLAGS) & set(kwargs), kwargs

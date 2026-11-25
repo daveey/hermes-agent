@@ -481,10 +481,16 @@ class CreateTaskBody(BaseModel):
     # [daveey] create_overlap override (same as the kanban_create tool): open cards this is not a duplicate of.
     distinct_from: list[str] = Field(default_factory=list)
     distinct_reason: Optional[str] = None
+    pin_mandatory: Optional[Any] = Field(default=None, exclude=True)
+    model_pin_mandatory: Optional[Any] = Field(default=None, exclude=True)
+    require_model: Optional[Any] = Field(default=None, exclude=True)
 
 
 @router.post("/tasks")
 def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
+    from hermes_cli.kanban_model_neutral import validate_update_flags
+    with _value_error_400():
+        validate_update_flags(payload)  # Reject before board/overlap writes; flags never become DB kwargs.
     with _board_conn(board) as (board, conn), _value_error_400():
         fields = payload.model_dump()
         overlap_args = {"body": fields.get("body"), "idempotency_key": fields.get("idempotency_key"),
