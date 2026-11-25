@@ -717,11 +717,12 @@ def _event_refresh(events) -> float | None:
                 read_at = _ksa._count_scopes.read_at_locked(scope)
             if lost:
                 _parts.failed(scope)
-            forced, part_keys = _parts.plan(
-                scope, clock=len(_holder_ctx.deadlines) != len(pending),
-                renew=read_at is None or time.monotonic() - read_at >= STRICT_REFRESH_AGE_S)
+            clock = len(_holder_ctx.deadlines) != len(pending)
+            renew = read_at is None or time.monotonic() - read_at >= STRICT_REFRESH_AGE_S
+            forced, part_keys = _parts.plan(scope, clock=clock, renew=renew)
             _ksa._revalidate.force_read.scope = scope
             _ksa._revalidate.force_read.parts = forced
+            _ksa._revalidate.force_read.content_only_boards = not (lost or clock or renew)
             try:
                 try:
                     # No part needs a read: avoid prepare/freeze/publication and ordinary inner TTLs.
@@ -749,6 +750,7 @@ def _event_refresh(events) -> float | None:
                 _holder_ctx.deadlines = None
                 _ksa._revalidate.force_read.scope = None
                 _ksa._revalidate.force_read.parts = None
+                _ksa._revalidate.force_read.content_only_boards = False
                 _ksa._annotate_refresh_lock.release()
         try:
             due = ctx.run(refresh_scope)

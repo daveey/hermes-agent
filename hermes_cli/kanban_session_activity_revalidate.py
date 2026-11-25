@@ -57,9 +57,15 @@ def board_memo_key(path) -> tuple:
     from hermes_cli import kanban_session_activity as _ksa
 
     key = _ksa._board_content_key(path)
-    if forced(_ksa._origin_scope(), 'counts'):
-        # The holder's independent counts counter includes run liveness and
-        # receipt selection that the legacy notify counter excludes.
+    from hermes_cli import kanban_annotation_revision
+
+    counted = kanban_annotation_revision.content_key(path, 'counts')
+    # Certified per-board counts keys include liveness/receipt inputs absent
+    # from the legacy notification counter. Unknown coverage cannot certify
+    # content-only reuse; ordinary legacy callers retain their existing gate.
+    if counted[:1] != ('unknown',) or getattr(force_read, 'content_only_boards', False):
+        key = key, counted
+    if forced(_ksa._origin_scope(), 'counts') and not getattr(force_read, 'content_only_boards', False):
         return key, object()
     if key[:1] == ("stat",):
         # data_version is connection-local: retain identity to reject a replacement reader.
