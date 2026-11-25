@@ -21,7 +21,9 @@ import time
 
 import pytest
 
+from agent import shell_hooks
 from agent.shell_hooks import ShellHookSpec, _spawn
+from hermes_cli import worker_drain_fence
 
 pytestmark = pytest.mark.platforms("posix")  # POSIX process-group semantics
 
@@ -188,6 +190,139 @@ def test_interrupt_kills_hook_and_propagates(tmp_path):
     if alive:  # cleanup so a failure doesn't leak a 300s sleeper
         os.kill(hook_pid, 9)
     assert not alive, f"hook {hook_pid} survived the interrupt"
+
+
+@pytest.mark.parametrize("when", ["before_create", "before_handoff"])
+def test_interrupt_at_spawn_boundary_reaps_real_hook(monkeypatch, tmp_path, when):
+    """OS child readiness can precede the parent's popen_worker return."""
+    original = worker_drain_fence.popen_worker
+    children = []
+    previous = signal.getsignal(signal.SIGINT)
+    script = tmp_path / "hook.sh"
+    script.write_text("#!/bin/sh\nsleep 300\n")
+    script.chmod(0o755)
+
+    def interrupted_handoff(popen, *args, **kwargs):
+        if when == "before_create":
+            signal.raise_signal(signal.SIGINT)
+        proc = original(popen, *args, **kwargs)
+        children.append(proc)
+        if when == "before_handoff":
+            signal.raise_signal(signal.SIGINT)
+        return proc
+
+    monkeypatch.setattr(worker_drain_fence, "popen_worker", interrupted_handoff)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _spawn(_spec(str(script), timeout=300), "{}")
+        assert signal.getsignal(signal.SIGINT) is previous
+        assert len(children) == 1
+        assert children[0].poll() is not None, "hook survived interrupted spawn handoff"
+    finally:
+        for proc in children:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=5)
+
+
+def test_interrupt_before_spawn_has_no_cleanup_target(monkeypatch):
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    def forbidden(*args):
+        pytest.fail("no child exists to clean up")
+
+    previous = signal.getsignal(signal.SIGINT)
+    monkeypatch.setattr(worker_drain_fence, "popen_worker", interrupted)
+    monkeypatch.setattr(shell_hooks, "kill_process_tree", forbidden)
+    with pytest.raises(KeyboardInterrupt):
+        _spawn(_spec("unused"), "{}")
+    assert signal.getsignal(signal.SIGINT) is previous
+
+
+def test_spawn_deferral_preserves_custom_handler(monkeypatch, tmp_path):
+    original = worker_drain_fence.popen_worker
+    children = []
+    calls = []
+    script = tmp_path / "hook.sh"
+    script.write_text("#!/bin/sh\nsleep 300\n")
+    script.chmod(0o755)
+
+    def custom(signum, frame):
+        calls.append(signum)
+        raise RuntimeError("custom interrupt")
+
+    def interrupted_handoff(popen, *args, **kwargs):
+        proc = original(popen, *args, **kwargs)
+        children.append(proc)
+        signal.raise_signal(signal.SIGINT)
+        assert not calls, "handler must run only after the handle is owned"
+        return proc
+
+    previous = signal.signal(signal.SIGINT, custom)
+    monkeypatch.setattr(worker_drain_fence, "popen_worker", interrupted_handoff)
+    try:
+        result = _spawn(_spec(str(script)), "{}")
+        assert result["error"] == "custom interrupt"
+        assert calls == [signal.SIGINT]
+        assert signal.getsignal(signal.SIGINT) is custom
+        assert len(children) == 1 and children[0].poll() is not None
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        for proc in children:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("handler", [signal.SIG_IGN, signal.SIG_DFL])
+def test_spawn_deferral_leaves_noncallable_handler_untouched(monkeypatch, handler):
+    previous = signal.signal(signal.SIGINT, handler)
+
+    def forbidden(*args):
+        pytest.fail("noncallable handler must not be replaced")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(shell_hooks.signal, "signal", forbidden)
+            with shell_hooks._defer_hook_spawn_sigint():
+                assert signal.getsignal(signal.SIGINT) == handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_spawn_deferral_in_worker_does_not_change_global_handler(monkeypatch):
+    previous = signal.getsignal(signal.SIGINT)
+    entered = []
+    errors = []
+
+    def forbidden(*args):
+        pytest.fail("worker thread must not change process signal disposition")
+
+    def worker():
+        try:
+            with shell_hooks._defer_hook_spawn_sigint():
+                entered.append(True)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(shell_hooks.signal, "signal", forbidden)
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not errors
+    assert entered == [True]
+    assert signal.getsignal(signal.SIGINT) is previous
+
+
+def test_spawn_deferral_does_not_ignore_sigint_in_child(tmp_path):
+    script = tmp_path / "self-interrupt.sh"
+    script.write_text("#!/bin/sh\nkill -INT $$\necho incorrectly-ignored\n")
+    script.chmod(0o755)
+    result = _spawn(_spec(str(script)), "{}")
+    assert result["returncode"] == -signal.SIGINT
+    assert result["stdout"] == ""
 
 
 def test_missing_command_still_fails_open():

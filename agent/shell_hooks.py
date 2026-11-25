@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -481,6 +482,32 @@ def _windows_script_argv(argv: list[str]) -> list[str]:
     return [_find_bash(), *argv]
 
 
+@contextmanager
+def _defer_hook_spawn_sigint() -> Iterator[None]:
+    """Publish the child handle before a main-thread SIGINT may unwind spawn.
+
+    A caught (not ignored/blocked) signal resets to default at child exec, so
+    hooks do not inherit an ignored SIGINT. Worker threads cannot run Python
+    signal handlers; leave their process-wide handler untouched.
+    """
+    previous = signal.getsignal(signal.SIGINT)
+    if threading.current_thread() is not threading.main_thread() or not callable(previous):
+        yield
+        return
+    pending = []
+
+    def remember(signum, frame):
+        pending[:] = [(signum, frame)]
+
+    signal.signal(signal.SIGINT, remember)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if pending:
+            previous(*pending[0])
+
+
 def _spawn(spec: ShellHookSpec, stdin_json: str) -> dict[str, Any]:
     """The single subprocess site: run ``spec.command`` with ``stdin_json`` on stdin. Same result keys for every outcome."""
     result: dict[str, Any] = {"returncode": None, "stdout": "", "stderr": "", "timed_out": False, "elapsed_seconds": 0.0, "error": None}
@@ -508,30 +535,32 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> dict[str, Any]:
     # script must not inherit; single-profile runs keep the process env byte-for-byte as before.
     from agent.secret_scope import is_multiplex_active
     from tools.environments.local import build_subprocess_env
+    proc = None
     try:
-        if IS_WINDOWS:
-            argv = _windows_script_argv(argv)
-        from hermes_cli.worker_drain_fence import popen_worker  # DrainRefused falls to the generic failure below
-        proc = popen_worker(subprocess.Popen, argv, drain_purpose='shell_hook',
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding='utf-8', errors='replace', shell=False,
-                            env=build_subprocess_env(scrub_secrets=is_multiplex_active()), **popen_kwargs)
-    except Exception as exc:
-        for cls, msg in _POPEN_ERRORS:
-            if isinstance(exc, cls):
-                return failed(msg)
-        if getattr(exc, "winerror", None) == 193:
-            # Unmapped suffix (.zsh, .fish, .rb, …) — the raw WinError text is localized, so an
-            # operator on a non-English Windows could not act on it at all.
-            return failed(f"{argv[0]!r} {_NOT_DIRECTLY_EXECUTABLE}")
-        return failed(str(exc))
-    try:
+        with _defer_hook_spawn_sigint():
+            try:
+                if IS_WINDOWS:
+                    argv = _windows_script_argv(argv)
+                from hermes_cli.worker_drain_fence import popen_worker  # DrainRefused is a spawn failure
+                proc = popen_worker(subprocess.Popen, argv, drain_purpose='shell_hook',
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, encoding='utf-8', errors='replace', shell=False,
+                                    env=build_subprocess_env(scrub_secrets=is_multiplex_active()), **popen_kwargs)
+            except Exception as exc:
+                for cls, msg in _POPEN_ERRORS:
+                    if isinstance(exc, cls):
+                        return failed(msg)
+                if getattr(exc, "winerror", None) == 193:
+                    # Unmapped script suffix: retain the actionable interpreter guidance.
+                    return failed(f"{argv[0]!r} {_NOT_DIRECTLY_EXECUTABLE}")
+                return failed(str(exc))
         stdout, stderr = proc.communicate(input=stdin_json, timeout=spec.timeout)
     except BaseException as exc:
-        # BaseException: the hook leads its own process group, so Ctrl+C's SIGINT never reaches it — only we can.
-        kill_process_tree(proc)  # the whole tree — forked helpers holding the pipes would stall the drain
-        with suppress(Exception):
-            proc.communicate(timeout=1)
+        # Include spawn handoff: SIGINT must not escape before we own the child.
+        if proc is not None:
+            kill_process_tree(proc)
+            with suppress(Exception):
+                proc.communicate(timeout=1)
         if not isinstance(exc, Exception):
             raise
         if not isinstance(exc, subprocess.TimeoutExpired):  # pragma: no cover — defensive
