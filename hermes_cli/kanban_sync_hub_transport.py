@@ -27,7 +27,7 @@ class BoundedRedirects(urllib.request.HTTPRedirectHandler):
 
     def http_error_302(self, req, fp, code, msg, headers):
         try:
-            read_response(fp, self.max_response_bytes)
+            read_response(fp, self.max_response_bytes, deterministic=False)  # a redirect body is never evidence
         except (ValueError, OSError, EOFError):
             fp.close()
             raise
@@ -36,20 +36,24 @@ class BoundedRedirects(urllib.request.HTTPRedirectHandler):
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
-def read_response(resp, max_response_bytes=None) -> bytes:
+def read_response(resp, max_response_bytes=None, *, deterministic=True) -> bytes:
     """Bound wire bytes before parsing, and decoded bytes for gzip/deflate replies.
 
     Uncapped callers retain the historical transport behavior. A capped caller must
     discard the connection on failure: the response may not have been drained.
     Content-Length is deliberately not trusted, including for compressed replies.
+    Both caps always apply, but only a ``deterministic`` (2xx evidence) answer over a cap raises the typed
+    :class:`BoundedResponseTooLarge`; an HTTP error or redirect body over the cap is transient and raises the
+    generic :class:`BoundedResponseError`, so it can never quarantine a card.
     """
+    too_large = BoundedResponseTooLarge if deterministic else BoundedResponseError
     if max_response_bytes is None:
         return resp.read()
     if type(max_response_bytes) is not int or max_response_bytes <= 0:
         raise ValueError("max_response_bytes must be a positive integer")
     raw = resp.read(max_response_bytes + 1)
     if len(raw) > max_response_bytes:
-        raise BoundedResponseTooLarge("Board response exceeds wire byte limit")
+        raise too_large("Board response exceeds wire byte limit")
     encoding = (resp.headers.get("Content-Encoding") or "identity").strip().lower()
     if encoding in ("", "identity"):
         return raw
@@ -70,7 +74,7 @@ def read_response(resp, max_response_bytes=None) -> bytes:
     except (OSError, EOFError, zlib.error) as exc:
         raise BoundedResponseError("Invalid compressed Board response") from exc
     if len(decoded) > max_response_bytes:
-        raise BoundedResponseTooLarge("Board response exceeds decoded byte limit")
+        raise too_large("Board response exceeds decoded byte limit")
     return decoded
 
 

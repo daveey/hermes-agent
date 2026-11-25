@@ -1,0 +1,191 @@
+"""Review v13: only a *2xx* over-cap evidence answer is deterministic enough to hold a card.
+
+Everything here runs through a real ``Hub`` (kept-alive http.client and the urlopen fallback) against a real
+HTTP server, then through the real ``ksc.pull`` -> ``certify_page`` -> quarantine path. Only the change feed
+itself is faked. A non-2xx over-cap body (5xx/410/redirect) is a transient condition: generic
+``BoundedResponseError``, the page aborts at cursor 0, nothing is quarantined, and recovery retries normally.
+"""
+from __future__ import annotations
+
+import gzip
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import kanban_sync_quarantine as quarantine
+from hermes_cli import kanban_sync_hub_transport as transport
+from tests.hermes_cli import kanban_quarantine_support as support
+from tests.hermes_cli import test_kanban_containment_replica as fixtures
+from tests.hermes_cli import test_kanban_owner_reassessment_canonical as canon
+from tests.hermes_cli.test_kanban_owner_reassessment_pull_quarantine import _feed
+
+kanban_home = fixtures.kanban_home
+synced_conn = fixtures.synced_conn
+
+OVER = canon.canonical.MAX_EVIDENCE_BYTES + 44 * 1024  # 300 KiB
+
+
+@pytest.fixture
+def board_server():
+    state = SimpleNamespace(status=200, body=b"{}", encoding=None, redirect_to=None, final_body=None,
+                            final_encoding=None, evidence_requests=0)
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            if self.path == "/final":
+                status, body, enc = 200, state.final_body, state.final_encoding
+            else:
+                state.evidence_requests += 1
+                status, body, enc = state.status, state.body, state.encoding
+            self.send_response(status)
+            if status == 302:
+                self.send_header("Location", "/final")
+            if enc:
+                self.send_header("Content-Encoding", enc)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(3)
+
+
+@pytest.fixture(params=[False, True], ids=["keepalive", "urlopen"])
+def real_hub(request, board_server, monkeypatch):
+    monkeypatch.setattr(ksc.Hub, "_proxied", staticmethod(lambda parts: request.param))
+    hub = ksc.Hub(ksc.Identity(board_server.url, "k", canon.GW), timeout=3)
+    try:
+        yield hub
+    finally:
+        hub.close()
+
+
+def _scenario(conn, monkeypatch):
+    bad_task = kb.create_task(conn, title="big park", assignee="w")
+    sib_task = kb.create_task(conn, title="sibling", assignee="w")
+    board = sync.sync_state(conn).get("board_id") or "default"
+    receipt = canon.make()
+    receipt["task_id"], receipt["board"] = bad_task, board
+    shaped = canon.ch(receipt)
+    bad = sync.RemoteChange(1, "task_events", shaped.uid, "upsert", shaped.fields, 1, "", shaped.origin_gateway)
+    sib_uid = sync.uuid7()
+    sibling = sync.RemoteChange(2, "task_events", sib_uid, "upsert",
+                                {"task_id": sib_task, "kind": "commented", "payload": "{}", "created_at": 1}, 2, "",
+                                "worker")
+    _feed(monkeypatch, [bad, sibling])
+    good = json.dumps({**canon.evidence_for(receipt), "board": board}).encode()
+    return bad_task, sib_task, receipt["park_event"]["uid"], sib_uid, board, good
+
+
+def _assert_untouched(conn, sib_uid, park):
+    assert sync.sync_state(conn)["cursor"] == 0
+    assert support.count(conn, "containment_sync_quarantine") == 0
+    assert quarantine.tasks(conn) == set()
+    assert support.count(conn, "owner_reassessment_canonical_receipts") == 0
+    assert conn.execute("SELECT 1 FROM task_events WHERE uid IN (?,?)", (sib_uid, park)).fetchone() is None
+
+
+def _recovers(conn, hub, server, board, good, park, sib_uid, bad_task):
+    server.status, server.body, server.encoding, server.redirect_to = 200, good, None, None
+    before = server.evidence_requests
+    ksc.pull(conn, hub, board, observers=False)
+    assert server.evidence_requests == before + 1  # the very same row is fetched again, not skipped
+    assert sync.sync_state(conn)["cursor"] == 2
+    assert support.count(conn, "containment_sync_quarantine") == 0 and quarantine.tasks(conn) == set()
+    assert support.count(conn, "owner_reassessment_canonical_receipts") == 1
+    assert conn.execute("SELECT 1 FROM task_events WHERE uid=?", (park,)).fetchone() is not None
+    assert conn.execute("SELECT 1 FROM task_events WHERE uid=?", (sib_uid,)).fetchone() is not None
+
+
+@pytest.mark.parametrize("shape", ["503", "500", "410", "302"])
+def test_non_2xx_overcap_body_aborts_cursor_zero_and_recovers(synced_conn, monkeypatch, real_hub, board_server, shape):
+    conn = synced_conn
+    bad_task, _sib, park, sib_uid, board, good = _scenario(conn, monkeypatch)
+    big = b"x" * OVER
+    if shape == "302":
+        board_server.status, board_server.body, board_server.final_body = 302, big, good
+    else:
+        board_server.status, board_server.body = int(shape), big
+    with pytest.raises(transport.BoundedResponseError) as caught:
+        ksc.pull(conn, real_hub, board, observers=False)
+    assert not isinstance(caught.value, transport.BoundedResponseTooLarge)
+    _assert_untouched(conn, sib_uid, park)
+    with pytest.raises(transport.BoundedResponseError):
+        ksc.pull(conn, real_hub, board, observers=False)
+    _assert_untouched(conn, sib_uid, park)
+    _recovers(conn, real_hub, board_server, board, good, park, sib_uid, bad_task)
+
+
+@pytest.mark.parametrize("shape", ["wire", "decoded", "redirect-final"])
+def test_2xx_overcap_holds_exactly_one_card_and_healthy_sibling_applies(synced_conn, monkeypatch, real_hub,
+                                                                         board_server, shape):
+    conn = synced_conn
+    bad_task, _sib, park, sib_uid, board, _good = _scenario(conn, monkeypatch)
+    if shape == "wire":
+        board_server.body = b"x" * OVER
+    elif shape == "decoded":
+        board_server.body = gzip.compress(b'{"p":"' + b"x" * OVER + b'"}')
+        board_server.encoding = "gzip"
+        assert len(board_server.body) < canon.canonical.MAX_EVIDENCE_BYTES  # only the decoded cap is exceeded
+    else:
+        board_server.status, board_server.body, board_server.final_body = 302, b"", b"x" * OVER
+    ksc.pull(conn, real_hub, board, observers=False)
+    assert sync.sync_state(conn)["cursor"] == 2
+    row = conn.execute("SELECT uid,task_id,kind FROM containment_sync_quarantine").fetchone()
+    assert tuple(row) == (park, bad_task, quarantine.REASSESSMENT_OVERSIZE)
+    assert support.count(conn, "containment_sync_quarantine") == 1 and quarantine.tasks(conn) == {bad_task}
+    assert support.count(conn, "owner_reassessment_canonical_receipts") == 0
+    assert conn.execute("SELECT 1 FROM task_events WHERE uid=?", (park,)).fetchone() is None
+    assert conn.execute("SELECT 1 FROM task_events WHERE uid=?", (sib_uid,)).fetchone() is not None
+    assert kb.claim_task(conn, bad_task) is None
+
+
+@pytest.mark.parametrize("status", [410, 500, 503])
+@pytest.mark.parametrize("encoding", [None, "gzip"])
+def test_transport_level_typing_by_status(real_hub, board_server, status, encoding):
+    """Typed ``BoundedResponseTooLarge`` is a 2xx-only verdict, for raw and decoded caps alike."""
+    cap = canon.canonical.MAX_EVIDENCE_BYTES
+    raw = b'{"p":"' + b"x" * OVER + b'"}'
+    board_server.encoding = encoding
+    board_server.body = gzip.compress(raw) if encoding else raw
+    board_server.status = status
+    with pytest.raises(transport.BoundedResponseError) as caught:
+        real_hub.row_evidence("b", "task_events", "u", max_response_bytes=cap)
+    assert type(caught.value) is transport.BoundedResponseError  # not the deterministic subtype
+    board_server.status = 200
+    with pytest.raises(transport.BoundedResponseTooLarge):
+        real_hub.row_evidence("b", "task_events", "u", max_response_bytes=cap)
+
+
+def test_redirect_body_overcap_is_generic_but_final_overcap_is_typed(real_hub, board_server):
+    cap = canon.canonical.MAX_EVIDENCE_BYTES
+    board_server.status, board_server.body, board_server.final_body = 302, b"x" * OVER, b"{}"
+    with pytest.raises(transport.BoundedResponseError) as caught:
+        real_hub.row_evidence("b", "task_events", "u", max_response_bytes=cap)
+    assert type(caught.value) is transport.BoundedResponseError
+    board_server.body, board_server.final_body = b"", b"x" * OVER
+    with pytest.raises(transport.BoundedResponseTooLarge):
+        real_hub.row_evidence("b", "task_events", "u", max_response_bytes=cap)

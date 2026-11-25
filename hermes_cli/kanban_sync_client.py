@@ -387,7 +387,7 @@ class Hub(HubRoutesMixin):
                         continue
                     raise urllib.error.URLError(exc) from exc
                 try:
-                    raw = read_response(resp, max_response_bytes)
+                    raw = read_response(resp, max_response_bytes, deterministic=200 <= resp.status < 300)
                 except BoundedResponseError:
                     self._drop()  # unread bytes must never become the next response; never replay this refusal
                     raise
