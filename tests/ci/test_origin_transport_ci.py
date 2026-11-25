@@ -42,13 +42,42 @@ def _steps() -> list[dict]:
     return _job()["steps"]
 
 
+def _pin() -> str:
+    pin = str(_load(WORKFLOW)["env"]["HERMES_HUB_PIN"])
+    assert re.fullmatch(r"[0-9a-f]{40}", pin), pin
+    return pin
+
+
 def test_hub_checkout_is_pinned_read_only_and_never_persisted():
     hub = [s for s in _steps() if (s.get("with") or {}).get("repository") == "daveey/hermes-hub"]
-    assert len(hub) == 1, hub
-    opts = hub[0]["with"]
-    assert re.fullmatch(r"[0-9a-f]{40}", str(opts["ref"])), opts["ref"]
-    assert opts["ssh-key"] == "${{ secrets.HERMES_HUB_READ_KEY }}"
-    assert opts["persist-credentials"] is False
+    assert [h["with"]["path"] for h in hub] == [".composed-hub", ".hub-main"], hub
+    for step in hub:
+        assert step["with"]["ssh-key"] == "${{ secrets.HERMES_HUB_READ_KEY }}"
+        assert step["with"]["persist-credentials"] is False
+    # The pin, or the ref a manual dispatch names (its default is the pin).
+    assert hub[0]["with"]["ref"] == "${{ inputs.hub_ref || env.HERMES_HUB_PIN }}"
+    data = _load(WORKFLOW)
+    triggers = data.get("on") or data.get(True)
+    assert triggers["workflow_dispatch"]["inputs"]["hub_ref"]["default"] == _pin()
+
+
+def test_no_checkout_persists_credentials():
+    checkouts = [s for s in _steps() if str(s.get("uses", "")).startswith("actions/checkout@")]
+    assert len(checkouts) == 3
+    assert all((s.get("with") or {}).get("persist-credentials") is False for s in checkouts)
+
+
+def test_a_weekly_run_fails_when_the_hub_client_moved_past_the_pin():
+    data = _load(WORKFLOW)
+    triggers = data.get("on") or data.get(True)
+    assert [c["cron"] for c in triggers["schedule"]] and len(triggers["schedule"]) == 1
+    main = next(s for s in _steps() if (s.get("with") or {}).get("path") == ".hub-main")
+    assert main["if"] == "github.event_name == 'schedule'"
+    assert main["with"]["ref"] == "main" and main["with"]["fetch-depth"] == 0
+    stale = [s for s in _steps() if "client/hermes_hub.py" in str(s.get("run", ""))]
+    assert len(stale) == 1 and stale[0]["if"] == "github.event_name == 'schedule'"
+    script = stale[0]["run"]
+    assert "HERMES_HUB_PIN" in script and "merge-base --is-ancestor" in script and "exit 1" in script and "::error::" in script
 
 
 def test_the_whole_directory_runs_with_the_courier_client_and_the_hub_canary_env():
@@ -59,8 +88,10 @@ def test_the_whole_directory_runs_with_the_courier_client_and_the_hub_canary_env
     assert step["env"]["COURIER"].endswith("/client/hermes_hub.py")
     for key, value in HUB_CANARY_ENV.items():
         assert step["env"].get(key) == value, key
-    # The canonical runner starts each file from `env -i`, which would drop the canary env.
-    assert "run_tests.sh" not in step["run"]
+    # The canonical runner starts each file from `env -i`, which would drop the canary env, and
+    # scripts/run-in-hermes-env would set the environment up again: setup-pm's interpreter runs it.
+    assert "run_tests.sh" not in step["run"] and "run-in-hermes-env" not in step["run"]
+    assert step["run"].lstrip().startswith('"$HERMES_PYTHON" -m pytest')
     assert "--junitxml=" in step["run"]
 
 
@@ -88,7 +119,7 @@ def test_a_skip_or_an_empty_run_fails_the_lane():
 def test_key_is_environment_scoped_on_trusted_events_and_ci_yaml_stays_secret_free():
     data = _load(WORKFLOW)
     triggers = data.get("on") or data.get(True)
-    assert set(triggers) == {"push", "workflow_dispatch"}, triggers
+    assert set(triggers) == {"push", "workflow_dispatch", "schedule"}, triggers
     assert triggers["push"]["branches"] == ["main"]
     assert _job()["environment"] == "hermes-hub-read"
     assert "HERMES_HUB_READ_KEY" not in (WORKFLOWS / "ci.yaml").read_text(encoding="utf-8")

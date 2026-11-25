@@ -354,7 +354,7 @@ branch protection.
 | `js-autofix.yml`, **auto-fix lint issues & formatting** | `push: main` touching `*.js/cjs/mjs/ts/tsx` or npm manifests; `workflow_dispatch` | `generate-patch` (no write access) runs `eslint --fix`. `apply-patch` (write access, never runs repo code) runs only when there are fixes. It pushes `bot/js-autofix` and opens an auto-merge PR. |
 | `archive-inputs.yml`, **Archive pinned PM inputs** | `push: main` on `pm/lock.json`, `pm/artifact-mirror.json`, `scripts/termux/runtime_libs.json`, its script, itself; `workflow_dispatch`; `workflow_call(sha)` | Verifies every pinned HTTP input and archives it to R2 (env `release-signing`). The archive step is skipped with a notice when R2 secrets are missing. |
 | `deploy-site.yml`, **Deploy Site** | `push: main` on `website/**`, `skills/**`, `optional-skills/**`, `plugin-catalog/**`, itself; `release: published`; `workflow_dispatch` (`skills_index_run_id`, `rebuild_skills_index`) | `deploy-docs` (GitHub Pages, upstream repo only) runs on every trigger. `deploy-vercel` (Vercel hook) runs only on `release` or dispatch, **not** on path pushes. Shared `pages` group, queued. |
-| `origin-transport.yml`, **Origin transport (pinned hermes-hub courier)** | `push: main`; `workflow_dispatch` | Runs `tests/origin_transport/` with `--courier-client` set to a pinned `daveey/hermes-hub` `client/hermes_hub.py` and the hub job's canary env; any skip or an empty run fails. The hub checkout uses the read-only deploy key `HERMES_HUB_READ_KEY` from env `hermes-hub-read`, which is why it is not a `ci.yaml` lane or part of the required gate. |
+| `origin-transport.yml`, **Origin transport (pinned hermes-hub courier)** | `push: main`; `workflow_dispatch` (`hub_ref`, default the pin); `schedule` Mon 09:17 UTC (also fails when hermes-hub's `client/hermes_hub.py` moved past the pin) | Runs `tests/origin_transport/` with `--courier-client` set to a pinned `daveey/hermes-hub` `client/hermes_hub.py` and the hub job's canary env; any skip or an empty run fails. The hub checkout uses the read-only deploy key `HERMES_HUB_READ_KEY` from env `hermes-hub-read`, which is why it is not a `ci.yaml` lane or part of the required gate. |
 | `skills-index.yml`, **Build Skills Index** | `schedule` 06:00 and 18:00 UTC; `push: main` on its script or itself; `workflow_dispatch` | `build-index` runs on the upstream repo only. `trigger-deploy` dispatches `deploy-site.yml` with the new index, and only on schedule or dispatch (not on the path push). |
 
 ---
@@ -583,7 +583,7 @@ gh workflow run windows-install-update-e2e.yml --ref <branch> -f strict_acceptan
 | `live-providers.yml` | Live provider canaries | tags `v*`, dispatch | none |
 | `macos-os-tests.yml` | macOS OS-marked tests (scheduled) | cron 00:37/12:37, dispatch, push `macos-os-probe/**` | none |
 | `nix.yml` | Nix flake check | PR, main, call | stable |
-| `origin-transport.yml` | Origin transport (pinned hermes-hub courier) | main, dispatch | none |
+| `origin-transport.yml` | Origin transport (pinned hermes-hub courier) | main, dispatch, cron Mon 09:17 | none |
 | `osv-scanner.yml` | OSV-Scanner | cron Mon 09:00, dispatch | none |
 | `plugin-catalog-ci.yml` | Plugin Catalog CI | PR (paths) | none |
 | `pm-bundle.yml` | PM Bundle | PR (paths), dispatch, call | stable |
