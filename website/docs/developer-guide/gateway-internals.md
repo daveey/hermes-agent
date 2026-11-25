@@ -476,6 +476,9 @@ setup do not install a missing service based on an imported preference. See
 
 ## Local control socket (public client contract)
 
+The private, same-peer, diagnostic-only [code-provenance snapshot API](code-provenance-control.md)
+is separate from public/session authorization and never grants capsule permission.
+
 Each gateway listens on a local control socket. It is how a client on the same machine finds the
 gateway that serves its profile and gets a WebSocket ticket, without spawning Python. Three verbs
 are public: `identify` (read-only), `resolve-profile` and the public form of `session-ticket`.

@@ -435,6 +435,8 @@ async def _start_gateway_start_control_socket(runner):
         # Quiet-v3 observer handlers (private, measurement bookkeeping); refuse until attestation finalizes.
         from gateway.quiet_control import register_quiet_control
         register_quiet_control(runner, _control_server)
+        from gateway.code_provenance_control import register_code_provenance_control
+        register_code_provenance_control(runner, _control_server)
         if not await _control_server.start():
             _control_server = None
         else:

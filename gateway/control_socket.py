@@ -468,6 +468,9 @@ class GatewayControlServer:
             request_id, verb = request.get("id"), request.get("verb")
             handler = self._handlers.get(verb) if isinstance(verb, str) else None
             if isinstance(verb, str) and verb in self.private_handlers:
+                if verb == 'code-provenance':
+                    from gateway.code_provenance_control import validate_envelope
+                    validate_envelope(request)
                 if (not peer_subject or request.get("protocol") != 1
                         or set(request) - {"protocol", "verb", "id", "params"}
                         or not isinstance(request.get("params"), dict)):

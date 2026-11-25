@@ -21,6 +21,10 @@ from itertools import islice
 import threading
 import time
 from types import CodeType, FunctionType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hermes_cli.code_attestation_snapshot import DiagnosticSnapshot
 
 
 # Required in every supported route (missing => unknown). Blob-compared, never audited.
@@ -1665,6 +1669,12 @@ def _check_inventory_deadline(deadline):
     # One filesystem operation is not interruptible, so check between modules.
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError('code attestation inventory budget exhausted')
+
+
+def diagnostic_snapshot(*, deadline: float) -> 'DiagnosticSnapshot':
+    """Bounded metadata-only read of the already installed ledger; never authorizes code."""
+    from hermes_cli.code_attestation_snapshot import snapshot
+    return snapshot(_ledger(), deadline=deadline)
 
 
 def integrity_observation(*, deadline=None):
