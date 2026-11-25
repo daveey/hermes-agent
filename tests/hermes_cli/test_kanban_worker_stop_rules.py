@@ -365,3 +365,67 @@ def test_the_read_first_check_and_the_context_share_one_definition():
     assert release.by_person({'writer_kind': 'human'}) and release.by_person({'recorded_decision': {}})
     assert release.by_person({'writer_kind': 'agent', 'relayed_human': {'session': 's'}})
     assert not release.by_person({}) and not release.by_person({'writer_kind': 'agent'})
+
+
+# --- follow-up 2: unread human comments bind by uid; ordinary prompts stay plain ----------------------------
+
+
+def _synced(board):
+    from hermes_cli import kanban_db_sync as sync
+    sync.apply_sync_schema_steps(board)
+    board.commit()
+
+
+def _remote_human(board, tid, uid, comment_id):
+    """The ``commented`` event a synced human comment brings: its uid, and the writer board's local id."""
+    with kb.write_txn(board):
+        kb._append_event(board, tid, 'commented', {'author': 'david', 'comment_id': comment_id, 'comment_uid': uid,
+                                                   'writer_kind': 'human'})
+
+
+def _stop(board, tid):
+    return release._newest_stop(board, tid)
+
+
+def test_a_synced_human_comment_not_here_yet_is_unread_and_unacknowledgeable(board, monkeypatch):
+    _no_worker_env(monkeypatch)
+    _synced(board)
+    tid = rel.spend_stopped(board)
+    _remote_human(board, tid, 'remote-comment-uid', 987654)
+    assert release._unread_human(board, tid, _stop(board, tid), None) == [None]
+    items = release._unread_items(board, tid, _stop(board, tid), ('agent', 's', 'x'), None)
+    assert any(i['id'] is None and 'not synced' in i['body'] for i in items)
+
+
+def test_a_synced_comment_id_that_collides_with_a_local_comment_is_not_that_comment(board, monkeypatch):
+    _no_worker_env(monkeypatch)
+    _synced(board)
+    tid = rel.spend_stopped(board)
+    other = kb.add_comment(board, tid, 'default', 'Unrelated agent note.', writer_kind='agent', writer_session='s')
+    _remote_human(board, tid, 'remote-comment-uid', other)  # the writer board's local id equals ours by chance
+    assert release._unread_human(board, tid, _stop(board, tid), None) == [None]
+    items = release._unread_items(board, tid, _stop(board, tid), ('agent', 's', 'x'), None)
+    assert not any('Unrelated agent note.' in i['body'] for i in items)
+
+
+def test_a_synced_human_comment_that_arrived_binds_to_its_local_id(board, monkeypatch):
+    _no_worker_env(monkeypatch)
+    _synced(board)
+    tid = rel.spend_stopped(board)
+    with kb.write_txn(board):  # as received from another board: the uid binds, the foreign comment_id does not
+        here = board.execute("INSERT INTO task_comments (task_id, author, body, created_at, uid) "
+                             "VALUES (?,?,?,?,?)", (tid, 'david', 'Stop at staging.', 3, 'arrived-uid')).lastrowid
+    _remote_human(board, tid, 'arrived-uid', 424242)
+    assert release._unread_human(board, tid, _stop(board, tid), None) == [here]
+
+
+def test_an_ordinary_card_with_many_comments_renders_no_release_or_instructions(board, monkeypatch):
+    _no_worker_env(monkeypatch)
+    tid = kb.create_task(board, title='Plain work', assignee='default')
+    for i in range(12):
+        kb.add_comment(board, tid, 'david', f'human comment {i}', writer_kind='human')
+        kb.add_comment(board, tid, 'default', f'agent comment {i}', writer_kind='agent', writer_session='s')
+        kb.add_comment(board, tid, 'kanban-dispatcher', f'kernel note {i}')
+    context = kb.build_worker_context(board, tid)
+    assert '## Release mandate' not in context and HUMAN_SECTION not in context
+    assert '## Comment thread' in context

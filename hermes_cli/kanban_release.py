@@ -311,18 +311,30 @@ def by_person(commented: Mapping[str, Any]) -> bool:
             or commented.get("recorded_decision") is not None)
 
 
-def _unread_human(conn: sqlite3.Connection, tid: str, stop: dict, seen: Optional[int]) -> list[int]:
-    """Ids of comments a person wrote (or a chat relayed for one) after the stop, newer than ``seen``."""
+def _unread_human(conn: sqlite3.Connection, tid: str, stop: dict, seen: Optional[int]) -> list[Optional[int]]:
+    """Local ids of comments a person wrote (or a chat relayed for one) after the stop, newer than ``seen``; None
+    for one whose text has not synced here (it can never be acknowledged; ``_unread_items``). A synced comment
+    binds by ``comment_uid``: its ``comment_id`` is the writer board's local id, which may be absent here or name
+    another comment. ``comment_id`` binds only an event with no uid to a local comment that has none."""
     from hermes_cli.kanban_sync_divergence import _event_order
+    synced = "uid" in {r[1] for r in conn.execute("PRAGMA table_info(task_comments)")}
+    local = {int(r[0]): (r[1] if synced else None) for r in conn.execute(
+        f"SELECT id, {'uid' if synced else 'NULL'} FROM task_comments WHERE task_id=?", (tid,))}
+    by_uid = {uid: cid for cid, uid in local.items() if uid}
     after, out = _event_order(stop), []
     for row in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='commented'", (tid,)):
         event = dict(row)
         p = _payload(event["payload"])
-        cid = p.get("comment_id")
-        if (by_person(p) and _event_order(event) > after
-                and isinstance(cid, int) and cid > (seen or 0)):
+        if not by_person(p) or _event_order(event) <= after:
+            continue
+        uid, cid = p.get("comment_uid"), p.get("comment_id")
+        if uid:
+            cid = by_uid.get(uid)
+        elif not (isinstance(cid, int) and cid in local and not local[cid]):
+            cid = None
+        if cid is None or cid > (seen or 0):
             out.append(cid)
-    return sorted(out)
+    return sorted(out, key=lambda c: (c is None, c or 0))
 
 
 def _existing_mandate(conn: sqlite3.Connection, tid: str, stop: dict, body: str, kind: str,
@@ -450,7 +462,11 @@ def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple,
     # id and never stands for, or collides with, a comment id.
     items: dict = {(item.get("kind", "comment"), item["id"]): dict(item) for item in extra}
     for cid in _unread_human(conn, tid, stop, None):
-        row = conn.execute("SELECT author, created_at, body FROM task_comments WHERE id=?", (cid,)).fetchone()
+        if cid is None:  # a person's comment whose text has not synced here
+            items[("comment", None)] = {"id": None, "who": "(human)", "time": "", "body": "(not synced here yet)"}
+            continue
+        row = conn.execute("SELECT author, created_at, body FROM task_comments WHERE id=? AND task_id=?",
+                           (cid, tid)).fetchone()
         if row is not None:
             items[("comment", cid)] = {"id": cid, "who": f"{row[0]} (human)", "body": str(row[2] or "")[:600],
                           "time": datetime.fromtimestamp(int(row[1] or 0), UTC).isoformat()}
@@ -679,7 +695,9 @@ def _decide(conn: sqlite3.Connection, s) -> str:
             return f"{s.tid} changed during the release"
         if kind != "human":
             if people := _unread_human(c, s.tid, s.stop, s.seen):
-                return f"a human commented on {s.tid} during the release (comment {people[-1]})"
+                last = max((c for c in people if c is not None), default=None)
+                return (f"a human commented on {s.tid} during the release "
+                        f"({f'comment {last}' if last is not None else 'a comment not synced here yet'})")
             unread.check(c, s.tid, session=session, seen=s.seen, verb="release", board=s.board)
         kb._append_event(c, s.tid, RELEASED, record)
         return None
