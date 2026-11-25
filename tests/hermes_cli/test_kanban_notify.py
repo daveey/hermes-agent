@@ -958,6 +958,10 @@ def test_migration_backfills_legacy_gateway_subs_to_notify_wake(kanban_home):
         # triggers, which name every read column and so block the DROP.
         from hermes_cli.kanban_activity_revision import drop_triggers
         drop_triggers(conn)
+        # The pre-column image predates the independent annotation revisions too.
+        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
+                                    "AND tbl_name='kanban_notify_subs' AND name LIKE 'kanban_annotation_%'").fetchall():
+            conn.execute(f'DROP TRIGGER "{name}"')
         conn.execute("ALTER TABLE kanban_notify_subs DROP COLUMN delivery_mode")
         conn.execute(
             "INSERT INTO kanban_notify_subs "

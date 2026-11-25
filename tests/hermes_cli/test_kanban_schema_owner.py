@@ -141,11 +141,13 @@ def test_reference_schema_matches_what_connect_creates(home):
     leaves readers on a stat fallback or a full read."""
     from hermes_cli.kanban_activity_revision import CHANGE_TABLE, REVISION_TABLE
     from hermes_cli.kanban_notify_revision import TABLE as NOTIFY_REVISION_TABLE
+    from hermes_cli.kanban_annotation_revision import KINDS
+    optional = {REVISION_TABLE, CHANGE_TABLE, NOTIFY_REVISION_TABLE, *(k.table for k in KINDS)}
     db = home / "kanban.db"
     kbc.connect(db).close()
     raw = sqlite3.connect(db)
     try:
-        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE, NOTIFY_REVISION_TABLE)}
+        created = {t: c for t, c in owner._tables(raw).items() if t not in optional}
         assert created == owner._reference_schema()
     finally:
         raw.close()
@@ -339,11 +341,13 @@ def test_reference_schema_with_sync_matches_what_a_synced_connect_creates(home, 
     """With sync live, the at-par reference also holds every sync table/column connect() installs."""
     from hermes_cli.kanban_activity_revision import CHANGE_TABLE, REVISION_TABLE
     from hermes_cli.kanban_notify_revision import TABLE as NOTIFY_REVISION_TABLE
+    from hermes_cli.kanban_annotation_revision import KINDS
+    optional = {REVISION_TABLE, CHANGE_TABLE, NOTIFY_REVISION_TABLE, *(k.table for k in KINDS)}
     monkeypatch.setattr(owner, "_REFERENCE", {})
     db = _synced_board(home)
     raw = sqlite3.connect(db)
     try:
-        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE, NOTIFY_REVISION_TABLE)}
+        created = {t: c for t, c in owner._tables(raw).items() if t not in optional}
         assert "kanban_sync_state" in created
         assert created == owner._reference_schema(sync=True)
     finally:

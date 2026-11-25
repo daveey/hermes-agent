@@ -384,6 +384,13 @@ def test_real_projection_removal_and_read_recovery(tmp_path, monkeypatch, action
     scope = ('native-recovery-test', 'default')
     path = tmp_path / 'kanban.db'
     writer = helpers._board(path, [('t1', 'running', 's1')])
+    # Give semantic lineage probing a real isolated store. Missing state is
+    # deliberately fail-fresh and would turn settle confirmations into forced reads.
+    from hermes_state import SessionDB
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    state = SessionDB(db_path=tmp_path / 'state.db')
+    state.create_session('s1', 'cli')
+    state.close()
     monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
     monkeypatch.setattr(disk, 'FORCE', True)
     monkeypatch.setattr(ksa, '_origin_scope', lambda: scope)
