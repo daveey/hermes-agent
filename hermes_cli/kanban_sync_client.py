@@ -1107,8 +1107,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
 
 def _send(live: sqlite3.Connection, hub: Hub, slug: str, gateway: str, mode: str, result: RoundResult, *,
           after_pull: bool, before_head: bool, seen: Optional[dict] = None) -> None:
-    """Push the outbox and resolve rejections, adding to ``result``. A round does this before its pulls and after
-    them (``after_pull``, which also transfers attachments); for ``before_head`` see :func:`push`."""
+    """Push before/after pulls; ``after_pull`` transfers attachments; see :func:`push` for ``before_head``."""
     from hermes_cli.kanban_sync_round_send import send
     send(live, hub, slug, gateway, mode, result, after_pull=after_pull, before_head=before_head, seen=seen)
 
@@ -1118,7 +1117,6 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     from hermes_cli.kanban_sync_guard import SyncRoundBusy
     from hermes_cli import kanban_containment_functions as udf_errors
     from hermes_cli.kanban_replay_admission import RestoreRequired
-
     ident = load_identity() if hub is None else hub.ident
     hub = hub or Hub(ident)
     publish_pickup_if_changed(hub)
@@ -1143,8 +1141,7 @@ def sync_all_once(hub: Optional[Hub] = None, *,
             _log.error("kanban sync: %s not synced: %s", slug, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"SchemaAhead: {exc}"))
         except SyncRoundBusy as exc:
-            # Routine since the dispatcher tick holds the board for its pull and reserves: not a failed round
-            # (no WARNING, the board is not marked failed, the outbox-age alarm keeps its last verdict).
+            # Routine dispatcher contention: no WARNING, board failure or change to the outbox-age verdict.
             _log.debug("kanban sync: round for %s skipped (%s)", slug, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"SyncRoundBusy: {exc}", skipped=True))
         except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, RestoreRequired, ReplayFault) as exc:
