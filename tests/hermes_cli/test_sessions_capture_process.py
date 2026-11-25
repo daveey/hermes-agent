@@ -151,9 +151,27 @@ def test_child_cpu_is_accounted_outside_the_owner_thread():
     assert after['runs'] == before.get('runs', 0) + 1
     assert after['errors'] == before.get('errors', 0)
     assert after['fallbacks'] == before.get('fallbacks', 0)  # the CPU was readable, not assumed 0
-    assert after['cpu_s'] - before.get('cpu_s', 0) >= .25
+    assert .25 <= after['cpu_s'] - before.get('cpu_s', 0) < 2
+    assert .25 <= after['wall_s'] - before.get('wall_s', 0) < capture.seconds
     # The CPU belongs to another process: the owner thread must not count it as its own.
     assert owner_accounted() - owner_before < .1
+
+
+def test_unreadable_child_cpu_preserves_response_and_cleanup(monkeypatch):
+    from hermes_cli import sessions_capture_process as module
+    monkeypatch.setattr(module, '_child_cpu', lambda pid: None)
+    before = _capture_child_stat()
+    capture = CaptureProcess(command=command(frame()))
+    try:
+        assert json.loads(capture('sessions', {}))['sessions'][0]['id'] == 'real-row'
+        assert capture._child is None
+    finally:
+        capture.close()
+    after = _capture_child_stat()
+    assert after['runs'] == before.get('runs', 0) + 1
+    assert after['fallbacks'] == before.get('fallbacks', 0) + 1
+    assert after['errors'] == before.get('errors', 0)
+    assert after['cpu_s'] == before.get('cpu_s', 0)
 
 
 def test_reaped_grandchild_cpu_is_accounted():

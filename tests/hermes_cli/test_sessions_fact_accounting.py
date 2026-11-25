@@ -50,9 +50,11 @@ async def test_mounted_route_emits_a_span_in_each_mode(native, path, params, nam
     transport = httpx.ASGITransport(app=native_helpers.app_for(native))
     async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
         before = runs(facts), runs(legacy)
+        fallbacks_before = stat(facts).get('fallbacks', 0)
         assert (await client.get(path, params=params)).status_code == 200
         # Served from owner memory: the facts span counts it, the legacy reader did not run.
         assert (runs(facts), runs(legacy)) == (before[0] + 1, before[1])
+        assert stat(facts)['fallbacks'] == fallbacks_before
         assert stat(facts)['errors'] == 0
 
         native.lifecycle.transition('sessions', native.scope, 'legacy', 10)
