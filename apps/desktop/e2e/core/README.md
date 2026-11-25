@@ -72,6 +72,14 @@ A small, deterministic Electron suite that guards three issue classes end to end
   enough profiles to condense the sidebar rail; the profile menu lists the
   ACTIVE gateway's default (checked, home glyph) on both sides of a switch
   (#106017, #131632).
+- **Kanban model requirement** — `kanban-model-requirement.spec.ts`: the New
+  task form and the task drawer's Model row offer only the profile default and
+  `class:*`; the created card stores the class with the `auto` provider, the
+  drawer clears it, and a card seeded with a pre-rule concrete model reads as
+  the profile default and is replaced by the chosen class (read from the
+  sandbox board's database). Both cards stay unassigned in Triage and the test
+  ends on zero run rows: every Desktop write nudges `POST /dispatch`, which
+  ignores `kanban.dispatch_in_gateway`.
 - **Transcript images** — `transcript-image-frame.spec.ts`: a portrait image
   reply, reloaded so it mounts cold in its reserved 4:3 frame, scales into the
   frame instead of painting over the text below it (#154409).

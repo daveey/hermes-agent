@@ -631,6 +631,8 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         "apps/desktop/src/app/chat/sidebar/fleet-",
         # reconnect-turn-state.spec.ts: the lost-turn card and Discard live in the queue panel.
         "apps/desktop/src/app/chat/composer/queue-",
+        # kanban-model-requirement.spec.ts: the New task form and the drawer's Model row.
+        "apps/desktop/src/plugins/kanban/",
     ),
     "e2e_desktop_update": (
         *_DESKTOP_E2E_SHARED,

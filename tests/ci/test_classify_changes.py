@@ -459,6 +459,10 @@ CASES = {
         ["apps/desktop/src/app/chat/sidebar/profile-switcher.tsx"],
         _lanes(frontend=True, e2e_desktop_core=True),
     ),
+    "desktop kanban plugin (model requirement producers) → desktop core": (
+        ["apps/desktop/src/plugins/kanban/model-override.tsx"],
+        _lanes(frontend=True, e2e_desktop_core=True),
+    ),
     "desktop update spec → desktop update, not core": (
         ["apps/desktop/e2e/update/app-update.spec.ts"],
         _lanes(frontend=True, e2e_desktop_update=True),
