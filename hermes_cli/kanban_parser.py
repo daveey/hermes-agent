@@ -726,6 +726,8 @@ _SPECS = [
              help="Permanently delete already-archived task ids from the board"),
         _reason("Human operator only: archive a contained card whose authority cannot release it (no live run or "
                 "lease), recording why on the archive event and as a comment"),
+        _arg("--yes", action="store_true",
+             help="With --reason: archive even though dependent cards will stay waiting on the closed hold"),
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [

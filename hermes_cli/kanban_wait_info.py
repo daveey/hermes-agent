@@ -242,15 +242,16 @@ def premise_key(kind: str, status: str, reason: Any = "", awaiting: Optional[dic
     return f"{kind}:{hashlib.sha1(basis.encode()).hexdigest()[:12]}"
 
 
-# A contained card's authority in one of these cannot run to release it (kanban_contained_wait ``parents``).
-PARKED_AUTHORITY = ("todo", "triage")
+# A contained card's authority in one of these cannot run to release it on its own.
+PARKED_AUTHORITY = ("triage", "blocked")
 
 
 def describe_contained(info: dict[str, Any], *, now: Optional[float] = None) -> dict[str, Any]:
     """Wait info for a held card from its ``contained`` episode (``kanban_contained_wait.read``). The wait object
     carries ``contained: {episode, authority: {id, status}, producer: {id, status} | None}`` (unknown status counts as
-    open). Authority parked (``todo`` behind unmet parents, or in triage): stalled at once, not agent-owned, naming
-    the authority and what it waits on. Authority otherwise open: waits on its release. Authority done/archived with the producer still open: waits on the
+    open). Authority that cannot progress (triage, blocked, or ``todo`` whose unmet parents are all stuck, per
+    ``kanban_contained_wait``): stalled at once, not agent-owned, naming the authority and what it waits on.
+    Authority otherwise open (running, ready, ``todo`` behind a progressing parent or none): waits on its release. Authority done/archived with the producer still open: waits on the
     producer. Authority finished for CONTAINED_STRAND_AFTER_S and no open producer: agent-owned and stalled at once,
     dated from the authority's completion, premise (contained, episode, authority status, authority completion)."""
     now = time.time() if now is None else now
@@ -260,18 +261,20 @@ def describe_contained(info: dict[str, Any], *, now: Optional[float] = None) -> 
              "producer": {"id": producer["id"], "status": producer["status"]} if producer else None}
     base = {"wait_state": "waiting", "waiting_since": done_at if done_at is not None else epoch_s(info.get("contained_at")), "agent_owned": False, "agent_owned_certain": True,
             "premise": None, "contained": shown}
-    if authority["status"] in PARKED_AUTHORITY:
-        # The authority cannot run, so it cannot release this card: stalled at once, never an ordinary wait.
+    parents = [p for p in authority.get("parents") or [] if isinstance(p, dict) and p.get("id")]
+    listed = ", ".join(f"{p['id']} ({p.get('status') or 'unknown'})" for p in parents)
+    if authority["status"] in PARKED_AUTHORITY or (authority["status"] == "todo" and authority.get("parked") is True):
+        # The authority cannot progress, so it cannot release this card: stalled at once, never an ordinary wait.
         # Not agent-owned: an agent cannot release for it, and a supervisor card would only restate the hold.
-        parents = [p for p in authority.get("parents") or [] if isinstance(p, dict) and p.get("id")]
-        behind = ("itself held in triage" if authority["status"] == "triage" else
-                  "behind unmet parents " + ", ".join(f"{p['id']} ({p.get('status') or 'unknown'})" for p in parents)
-                  if parents else "behind unmet parents")
+        behind = (f"itself {authority['status']}" if authority["status"] in PARKED_AUTHORITY
+                  else f"todo behind parents that cannot progress: {listed}")
         shown["authority"]["waits_on"] = [{"id": p["id"], "status": p.get("status") or "unknown"} for p in parents]
+        card = info.get("task") or "this card"
         return {**base, "wait_state": "stalled",
-                "waiting_on": f"its authority {authority['id']}, which is {authority['status']} {behind} and cannot "
-                              "run to release it; a human operator can archive it with `hermes kanban archive "
-                              "<id> --reason`"}
+                "waiting_on": f"its authority {authority['id']}, which is {behind}, so nothing will release it; "
+                              f"a human operator can archive it with `hermes kanban archive {card} --reason \"<why>\"`"}
+    if authority["status"] == "todo" and parents:
+        return {**base, "waiting_on": f"release by card {authority['id']} (todo, waiting on {listed})"}
     if authority["status"] not in ("done", "archived"):
         return {**base, "waiting_on": f"release by card {authority['id']} ({authority['status']})"}
     if producer and producer["status"] not in ("done", "archived") and not producer.get("released"):
@@ -445,7 +448,7 @@ def describe_replica(card: dict[str, Any], *, now: Optional[float] = None) -> Op
             "block_loop_detected" if outcome == "blocked" else outcome)
     contained = card.get("contained") if status == "triage" else None
     if isinstance(contained, dict):
-        return describe_contained(contained, now=now)
+        return describe_contained({**contained, "task": contained.get("task") or card.get("id")}, now=now)
     return describe(status, block_kind=card.get("block_kind"), human=human,
                     park={"wake_check": card.get("wake_check"), "reason": park.get("reason") or "",
                           "wake_at": park.get("wake_at"), "unknown_producer": not published},

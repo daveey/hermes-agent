@@ -86,6 +86,14 @@ def valid_closure(data: dict) -> bool:
             and isinstance(data["authority_status"], str) and bool(data["authority_status"]))
 
 
+def dependents(conn, task: str) -> list[tuple[str, str, str]]:
+    """``[(id, status, title)]`` of the unfinished cards that list ``task`` as a parent. A closed containment never
+    satisfies them, and the hold refuses unlinking them."""
+    return [(str(r[0]), str(r[1]), str(r[2] or "")) for r in conn.execute(
+        "SELECT t.id, t.status, t.title FROM task_links l JOIN tasks t ON t.id = l.child_id WHERE l.parent_id = ? "
+        "AND t.status NOT IN ('done', 'archived') ORDER BY t.id", (task,))]
+
+
 def safety_refusal(conn, task: str) -> Optional[str]:
     from hermes_cli.kanban_refusal_receipt import restricted
     if restricted(conn, task):

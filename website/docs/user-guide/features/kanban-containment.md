@@ -96,9 +96,15 @@ The authority card is left as it is, and the closed card still never satisfies a
 dependency. Enrolled boards send `human_operator: {version: 1, actor_kind: "human",
 episode, reason}` on the ordinary `archive` op and require
 `containment_human_archive: 1` in the decision-retain capability; without it
-core refuses `board_unsupported` before staging anything. A card whose authority
-is parked like this is reported as stalled, naming the authority and its unmet
-parents.
+core refuses `board_unsupported` before staging anything. The command first lists
+the unfinished cards that depend on the held card (they stay waiting, and cannot be
+unlinked while the hold stands) and requires `--yes` when there are any.
+
+A held card is reported as stalled only when its authority cannot progress: the
+authority is in triage or blocked, or it is `todo` and every unmet parent is itself
+stuck (triage, blocked, a closed containment, or a stuck `todo`, up to six levels).
+A `todo` authority with no parents or a running, ready or scheduled parent is an
+ordinary wait that names what it waits on.
 
 ## Local and enrolled boards
 

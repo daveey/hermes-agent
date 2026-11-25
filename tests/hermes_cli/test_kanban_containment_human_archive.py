@@ -37,20 +37,27 @@ def _as(monkeypatch, who):
     monkeypatch.setattr(writer_mod, "cli_comment_writer", lambda **_kw: who)
 
 
-def _cli(ids, reason=None) -> int:
-    return kanban_cli._cmd_archive(argparse.Namespace(task_ids=list(ids), purge_ids=None, reason=reason))
+def _cli(ids, reason=None, yes=False) -> int:
+    return kanban_cli._cmd_archive(argparse.Namespace(task_ids=list(ids), purge_ids=None, reason=reason, yes=yes))
 
 
-def _parked(conn, *, live=False):
-    """A self-contained relay whose authority is TODO behind an open parent (or, ``live``, still claimed)."""
+def _parked(conn, *, live=False, chain=("triage",)):
+    """A self-contained relay whose authority is TODO behind a chain of parents (``chain[0]`` the direct parent's
+    status, each next one that parent's parent; ``()`` none), or, ``live``, still claimed. Returns the direct
+    parent as ``blocker``."""
     relay, _consumer, authority, target, spec = lifecycle.setup(conn)
     episode = lifecycle.contain(conn, relay, target, spec)["episode"]
     blocker = None
     if not live:
         conn.execute("UPDATE tasks SET status='todo', current_run_id=NULL, claim_lock=NULL, claim_expires=NULL, "
                      "worker_pid=NULL WHERE id=?", (authority,))
-        blocker = kb.create_task(conn, title="Open parent of the authority", assignee="default")
-        kb.link_tasks(conn, blocker, authority)
+        child = authority
+        for status in chain:
+            parent = kb.create_task(conn, title=f"Parent ({status})", assignee="default")
+            kb.link_tasks(conn, parent, child)
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, parent))
+            blocker = blocker or parent
+            child = parent
         conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (authority,))
     return relay, authority, blocker, episode
 
@@ -65,7 +72,7 @@ def _events(conn, task, kind):
 def test_human_cli_archive_closes_a_parked_authority_hold_on_an_unsynced_board(board, monkeypatch, capsys):
     relay, authority, _blocker, episode = _parked(board)
     _as(monkeypatch, HUMAN)
-    assert _cli([relay], REASON) == 0
+    assert _cli([relay], REASON, yes=True) == 0
     assert f"Archived {relay}" in capsys.readouterr().out
     assert kb.get_task(board, relay).status == "archived"
     assert connections.held(board, relay)  # closed, never released: dependents stay unsatisfied
@@ -103,7 +110,7 @@ def test_plain_archive_refusal_names_the_human_operator_exit(board, monkeypatch,
 def test_live_authority_claim_refuses_the_human_archive(board, monkeypatch, capsys):
     relay, authority, _blocker, _ = _parked(board, live=True)
     _as(monkeypatch, HUMAN)
-    assert _cli([relay], REASON) == 1
+    assert _cli([relay], REASON, yes=True) == 1
     assert "authority_live" in capsys.readouterr().err
     assert kb.get_task(board, relay).status == "triage"
     assert kb.get_task(board, authority).status == "running"
@@ -113,7 +120,7 @@ def test_safety_restricted_contained_card_stays_refused(board, monkeypatch, caps
     relay, _authority, _blocker, _ = _parked(board)
     kb._append_event(board, relay, "decision_hold_restricted", {"cause": "safety_refusal"})
     _as(monkeypatch, HUMAN)
-    assert _cli([relay], REASON) == 1
+    assert _cli([relay], REASON, yes=True) == 1
     assert "safety_restricted" in capsys.readouterr().err
     assert kb.get_task(board, relay).status == "triage"
     assert not _events(board, relay, "containment_closed")
@@ -156,6 +163,7 @@ class HumanHub(remote.ArchiveHub):
         super().__init__(conn)
         self.retain = {"decision_retain": 1, "scope_renewal": 1, "containment_human_archive": 1}
         self.reject = None
+        self.patched = False
 
     def decision_retain_capability(self, board):
         assert not self.conn.in_transaction
@@ -165,8 +173,15 @@ class HumanHub(remote.ArchiveHub):
         if self.reject:
             self.posts.append(copy.deepcopy(ops))
             return {"results": [{"client_op_id": ops[0]["client_op_id"], "status": "rejected", **self.reject}]}
-        result = super().ops(board, ops)
         human = ops[0].get("human_operator")
+        try:
+            return super().ops(board, ops)
+        finally:  # also when the reply is lost: the Board wrote it all the same
+            if human and not self.patched:
+                self.patched = True
+                self._human(human)
+
+    def _human(self, human):
         if human:
             row = self.source.events[self.close_event["event_uid"]]["row"]
             payload = json.loads(row["payload"])
@@ -177,7 +192,6 @@ class HumanHub(remote.ArchiveHub):
             audit.update(closure="human_operator", actor_kind="human", actor_gateway=self.ident.gateway,
                          reason=human["reason"], source_status="triage")
             self.audit["payload"] = json.dumps(audit)
-        return result
 
 
 def _synced(conn, monkeypatch):
@@ -198,7 +212,7 @@ def _synced(conn, monkeypatch):
 def test_human_cli_archive_on_a_synced_board_sends_human_operator(synced_conn, monkeypatch, capsys):
     hub = _synced(synced_conn, monkeypatch)
     _as(monkeypatch, HUMAN)
-    assert _cli([hub.target], REASON) == 0, capsys.readouterr().err
+    assert _cli([hub.target], REASON, yes=True) == 0, capsys.readouterr().err
     [[op]] = hub.posts
     assert op["op"] == "archive" and op["human_operator"] == {
         "version": 1, "actor_kind": "human", "episode": hub.stop["event_uid"], "reason": REASON}
@@ -214,7 +228,7 @@ def test_synced_human_archive_without_board_capability_is_board_unsupported(sync
     hub = _synced(synced_conn, monkeypatch)
     hub.retain.pop("containment_human_archive")
     _as(monkeypatch, HUMAN)
-    assert _cli([hub.target], REASON) == 1
+    assert _cli([hub.target], REASON, yes=True) == 1
     assert "board_unsupported" in capsys.readouterr().err
     assert hub.posts == []
     assert kb.get_task(synced_conn, hub.target).status == "triage"
@@ -236,31 +250,116 @@ def test_synced_safety_restricted_card_is_refused_before_the_board(synced_conn, 
     synced_conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, 1)",
                         (hub.target, "decision_hold_restricted", json.dumps({"cause": "safety_refusal"})))
     _as(monkeypatch, HUMAN)
-    assert _cli([hub.target], REASON) == 1
+    assert _cli([hub.target], REASON, yes=True) == 1
     assert "safety_restricted" in capsys.readouterr().err
     assert hub.posts == []
 
 
-# --- a parked authority is reported as stalled ---------------------------------------------------------------
+# --- a parked authority is reported as stalled; a waiting one is not ----------------------------------------
 
-def test_authority_parked_behind_open_parents_is_stalled_and_named(board):
-    relay, authority, blocker, _ = _parked(board)
-    wait = _local_wait_info(board, [relay]).get(relay)
+def _wait(conn, task):
+    wait = _local_wait_info(conn, [task]).get(task)
+    assert wait is not None
+    return wait
+
+
+@pytest.mark.parametrize("chain", [("running",), ("ready",), ("scheduled",), (), ("todo", "running")])
+def test_authority_that_can_still_progress_is_an_ordinary_wait(board, chain):
+    relay, authority, blocker, _ = _parked(board, chain=chain)
+    wait = _wait(board, relay)
+    assert wait["wait_state"] == "waiting" and wait["agent_owned"] is False
+    assert authority in wait["waiting_on"] and "human operator" not in wait["waiting_on"]
+    if blocker:
+        assert blocker in wait["waiting_on"]
+
+
+@pytest.mark.parametrize("chain", [("triage",), ("blocked",), ("todo", "triage"), ("todo", "todo", "blocked")])
+def test_authority_behind_parents_that_cannot_progress_is_stalled_and_named(board, chain):
+    relay, authority, blocker, _ = _parked(board, chain=chain)
+    wait = _wait(board, relay)
     assert wait["wait_state"] == "stalled" and wait["agent_owned"] is False
-    assert authority in wait["waiting_on"] and blocker in wait["waiting_on"] and "--reason" in wait["waiting_on"]
-    assert wait["contained"]["authority"]["waits_on"] == [{"id": blocker, "status": "ready"}]
+    assert authority in wait["waiting_on"] and blocker in wait["waiting_on"]
+    assert f"hermes kanban archive {relay} --reason" in wait["waiting_on"] and "<id>" not in wait["waiting_on"]
+    assert wait["contained"]["authority"]["waits_on"] == [{"id": blocker, "status": chain[0]}]
 
 
-def test_authority_in_triage_is_stalled():
-    card = {"status": "triage", "contained": {
+@pytest.mark.parametrize("status", ["triage", "blocked"])
+def test_authority_that_is_itself_parked_is_stalled(status):
+    card = {"id": "t_00000000000000aa", "status": "triage", "contained": {
         "episode": "019a98b4-0000-7000-8000-000000000001", "contained_at": 1_800_000_000,
-        "authority": {"id": "t_1123456789abcdef", "status": "triage", "at": None}, "producer": None}}
+        "authority": {"id": "t_1123456789abcdef", "status": status, "at": None}, "producer": None}}
     wait = kwi.describe_replica(card, now=1_800_000_100)
     assert wait["wait_state"] == "stalled" and "t_1123456789abcdef" in wait["waiting_on"]
-    assert "itself held in triage" in wait["waiting_on"]
+    assert f"itself {status}" in wait["waiting_on"] and "hermes kanban archive t_00000000000000aa" in wait["waiting_on"]
+
+
+def test_replica_todo_authority_without_parent_facts_is_an_ordinary_wait():
+    card = {"id": "t_00000000000000aa", "status": "triage", "contained": {
+        "episode": "019a98b4-0000-7000-8000-000000000001", "contained_at": 1_800_000_000,
+        "authority": {"id": "t_1123456789abcdef", "status": "todo", "at": None}, "producer": None}}
+    assert kwi.describe_replica(card, now=1_800_000_100)["wait_state"] == "waiting"
 
 
 def test_running_authority_is_still_an_ordinary_wait(board):
     relay, authority, _blocker, _ = _parked(board, live=True)
-    wait = _local_wait_info(board, [relay]).get(relay)
+    wait = _wait(board, relay)
     assert wait["wait_state"] == "waiting" and wait["waiting_on"] == f"release by card {authority} (running)"
+
+
+# --- dependents, Board refusals, marker fallback, changed retries ---------------------------------------------
+
+def test_human_archive_lists_dependents_and_requires_yes(board, monkeypatch, capsys):
+    relay, _authority, _blocker, _ = _parked(board)
+    consumer = board.execute("SELECT child_id FROM task_links WHERE parent_id=?", (relay,)).fetchone()[0]
+    _as(monkeypatch, HUMAN)
+    assert _cli([relay], REASON) == 1
+    out = capsys.readouterr()
+    assert consumer in out.out and "cannot be unlinked" in out.out and "--yes" in out.err
+    assert kb.get_task(board, relay).status == "triage"
+    assert _cli([relay], REASON, yes=True) == 0
+    assert kb.get_task(board, relay).status == "archived" and kb.get_task(board, consumer).status == "todo"
+
+
+def test_human_archive_without_dependents_needs_no_yes(board, monkeypatch, capsys):
+    relay, _authority, _blocker, _ = _parked(board)
+    consumer = board.execute("SELECT child_id FROM task_links WHERE parent_id=?", (relay,)).fetchone()[0]
+    assert kb.archive_task(board, consumer)
+    _as(monkeypatch, HUMAN)
+    assert _cli([relay], REASON) == 0
+    assert "dependent" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("reason,detail", [
+    ("authority_live", "authority t_x has a live run or lease; let it release the card"),
+    ("containment_episode_changed", "the named episode is not the card's current containment episode"),
+])
+def test_synced_board_human_refusals_print_reason_and_detail(synced_conn, monkeypatch, capsys, reason, detail):
+    hub = _synced(synced_conn, monkeypatch)
+    hub.reject = {"reason": reason, "detail": detail}
+    _as(monkeypatch, HUMAN)
+    assert _cli([hub.target], REASON, yes=True) == 1
+    err = capsys.readouterr().err
+    assert f"Board refused terminal archive: {reason} ({detail})" in err and "--reason \"<why>\"" not in err
+    assert len(hub.posts) == 1 and "human_operator" in hub.posts[0][0]
+    assert kb.get_task(synced_conn, hub.target).status == "triage"
+    assert synced_conn.execute("SELECT confirmed FROM containment_delivery").fetchone()[0] == -1
+
+
+def test_unsynced_marker_falls_back_to_the_single_attested_episode(synced_conn, monkeypatch):
+    hub = _synced(synced_conn, monkeypatch)
+    assert synced_conn.execute("SELECT containment_episode FROM tasks WHERE id=?", (hub.target,)).fetchone()[0] is None
+    assert kb.archive_task(synced_conn, hub.target, human=HumanArchive(REASON))
+    assert hub.posts[0][0]["human_operator"]["episode"] == hub.stop["event_uid"]
+
+
+def test_retry_with_a_changed_reason_is_refused_before_the_board(synced_conn, monkeypatch):
+    hub = _synced(synced_conn, monkeypatch)
+    hub.fail = True
+    with pytest.raises(TimeoutError):
+        kb.archive_task(synced_conn, hub.target, human=HumanArchive(REASON))
+    hub.fail = False
+    with pytest.raises(ContainmentRefused, match="different metadata"):
+        kb.archive_task(synced_conn, hub.target, human=HumanArchive("another reason"))
+    assert len(hub.posts) == 1
+    assert kb.archive_task(synced_conn, hub.target, human=HumanArchive(REASON))  # the same reason recovers
+    assert hub.posts[0] == hub.posts[1]

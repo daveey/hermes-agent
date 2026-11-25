@@ -43,6 +43,17 @@ def cmd_archive(args: argparse.Namespace) -> int:
                 human = for_caller(args.reason)
             except ContainmentRefused as exc:
                 return _err(f"cannot archive {', '.join(ids)}: {exc}")
+            from hermes_cli.kanban_containment_human import dependents
+            waiting = {tid: dependents(conn, tid) for tid in ids}
+            for tid, deps in waiting.items():
+                if deps:
+                    print(f"{tid} has {len(deps)} dependent card(s) that will stay waiting, and cannot be unlinked "
+                          "while its containment hold stands:")
+                    for dep, status, title in deps:
+                        print(f"  {dep}  {status:8s}  {title}")
+            if any(waiting.values()) and not getattr(args, "yes", False):
+                return _err("refusing the human operator archive without --yes: the dependent cards above stay "
+                            "waiting on a parent that never succeeds; rerun with --yes to archive anyway")
         # A card another machine runs under its live Board lease gets a stop request, not a local status write
         # the Board would reject (kanban_remote_stop). [daveey]
         from hermes_cli.kanban_remote_stop import RemoteArchiveRefused, archive as _archive
