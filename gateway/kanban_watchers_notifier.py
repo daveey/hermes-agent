@@ -63,8 +63,8 @@ TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized", "spend_budget_decision_r
 _WAKE_KINDS = (*_WAKE_KINDS, "park_progress_notice")
 _WAKE_KINDS = (*_WAKE_KINDS, "spend_budget_decision_ready")
 # ``decision_requested`` (hermes_cli.kanban_decision_ask): a card parked on its orchestrator's answer.
-TERMINAL_KINDS = (*TERMINAL_KINDS, "decision_requested", "wake_probe_unproven_notice")
-_WAKE_KINDS = (*_WAKE_KINDS, "decision_requested")
+TERMINAL_KINDS = (*TERMINAL_KINDS, "parent_held", "decision_requested", "wake_probe_unproven_notice")
+_WAKE_KINDS = (*_WAKE_KINDS, "parent_held", "decision_requested")
 
 
 def diagnostic_event(ev) -> bool:
@@ -658,6 +658,12 @@ def _fmt_unproven_notice(ev, n) -> tuple:
     return f"⚠ {n.head}: {notice_text(ev.payload)}", None, None
 
 
+def _fmt_parent_held(ev, n) -> tuple:
+    from hermes_cli.kanban_parent_held import text
+    body = text(ev.payload or {})
+    return f"⏸ {n.head}: {body}", body, None
+
+
 def _fmt_parent_unclaimed(ev, n) -> tuple:
     from hermes_cli.kanban_parent_unclaimed import notice_text
     return f"⏳ {n.head}: {notice_text(ev.payload)}", None, None
@@ -733,6 +739,7 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "quota_episode_notice": _fmt_quota_episode,
     "worker_repin_notice": _fmt_repin_notice,
     "wake_probe_unproven_notice": _fmt_unproven_notice,
+    "parent_held": _fmt_parent_held,
     "dependency_parent_unclaimed": _fmt_parent_unclaimed,
     "spend_budget_decision_ready": _fmt_spend_budget,
     "chat_wait_unclaimed": _fmt_chat_wait,

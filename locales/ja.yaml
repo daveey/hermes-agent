@@ -243,6 +243,7 @@ gateway:
       chat_wait_unclaimed: "is ready with no worker claiming it"
       park_progress_notice: "待機中に進捗を報告しました。まだ完了していません"
       decision_requested: "is parked until its orchestrator decides"
+      parent_held: "前提タスクが保留中です。所有者の判断が必要です"
       spend_budget_decision_ready: "支出予算に達しました。再開またはアーカイブの判断を待っています"
       status_default: "status changed"
       status_joiner: ", "

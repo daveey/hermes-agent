@@ -272,7 +272,7 @@ def park_state(conn: sqlite3.Connection, task_id: str) -> dict:
         # ``continued`` event that carries its wake (t_01a1df6a505bf42f). [daveey]
         from hermes_cli.kanban_restore_chat_subs import restored_at
         restored = restored_at(conn, task_id)
-        last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (task_id,)).fetchone()
+        last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind != 'parent_held'", (task_id,)).fetchone()
         parked_at = max(int(last[0] or 0), restored or 0) if last else restored
         parked_at = parked_at or int(time.time())
         return {"payload": {}, "parked_at": parked_at, "timed": False, "event_id": None,

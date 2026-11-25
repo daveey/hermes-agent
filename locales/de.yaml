@@ -243,6 +243,7 @@ gateway:
       chat_wait_unclaimed: "is ready with no worker claiming it"
       park_progress_notice: "hat während der Wartezeit Fortschritt gemeldet; nicht abgeschlossen"
       decision_requested: "is parked until its orchestrator decides"
+      parent_held: "hat eine angehaltene Voraussetzung; deren Eigentümer muss entscheiden"
       spend_budget_decision_ready: "hat das Ausgabenbudget erreicht; wartet auf Freigabe oder Archivierung"
       status_default: "status changed"
       status_joiner: ", "

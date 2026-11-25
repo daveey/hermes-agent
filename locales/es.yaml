@@ -243,6 +243,7 @@ gateway:
       chat_wait_unclaimed: "is ready with no worker claiming it"
       park_progress_notice: "informó de avances mientras espera; no completada"
       decision_requested: "is parked until its orchestrator decides"
+      parent_held: "tiene un requisito previo suspendido; su responsable debe decidir"
       spend_budget_decision_ready: "alcanzó su presupuesto; espera una decisión de reactivación o archivo"
       status_default: "status changed"
       status_joiner: ", "

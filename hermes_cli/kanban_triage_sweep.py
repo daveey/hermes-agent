@@ -282,7 +282,8 @@ def sweep_stale_triage(
     rows = conn.execute(
         "SELECT t.id, t.title, t.body, t.assignee, t.human_request, t.tenant FROM tasks t "
         "WHERE t.status = 'triage' " + _gate_exclusion() +
-        "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id), t.created_at) <= ? "
+        "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id "
+        "AND e.kind != 'parent_held'), t.created_at) <= ? "
         "AND " + _PENDING, (cutoff, *_PENDING_ARGS),
     ).fetchall()
     from hermes_cli.kanban_resume_requester import open_recovery_card

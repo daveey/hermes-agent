@@ -243,6 +243,7 @@ gateway:
       chat_wait_unclaimed: "is ready with no worker claiming it"
       park_progress_notice: "het vordering gerapporteer terwyl dit wag; nie voltooi nie"
       decision_requested: "is parked until its orchestrator decides"
+      parent_held: "het 'n opgeskorte voorvereiste; die eienaar moet besluit"
       spend_budget_decision_ready: "het sy bestedingsbegroting bereik; wag op 'n bevorder- of argiveerbesluit"
       status_default: "status changed"
       status_joiner: ", "
