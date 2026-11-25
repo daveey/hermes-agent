@@ -27,13 +27,14 @@ class PrimarySettlement:
         from hermes_cli.kanban_sync_client import HubError, Resync
         try:
             from hermes_cli.kanban_replay_reply import row_evidence_envelope
-            evidence = row_evidence_envelope(self.hub.row_evidence(self.board, row['table_name'], row['row_uid']))
+            evidence = row_evidence_envelope(self.hub.row_evidence(self.board, row['table_name'], row['row_uid']),
+                                             conn=self.conn, table=row['table_name'])
         except (OSError, HubError, Resync, ValueError) as exc:
             raise CurrentRowHold(f'primary replay live current row unavailable: {exc}', transient=True) from exc
         image = evidence.get('row')
         if (evidence.get('board') != self.board or evidence.get('table') != row['table_name'] or
                 evidence.get('uid') != row['row_uid'] or
-                type(evidence.get('head')) is not int or evidence['head'] < 0):
+                type(evidence.get('head')) is not int or not 0 <= evidence['head'] < 1 << 63):
             raise CurrentRowHold('primary replay live current row unavailable: unbound evidence')
         if (row['op'] == 'delete' and verdict['status'] in ('applied', 'merged') and
                 evidence.get('state') == 'deleted' and 'row' in evidence and image is None):

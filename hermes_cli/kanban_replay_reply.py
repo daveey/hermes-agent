@@ -24,6 +24,8 @@ def capability_envelope(payload):
     """Refuse a non-object capability as a board-local stream fault."""
     if not isinstance(payload, dict):
         raise ValueError('replay capability unavailable')
+    if payload.get('deferred_observation') is not None and not isinstance(payload['deferred_observation'], str):
+        raise ValueError('invalid replay deferred capability')
     return payload
 
 
@@ -36,9 +38,17 @@ def slot_envelope(payload):
     return slot
 
 
-def row_evidence_envelope(payload):
-    """Refuse a non-object current-row evidence payload before dereference."""
-    return mapping_envelope(payload, 'current-row')
+def row_evidence_envelope(payload, *, conn=None, table=None):
+    """Validate current-row scalars before either projection path can bind them."""
+    from hermes_cli.kanban_replay_values import integer, row_image
+    mapping_envelope(payload, 'current-row')
+    image = payload.get('row')
+    if image:  # {} and None are judged by the caller's own deletion/evidence rules
+        mapping_envelope(image, 'current-row image')
+        integer(image.get('version'), 'current-row version', minimum=1)
+        if conn is not None:
+            row_image(conn, table, image)
+    return payload
 
 
 def consumed_slot(reply, wire, previous, local):

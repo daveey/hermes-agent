@@ -222,13 +222,14 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         from hermes_cli.kanban_replay_existence import CurrentRowHold
         try:
             from hermes_cli.kanban_replay_reply import row_evidence_envelope
-            evidence = row_evidence_envelope(hub.row_evidence(board, 'tasks', row['row_uid']))
+            evidence = row_evidence_envelope(hub.row_evidence(board, 'tasks', row['row_uid']),
+                                             conn=conn, table='tasks')
         except (OSError, client.HubError, client.Resync, ValueError) as exc:
             raise CurrentRowHold(f'synthetic parent current row unavailable: {exc}', transient=True) from exc
         state = evidence.get('row')
         if (evidence.get('board') != board or evidence.get('table') != 'tasks' or
                 evidence.get('uid') != row['row_uid'] or evidence.get('state') != 'live' or
-                type(evidence.get('head')) is not int or evidence['head'] < 0 or
+                type(evidence.get('head')) is not int or not 0 <= evidence['head'] < 1 << 63 or
                 not isinstance(state, dict) or state.get('uid') != row['row_uid'] or
                 type(state.get('version')) is not int or state['version'] <= 0 or
                 state.get('deleted_at') is not None):

@@ -56,6 +56,19 @@ def _verdict(remote: dict, h: int) -> dict | None:
             not isinstance(verdict.get('status'), str) or verdict['status'] not in _FINAL or
             verdict.get('row') is not None or verdict.get('source_predecessor') is not None):
         raise ValueError('invalid retained verdict')
+    # Both inspected and consuming replies pass here before settlement binds SQLite.
+    if 'version' in verdict:
+        version = verdict['version']
+        if type(version) is not int or not 0 <= version <= _MAX:
+            raise ValueError('invalid retained verdict version')
+    for key in ('reason', 'detail'):
+        if verdict.get(key) is not None and not isinstance(verdict[key], str):
+            raise ValueError(f'invalid retained verdict {key}')
+    if verdict.get('deferred') is not None:
+        reference = verdict['deferred']
+        if (not isinstance(reference, dict) or set(reference) != {'task', 'origin'} or
+                any(not isinstance(reference[key], str) or not reference[key] for key in ('task', 'origin'))):
+            raise ValueError('invalid retained verdict deferred reference')
     return verdict
 
 
