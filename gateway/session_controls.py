@@ -346,8 +346,11 @@ class AuthorityConnection:
             if method in _PROFILE_IMPLICIT:
                 params = {key: value for key, value in params.items() if key != 'profile'}
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
+        # A submodule can be ready while another thread still fills the package's
+        # catalog. Wait for package initialization before snapshotting a contract.
+        from tui_gateway.contracts import CANONICAL_METHODS, METHODS
         from tui_gateway.contracts.registry import (
-            CANONICAL_METHODS, METHODS, canonical_param_problems, check_params_accepted, check_result,
+            canonical_param_problems, check_params_accepted, check_result,
             unknown_method_message,
         )
         contract = CANONICAL_METHODS.get(method)

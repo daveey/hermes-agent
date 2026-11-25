@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -67,6 +69,16 @@ def _docx_upload(text: str) -> bytes:
         for part, xml in parts.items():
             archive.writestr(part, xml)
     return buffer.getvalue()
+
+
+def test_file_attach_waits_for_a_concurrent_cold_contract_import():
+    """Registry import alone must not snapshot an unfinished session contract."""
+    result = subprocess.run(
+        [sys.executable, "-m", "tests._fixtures.contracts_import"],
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "COLD_CATALOG_REAL_RESUME_AND_VALIDATION_OK" in result.stdout
 
 
 def test_browser_document_upload_remains_extractable_after_file_attach(
