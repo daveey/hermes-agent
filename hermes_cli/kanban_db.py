@@ -978,8 +978,7 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
--- Condition-wake probe of a ``scheduled`` card (``kanban_wake_check``): one row per
--- card, rewritten per probe instead of one event per probe. [daveey]
+-- Condition-wake probes use one rewritten row per card (``kanban_wake_check``). [daveey]
 CREATE TABLE IF NOT EXISTS task_wake_checks (
     task_id   TEXT PRIMARY KEY,
     cmd       TEXT NOT NULL,
@@ -998,6 +997,7 @@ CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, c
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_kind_task_id   ON task_events(kind, task_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_park_history ON task_events(id) WHERE kind IN ('scheduled','continued') AND typeof(kind)='text';
+CREATE INDEX IF NOT EXISTS idx_events_wait_end ON task_events(task_id,id) WHERE kind IN ('condition_met','continuation_woken','promoted','promoted_manual','unblocked','claimed','completed','archived') AND typeof(kind)='text';
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);

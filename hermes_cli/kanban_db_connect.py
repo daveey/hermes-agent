@@ -1284,6 +1284,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON task_events(run_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind_task_id ON task_events(kind, task_id, id)")
     conn.execute(_EVENT_PARK_HISTORY_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
+    conn.execute(_EVENT_WAIT_END_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
     conn.execute(_EVENT_BLOCKER_ASSERT_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
 
     if _table_exists(conn, "kanban_notify_subs"):
@@ -1497,6 +1498,13 @@ _EVENT_PARK_HISTORY_INDEX = (
 )
 
 
+_EVENT_WAIT_END_INDEX = (
+    "CREATE INDEX idx_events_wait_end ON task_events(task_id,id) WHERE kind IN "
+    "('condition_met','continuation_woken','promoted','promoted_manual','unblocked',"
+    "'claimed','completed','archived') AND typeof(kind)='text'"
+)
+
+
 _REBUILD_SPECS = {
     "task_events": (
         "CREATE TABLE task_events ("
@@ -1508,6 +1516,7 @@ _REBUILD_SPECS = {
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
             "CREATE INDEX idx_events_kind_task_id ON task_events(kind, task_id, id)",
             _EVENT_PARK_HISTORY_INDEX,
+            _EVENT_WAIT_END_INDEX,
             _EVENT_BLOCKER_ASSERT_INDEX,
         ),
     ),
