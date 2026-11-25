@@ -925,9 +925,8 @@ _links_fresh = _links_tickets.fresh
 _origin_rows_sink = threading.local()  # .rows: set by _project_remote_links for _store_links
 
 
-# The links projection's fingerprint covers every store it reads except state.db (compression alias tips), so its
-# max age only bounds how late a rotated alias tip shows. Re-projecting every _CACHE_TTL_S (3 s) for that alone cost
-# a busy Desktop backend ~10% of a core. [daveey]
+# The links fingerprint covers all stores except state.db (compression tips); TTL bounds tip rotation.
+# Re-projecting every 3s for that alone cost a busy Desktop backend ~10% of a core. [daveey]
 _LINKS_MAX_AGE_S = 15.0
 
 
@@ -1301,6 +1300,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
             parked[sid] = parked.get(sid, 0) + 1
             remote_keys.setdefault(sid, set()).update(_external_activity.replica_markers(card))
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
+        remote_keys[sid].update(_identity.timers.marker(card))
         _replica_exec.collect(card, execution)
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
         # only its last report) is never counted stalled, so stalled can't exceed what the row shows parked.
@@ -1401,6 +1401,7 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES, tasks=tasks)
                 reads["blocked_pairs"] = _pairs_sink
                 reads["pairs"] = reads["active_pairs"] | reads["blocked_pairs"]
+                reads["timers"] = _identity.timers.local(conn, reads["pairs"])
                 from hermes_cli.kanban_execution_source import assemble, safe_raw, unknown_raw
                 from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
                 gateway, profile = card_scope(path)

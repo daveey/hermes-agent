@@ -167,7 +167,7 @@ it('uses the same ordered text for the accessible label and top tooltip', () => 
   vi.useFakeTimers()
   draw({ kanban_blocked: 1, kanban_active: 3, kanban_parked: 2 })
   const squares = screen.getByTestId('session-row-card-squares')
-  expect(squares.getAttribute('aria-label')).toBe('Needs you 1 · Waiting 2')
+  expect(squares.getAttribute('aria-label')).toBe('Needs you 1')
   act(() => {
     fireEvent.pointerMove(squares, { pointerType: 'mouse' })
     vi.advanceTimersByTime(700)

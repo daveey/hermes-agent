@@ -22,7 +22,7 @@ FIELDS = {
         'kanban_attention', 'kanban_remote_stale', 'kanban_parked', 'kanban_held',
         'kanban_stalled', 'kanban_observed_at', 'kanban_unknown', 'kanban_waiting_on',
         'kanban_blocked_on', 'needs_you', 'kanban_external', 'kanban_external_unknown',
-        'kanban_external_down', 'kanban_external_cards')),
+        'kanban_external_down', 'kanban_external_cards', 'kanban_timed_cards', 'kanban_timed_more')),
     'goal': frozenset(('goal_active',)),
     'cron': frozenset(('cron_active',)),
     'background': frozenset(('background_active', 'background_processes')),

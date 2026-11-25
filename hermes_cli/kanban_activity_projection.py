@@ -35,6 +35,7 @@ def project_kanban_activity(rows, *, parts, observed_at, now, external=None):
         row["kanban_observed_at"] = observed_at
         row.pop("kanban_unknown", None)
         ids = list(identity.row_ids(row))
+        identity.timers.stamp(row, {key for sid in ids for key in remote_keys.get(sid, ())})
         dup = identity.lineage_duplicates(remote_keys, ids)
         identity.stamp_blocked_owners(row, remote_keys, ids, WAITING_ON_CAP)
         for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),

@@ -17,6 +17,10 @@ export interface SessionBackgroundProcess {
 }
 
 export interface SessionActivityFields {
+  /** Per-card display clocks: cap six, running first, oldest first within each state. */
+  kanban_timed_cards?: { id: string; title: string; state: 'running' | 'blocked'; since: number }[]
+  /** Timed cards beyond the wire cap; absent when there are no clocks. */
+  kanban_timed_more?: number
   /** [daveey] Kanban tasks this conversation created (`kanban_create`) that
    *  are still queued or running, summed over its compression lineage. The
    *  turn that created them has ended, but the session's work goes on in the

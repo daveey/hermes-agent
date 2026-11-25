@@ -1,5 +1,6 @@
 """Card identity helpers for local and remote session activity snapshots."""
 from copy import deepcopy
+from hermes_cli import kanban_session_activity_timers as timers
 
 
 def local_keys(path, reads, board=None):
@@ -15,6 +16,10 @@ def local_keys(path, reads, board=None):
     for bucket in ("active", "blocked", "held", "stalled"):
         for sid, tid in reads.get(bucket + "_pairs", ()):
             out.setdefault(sid, set()).add((f"{label}/{tid}", bucket, (sid, tid) in parked and bucket == "active"))
+    for sid, tid in reads.get('pairs', ()):
+        card = reads.get('timers', {}).get(tid)
+        if card:
+            out.setdefault(sid, set()).update(timers.marker({**card, 'key': f'{label}/{tid}'}))
     return out
 
 
@@ -105,5 +110,7 @@ def mark_unknown(rows):
         row.pop("kanban_waiting_on", None)
         row.pop("kanban_blocked_on", None)
         row.pop("needs_you", None)
+        row.pop("kanban_timed_cards", None)
+        row.pop("kanban_timed_more", None)
         row["kanban_unknown"] = True
     return rows

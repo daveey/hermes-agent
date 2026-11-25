@@ -33,6 +33,7 @@ def _remote(cards, maps, keys, execution):
             parked[sid] = parked.get(sid, 0) + 1
             keys.setdefault(sid, set()).update(activity._external_activity.replica_markers(card))
         keys.setdefault(sid, set()).add((str(card.get('key')), str(bucket), is_parked))
+        keys[sid].update(activity._identity.timers.marker(card))
         activity._replica_exec.collect(card, execution)
         if card.get('status') not in activity.PENDING_RELEASE_STATUSES and (
                 activity._remote_wait(card) or {}).get('wait_state') == 'stalled':

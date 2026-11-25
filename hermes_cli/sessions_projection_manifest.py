@@ -169,7 +169,7 @@ POPPED_INTERNAL_KEYS = frozenset({"_preview_raw", "_effective_last_active", "_sy
 STAMP_FIXED_COLUMNS = ("cwd", "git_branch", "git_repo_root", "outcome", "muted")
 SIDEBAR_SLICES = ("recents", "cron", "messaging")
 CAPS = {"kanban_waiting_on": 50, "kanban_blocked_on": 50, "kanban_external_cards": 10,
-        "background_processes": 8}
+        "kanban_timed_cards": 6, "background_processes": 8}
 
 # Route-stamped columns override the stored integer flags with booleans.
 _ROW_OVERRIDES = {
@@ -258,6 +258,9 @@ ANNOTATION_FAMILIES: dict[str, tuple[FieldSpec, ...]] = {
             "kanban_external", "kanban_external_unknown", "kanban_external_down")),
         FieldSpec("kanban_external_cards", "array<shape:ExternalCard>", CONDITIONAL,
                   "kanban_external_activity.stamp_rows", "absent when empty; capped"),
+        FieldSpec("kanban_timed_cards", "array<shape:TimedCard>", CONDITIONAL,
+                  "kanban_session_activity_timers.stamp", "absent when empty; capped"),
+        _count("kanban_timed_more", "kanban_session_activity_timers.stamp", "present with timed cards, including zero"),
         _EXECUTION_OBSERVATIONS,
     ),
     "goal": (_flag("goal_active", "goal_session_activity.annotate_goal_activity"),),
@@ -336,6 +339,10 @@ PROJECTIONS = {p.name: p for p in (
 
 # ── closed nested shapes and documented open mappings ────────────────────
 SHAPES: dict[str, tuple[FieldSpec, ...]] = {
+    "TimedCard": (FieldSpec("id", "string", ALWAYS, "owner-qualified card key"),
+                  FieldSpec("title", "string", ALWAYS, "tasks.title or ''"),
+                  FieldSpec("state", "enum:running,blocked", ALWAYS, "kanban_session_activity_timers.card_timer"),
+                  FieldSpec("since", "number", ALWAYS, "run start or latest blocked transition, epoch seconds")),
     "NeedsYouEntry": (FieldSpec("kind", "const:card", ALWAYS, "kanban_open_asks.open_human_asks"),
                       FieldSpec("ref", "string", ALWAYS, "owner-qualified card key, '' when padded"),
                       FieldSpec("question", "const:", ALWAYS, "always '' (deliberately narrowed)")),

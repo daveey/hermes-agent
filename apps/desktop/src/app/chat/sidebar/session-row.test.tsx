@@ -859,7 +859,8 @@ describe('SidebarSessionRow card project label', () => {
 describe('SidebarSessionRow kanban counts', () => {
   it('names the forwarded blocked owner rather than its scheduled relay in the red reason', () => {
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }),
+      makeSession({
+        outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }),
         kanban_active: 1,
         kanban_parked: 1,
         kanban_blocked: 1,
@@ -887,7 +888,7 @@ describe('SidebarSessionRow kanban counts', () => {
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).not.toBe('stuck')
-    expect(screen.getByTestId('session-row-card-squares').getAttribute('aria-label')).toBe('Waiting 2')
+    expect(screen.queryByTestId('session-row-card-squares')).toBeNull()
   })
 
   afterEach(() => vi.useRealTimers())
@@ -898,7 +899,8 @@ describe('SidebarSessionRow kanban counts', () => {
     vi.setSystemTime(1001_000)
 
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('none', {}, { kind: 'running' }),
+      makeSession({
+        outcome: canonicalOutcome('none', {}, { kind: 'running' }),
         execution_observations: [{ ...fixture.base, valid_until: 1010 }],
         kanban_active: 1,
         kanban_parked: 1,
@@ -982,7 +984,12 @@ describe('SidebarSessionRow kanban counts', () => {
 
   it('paints the red (stuck) stripe while a kanban card it created is blocked', () => {
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }), kanban_blocked: 1, message_count: 4, title: 'Blocked' } as Partial<SessionInfo> & {
+      makeSession({
+        outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }),
+        kanban_blocked: 1,
+        message_count: 4,
+        title: 'Blocked'
+      } as Partial<SessionInfo> & {
         title: string
       })
     )
@@ -993,7 +1000,12 @@ describe('SidebarSessionRow kanban counts', () => {
   // [daveey] A done card whose handoff admits dropped work: amber, not green.
   it('paints the amber (attention) stripe and a warning count for a false-done card', () => {
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('attention', {}, { kind: 'unresolved' }), kanban_attention: 1, message_count: 4, title: 'Looks done' } as Partial<SessionInfo> & {
+      makeSession({
+        outcome: canonicalOutcome('attention', {}, { kind: 'unresolved' }),
+        kanban_attention: 1,
+        message_count: 4,
+        title: 'Looks done'
+      } as Partial<SessionInfo> & {
         title: string
       })
     )
@@ -1034,7 +1046,8 @@ describe('SidebarSessionRow kanban counts', () => {
 
     try {
       const { container } = renderRow(
-        makeSession({ outcome: canonicalOutcome('attention', {}, { kind: 'unresolved' }),
+        makeSession({
+          outcome: canonicalOutcome('attention', {}, { kind: 'unresolved' }),
           kanban_active: 1,
           kanban_observed_at: Date.now() / 1000,
           kanban_parked: 1,
@@ -1060,7 +1073,8 @@ describe('SidebarSessionRow kanban counts', () => {
 
   it('a parked row without stalled cards stays grey waiting', () => {
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('waiting', {}, { kind: 'waiting' }),
+      makeSession({
+        outcome: canonicalOutcome('waiting', {}, { kind: 'waiting' }),
         kanban_active: 1,
         kanban_observed_at: Date.now() / 1000,
         kanban_parked: 1,
@@ -1070,7 +1084,8 @@ describe('SidebarSessionRow kanban counts', () => {
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('waiting')
-    expect(screen.getByTestId('session-row-card-squares').querySelector('[data-card-colour="amber"]')).toBeNull()
+    expect(container.querySelector('[data-card-colour="amber"]')).toBeNull()
+    expect(container.querySelector('[data-card-colour="grey"]')).toBeNull()
   })
 
   it('stays green (done) without kanban_attention', () => {
@@ -1129,7 +1144,8 @@ describe('SidebarSessionRow own activity stamps', () => {
   // [daveey] The background dot's words follow its evidence: unknown-only work never reads as "running".
   it('labels a row whose only open work is unknown as unknown, not running', () => {
     const { container } = renderRow(
-      makeSession({ outcome: undefined,
+      makeSession({
+        outcome: undefined,
         execution_observations: [{ source: 'unavailable.work' }],
         id: 'unknown-only',
         kanban_active: 1,
@@ -1155,7 +1171,8 @@ describe('SidebarSessionRow own activity stamps', () => {
 
     try {
       const { container } = renderRow(
-        makeSession({ outcome: canonicalOutcome('none', {}, { kind: 'running' }),
+        makeSession({
+          outcome: canonicalOutcome('none', {}, { kind: 'running' }),
           id: 'unknown-polled',
           kanban_unknown: true,
           message_count: 4,
@@ -1179,7 +1196,8 @@ describe('SidebarSessionRow own activity stamps', () => {
 
     try {
       const { container } = renderRow(
-        makeSession({ outcome: canonicalOutcome('waiting', { kind: 'running' }, { kind: 'running' }),
+        makeSession({
+          outcome: canonicalOutcome('waiting', { kind: 'running' }, { kind: 'running' }),
           execution_observations: [fixture.base],
           id: 'running-card',
           kanban_active: 1,
@@ -1190,7 +1208,9 @@ describe('SidebarSessionRow own activity stamps', () => {
         } as Partial<SessionInfo> & { title: string })
       )
 
-      expect(container.querySelector('[role="status"][aria-label="Running"]')?.getAttribute('data-session-status-dot')).toBe('waiting')
+      expect(
+        container.querySelector('[role="status"][aria-label="Running"]')?.getAttribute('data-session-status-dot')
+      ).toBe('waiting')
       expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
     } finally {
       vi.useRealTimers()
@@ -1199,7 +1219,8 @@ describe('SidebarSessionRow own activity stamps', () => {
 
   it('keeps the running label when a live process holds a row with unfresh card evidence', () => {
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('none', {}, { kind: 'running' }),
+      makeSession({
+        outcome: canonicalOutcome('none', {}, { kind: 'running' }),
         background_active: 1,
         id: 'proc-row',
         kanban_observed_at: undefined,
@@ -1218,7 +1239,13 @@ describe('SidebarSessionRow own activity stamps', () => {
   // `waiting` card glyph (parked: ⌘] / ⌘[ skip it).
   it('shows the grey waiting glyph while kanban_active is set', () => {
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('waiting', {}, { kind: 'waiting' }), id: 'old-proj', kanban_active: 2, message_count: 9, title: 'Old' } as Partial<SessionInfo> & {
+      makeSession({
+        outcome: canonicalOutcome('waiting', {}, { kind: 'waiting' }),
+        id: 'old-proj',
+        kanban_active: 2,
+        message_count: 9,
+        title: 'Old'
+      } as Partial<SessionInfo> & {
         title: string
       })
     )
@@ -1230,7 +1257,8 @@ describe('SidebarSessionRow own activity stamps', () => {
   })
 
   it('uses published goal/card transitions rather than classifying refreshed counts', () => {
-    const row = makeSession({ outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }),
+    const row = makeSession({
+      outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }),
       id: 'goal-kanban-project',
       title: 'Goal complete',
       message_count: 9,
@@ -1259,12 +1287,31 @@ describe('SidebarSessionRow own activity stamps', () => {
     expect(stripe(container)).toBe('stuck')
     expect(screen.queryByLabelText('Finished')).toBeNull()
 
-    rerender(<SidebarSessionRow {...props} session={{ ...row, goal_active: false, kanban_blocked: 0, outcome: canonicalOutcome('waiting', { revision: 8 }) }} />)
+    rerender(
+      <SidebarSessionRow
+        {...props}
+        session={{
+          ...row,
+          goal_active: false,
+          kanban_blocked: 0,
+          outcome: canonicalOutcome('waiting', { revision: 8 })
+        }}
+      />
+    )
     expect(stripe(container)).toBe('waiting')
     expect(screen.queryByLabelText('Finished')).toBeNull()
 
     rerender(
-      <SidebarSessionRow {...props} session={{ ...row, goal_active: false, kanban_active: 0, kanban_blocked: 0, outcome: canonicalOutcome('done', { revision: 9 }) }} />
+      <SidebarSessionRow
+        {...props}
+        session={{
+          ...row,
+          goal_active: false,
+          kanban_active: 0,
+          kanban_blocked: 0,
+          outcome: canonicalOutcome('done', { revision: 9 })
+        }}
+      />
     )
     expect(stripe(container)).toBe('done')
     expect(screen.getByLabelText('Done')).toBeTruthy()
@@ -1272,7 +1319,13 @@ describe('SidebarSessionRow own activity stamps', () => {
 
   it('a blocked card beats waiting (red)', () => {
     const { container } = renderRow(
-      makeSession({ outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }), kanban_active: 1, kanban_blocked: 1, message_count: 9, title: 'Old' } as Partial<SessionInfo> & {
+      makeSession({
+        outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }),
+        kanban_active: 1,
+        kanban_blocked: 1,
+        message_count: 9,
+        title: 'Old'
+      } as Partial<SessionInfo> & {
         title: string
       })
     )
@@ -1387,6 +1440,48 @@ it('does not paint a retained live turn as running on an offline row', () => {
 })
 
 // [daveey] session-outcome: the stored outcome paints the stripe and explains it on hover.
+describe('per-card elapsed clocks on actual flat rows', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it.each([true, false])('keeps timers before the cloud with card=%s', card => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 })
+    const before = $sidebarRowMeta.get()
+    $sidebarRowMeta.set(['updated'])
+    certifyRow(makeSession({ title: 'Timers' }))
+    $connectionsRegistry.set({
+      activeConnectionId: 'local',
+      primary: 'local',
+      connections: [
+        { id: 'local', kind: 'local', label: 'Laptop' },
+        { id: 'remote', kind: 'ssh', label: 'Cloud' }
+      ]
+    } as never)
+
+    try {
+      const { container } = renderRow(
+        makeSession({
+          title: 'Timers',
+          kanban_timed_cards: [
+            { id: 'b', title: 'Blocked card', state: 'blocked', since: 1_799_999_930 },
+            { id: 'a', title: 'Running card', state: 'running', since: 1_799_999_955 }
+          ]
+        }),
+        { card, unreadAuthority: true }
+      )
+
+      const timers = screen.getByTestId('session-row-card-timers')
+      expect([...timers.querySelectorAll('[data-card-timer]')].map(c => c.textContent)).toEqual(['45s', '1m'])
+      const cloud = container.querySelector('[data-slot="session-gateway-device"]')!
+      expect(timers.nextElementSibling).toBe(cloud)
+      expect(cloud.nextElementSibling).toBeNull()
+      act(() => vi.advanceTimersByTime(1000))
+      expect(timers.querySelector('[data-card-timer="running"]')?.textContent).toBe('46s')
+    } finally {
+      $sidebarRowMeta.set(before)
+    }
+  })
+})
+
 describe('SidebarSessionRow stored outcome', () => {
   afterEach(() => {
     clearAllSessionStates()
@@ -1409,7 +1504,19 @@ describe('SidebarSessionRow stored outcome', () => {
   ] as const)('%j paints %s (%s) with its tooltip', (outcome, stripe, colour, tip) => {
     const { container } = renderRow(
       // Inputs the old logic would paint green, so the outcome is what decides.
-      makeSession({ message_count: 4, outcome: canonicalOutcome(stripe, {}, { ...outcome, items: 'items' in outcome ? [...outcome.items] : undefined, on: 'on' in outcome ? [...outcome.on] : undefined }), title: 'Outcome' } as Partial<SessionInfo> & { title: string })
+      makeSession({
+        message_count: 4,
+        outcome: canonicalOutcome(
+          stripe,
+          {},
+          {
+            ...outcome,
+            items: 'items' in outcome ? [...outcome.items] : undefined,
+            on: 'on' in outcome ? [...outcome.on] : undefined
+          }
+        ),
+        title: 'Outcome'
+      } as Partial<SessionInfo> & { title: string })
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe(stripe)
@@ -1443,7 +1550,11 @@ describe('SidebarSessionRow stored outcome', () => {
   // [daveey] A Kanban close-out turn the backend woke in a chat this window never opened: no stream state, only
   // the row's `turn_live` stamp. The decision must yield to it (working, no red stripe), and paint red again after.
   it('turn_live decorates activity but does not override a published decision', () => {
-    const decision = canonicalOutcome('stuck', {}, { kind: 'decision', items: [{ id: 'us_1', question: 'Merge PR #12?' }] })
+    const decision = canonicalOutcome(
+      'stuck',
+      {},
+      { kind: 'decision', items: [{ id: 'us_1', question: 'Merge PR #12?' }] }
+    )
 
     const live = renderRow(
       makeSession({
@@ -1493,16 +1604,12 @@ describe('SidebarSessionRow stored outcome', () => {
 
     try {
       const { container } = renderRow(session)
-      expect(container.querySelector('[data-testid="session-row-card-squares"]')?.getAttribute('aria-label')).toBe(
-        'Waiting 1'
-      )
+      expect(container.querySelector('[data-card-colour="grey"]')).toBeNull()
       await act(async () => {
         vi.setSystemTime(1011000)
         $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
       })
-      expect(container.querySelector('[data-testid="session-row-card-squares"]')?.getAttribute('aria-label')).toBe(
-        'Waiting 2'
-      )
+      expect(container.querySelector('[data-card-colour="grey"]')).toBeNull()
     } finally {
       $liveWorkRoster.set({})
       vi.useRealTimers()
@@ -1524,8 +1631,7 @@ describe('SidebarSessionRow stored outcome', () => {
       $unreadFinishedSessionIds.set([])
     })
 
-    const dotOf = (container: HTMLElement) =>
-      container.querySelector('[data-session-status-dot]')
+    const dotOf = (container: HTMLElement) => container.querySelector('[data-session-status-dot]')
 
     it.each([
       [{ kind: 'waiting', on: [{ kind: 'card', id: 't_1', state: 'scheduled' }] }, 'zinc', 'Waiting'],
@@ -1540,7 +1646,17 @@ describe('SidebarSessionRow stored outcome', () => {
           kanban_active: 2,
           kanban_parked: 2,
           message_count: 4,
-          outcome: canonicalOutcome(({ waiting: 'waiting', running: 'waiting', unresolved: 'attention', decision: 'stuck' } as const)[outcome.kind], { kind: outcome.kind }, { ...outcome, items: 'items' in outcome ? [...outcome.items] : undefined, on: 'on' in outcome ? [...outcome.on] : undefined }),
+          outcome: canonicalOutcome(
+            ({ waiting: 'waiting', running: 'waiting', unresolved: 'attention', decision: 'stuck' } as const)[
+              outcome.kind
+            ],
+            { kind: outcome.kind },
+            {
+              ...outcome,
+              items: 'items' in outcome ? [...outcome.items] : undefined,
+              on: 'on' in outcome ? [...outcome.on] : undefined
+            }
+          ),
           title: 'Parked cards'
         } as Partial<SessionInfo> & { title: string })
       )

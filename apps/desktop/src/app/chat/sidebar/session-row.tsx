@@ -58,6 +58,7 @@ import {
 import { shellOwnsPress } from './reorderable-list'
 import { SessionContextMenu } from './session-actions-menu'
 import { flatRowCardMarks, runningCardCount } from './session-row-card-squares'
+import { SessionRowCardTimers } from './session-row-card-timers'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { RowHoverActions } from './session-row-hover-actions'
@@ -281,9 +282,8 @@ function SidebarSessionRowImpl({
   const flatMarks = flatRowCardMarks(session, executionUnknown, gatewayIcon, statusStripe)
 
   if (card) {
-    // The card's meta lines separate by spacing alone, so its header figures
-    // match (non-breaking pair — plain spaces collapse to one); the one-line
-    // row keeps the interpunct between joined figures.
+    // Card meta uses spacing alone (non-breaking: plain spaces collapse);
+    // one-line rows retain interpuncts between figures.
     const sep = '\u00A0\u00A0'
     const head = figures.join(sep)
 
@@ -306,6 +306,7 @@ function SidebarSessionRowImpl({
             </Tip>
             {kanbanCounts}
             {processBadge}
+            <SessionRowCardTimers session={session} />
             {gatewayIcon}
           </span>
         </span>

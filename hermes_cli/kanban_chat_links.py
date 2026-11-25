@@ -665,11 +665,12 @@ def replica_link_rows(conn: sqlite3.Connection, path: Path, gateway: str, profil
 
 def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) -> list[dict[str, Any]]:
     from hermes_cli.kanban_replica_upstream import enrich, optional_select
+    from hermes_cli.kanban_session_activity_timers import select
     rows = [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
         f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
         f"{placement_select(conn, 't', ('ready_since',))}, "
-        f"l.chat_session, l.chat_profile, l.kind {optional_select(conn)} "
+        f"l.chat_session, l.chat_profile, l.kind, {select(conn)} {optional_select(conn)} "
         "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
         "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
         "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
@@ -1000,6 +1001,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "source": "replica",
             }
             out[pair].update(upstream_fields(r))
+            out[pair].update({k: v for k, v in r.items() if k.startswith('timer_')})
             out[pair].update(_ledger_wait(index, owner, owner_profile, board, tid, status,
                                           named=named and not unknown))
             if machine := run_machine(r):

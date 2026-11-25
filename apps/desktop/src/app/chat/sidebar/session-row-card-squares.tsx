@@ -9,6 +9,9 @@ import { cn } from '@/lib/utils'
 import { isWaitKind, ORANGE_OVER, type WaitEta, type WaitReadout, waitReadout } from '@/lib/wait-eta'
 import type { SessionStatusStripe } from '@/store/session-dot-state'
 
+import { SessionRowCardTimers } from './session-row-card-timers'
+import { useWaitClock } from './use-wait-clock'
+
 const COLOURS = {
   red: 'bg-red-500',
   pink: 'bg-pink-500',
@@ -75,7 +78,7 @@ export const runningCardCount = (session: SessionInfo): number =>
   sessionCardColours(session, 0).find(item => item.colour === 'blue')?.count ?? 0
 
 const trailingColours = (session: SessionInfo, executionUnknown: number) =>
-  sessionCardColours(session, executionUnknown).filter(item => item.colour !== 'blue')
+  sessionCardColours(session, executionUnknown).filter(item => item.colour !== 'blue' && item.colour !== 'grey')
 
 export function SessionRowCardSquares({
   session,
@@ -124,7 +127,12 @@ export function flatRowCardMarks(
 ): ReactNode {
   const readouts = statusStripe === 'external' ? sessionWaitEtas(session, Date.now() / 1000) : []
 
-  if (!gatewayIcon && !readouts.length && !trailingColours(session, executionUnknown).length) {
+  if (
+    !gatewayIcon &&
+    !readouts.length &&
+    !trailingColours(session, executionUnknown).length &&
+    !session.kanban_timed_cards?.length
+  ) {
     return null
   }
 
@@ -135,23 +143,10 @@ export function flatRowCardMarks(
       ) : (
         <SessionRowCardSquares executionUnknown={executionUnknown} session={session} />
       )}
+      <SessionRowCardTimers session={session} />
       {gatewayIcon}
     </span>
   )
-}
-
-/** Fast tick while a figure is in seconds, slow otherwise: a row is not worth a repaint per second for minutes. */
-function useWaitClock(fast: boolean): number {
-  const [now, setNow] = useState(() => Date.now() / 1000)
-
-  useEffect(() => {
-    setNow(Date.now() / 1000)
-    const id = window.setInterval(() => setNow(Date.now() / 1000), fast ? 1000 : 10_000)
-
-    return () => window.clearInterval(id)
-  }, [fast])
-
-  return now
 }
 
 /** `<waited> / <expected>  <left>` in aligned tabular columns; the soonest-ending wait leads, the rest are in the title. */
@@ -205,8 +200,6 @@ const byLeft = (a: WaitReadout, b: WaitReadout): number => (a.leftS ?? Infinity)
 /** The ETA of every light-blue wait the row carries (CI / deploy / timer cards that are not down). */
 export function sessionWaitEtas(session: SessionInfo, now: number): WaitEta[] {
   return (session.kanban_external_cards ?? []).flatMap(card =>
-    card.eta && isWaitKind(card.eta.wait_kind) && deriveExternalVisual(card.external, now) !== 'down'
-      ? [card.eta]
-      : []
+    card.eta && isWaitKind(card.eta.wait_kind) && deriveExternalVisual(card.external, now) !== 'down' ? [card.eta] : []
   )
 }

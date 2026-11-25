@@ -67,6 +67,7 @@ def test_serializer_constants_match_sources():
     assert manifest.CAPS == {"kanban_waiting_on": kanban_session_activity.WAITING_ON_CAP,
                              "kanban_blocked_on": kanban_session_activity.WAITING_ON_CAP,
                              "kanban_external_cards": kanban_external_activity.CARDS_CAP,
+                             "kanban_timed_cards": kanban_session_activity._identity.timers.CARDS_CAP,
                              "background_processes": process_session_activity._MAX_ROW_PROCESSES}
     assert hermes_state_health.STORAGE_CORRUPT == "corrupt"
 
@@ -194,6 +195,7 @@ FAMILY_SOURCES = {
                ("hermes_cli/kanban_activity_projection.py", "project_kanban_unknown"),
                ("hermes_cli/kanban_activity_identity.py", "stamp_blocked_owners"),
                ("hermes_cli/kanban_activity_identity.py", "mark_unknown"),
+               ("hermes_cli/kanban_session_activity_timers.py", "stamp"),
                ("hermes_cli/kanban_open_asks.py", "stamp_needs_you"),
                ("hermes_cli/kanban_execution_observations.py", "count_snapshot"),
                ("hermes_cli/kanban_execution_observations.py", "_merge"),
@@ -222,7 +224,7 @@ AUDITED_ROW_CALLS = {
     # its complete writer is included in FAMILY_SOURCES so new keys remain guarded.
     "_external_activity.stamp_replica_counts", "row_ids",
     "identity.mark_unknown", "count_snapshot", "_external_activity.stamp_boards", "identity.row_ids",
-    "identity.stamp_blocked_owners", "_mark_kanban_unknown", "stamp_needs_you", "_merge", "ids_of",
+    "identity.stamp_blocked_owners", "identity.timers.stamp", "_mark_kanban_unknown", "stamp_needs_you", "_merge", "ids_of",
     "stamp_rows", "external_activity.stamp_rows", "_row_ids", "replace", "_row_prs", "enumerate",
     "project_kanban_activity", "project_kanban_unknown", "project_goal_activity", "project_cron_activity",
     "project_background_activity", "project_turn_activity", "project_subagent_activity", "project_review_row"}
