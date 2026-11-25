@@ -56,7 +56,7 @@ def test_authentication_identity_and_ledger_process_refusals(runtime, monkeypatc
     with pytest.raises(PermissionError, match='authenticated_peer_required'):
         control.handle(params, None)
     runtime[2]._pid += 1
-    assert control.handle(params, 'peer') == pc._error('ledger_process_mismatch')
+    assert helpers.capture_result(control.handle(params, 'peer')) == pc._error('ledger_process_mismatch')
     runtime[2]._pid -= 1
     monkeypatch.setattr(pc.os, 'getpid', lambda: control.pid + 1)
     assert control.handle(params, 'peer') == pc._error('process_identity_unavailable')
@@ -76,7 +76,7 @@ def test_thread_start_failure_releases_global_flight(runtime, monkeypatch):
     def fail(thread):
         raise RuntimeError('SECRET_SENTINEL')
     monkeypatch.setattr(pc.threading.Thread, 'start', fail)
-    assert control.handle(params, 'peer') == pc._error('worker_unavailable')
+    assert helpers.capture_result(control.handle(params, 'peer')) == pc._error('worker_unavailable')
     assert not pc._FLIGHT.locked()
     monkeypatch.setattr(pc.threading.Thread, 'start', original)
     assert control.handle(params, 'peer')['complete']
@@ -91,7 +91,7 @@ def test_replaced_ledger_during_capture_cannot_publish(runtime, monkeypatch):
         monkeypatch.setattr(ca, '_installed', None)
         return snapshot
     monkeypatch.setattr(ca, 'diagnostic_snapshot', replace)
-    assert control.handle(params, 'peer') == pc._error('identity_changed')
+    assert helpers.capture_result(control.handle(params, 'peer')) == pc._error('identity_changed')
     assert not control._snapshots
 
 
@@ -159,7 +159,7 @@ def test_completed_after_deadline_is_not_a_reusable_positive(runtime, monkeypatc
 
     # Zero budget is only a deterministic boundary control, not a production override.
     monkeypatch.setattr(pc, 'CAPTURE_SECONDS', 0)
-    assert control.handle(params, 'peer') == pc._error('capture_timeout')
+    assert helpers.capture_result(control.handle(params, 'peer')) == pc._error('capture_timeout')
     # Join the actual worker before restoring mocks or starting a new request.
     for thread in threading.enumerate():
         if thread.name == 'gateway-code-provenance':

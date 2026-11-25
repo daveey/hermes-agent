@@ -175,7 +175,7 @@ def _execution(ledger, builder):
             builder.add('producers', {'kind': 'unknown_producer', 'reason': reason, 'producer': producer})
 
 
-def snapshot(ledger, *, deadline: float) -> DiagnosticSnapshot:
+def snapshot(ledger, *, deadline: float, progress=None) -> DiagnosticSnapshot:
     """One locked view. Inventory is monotone; a filesystem syscall cannot be cancelled.
 
     The caller owns single-flight custody until this function actually returns.
@@ -184,16 +184,26 @@ def snapshot(ledger, *, deadline: float) -> DiagnosticSnapshot:
     begin = time.monotonic()
     if begin >= deadline:
         raise TimeoutError('snapshot_deadline')
+    if progress is not None:
+        progress.set_phase('disk')
     disk = disk_identity(ledger.core_root, deadline)
+    if progress is not None:
+        progress.set_phase('ledger_lock')
     if not ledger._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
         raise TimeoutError('snapshot_lock_timeout')
     try:
+        if progress is not None:
+            progress.set_phase('inventory')
         ledger._inventory_modules(deadline=deadline)
         if time.monotonic() >= deadline:
             raise TimeoutError('snapshot_deadline')
         if getattr(ledger, '_reviewed_plugins', None):
             from hermes_cli.plugin_review_records import verify_registered
+            if progress is not None:
+                progress.set_phase('registry')
             verify_registered(ledger)
+        if progress is not None:
+            progress.set_phase('projection')
         builder = _Builder(deadline)
         for reason in ledger._unknown:
             builder.add('unknowns', reason)
@@ -203,6 +213,11 @@ def snapshot(ledger, *, deadline: float) -> DiagnosticSnapshot:
         builder.add('metadata', {'kind': 'disk', **disk})
         _roots(ledger, builder)
         _execution(ledger, builder)
-        return builder.finish(ledger._generation, begin, disk, boot)
+        if progress is not None:
+            progress.set_phase('finalize')
+        result = builder.finish(ledger._generation, begin, disk, boot)
+        if progress is not None:
+            progress.set_phase('complete')
+        return result
     finally:
         ledger._lock.release()

@@ -65,6 +65,19 @@ def page_params(summary, **over):
             'section': 'unknowns', 'offset': 0, 'limit': 128, **over}
 
 
+def capture_result(result):
+    """Check the additive private scalar schema; preserve exact legacy error assertions."""
+    from hermes_cli.code_provenance_progress import PHASES, MAX_COUNTER_MS
+    d = result['diagnostics']
+    assert set(d) == {'schema', 'phase', 'sampled_elapsed_ms', 'worker_cpu_ms', 'cpu_is_lower_bound'}
+    assert type(d['schema']) is int and d['schema'] == 1
+    assert d['phase'] in PHASES and d['cpu_is_lower_bound'] is True
+    for key in ('sampled_elapsed_ms', 'worker_cpu_ms'):
+        assert type(d[key]) is int and 0 <= d[key] <= MAX_COUNTER_MS
+    assert len(json.dumps(d).encode()) <= 4096
+    return {key: value for key, value in result.items() if key != 'diagnostics'}
+
+
 def test_actual_bootstrap_authenticated_passive_round_trip(runtime):
     async def scenario():
         server, _control, params = await start(runtime)
@@ -161,7 +174,7 @@ def test_unexpected_inventory_failure_is_sanitized_and_recoverable(runtime, monk
             assert len(workers) == 1
             await asyncio.to_thread(workers[0].join, 2)
             assert not workers[0].is_alive()
-            assert reply == {'protocol': 1, 'id': 1, 'ok': True,
+            assert {**reply, 'result': capture_result(reply['result'])} == {'protocol': 1, 'id': 1, 'ok': True,
                              'result': pc._error('capture_failed')}
             assert 'snapshot_id' not in reply['result']
             assert not hooks
@@ -196,7 +209,7 @@ def test_late_unexpected_failure_keeps_flight_until_worker_exit(runtime, monkeyp
             monkeypatch.setattr(runtime[2], '_inventory_modules', blocked)
             pending = asyncio.create_task(ask(runtime, params))
             assert await asyncio.to_thread(entered.wait, 2)
-            assert (await pending)['result'] == pc._error('capture_timeout')
+            assert capture_result((await pending)['result']) == pc._error('capture_timeout')
             assert (await ask(runtime, params))['result'] == pc._error('capture_busy')
             assert (await ask(runtime, page_params(summary)))['result']['complete']
             assert pc._FLIGHT.locked()
@@ -221,7 +234,7 @@ def test_missing_ledger_is_error_and_never_installs(runtime, monkeypatch):
         server, _control, params = await start(runtime)
         try:
             result = (await ask(runtime, params))['result']
-            assert result == pc._error('ledger_unavailable_or_unsupported')
+            assert capture_result(result) == pc._error('ledger_unavailable_or_unsupported')
             assert ca._installed is None
         finally:
             await server.stop()
@@ -317,7 +330,7 @@ def test_blocked_inventory_default_deadline_single_flight_and_responsive_pages(r
             assert identified['result']['pid'] == os.getpid()
             assert identified['result']['instance_id'] == params['expected']['instance_id']
             reply = await pending  # real client default timeout, production 2s capture budget
-            assert reply['result'] == pc._error('capture_timeout')
+            assert capture_result(reply['result']) == pc._error('capture_timeout')
             for _ in range(10):
                 assert (await ask(runtime, params))['result'] == pc._error('capture_busy')
             workers = [t for t in threading.enumerate() if t.name == 'gateway-code-provenance']

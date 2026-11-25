@@ -54,7 +54,7 @@ def test_capture_identity_change_without_ledger_replacement(runtime, monkeypatch
         runtime[1].session_runtime_descriptor['instance_id'] = 'new-instance'
         return result
     monkeypatch.setattr(ca, 'diagnostic_snapshot', changed)
-    assert control.handle(params, 'peer') == pc._error('identity_changed')
+    assert helpers.capture_result(control.handle(params, 'peer')) == pc._error('identity_changed')
     assert not control._snapshots
 
 
@@ -67,8 +67,8 @@ def test_exception_class_and_message_whitelists_are_independent(runtime, monkeyp
     def fail(**kwargs):
         raise exception
     monkeypatch.setattr(ca, 'diagnostic_snapshot', fail)
-    assert control.handle({'schema': 1, 'op': 'capture', 'expected': control.identity(),
-                           'refresh_inventory': True}, 'peer') == pc._error(expected)
+    assert helpers.capture_result(control.handle({'schema': 1, 'op': 'capture', 'expected': control.identity(),
+                           'refresh_inventory': True}, 'peer')) == pc._error(expected)
 
 
 def test_publish_prunes_only_expired_other_peer_snapshots(runtime, monkeypatch):
@@ -112,7 +112,7 @@ def test_wait_false_refuses_even_before_clock_deadline(runtime, monkeypatch):
     monkeypatch.setattr(pc.threading, 'Event', event)
     monkeypatch.setattr(ca, 'diagnostic_snapshot', blocked)
     try:
-        assert control.handle(params, 'peer') == pc._error('capture_timeout')
+        assert helpers.capture_result(control.handle(params, 'peer')) == pc._error('capture_timeout')
         assert pc._FLIGHT.locked()
     finally:
         release.set()

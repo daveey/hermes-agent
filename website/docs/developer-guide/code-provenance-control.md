@@ -42,6 +42,30 @@ are rejected by the existing outer transport error envelope.
 
 ## Sections and provenance
 
+### Private capture progress
+
+Only an admitted capture response adds a detached `diagnostics` object (including
+sanitized incomplete/timeout results). Invalid, foreign-identity and busy requests
+receive no recorder or another flight's telemetry; page responses are unchanged.
+The fixed keys are `schema: 1`, `phase`, `sampled_elapsed_ms`, `worker_cpu_ms`, and
+`cpu_is_lower_bound: true`. Phases are `worker_start`, `disk`, `ledger_lock`,
+`inventory`, `registry` (only for fresh reviewed-plugin verification), `projection`,
+`finalize`, `complete`, and `unavailable`. Complete is sampled only after the final
+snapshot deadline check; even that phase cannot override capture timeout or identity
+refusal. Recorder failures return sanitized incomplete and do not replace old pages.
+
+Elapsed is wall time through the **last worker sample**, not exact timeout elapsed.
+CPU is cumulative worker `thread_time_ns` since its first sample, a lower bound;
+CPU spent inside a still-running phase is unknown, and zero does not mean no work.
+Counters are integers clamped to 0 through 2147483647 milliseconds. At most nine
+fixed transitions are retained in O(1) storage, with no histories, names, paths,
+exceptions, callbacks, polling, files, timers, extra threads or persistent store.
+The encoded object stays below 4096 bytes and consumes no page-envelope headroom.
+Snapshot uses a nonblocking recorder lock; contention returns a fresh fixed
+`unavailable` sample with zero counters. Clock reads precede the lock. Returned
+scalar dictionaries cannot be mutated by late worker writes. This does not add a
+hard physical worker/ledger-lock bound, change trust or relax any existing limit.
+
 - `unknowns`: every raw sticky reason, unfiltered.
 - `quiet_blocking`, `quiet_extension`: partitions derived from that same locked view.
 - `components`: registered canonical roots, one row per reviewed relative SHA256

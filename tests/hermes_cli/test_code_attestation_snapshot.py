@@ -166,7 +166,11 @@ def test_actual_hook_cold_capture_consistent_and_never_authorizes(tmp_path):
         ca._installed = a
         assert 'hermes_cli.code_attestation_snapshot' not in sys.modules
         a.mark_unknown('unsupported-route:diagnostic-control')
-        s = ca.diagnostic_snapshot(deadline=time.monotonic() + 2)
+        from hermes_cli.code_provenance_progress import CaptureProgress
+        progress = CaptureProgress()
+        progress.set_phase('worker_start')
+        s = ca.diagnostic_snapshot(deadline=time.monotonic() + 2, progress=progress)
+        assert progress.snapshot()['phase'] == 'complete'
         raw = [json.loads(r) for r in s.sections['unknowns']]
         after = sorted(a._unknown)
         generation = a._generation

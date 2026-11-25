@@ -13,6 +13,7 @@ import threading
 import time
 
 from hermes_cli.code_attestation_snapshot import SECTIONS
+from hermes_cli.code_provenance_progress import CaptureProgress, unavailable
 
 
 CAPTURE_SECONDS = 2.0
@@ -24,6 +25,14 @@ _FLIGHT = threading.Lock()
 
 def _error(code):
     return {'purpose': 'diagnostic_only', 'complete': False, 'error': code}
+
+
+def _settle(result, progress):
+    try:
+        diagnostics = progress.snapshot()
+    except Exception:  # health: allow BLE001 -- private recorder failures must not expose exception text or publish partial success
+        return {**_error('capture_failed'), 'diagnostics': unavailable()}
+    return {**result, 'diagnostics': diagnostics}
 
 
 def _integer(value, minimum, maximum):
@@ -101,13 +110,19 @@ class CodeProvenanceControl:
             return _error('identity_mismatch')
         if not _FLIGHT.acquire(blocking=False):
             return _error('capture_busy')
+        deadline = time.monotonic() + CAPTURE_SECONDS
+        try:
+            progress = CaptureProgress()
+        except Exception:  # health: allow BLE001 -- sanitized private startup failure; no exception text
+            _FLIGHT.release()
+            return {**_error('capture_failed'), 'diagnostics': unavailable()}
         done, box = threading.Event(), {}
         custody = threading.Lock()
         abandoned = False
-        deadline = time.monotonic() + CAPTURE_SECONDS
 
         def work():
             try:
+                progress.set_phase('worker_start')
                 ledger = ca._installed
                 if not isinstance(ledger, ca.Attestation):
                     box['error'] = 'ledger_unavailable_or_unsupported'
@@ -115,7 +130,7 @@ class CodeProvenanceControl:
                 if ledger._pid != identity['pid']:
                     box['error'] = 'ledger_process_mismatch'
                     return
-                snapshot = ca.diagnostic_snapshot(deadline=deadline)
+                snapshot = ca.diagnostic_snapshot(deadline=deadline, progress=progress)
                 disk = dict(snapshot.disk)
                 box['value'] = (snapshot, disk, ledger)
             except (OSError, RuntimeError, ValueError, TypeError, AttributeError, TimeoutError) as exc:
@@ -137,21 +152,25 @@ class CodeProvenanceControl:
             worker.start()
         except RuntimeError:
             _FLIGHT.release()
-            return _error('worker_unavailable')
+            return _settle(_error('worker_unavailable'), progress)
         completed = done.wait(max(0.0, deadline - time.monotonic()))
         with custody:
             if not completed or time.monotonic() >= deadline:
                 abandoned = True
                 if done.is_set():
                     _FLIGHT.release()
-                return _error('capture_timeout')
+                return _settle(_error('capture_timeout'), progress)
         try:
             if 'error' in box:
-                return _error(box['error'])
+                return _settle(_error(box['error']), progress)
             snapshot, disk, ledger = box['value']
             if self.identity() != identity or ca._installed is not ledger:
-                return _error('identity_changed')
-            return self._publish(peer, identity, snapshot, disk, ledger)
+                return _settle(_error('identity_changed'), progress)
+            # Sample before publication: observer failure cannot replace old pages.
+            result = _settle({}, progress)
+            if 'error' in result:
+                return result
+            return {**self._publish(peer, identity, snapshot, disk, ledger), **result}
         finally:
             _FLIGHT.release()
 

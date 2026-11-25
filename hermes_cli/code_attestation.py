@@ -1671,10 +1671,12 @@ def _check_inventory_deadline(deadline):
         raise TimeoutError('code attestation inventory budget exhausted')
 
 
-def diagnostic_snapshot(*, deadline: float) -> 'DiagnosticSnapshot':
+def diagnostic_snapshot(*, deadline: float, progress=None) -> 'DiagnosticSnapshot':
     """Bounded metadata-only read of the already installed ledger; never authorizes code."""
     from hermes_cli.code_attestation_snapshot import snapshot
-    return snapshot(_ledger(), deadline=deadline)
+    if progress is None:
+        return snapshot(_ledger(), deadline=deadline)
+    return snapshot(_ledger(), deadline=deadline, progress=progress)
 
 
 def integrity_observation(*, deadline=None):
