@@ -10,9 +10,12 @@ both gates; the adapter cancels only on that mark. Adapters with no authorizatio
 registered have no runner verdict to wait for and keep the old unconditional cancel."""
 
 import asyncio
+import gc
+import weakref
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult, TextDebounceState
@@ -24,6 +27,38 @@ from tests.waiting import async_wait_until
 
 OWNER, MEMBER, STRANGER = "@owner:hs", "@member:hs", "@mallory:hs"
 HELD_TEXT = "and add the Q3 numbers"
+
+
+async def _retire_adapter(adapter):
+    # Cancellation can hand a queued follow-up to a fresh drain. Discard fixture-only
+    # queued work first, then join the actual workers while this loop/patches still live.
+    adapter._pending_messages.clear()
+    for state in adapter._text_debounce_store().values():
+        state.cancel_timer()
+    adapter._text_debounce_store().clear()
+    tasks = set(adapter._background_tasks) | set(adapter._session_tasks.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+    assert all(task.done() for task in tasks)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _owned_adapters(monkeypatch):
+    # Keep strong custody until teardown: otherwise a suspended task/adapter cycle can
+    # be GC-closed during a later test's import, running Matrix warning discovery there.
+    adapters = []
+    initialize = BasePlatformAdapter.__init__
+
+    def capture(adapter, *args, **kwargs):
+        initialize(adapter, *args, **kwargs)
+        adapters.append(adapter)
+
+    monkeypatch.setattr(BasePlatformAdapter, "__init__", capture)
+    yield adapters
+    for adapter in adapters:
+        await _retire_adapter(adapter)
 
 
 class _Adapter(BasePlatformAdapter):
@@ -105,6 +140,57 @@ def _assert_turn_untouched(adapter, runner, key, task):
     pending = adapter._pending_messages.get(key)
     texts = [held.event.text if held else "", pending.text if pending else ""]
     assert any(HELD_TEXT in text for text in texts), texts  # the owner's text was not dropped
+
+
+@pytest.mark.asyncio
+async def test_fixture_keeps_a_suspended_owner_out_of_later_garbage_collection(monkeypatch, _owned_adapters):
+    errors = AsyncMock()
+    monkeypatch.setattr(BasePlatformAdapter, "_notify_turn_error", errors)
+
+    async def leave_local_scope():
+        _adapter, runner, _key, task = await _busy_session()
+        return weakref.ref(task), runner
+
+    task, runner = await leave_local_scope()
+    # Custody must be explicit even when the event loop transiently retains the Task.
+    assert len(_owned_adapters) == 1
+    assert task() in _owned_adapters[0]._session_tasks.values()
+    await asyncio.sleep(0)  # release the startup waiter's queued callback references
+    gc.collect()  # the old task/adapter cycle was closed in unrelated later imports
+    assert task() is not None and not task().done()
+    assert not runner.turn_cancelled.is_set()
+    errors.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fixture_retirement_joins_cancellation_before_restoring_patches():
+    adapter, started, entered, release = _Adapter(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def handle(event):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            entered.set()
+            await release.wait()
+
+    adapter.set_message_handler(handle)
+    await adapter.handle_message(_event(OWNER, "write the report"))
+    worker = next(iter(adapter._session_tasks.values()))
+    # Ensure the handler is suspended before retiring it, without a timing sleep.
+    await asyncio.wait_for(started.wait(), 5)
+    retirement = asyncio.create_task(_retire_adapter(adapter))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert not retirement.done() and not worker.done()
+    finally:
+        release.set()
+        try:
+            await asyncio.wait_for(retirement, 5)
+        finally:
+            # The regression must also reap its worker if retirement itself is broken.
+            await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 5)
+    assert worker.done()
 
 
 async def _send_and_settle(adapter, runner, user_id, command):
