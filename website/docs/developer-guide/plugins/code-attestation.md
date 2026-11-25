@@ -62,6 +62,16 @@ site-packages environment, verify installer RECORD custody, then call
 Plugin-controlled search-path additions are not automatically registered. An
 unrooted dependency or unsupported generated code still withholds the capability.
 
+The closed attrs 26.1.0 rule also requires the reviewed `attr/_make.py` digest,
+observed producer/caller code identities and paired compile/exec output custody;
+a producer receipt alone grants nothing. Installer metadata is keyed by both
+site-packages root and distribution, so overlapping same-version generations
+cannot borrow one another's RECORD. Multiple valid claims for one source path
+latch ambiguity regardless of digest agreement or enumeration order. A missing
+or changed original RECORD refuses generated output. Receipt reports retain the
+usual distribution key for a unique generation; overlapping distributions use
+root-qualified keys, preserving each used generation's independent evidence.
+
 `dependency_receipts().unknown_producer_sources` attributes an unsupported
 execution to its producer's previously observed installer-receipted source, when
 that exact live producer code object is known. Each diagnostic contains the
