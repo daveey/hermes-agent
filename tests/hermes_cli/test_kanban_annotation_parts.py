@@ -31,9 +31,12 @@ def world(tmp_path, monkeypatch):
     """One board, one plain input (state.db's stand-in) and a done check with one declared file."""
     board = tmp_path / 'kanban.db'
     conn = helpers._board(board, [('t1', 'running', 's1')])
+    from hermes_state import SessionDB
     plain, declared = tmp_path / 'state.db', tmp_path / 'done-check.json'
-    plain.write_text('0')
+    state = SessionDB(db_path=plain)
+    state.create_session('ordinary', 'cli')
     declared.write_text('0')
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
     monkeypatch.setattr(disk, 'FORCE', True)
     monkeypatch.setattr(ksa, '_origin_scope', lambda: SCOPE)
@@ -46,7 +49,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
     monkeypatch.setattr(host, 'SETTLE_S', ())
     seen = SimpleNamespace(counts=0, links=0, checks=0, flagged=True, conn=conn, board=board, plain=plain,
-                           declared=declared, deadline=None)
+                           declared=declared, deadline=None, state=state)
     recompute = ksa._recompute_all_counts
 
     def counting(*a, **kw):
@@ -70,6 +73,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(host, '_known', {SCOPE: contextvars.copy_context()})
     disk.touch_demand(SCOPE)
     yield seen
+    state.close()
     conn.close()
     ksa._reset_cache_for_tests()
 
@@ -117,8 +121,8 @@ def test_a_write_to_one_source_rereads_only_the_parts_that_read_it(world):
     _refresh()
     assert _reads(world) == before, 'a bookkeeping write reread a part'
 
-    # the plain input (state.db, config): the counts read it; the links cache bounds it by its TTL, not a key
-    world.plain.write_text('moved')
+    # Relevant lineage membership changes still force counts, not links.
+    world.state.create_session('new-lineage', 'cli')
     _refresh()
     assert _reads(world) == (before[0] + 1, before[1], before[2]), 'a plain input forced the links projection'
 
@@ -197,7 +201,7 @@ def _undated(value):
 def test_every_gated_refresh_publishes_what_a_cold_full_read_would(world):
     steps = [
         lambda: None,
-        lambda: world.plain.write_text('one'),
+        lambda: world.state.create_session('one', 'cli'),
         lambda: world.declared.write_text('one'),
         lambda: world.conn.execute("INSERT INTO tasks VALUES ('t2', 'running', 's2')"),
         lambda: setattr(world, 'flagged', False) or world.declared.write_text('two'),
@@ -546,7 +550,7 @@ def test_links_key_is_the_links_cache_fingerprint(world, tmp_path, monkeypatch):
     _refresh()
     links = world.links
     for i in range(5):  # state.db churn: chats writing, sync stamps
-        world.plain.write_text(f'churn {i}')
+        world.state.append_message('ordinary', 'user', f'churn {i}')
         _refresh()
     assert world.links == links, 'plain-input churn re-projected the links'
 

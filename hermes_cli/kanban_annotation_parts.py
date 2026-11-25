@@ -90,15 +90,20 @@ def _signature(scope: tuple[str, ...], paths) -> str:
     return watch.signature(scope, [p for p in paths if p not in plain], plain)
 
 
-def _plain_key(scope: tuple[str, ...]) -> str:
-    """Every watched input of ``scope`` that no content revision covers."""
+def _plain_key(scope: tuple[str, ...]) -> object:
+    """Non-board inputs, with state.db narrowed to canonical continuation edges."""
     from hermes_cli import kanban_annotation_host as host
     from hermes_cli import kanban_session_activity as ksa
 
     dbs, files = host._watch_paths(scope)
     discovery, _dirs = host._discovery_paths()
     keyed = {str(p) for p in ksa._board_db_paths()} | {str(p) for p in ksa._replica_paths()}
-    return _signature(scope, {*dbs, *files, *(str(p) for p in discovery)} - keyed)
+    from hermes_cli import kanban_annotation_lineage as lineage
+    from hermes_constants import get_hermes_home
+
+    state = get_hermes_home() / 'state.db'
+    return (_signature(scope, {*dbs, *files, *(str(p) for p in discovery)} - keyed - {str(state)}),
+            lineage.key(state))
 
 
 def _replica_dir() -> str | None:
