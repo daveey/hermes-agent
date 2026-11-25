@@ -152,6 +152,19 @@ def _state(reader, tid, events):
     return stop or receipt, restricted, reader.partial or unknown or bool(receipt) or tid in reader.malformed
 
 
+def _replica_parent_terminal(reader: Reader, tid: str) -> bool:
+    """Missing-live edge only: borrow lifecycle status, never replica stop/custody history."""
+    from hermes_cli.kanban_shadow_view import _open_card_replica
+    try:
+        with _open_card_replica(reader.conn) as replica:
+            if replica is None:
+                return False
+            row = replica.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()
+            return row is not None and row[0] in ('done', 'archived')
+    except EVIDENCE_ERRORS:
+        return False
+
+
 def _dependencies(reader: Reader, tid: str) -> tuple[list[dict], bool]:
     if 'task_links' not in reader.tables:
         return [], True
@@ -159,6 +172,8 @@ def _dependencies(reader: Reader, tid: str) -> tuple[list[dict], bool]:
     for (pid,) in reader.conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (tid,)):
         parent = reader.task(pid)
         if parent is None:
+            if _replica_parent_terminal(reader, pid):
+                continue
             result.append({'task_id': pid, 'status': None, 'owner': owner(None),
                            'trigger': f'Recover authoritative parent evidence for {pid}'})
             unknown = True
