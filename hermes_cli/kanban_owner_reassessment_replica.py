@@ -14,6 +14,7 @@ import sqlite3
 from hermes_cli import kanban_owner_reassessment_canonical as canonical
 from hermes_cli.kanban_containment_functions import register as register_function
 from hermes_cli.kanban_owner_reassessment import ReassessmentRefused
+from hermes_cli.kanban_sync_hub_transport import BoundedResponseTooLarge
 
 TABLE = "owner_reassessment_canonical_receipts"
 _PERMIT: contextvars.ContextVar[sqlite3.Connection | None] = contextvars.ContextVar("owner_reassessment_cache_write", default=None)
@@ -21,6 +22,10 @@ _PERMIT: contextvars.ContextVar[sqlite3.Connection | None] = contextvars.Context
 
 class ReassessmentConflict(ReassessmentRefused):
     """A different canonical identity arrived for an already-recorded receipt."""
+
+
+class ReassessmentEvidenceOversize(ReassessmentRefused):
+    """The Board's evidence for one park is deterministically over the response cap: unprovable, never authority."""
 
 
 def register(conn: sqlite3.Connection) -> None:
@@ -173,12 +178,16 @@ def certify_page(conn: sqlite3.Connection, hub, board: str, changes) -> None:
 
     A park event merely *claiming* an episode is ordinary history: if the Board attests nothing
     for it, nothing is recorded and nothing is authorized (page still applies). Transport errors
-    abort the page; an attestation that contradicts the feed row or a recorded receipt raises.
+    abort the page, except a deterministically over-cap evidence answer, which raises
+    :class:`ReassessmentEvidenceOversize` so the caller can hold that one card; an attestation that contradicts the feed row or a recorded receipt raises.
     """
     for ch in changes:
         if not _is_candidate(ch):
             continue
-        evidence = hub.row_evidence(board, "task_events", ch.uid, max_response_bytes=canonical.MAX_EVIDENCE_BYTES)
+        try:
+            evidence = hub.row_evidence(board, "task_events", ch.uid, max_response_bytes=canonical.MAX_EVIDENCE_BYTES)
+        except BoundedResponseTooLarge as exc:  # deterministic for this row; other transport errors still abort
+            raise ReassessmentEvidenceOversize(f"Board evidence for park {ch.uid} exceeds the response cap: {exc}") from exc
         if not isinstance(evidence, dict) or "owner_reassessment_v1" not in evidence:
             continue
         try:

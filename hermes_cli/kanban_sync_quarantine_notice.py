@@ -57,8 +57,20 @@ def _write_state(state: dict) -> None:
 
 
 def _body(entry: dict) -> str:
-    from hermes_cli.kanban_sync_quarantine import release_command
+    from hermes_cli.kanban_sync_quarantine import NO_GENERIC_RELEASE, clear_instruction, release_command
     board, receipt = entry["board"], entry["receipt"]
+    if entry["kind"] in NO_GENERIC_RELEASE:
+        return "\n".join([
+            f"Board **{board}**: this host quarantined owner-reassessment receipt `{receipt}` "
+            f"({entry['kind']}: {entry['reason']}). The cards below are held here (no dispatch, pickup or push); "
+            "every other card keeps syncing.",
+            "",
+            f"- Receipt: `{receipt}` (task `{entry['task']}`)",
+            f"- Held tasks: {', '.join(f'`{t}`' for t in entry['held_tasks']) or '-'}",
+            f"- Refusal kind: `{entry['kind']}`",
+            "",
+            f"Do: the owner adjudicates the Board's receipt explicitly. {clear_instruction(entry['kind'], board, receipt)}.",
+        ])
     return "\n".join([
         f"Board **{board}**: this host quarantined containment receipt `{receipt}` because its evidence conflicts "
         f"({entry['kind']}: {entry['reason']}). The cards below are held here (no dispatch, pickup or push) until "
@@ -114,8 +126,8 @@ def _notify(conn, board, runner, hub_cli, host, now) -> list[str]:
     if host == HUB:
         for entry in todo:
             log.error("kanban sync: hub quarantined containment receipt %s on %s (tasks %s, %s); no hub card filed "
-                      "(it would wait on this board's own sync); release with `%s`", entry["receipt"], board,
-                      entry["held_tasks"], entry["kind"], quarantine.release_command(board, entry["receipt"]))
+                      "(it would wait on this board's own sync); %s", entry["receipt"], board,
+                      entry["held_tasks"], entry["kind"], quarantine.clear_instruction(entry["kind"], board, entry["receipt"]))
             filed[key(board, entry, host)] = {"hub": True, "seen_at": now}
         _write_state({**state, "filed": filed})
         return []

@@ -175,12 +175,27 @@ def release_command(board: str, receipt: str) -> str:
     return f"hermes kanban --board {board} sync quarantine --release {receipt} --reason ..."
 
 
+REASSESSMENT_OVERSIZE = "reassessment_evidence_oversize"
+# A generic operator release refuses these (no canonical containment attestation) and stores no receipt.
+NO_GENERIC_RELEASE = ("reassessment_conflict", REASSESSMENT_OVERSIZE)
+
+
+def clear_instruction(kind: str, board: str, receipt: str) -> str:
+    """What clears a hold. Never advertises a release that cannot work for ``kind``."""
+    if kind in NO_GENERIC_RELEASE:
+        return (f"generic `sync quarantine --release` does NOT clear this kind and grants no authority; the card stays "
+                f"held (no dispatch, no park applied) until the owner adjudicates Board receipt {receipt} explicitly")
+    return f"release with `{release_command(board, receipt)}`"
+
+
 def refusal(conn, task: str) -> str | None:
     """Why a held card waits and how it is released (``resume-contained`` cannot: this is not an episode)."""
     mine = holders(conn, task)
     if not mine:
         return None
-    board = conn.execute("SELECT board FROM containment_sync_quarantine WHERE uid=?", (mine[0],)).fetchone()[0]
+    board, kind = conn.execute("SELECT board,kind FROM containment_sync_quarantine WHERE uid=?", (mine[0],)).fetchone()
+    if kind in NO_GENERIC_RELEASE:
+        return f"held by sync quarantine of receipt {', '.join(mine)}; {clear_instruction(kind, board, mine[0])}"
     return (f"held by sync quarantine of receipt {', '.join(mine)}; release with "
             f"`{release_command(board, mine[0])}` once you have ruled on the Board's copy")
 
@@ -243,9 +258,9 @@ def certified_page(conn, hub, board: str, changes) -> list:
     for change in changes:
         try:  # one card's contradicted reassessment receipt holds that card; siblings keep syncing
             reassessment.certify_page(conn, hub, board, [change])
-        except reassessment.ReassessmentConflict as exc:
-            quarantine_change(conn, board, change,
-                              ContainmentConflict(str(exc), kind="reassessment_conflict", uid=change.uid))
+        except (reassessment.ReassessmentConflict, reassessment.ReassessmentEvidenceOversize) as exc:
+            kind = "reassessment_conflict" if isinstance(exc, reassessment.ReassessmentConflict) else REASSESSMENT_OVERSIZE
+            quarantine_change(conn, board, change, ContainmentConflict(str(exc), kind=kind, uid=change.uid))
             continue
         if not protected(change):
             continue
@@ -265,7 +280,7 @@ def quarantine_change(conn, board: str, change, exc, *, at: int | None = None) -
     cached = replica._cached(conn, change.uid)
     if cached:
         held_tasks.add(cached["row"]["task_id"])
-    if exc.kind == "reassessment_conflict":
+    if exc.kind in NO_GENERIC_RELEASE:
         from hermes_cli import kanban_owner_reassessment_replica as reassessment
         if _exists(conn, reassessment.TABLE):
             prior = conn.execute(f"SELECT task_id FROM {reassessment.TABLE} WHERE event_uid=?",
@@ -284,8 +299,8 @@ def quarantine_change(conn, board: str, change, exc, *, at: int | None = None) -
                          [(task, change.uid) for task in held_tasks])
     if inserted:
         log.error("kanban sync: quarantined receipt %s on %s tasks=%s (%s: %s); unrelated rows keep syncing; "
-                  "release with `%s`", change.uid, board, sorted(held_tasks), exc.kind, reason,
-                  release_command(board, change.uid))
+                  "%s", change.uid, board, sorted(held_tasks), exc.kind, reason,
+                  clear_instruction(exc.kind, board, change.uid))
     _mirror(conn)
 
 

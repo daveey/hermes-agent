@@ -7,6 +7,13 @@ class BoundedResponseError(ValueError):
     """A capped evidence response is too large or cannot be decoded safely."""
 
 
+class BoundedResponseTooLarge(BoundedResponseError):
+    """The Board's answer is deterministically over the cap (wire or decoded bytes).
+
+    Unlike a malformed/truncated body this recurs on every retry for the same row.
+    """
+
+
 class BoundedRedirects(urllib.request.HTTPRedirectHandler):
     """Cap urllib's internal redirect-body drain as well as the final response."""
 
@@ -42,7 +49,7 @@ def read_response(resp, max_response_bytes=None) -> bytes:
         raise ValueError("max_response_bytes must be a positive integer")
     raw = resp.read(max_response_bytes + 1)
     if len(raw) > max_response_bytes:
-        raise BoundedResponseError("Board response exceeds wire byte limit")
+        raise BoundedResponseTooLarge("Board response exceeds wire byte limit")
     encoding = (resp.headers.get("Content-Encoding") or "identity").strip().lower()
     if encoding in ("", "identity"):
         return raw
@@ -63,7 +70,7 @@ def read_response(resp, max_response_bytes=None) -> bytes:
     except (OSError, EOFError, zlib.error) as exc:
         raise BoundedResponseError("Invalid compressed Board response") from exc
     if len(decoded) > max_response_bytes:
-        raise BoundedResponseError("Board response exceeds decoded byte limit")
+        raise BoundedResponseTooLarge("Board response exceeds decoded byte limit")
     return decoded
 
 

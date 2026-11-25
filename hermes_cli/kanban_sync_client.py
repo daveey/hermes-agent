@@ -55,7 +55,7 @@ from hermes_cli import kanban_sync_refusal as refusal  # one board's Containment
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
-from hermes_cli.kanban_sync_compat import TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
+from hermes_cli.kanban_sync_compat import REASSESSMENT_REFUSALS, TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
 from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed
 from hermes_cli.kanban_sync_hub_transport import BoundedRedirects, BoundedResponseError, read_response
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
@@ -740,7 +740,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                                  "WHERE op_id = ?", (reason[:500], op_id))
                     out.rejected += 1
                     _log.warning("kanban sync: %s %s %s rejected (%s)", board, row["table_name"], row["row_uid"], reason)
-                    if res.get("reason") == "forbidden_field":
+                    if res.get("reason") in ("forbidden_field", *REASSESSMENT_REFUSALS):
                         from hermes_cli.kanban_sync_compat import VIRTUAL_DROPPED, enqueue_retry, record_rejection
                         sent_op = next(op for op in wire if op["client_op_id"] == op_id)
                         if enqueue_retry(conn, row, sent_op, res) != VIRTUAL_DROPPED:

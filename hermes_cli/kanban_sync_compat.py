@@ -76,6 +76,8 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
     from hermes_cli.kanban_sync_reserved_key import is_replacement
     if is_replacement(conn, row["op_id"]):
         return False  # keep the exact recovery refusal visible; never omit an approved recovery field
+    if result.get("reason") in REASSESSMENT_REFUSALS:
+        return downgrade_reassessment(conn, row, wire, result)
     if result.get("reason") != "forbidden_field" or row["op"] not in ("upsert", "import"):
         return False
     match = re.fullmatch(r"not writable on ([a-z0-9_]+): ([a-z0-9_]+(?:, [a-z0-9_]+)*)", str(result.get("detail") or ""))
@@ -110,9 +112,28 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
 
 
 VIRTUAL_DROPPED = "virtual_dropped"
+# An advertising Board's definitive refusal of the certificate itself (binding/time/transition). The park is
+# still a valid ordinary park without it, so exactly these reasons downgrade to the saved ordinary origin.
+REASSESSMENT_REFUSALS = ("owner_reassessment_binding", "owner_reassessment_time", "owner_reassessment_transition_lost")
 _REASSESSMENT = ("owner_reassessment_v1", "owner_reassessment_fallback_status_origin")
 # Real columns a new Board fences on custody/manifest cards (workspace_source v1, R4c): refused one per detail.
 FENCED_FIELDS: dict[str, frozenset[str]] = {"tasks": frozenset({"workspace_kind", "branch_name"})}
+
+
+def downgrade_reassessment(conn: sqlite3.Connection, row: dict, wire: dict, result: dict) -> bool | str:
+    """Resend an opt-in park without its certificate after the Board definitively refused only that certificate.
+
+    Only a known refusal of an op that actually carried the certificate and has its saved ordinary origin
+    qualifies; anything else (unknown reasons, lost answers, other tables) is left untouched.
+    """
+    if (result.get("status") != "rejected" or result.get("reason") not in REASSESSMENT_REFUSALS
+            or row["table_name"] != "tasks" or row["op"] != "upsert"
+            or "owner_reassessment_v1" not in wire.get("fields", {})):
+        return False
+    stored = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"] or "{}")
+    if not isinstance(stored.get("owner_reassessment_fallback_status_origin"), str):
+        return False  # no saved ordinary origin: never invent one
+    return _drop_virtual(conn, row, wire, ["owner_reassessment_v1"])
 
 
 def _drop_virtual(conn: sqlite3.Connection, row: dict, wire: dict, dropped: list[str]) -> str:
