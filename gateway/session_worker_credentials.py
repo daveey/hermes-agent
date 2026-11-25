@@ -87,9 +87,25 @@ def route_environment(authority, policy, config):
             if isinstance(route, dict):
                 routes.append({**main, **route} if not route.get('provider') and not route.get('base_url') else route)
                 routes.extend(route.get('fallback_chain') or [])
+    from agent.model_routing import eligible_routes, is_class_selector, validate_policy
+    from hermes_cli.config import is_provider_enabled
     names = set()
     for route in routes:
-        if isinstance(route, dict):
+        if not isinstance(route, dict):
+            continue
+        model = route.get('model') or route.get('default')
+        if is_class_selector(model):
+            # A class is not provider auto-detection. The adopted worker resolves
+            # it later, with its session identity; give it only this class's
+            # policy-authorized providers, never every registry/profile secret.
+            routing = config.get('model_routing', {})
+            validate_policy(routing)
+            if routing.get('enabled') and route.get('provider', 'auto') in (None, '', 'auto'):
+                for candidate in eligible_routes(routing, model.removeprefix('class:')):
+                    block = config.get('providers', {}).get(candidate['provider'], {})
+                    if is_provider_enabled(block):
+                        names.update(_route_names(candidate, config, values))
+        else:
             names.update(_route_names(route, config, values))
     return {name: values[name] for name in names if values.get(name) is not None}
 
