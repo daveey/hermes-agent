@@ -273,11 +273,12 @@ def test_preview_dispatch_writes_nothing(board, monkeypatch):
 def test_calls_have_no_shared_diagnostics(board, monkeypatch, concurrent):
     from concurrent.futures import ThreadPoolExecutor
     from types import SimpleNamespace
+    monkeypatch.setattr('hermes_cli.kanban_refusal_fallback.refused_providers', lambda *a: [])  # isolated collector unit
     routes(monkeypatch)
     monkeypatch.setattr(review, "_override", lambda *a: None)
     monkeypatch.setattr(review, "independent_routes", lambda pin, cfg, assignee, **kw: iter([(assignee, "anthropic")]))
     def resolve(name):
-        task = SimpleNamespace(assignee=name, model_override=None)
+        task = SimpleNamespace(id=name, assignee=name, model_override=None)
         collector = {}
         result = review.resolve_review_model(None, task, {}, collector=collector)
         assert not hasattr(task, "collector")

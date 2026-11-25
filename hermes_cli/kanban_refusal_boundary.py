@@ -42,8 +42,8 @@ def require_route(conn, task, model, provider, *, lane='ready', check_peers=True
 def require_policy(policy, *, model=_UNSET, provider=_UNSET, request=False):
     """Fresh board read at real owner exec and worker construction, including saved policies.
 
-    ``request=True`` (outbound request): an ended claim (the run's own terminal board tool) is no longer
-    live, so only the provider fence applies; a live claim gets the full route check."""
+    ``request=True`` (outbound request): the same ended run with no successor claimant may finish its
+    reply on an unrefused provider; a live claim also requires a concrete route, not peer availability."""
     if policy is None or not getattr(policy, 'kanban_json', None):
         return
     from hermes_cli import kanban_db as kb
@@ -61,7 +61,7 @@ def require_policy(policy, *, model=_UNSET, provider=_UNSET, request=False):
             if (task is None or task.status != 'running' or task.current_run_id != context['run_id']
                     or task.claim_lock != context['claim_lock'] or run is None
                     or tuple(run) != ('running', context['claim_lock'], None)):
-                # Closing reply: only the SAME run, ended by its own terminal tool, with no other claimant,
+                # Closing reply: only the SAME ended run (including reclaim), with no other claimant,
                 # on an unrefused concrete route. Never reopens tools/work or authorizes another claim.
                 if (request and task is not None and run is not None
                         and run['claim_lock'] == context['claim_lock'] and run['ended_at'] is not None

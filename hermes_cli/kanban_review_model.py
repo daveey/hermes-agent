@@ -453,6 +453,8 @@ def resolve_review_model(conn, task, cfg, *, collector=None):
     import time
     from hermes_cli import kanban_provider_walls as pw
     # Separate execution is enforced by verdict custody, not model identity.
+    from hermes_cli.kanban_refusal_fallback import refused_providers
+    safety_refused = set(refused_providers(conn, task.id))
     override = _override(conn, task)
     # A card's explicit paid class survives review only when no newer handoff
     # supersedes it. Ordinary review candidates must never select carbon.
@@ -479,6 +481,9 @@ def resolve_review_model(conn, task, cfg, *, collector=None):
 
     def _unavailable(model, provider, level="deep"):
         norm = pw._norm(provider)
+        if norm in safety_refused:
+            _candidate(collector, level, model, norm, now, (), ["safety_refused"])
+            return True  # A cooldown/deadline cannot restore a refused provider's authority.
         if not norm or norm == "auto":
             _candidate(collector, level, model, norm, now, (), ["provider_unresolved"])
             return True
@@ -515,7 +520,7 @@ def resolve_review_model(conn, task, cfg, *, collector=None):
     candidates = independent_routes(set(), cfg, assignee)
     independent_candidate = False
     for model, provider in candidates:
-        independent_candidate = True
+        independent_candidate |= pw._norm(provider) not in safety_refused
         if _unavailable(model, provider):
             continue
         if override and registry_refusal(model, provider, assignee):
@@ -526,7 +531,7 @@ def resolve_review_model(conn, task, cfg, *, collector=None):
         return model, provider, reason
     # Refused overrides retain their existing registered-deep-only recovery contract.
     for model, provider in (() if refusal else independent_routes(set(), cfg, assignee, level="standard")):
-        independent_candidate = True
+        independent_candidate |= pw._norm(provider) not in safety_refused
         if _unavailable(model, provider, "standard"):
             continue
         if override and registry_refusal(model, provider, assignee):
@@ -537,7 +542,7 @@ def resolve_review_model(conn, task, cfg, *, collector=None):
     detail = f"No eligible {levels} review route"
     if refusal and override:
         detail = f"review_model {override[0]!r} is refused here ({refusal.code}); {detail}"
-    if not independent_candidate and not override and not _downstream(task):
+    if not independent_candidate and not override and not _downstream(task) and not safety_refused:
         # Keep the normal profile/class tier route when no concrete review policy
         # is configured. Missing attribution must not disable legacy allocation.
         from hermes_cli.kanban_model_assignment import _assignee_config

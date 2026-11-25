@@ -29,6 +29,7 @@ def test_carbon_cannot_be_configured_as_implicit_tier(monkeypatch, case):
 @pytest.mark.parametrize("lane", ["ready", "review"])
 def test_explicit_card_carbon_survives_tiering(monkeypatch, lane):
     from hermes_cli import kanban_review_model as review
+    monkeypatch.setattr('hermes_cli.kanban_refusal_fallback.refused_providers', lambda *a: [])  # no DB in this unit
     monkeypatch.setattr(review, "_override", lambda *a: None)
     assert tier.resolve_model_tier(None, task("class:carbon"), lane=lane, cfg={}) == (
         "class:carbon", "auto", "class")
@@ -53,6 +54,7 @@ def test_automatic_review_and_ratio_and_peer_candidates_exclude_carbon(monkeypat
 
 def test_explicit_review_handoff_carbon_is_honored_without_deep_fallback(monkeypatch):
     from hermes_cli import kanban_model_assignment as assignment
+    monkeypatch.setattr('hermes_cli.kanban_refusal_fallback.refused_providers', lambda *a: [])  # no DB in this unit
     from hermes_cli import kanban_review_model as review
     monkeypatch.setattr(assignment, "_assignee_config", lambda *a: carbon_config())
     monkeypatch.setattr(review, "_override", lambda *a: ("class:carbon", "auto"))
