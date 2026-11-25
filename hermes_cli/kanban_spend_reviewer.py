@@ -25,8 +25,9 @@ sat for up to 40 h. The reviewer decides at once, outside the worker queue:
   ``kanban_spend_promote.MAX_RUNS``); the judge quoted at least ``QUOTE_MIN`` characters verbatim from that
   window's run summaries or non-system comments as progress; and, again under the write lock, the stop is still
   the card's current, ordinary, pending, undisposed stop, still in triage, with no human comment or budget
-  decision since and no open parent. A promotion followed by triage with zero new runs cannot earn another
-  grant: the owner must reconcile it. The grant is the decision card's promotion (``kanban_spend_promote.apply``):
+  decision since and no open parent. Any promotion (including a plain manual promotion without a budget
+  grant) followed by triage with zero new runs requires the owner to reconcile it; the reviewer must not grant.
+  The grant is the decision card's promotion (``kanban_spend_promote.apply``):
   status ready, a ``spend_budget_set`` of exactly N runs, a ``promoted_manual`` that opens a fresh window,
   and a comment. An open decision card for the same stop is archived as decided.
 * **Escalate** otherwise (``spend_review_escalated`` plus a comment with the reason): the stop is routed the
