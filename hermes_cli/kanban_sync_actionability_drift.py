@@ -89,6 +89,10 @@ def audited_rejection(live, shadow, op):
         frozen = wire['payload']['facts']
         if not _valid_facts(frozen):
             return False
+        for conn in (live, shadow):
+            if conn.execute('SELECT 1 FROM task_events WHERE uid=? AND task_id=?',
+                            (frozen['source_uids'][0]['uid'], wire['task'])).fetchone() is None:
+                return False  # A missing original is not proof of a newer source.
         comparable = {**frozen, 'source_uids': [{'uid': s['uid']} for s in frozen['source_uids']]}
         current, replica = _source(live, wire['task']), _source(shadow, wire['task'])
         return _valid_facts(current, portable_only=True) and current == replica and current != comparable

@@ -165,6 +165,21 @@ def test_malformed_frozen_facts_with_matching_digest_stay_dirty(stores, key, val
     assert not drift.audited_rejection(live, shadow, op)
 
 
+@pytest.mark.parametrize('facts', [None, [], {'extra': 1}], ids=['null', 'list', 'incomplete'])
+def test_invalid_facts_container_stays_dirty(stores, facts):
+    live, shadow, op = stores
+    _refreeze(live, op, facts)
+    assert not drift.audited_rejection(live, shadow, op)
+
+
+def test_extra_frozen_fact_is_not_understood(stores):
+    live, shadow, op = stores
+    facts = json.loads(op['fields'])['payload']['facts']
+    facts['unknown'] = 'value'
+    _refreeze(live, op, facts)
+    assert not drift.audited_rejection(live, shadow, op)
+
+
 def test_version_only_difference_cannot_prove_supersession(stores):
     live, shadow, op = stores
     facts = json.loads(op['fields'])['payload']['facts']
@@ -172,6 +187,42 @@ def test_version_only_difference_cannot_prove_supersession(stores):
     facts['source_uids'][0]['version'] = 2
     _refreeze(live, op, facts)
     assert not drift.audited_rejection(live, shadow, op)
+
+
+@pytest.mark.parametrize('sql', [
+    "UPDATE tasks SET deleted_at=1 WHERE id='t_card'",
+    "UPDATE task_events SET deleted_at=1 WHERE uid='source'",
+    "UPDATE tasks SET current_run_id=9 WHERE id='t_card'",
+])
+def test_agreeing_invalid_current_sources_stay_dirty(stores, sql):
+    live, shadow, op = stores
+    for conn in (live, shadow):
+        conn.execute(sql)
+    assert not drift.audited_rejection(live, shadow, op)
+
+
+@pytest.mark.parametrize('copies', ['both', 'live', 'shadow'])
+def test_missing_frozen_event_with_other_source_is_not_supersession(stores, copies):
+    live, shadow, op = stores
+    for name, conn in [('live', live), ('shadow', shadow)]:
+        conn.execute("INSERT INTO task_events VALUES (2,'new-source','t_card','linked',124,'{}',NULL)")
+        if copies in ('both', name):
+            conn.execute("DELETE FROM task_events WHERE uid='source'")
+    assert not drift.audited_rejection(live, shadow, op)
+
+
+@pytest.mark.parametrize('frozen_status', ['running', 'ready', 'scheduled', 'done'])
+@pytest.mark.parametrize('current_status', ['running', 'ready', 'scheduled', 'done'])
+@pytest.mark.parametrize('copies', ['both', 'live', 'shadow'])
+def test_dependency_status_product_requires_changed_agreeing_copies(stores, frozen_status, current_status, copies):
+    live, shadow, op = stores
+    facts = json.loads(op['fields'])['payload']['facts']
+    facts['dependencies'][0]['status'] = frozen_status
+    _refreeze(live, op, facts)
+    for name, conn in [('live', live), ('shadow', shadow)]:
+        status = current_status if copies in ('both', name) else frozen_status
+        conn.execute("UPDATE tasks SET status=? WHERE id='t_parent'", (status,))
+    assert drift.audited_rejection(live, shadow, op) == (copies == 'both' and current_status != frozen_status)
 
 
 @pytest.mark.parametrize('change', ['run', 'source', 'episode', 'parent_set', 'held_parent'])
