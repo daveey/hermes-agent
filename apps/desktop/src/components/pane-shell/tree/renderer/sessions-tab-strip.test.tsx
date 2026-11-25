@@ -60,6 +60,7 @@ it('mounts ordered contributions after the tabs of only the Sessions zone strip'
   expect(slot.closest('[role="tablist"]')).toBeNull()
   expect(strip.querySelector('[role="tablist"]')?.textContent).toContain('bots')
   expect(slot.className).toContain('max-w-[65%]')
+  expect(slot.className).not.toMatch(/justify-end|flex-end/)
 })
 
 it('keeps clicks in the slot from starting a pane drag', () => {

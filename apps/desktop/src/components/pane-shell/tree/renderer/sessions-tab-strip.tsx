@@ -15,7 +15,7 @@ export function SessionsTabStripSlot({ panes }: { panes: readonly string[] }) {
 
   return (
     <div
-      className="flex min-w-0 max-w-[65%] shrink items-center justify-end overflow-x-auto overflow-y-hidden [-webkit-app-region:no-drag] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className="flex min-w-0 max-w-[65%] shrink items-center overflow-x-auto overflow-y-hidden [-webkit-app-region:no-drag] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       data-sessions-tab-strip=""
       onPointerDown={event => event.stopPropagation()}
     >
