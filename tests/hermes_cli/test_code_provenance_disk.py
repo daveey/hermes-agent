@@ -84,3 +84,25 @@ def test_metadata_read_checks_size_and_post_syscall_deadline(tmp_path, monkeypat
     monkeypatch.setattr(disk.time, 'monotonic', lambda: next(ticks))
     with pytest.raises(TimeoutError, match='disk_identity_deadline'):
         disk._read(path, 5)
+
+
+@pytest.mark.parametrize('mode', ['line', 'total', 'parts'])
+def test_packed_ref_guards_without_generic_error_mask(tmp_path, monkeypatch, mode):
+    git = tmp_path / '.git'
+    git.mkdir()
+    (git / 'HEAD').write_text('ref: refs/heads/topic')
+    packed = git / 'packed-refs'
+    valid = 'a' * 40 + ' refs/heads/topic\n'
+    if mode == 'line':
+        # Oversize line still has a valid matching ref; bypass cannot hide in SHA validation.
+        packed.write_text('x' * (disk.MAX_METADATA + 1) + ' refs/heads/topic\n')
+        with pytest.raises(ValueError, match='git_metadata_too_large'):
+            disk._head(tmp_path, time.monotonic() + 2)
+    elif mode == 'total':
+        packed.write_text('# comment\n' * 20 + valid)
+        monkeypatch.setattr(disk, 'MAX_PACKED_REFS', 150)
+        with pytest.raises(ValueError, match='git_metadata_too_large'):
+            disk._head(tmp_path, time.monotonic() + 2)
+    else:
+        packed.write_text('#comment\n' + valid)
+        assert disk._head(tmp_path, time.monotonic() + 2) == 'a' * 40

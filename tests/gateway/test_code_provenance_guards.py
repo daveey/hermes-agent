@@ -14,6 +14,17 @@ ledger = snapshot_helpers.ledger
 pytestmark = pytest.mark.platforms('linux', 'macos')
 
 
+def test_expected_rejects_mapping_lookalike_without_adjacent_mask():
+    from collections import UserDict
+    value = UserDict(pid=1, start_time=2, instance_id='instance')
+    assert pc._expected(value) is False
+
+
+def test_unknown_operation_classification():
+    with pytest.raises(ValueError, match='invalid_operation'):
+        pc._validate({'schema': 1, 'op': 'unsupported'})
+
+
 @pytest.mark.parametrize('value', [None, [], 1, {'op': 'capture'}, {'schema': None}, {'schema': '1'}])
 def test_invalid_schema_is_classified(value):
     with pytest.raises(ValueError, match='invalid_schema'):

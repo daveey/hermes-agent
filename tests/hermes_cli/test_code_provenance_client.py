@@ -40,17 +40,40 @@ def test_client_refuses_altered_pages(stream, monkeypatch, field, value):
     original = stream[0]
     def corrupt(home, params):
         result = original(home, params)
-        if params['op'] == 'page' and params['section'] == 'unknowns':
+        if params['op'] == 'page' and params['section'] == 'unknowns' and params['offset'] == 0:
             result[field] = value
         return result
     monkeypatch.setattr(client, 'query', corrupt)
-    with pytest.raises(ValueError):
+    error = 'cursor_invalid' if field == 'next' or (field == 'entries' and value == []) else None
+    with pytest.raises(ValueError, match=error):
+        client.collect(Path('/unused'), {})
+
+
+def test_client_rejects_empty_nonterminal_cursor_without_digest_mask(stream, monkeypatch):
+    original = stream[0]
+    calls = 0
+    def corrupt(home, params):
+        nonlocal calls
+        result = original(home, params)
+        if params['op'] == 'page' and params['section'] == 'metadata':
+            calls += 1
+            if calls == 1:
+                result['next'] = 0
+        return result
+    monkeypatch.setattr(client, 'query', corrupt)
+    with pytest.raises(ValueError, match='cursor_invalid'):
         client.collect(Path('/unused'), {})
 
 
 @pytest.mark.parametrize('field,value', [('complete', False), ('purpose', 'authorization'), ('raw', {})])
-def test_client_refuses_bad_capture(stream, field, value):
-    stream[2][field] = value
+def test_client_refuses_bad_capture(stream, monkeypatch, field, value):
+    original = stream[0]
+    def corrupt(home, params):
+        reply = original(home, params)
+        if params['op'] == 'capture':
+            reply[field] = value
+        return reply
+    monkeypatch.setattr(client, 'query', corrupt)
     with pytest.raises(ValueError):
         client.collect(Path('/unused'), {})
 
@@ -99,3 +122,58 @@ def test_query_bounds_actual_reads_and_deadline(monkeypatch, mode):
     else:
         with pytest.raises(TimeoutError if mode == 'deadline' else ValueError):
             client.query(Path('/unused'), {})
+
+
+def test_windows_query_uses_authenticated_transport(monkeypatch):
+    from gateway import runtime_bootstrap_windows
+    monkeypatch.setattr(client, 'os', type('OS', (), {'name': 'nt'}))
+    calls = []
+    def query(home, request, timeout):
+        calls.append((home, json.loads(request), timeout))
+        return b'{"ok":true,"result":{"complete":true}}'
+    monkeypatch.setattr(runtime_bootstrap_windows, 'query_runtime_control', query)
+    assert client.query(Path('/unused'), {}, timeout=3) == {'complete': True}
+    assert calls == [(Path('/unused'), {'protocol': 1, 'id': 1, 'verb': 'code-provenance', 'params': {}}, 3)]
+
+
+@pytest.mark.parametrize('ok', [True, False])
+def test_main_identify_guard_and_expected_identity(monkeypatch, capsys, ok):
+    import sys
+    from hermes_cli import gateway_client
+    monkeypatch.setattr(sys, 'argv', ['provenance-client', '/unused'])
+    identity = {'pid': 1, 'start_time': 2, 'instance_id': 'instance'}
+    monkeypatch.setattr(gateway_client, 'private_control_query', lambda *args: json.dumps({'ok': ok, 'result': identity}))
+    def collect(home, expected):
+        assert home == Path('/unused') and expected == identity
+        return {'verified': True}
+    monkeypatch.setattr(client, 'collect', collect)
+    if ok:
+        client.main()
+        assert json.loads(capsys.readouterr().out) == {'verified': True}
+    else:
+        with pytest.raises(ValueError, match='identify_refused'):
+            client.main()
+
+
+def test_module_entrypoint_executes_client(monkeypatch, capsys, stream):
+    import runpy
+    import sys
+    from hermes_cli import gateway_client, gateway_runtime_discovery
+    monkeypatch.setattr(sys, 'argv', ['provenance-client', '/unused'])
+    identity = {'pid': 1, 'start_time': 2, 'instance_id': 'instance'}
+    monkeypatch.setattr(gateway_client, 'private_control_query', lambda *args: json.dumps({'ok': True, 'result': identity}))
+    class Peer:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def sendall(self, request):
+            params = json.loads(request)['params']
+            self.reply = json.dumps({'ok': True, 'result': stream[0](Path('/unused'), params)}).encode() + b'\n'
+        def settimeout(self, timeout):
+            pass
+        def recv(self, amount):
+            return self.reply
+    monkeypatch.setattr(gateway_runtime_discovery, 'connect_private', lambda *args: Peer())
+    runpy.run_path(client.__file__, run_name='__main__')
+    assert json.loads(capsys.readouterr().out)['sections'] == stream[1]
