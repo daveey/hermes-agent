@@ -484,6 +484,7 @@ class CreateTaskBody(BaseModel):
     pin_mandatory: Optional[Any] = Field(default=None, exclude=True)
     model_pin_mandatory: Optional[Any] = Field(default=None, exclude=True)
     require_model: Optional[Any] = Field(default=None, exclude=True)
+    metadata: Optional[Any] = Field(default=None, exclude=True)  # validated for nested flags, never stored
 
 
 @router.post("/tasks")
