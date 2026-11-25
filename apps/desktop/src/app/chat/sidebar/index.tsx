@@ -1257,7 +1257,7 @@ export function ChatSidebar({
 
   const showSessionSections = hasSessionArea({
     cronJobs: showsAdvancedChrome ? cronJobs.length : 0,
-    loading: showSessionSkeletons || Boolean(sessionsLoadError) || filtersActive,
+    loading: showSessionSkeletons || Boolean(sessionsLoadError) || filtersActive || Boolean(trimmedQuery),
     messaging: messagingGroups.length,
     profileGroups: profileGroups?.length ?? 0,
     projects: projectModel.length,

@@ -305,6 +305,9 @@ describe('ChatSidebar search disclosure', () => {
     const input = await reveal()
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
     expect(search()).toBe(input)
+    fireEvent.change(input, { target: { value: 'missing title' } })
+    expect(screen.getByText('Results')).toBeTruthy()
+    expect(screen.queryByText('No sessions yet')).toBeNull()
   })
 
   it('leaves no nav row or bottom padding when the saved nav is collapsed', () => {
