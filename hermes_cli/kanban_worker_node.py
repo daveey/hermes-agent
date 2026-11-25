@@ -338,6 +338,11 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     # t_01a1d4f144e2f2a0).
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone():
         keep += " AND NOT EXISTS (SELECT 1 FROM origin_creation_intents i WHERE i.task_id = tasks.id)"
+    # A bound dir/worktree is host-local source custody, not a disposable wire
+    # projection. Re-import omits workspace_path (LOCAL_COLUMNS), so eviction
+    # would silently erase that binding and every other local column. Keep the
+    # row even when the directory is currently absent; existence is not custody.
+    keep += " AND NOT (workspace_kind IN ('dir', 'worktree') AND workspace_path IS NOT NULL)"
     rows = conn.execute(
         "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ? AND claim_lock IS NULL "
         "AND status != 'running'" + keep, (own,)).fetchall()

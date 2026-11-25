@@ -69,6 +69,8 @@ def _resolve(conn: sqlite3.Connection, claimed: Any, snapshot: Any, launch: Any,
                      and source.source_kind == "scratch_external"
                      else Path(source.path))
         return workspace, source.branch, source
+    from hermes_cli.kanban_missing_workspace import check as check_missing_workspace
+    check_missing_workspace(conn, claimed)
     if claimed.workspace_kind == "worktree":
         workspace, branch = kbw.resolve_worktree_for_dispatch(conn, claimed, board=board)
         return workspace, branch, None
