@@ -20,9 +20,16 @@ def capture(conn: sqlite3.Connection, kind: str) -> dict[str, list[float]]:
     probes = ' UNION ALL '.join(
         'SELECT MIN(n.id) AS next_id FROM task_events n '
         'WHERE n.kind=? AND n.task_id=p.task_id AND n.id>p.id' for _ in END_EVENTS)
+    # Explicit opt-in keeps this partial index unavailable to existing readers
+    # whose unspecified traversal order must not change after installation.
+    indexed = conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='index' AND name='idx_events_park_history'"
+    ).fetchone() is not None
+    source = 'task_events INDEXED BY idx_events_park_history' if indexed else 'task_events'
+    opt_in = " AND typeof(kind)='text'" if indexed else ''
     sql = (
-        "WITH parks AS MATERIALIZED (SELECT id,task_id,payload,created_at FROM task_events "
-        "WHERE kind IN ('scheduled','continued') AND json_extract(payload,'$.awaiting.kind')=? "
+        f"WITH parks AS MATERIALIZED (SELECT id,task_id,payload,created_at FROM {source} "
+        "WHERE kind IN ('scheduled','continued')" + opt_in + " AND json_extract(payload,'$.awaiting.kind')=? "
         "ORDER BY id DESC LIMIT ?), ended AS ("
         f"SELECT p.*, (SELECT MIN(next_id) FROM ({probes})) AS end_id FROM parks p) "
         "SELECT json_group_array(json_array(CASE WHEN typeof(payload)='blob' THEN hex(payload) ELSE payload END,created_at,"
