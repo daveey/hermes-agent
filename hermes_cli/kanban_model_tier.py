@@ -277,6 +277,28 @@ def effective_route(task: Any) -> tuple[Optional[str], Optional[str], str]:
     return model, provider, "profile_default" if model else "unknown"
 
 
+def _stored_selector(conn: sqlite3.Connection, task: Any) -> tuple[str, str]:
+    """``(model_override, provider_override)`` on the card row; the claimed ``Task`` carries the per-run route."""
+    row = conn.execute("SELECT model_override, provider_override FROM tasks WHERE id=?", (task.id,)).fetchone()
+    if row is None:
+        raise LookupError(task.id)  # no row to compare with: the caller keeps the in-memory label
+    return _str(row[0]), _str(row[1])
+
+
+def _stored_source(stored: tuple[str, str], source: str) -> str:
+    """Receipt ``source`` for a concrete per-run route: a pin only when the card row itself stores that selector.
+
+    ``apply_model_tier`` allocates on the claimed ``Task``, so an unpinned card's concrete route used to read as
+    ``pin`` (hub review of PR #4407, 2026-11-25: row NULL, ``tier_reason: review_unpinned``, ``source: pin``)."""
+    from agent.model_routing import is_class_selector
+    model, provider = stored
+    if not model:
+        return "dynamic" + source[len("pin"):]
+    if is_class_selector(model) or provider.lower() == "auto":
+        return "class"
+    return source
+
+
 def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: str) -> None:
     """Admission receipt (``run_route`` event on this run) for every spawn, tier on or off. [daveey]
 
@@ -291,6 +313,12 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
         logger.debug("kanban model tier: route resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
                      exc_info=True)
         model, provider, source = None, None, "unknown"
+    if source in ("pin", "pin_provider_unknown"):
+        try:
+            source = _stored_source(_stored_selector(conn, task), source)
+        except Exception as exc:  # the receipt still gets written, with the in-memory label
+            logger.debug("kanban model tier: stored selector read failed for %s (%s)", getattr(task, "id", "?"), exc,
+                         exc_info=True)
     payload = {"model": model, "provider": provider, "lane": lane, "source": source, "tier_reason": reason}
     if picked := _ratio_receipt(conn, task, reason):
         payload["ratio"] = picked
