@@ -907,6 +907,12 @@ def _ensure_activity_revision(conn: sqlite3.Connection, resolved: str) -> None:
     except sqlite3.Error as exc:
         _kb._log.warning("kanban notify revision not installed on %s (%s); notification reads stay literal",
                          resolved, exc)
+    from hermes_cli import kanban_annotation_revision as annotation_rev
+    try:
+        annotation_rev.ensure_revisions(conn)
+    except sqlite3.Error as exc:
+        _kb._log.warning("kanban annotation part revisions not installed on %s (%s); holder reads stay fresh",
+                         resolved, exc)
 
 
 def _db_file_identity(path: Path) -> Optional[tuple[int, int]]:

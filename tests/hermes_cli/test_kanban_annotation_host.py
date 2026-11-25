@@ -60,6 +60,8 @@ def _board(path: Path, rows) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, session_id TEXT)")
     revision.ensure_revision(conn, revision.LOCAL_TABLES)
+    from hermes_cli import kanban_annotation_revision
+    kanban_annotation_revision.ensure_revisions(conn)
     conn.executemany("INSERT INTO tasks VALUES (?, ?, ?)", rows)
     return conn
 

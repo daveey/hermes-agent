@@ -31,6 +31,7 @@ def world(tmp_path, monkeypatch):
     """One board, one plain input (state.db's stand-in) and a done check with one declared file."""
     board = tmp_path / 'kanban.db'
     conn = helpers._board(board, [('t1', 'running', 's1')])
+    conn.execute('PRAGMA journal_mode=WAL')
     from hermes_state import SessionDB
     plain, declared = tmp_path / 'state.db', tmp_path / 'done-check.json'
     state = SessionDB(db_path=plain)
@@ -44,6 +45,8 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(ksa, '_hub_db_path', lambda: None)
     monkeypatch.setattr(ksa, '_replica_paths', list)
     monkeypatch.setattr(ksa, '_waiting_sources', {})
+    from hermes_cli import kanban_annotation_done_inputs as done_inputs
+    monkeypatch.setattr(done_inputs, '_declared', {})
     monkeypatch.setattr(host, 'core_sha', lambda: 'a' * 40)
     monkeypatch.setattr(host, '_watch_paths', lambda scope: ([str(board), str(plain)], []))
     monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
@@ -313,6 +316,10 @@ def test_a_declared_board_or_replica_reruns_the_checks_on_content_not_on_bookkee
         check = ksa._done_checks['fixture']
         monkeypatch.setattr(host, '_done_event_sources', {
             'fixture': (check, lambda: [world.board, shadow / 'b.db', world.declared], lambda: None)})
+        from hermes_cli import kanban_annotation_done_inputs as done_inputs
+        done_inputs.declaration('fixture', check, lambda: (
+            list(world.conn.execute('SELECT * FROM tasks')),
+            list(replica.execute('SELECT * FROM tasks')), world.declared.read_text()))
         for conn in (world.conn, replica):
             conn.execute('CREATE TABLE IF NOT EXISTS bookkeeping_stamp (at REAL)')
         _refresh()
@@ -507,6 +514,8 @@ def test_a_created_event_alone_reruns_the_done_check(world):
         "CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, "
         "created_at INTEGER)")
     revision.ensure_revision(world.conn, revision.LOCAL_TABLES)
+    from hermes_cli import kanban_annotation_revision
+    kanban_annotation_revision.ensure_revisions(world.conn)
 
     def honest(card):
         world.checks += 1
@@ -519,6 +528,9 @@ def test_a_created_event_alone_reruns_the_done_check(world):
     # The host ignores a declared source whose function is not the registered check.
     ksa._done_checks["fixture"] = honest
     host._done_event_sources["fixture"] = (honest, lambda: [world.board], lambda: None)
+    from hermes_cli import kanban_annotation_done_inputs as done_inputs
+    done_inputs.declaration('fixture', honest, lambda: list(world.conn.execute(
+        "SELECT task_id,kind,payload FROM task_events WHERE kind='created' ORDER BY id")))
     _refresh()
     assert world.checks == 1 and _published()[10] == {"s1": 1}
     _refresh()

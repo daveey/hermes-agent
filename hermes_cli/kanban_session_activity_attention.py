@@ -107,18 +107,22 @@ class AttentionCache:
 
 
 def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool], *,
-                        watch_paths=None, next_deadline=None) -> Callable[[], None]:
+                        watch_paths=None, next_deadline=None, inputs=None) -> Callable[[], None]:
     """Register ``fn(card) -> bool`` (True = this completed card needs attention). ``card`` has ``id``, ``title``,
     ``summary`` (latest run summary, else ``result``), ``completed_at``, ``board`` and ``board_path``. Re-registering a
     name replaces it; the returned callable unregisters. Optional event callbacks
     have the same no-DB-read contract as ``register_waiting_source``; undeclared
     checks retain bounded fallback rather than silently missing external inputs.
-    A declared board or sync replica is keyed by its notify revision (``revision``, not the projection counter;
-    ``kanban_activity_revision.LOCAL_TABLES`` / ``SHADOW_TABLES``), not by its file: a done check is plugin code
-    and may select any event kind. A check that reads a table outside those lists does not rerun on a write to it
-    until the attention cache's own bound. Other declared files are keyed by their stat."""
+    A database path is event coverage, not a complete semantic declaration: the holder rereads undeclared
+    database-dependent checks, since plugin code may select arbitrary events, comments or tables. File-only
+    legacy declarations retain literal change signatures.
+
+    ``inputs()`` optionally declares the complete portable semantic key (see ``kanban_annotation_done_inputs``); it
+    is bound to this ``fn`` and, when absent or failing, callers recompute fresh."""
+    from hermes_cli import kanban_annotation_done_inputs as done_inputs
     from hermes_cli import kanban_session_activity as activity
     activity._host_copy.declare_events(name, fn, watch_paths, next_deadline, done_check=True)
+    done_inputs.declaration(name, fn, inputs)
     activity._done_checks[name] = fn
     activity._attention.clear()
     activity._host_copy.wake_holder()
@@ -126,6 +130,7 @@ def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool], *,
     def _dispose() -> None:
         if activity._done_checks.get(name) is fn:
             activity._done_checks.pop(name, None)
+            done_inputs.dispose(name, fn)
             activity._host_copy.declare_events(name, None, None, None, done_check=True)
             activity._attention.clear()
             activity._host_copy.wake_holder()

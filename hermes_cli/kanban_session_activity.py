@@ -1733,10 +1733,10 @@ _attention = _AttentionCache(_ATTENTION_TTL_S, max_age_s=_ATTENTION_MAX_AGE_S)
 
 
 def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool], *,
-                        watch_paths=None, next_deadline=None) -> Callable[[], None]:
-    """Register a done check with optional no-DB watch/deadline declarations."""
+                        watch_paths=None, next_deadline=None, inputs=None) -> Callable[[], None]:
+    """Register a done check with optional no-DB watch/deadline declarations and explicit semantic ``inputs``."""
     from hermes_cli.kanban_session_activity_attention import register_done_check as register
-    return register(name, fn, watch_paths=watch_paths, next_deadline=next_deadline)
+    return register(name, fn, watch_paths=watch_paths, next_deadline=next_deadline, inputs=inputs)
 
 
 def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any]]]:

@@ -16,10 +16,9 @@ inputs that part reads, and forces a part only when its key differs from the one
   seconds and that cache bounds them by its TTL instead. Keying links on them forced a
   full ledger projection under ``_links_lock`` on nearly every wake (91% of a hub backend's uptime in annotation
   refreshes, 2026-11-23), and every strict links reader, the Desktop action queue among them, queued behind it;
-- ``attention``: the boards' notify revisions (``revision``, not the projection counter) and the files the
-  done checks declared (a declared board or sync replica by that same notify revision, never its stat and never
-  the projection counter). A done check is plugin code and may select any event kind, so this key cannot be the
-  projection counter.
+- ``attention``: an independent revision over its selected board tables plus complete semantic done-check
+  declarations. Path-only database dependencies, missing declarations and provider errors force a fresh read;
+  arbitrary plugin event or comment dependencies cannot be inferred from the built-in attention table set.
 
 Plain inputs are everything else the holder watches for the scope (state.db, the hub database, config files, the
 mutation cue), keyed by ``kanban_annotation_watch.signature`` (stat, header change counter, WAL-index header). A
@@ -116,30 +115,41 @@ def _replica_dir() -> str | None:
 
 
 def _done_key(scope: tuple[str, ...], wall: float) -> object:
-    """The done checks' declared inputs; unequal to everything while any check is undeclared.
+    """Complete semantic declarations, or fresh fallback for unknown database inputs.
 
-    A declared board is left out: the attention key carries every board's notify revision. A declared sync
-    replica is keyed by that same counter (``revision``), not the projection counter: a done check is plugin
-    code and may select any event kind. Both files are rewritten several times a second by bookkeeping (claims,
-    heartbeats, pull stamps) that moves no row a reader selects, and a stat key over them would rerun every done
-    check on each of those writes. A replica whose revision cannot vouch (no counter and a stat not yet settled,
-    or unreadable) makes the key unequal to everything. Any other declared file is keyed by its change signature."""
+    File-only legacy declarations retain their literal change signatures; a path alone cannot certify which
+    database columns an arbitrary plugin reads. Complete ``inputs`` callbacks take precedence over paths.
+    """
     from hermes_cli import kanban_annotation_host as host
+    from hermes_cli import kanban_annotation_done_inputs as declared_inputs
     from hermes_cli import kanban_session_activity as ksa
 
+    checks = dict(ksa._done_checks)
+    if any(name in declared_inputs._declared for name in checks):
+        # Explicit complete dependencies supersede broad path signatures. A mixed,
+        # missing, malformed or failed declaration cannot certify suppression.
+        return declared_inputs.key(checks)
     paths: set[str] = set()
-    for name, fn in sorted(ksa._done_checks.items()):
+    for name, fn in sorted(checks.items()):
         declared = host._done_event_sources.get(name)
         if declared is None or declared[0] is not fn:
             return object()
         paths.update(str(p) for p in declared[1]())
-    paths -= {str(p) for p in ksa._board_db_paths()}
-    shadow_dir = _replica_dir()
-    replicas = sorted(p for p in paths if p.endswith(".db") and os.path.dirname(p) == shadow_dir)
-    content = tuple((p, ksa._board_content_key(Path(p), ksa._revision.SHADOW_TABLES)) for p in replicas)
-    if not ksa._revalidate.revalidatable(content, wall):
-        return object()
-    return (tuple(sorted(ksa._done_checks.items())), content, _signature(scope, paths - set(replicas)))
+    # Path-only providers may select arbitrary comments, heartbeat events or
+    # uncovered tables. Only literal signatures cover that contract.
+    if any(p.endswith('.db') for p in paths):
+        return object()  # no complete semantic declaration: never suppress a DB-dependent check
+    return (tuple(sorted(checks.items())), _signature(scope, paths))
+
+
+def _part_fingerprint(part: str, *, shadows: bool = False) -> tuple:
+    from hermes_cli import kanban_annotation_revision as revision
+    from hermes_cli import kanban_session_activity as ksa
+
+    paths = ksa._replica_paths() if shadows else ksa._board_db_paths()
+    values = tuple((str(p), revision.content_key(p, part)) for p in paths)
+    hub = None if shadows else ksa._hub_db_path()
+    return values + ((ksa._hub_content_signature(hub),) if hub is not None else ())
 
 
 def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
@@ -147,15 +157,13 @@ def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
     from hermes_cli import kanban_session_activity as ksa
 
     wall = time.time()
-    counts_local = ksa._activity_fingerprint(include_shadows=False)
-    links_local = ksa._activity_fingerprint(include_shadows=False, projection=True)
-    shadows = ksa._shadow_fingerprint()
-    if not ksa._revalidate.revalidatable(counts_local + shadows, wall):
-        return None
+    counts_local = _part_fingerprint(COUNTS)
+    links_local = _part_fingerprint(LINKS)
+    shadows = _part_fingerprint(COUNTS, shadows=True)
     ledger = ksa._origin_ledger_fingerprint()
     plain = _plain_key(scope)
     return {COUNTS: (counts_local, shadows, ledger, plain), LINKS: (links_local, ledger),
-            ATTENTION: (counts_local, _done_key(scope, wall)), WAITING: _waiting_key()}
+            ATTENTION: (_part_fingerprint(ATTENTION), _done_key(scope, wall)), WAITING: _waiting_key()}
 
 
 def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[frozenset, dict[str, object] | None]:
