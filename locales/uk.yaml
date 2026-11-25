@@ -245,6 +245,7 @@ gateway:
       decision_requested: "is parked until its orchestrator decides"
       parent_held: "має призупинену передумову; потрібне рішення власника"
       spend_budget_decision_ready: "досягла бюджету; очікує рішення про відновлення або архівування"
+      caused_stop_decision_ready: "зупинилася сама: {cause}; очікує рішення"
       status_default: "status changed"
       status_joiner: ", "
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."

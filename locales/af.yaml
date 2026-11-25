@@ -245,6 +245,7 @@ gateway:
       decision_requested: "is parked until its orchestrator decides"
       parent_held: "het 'n opgeskorte voorvereiste; die eienaar moet besluit"
       spend_budget_decision_ready: "het sy bestedingsbegroting bereik; wag op 'n bevorder- of argiveerbesluit"
+      caused_stop_decision_ready: "het homself gestop: {cause}; wag op 'n besluit"
       status_default: "status changed"
       status_joiner: ", "
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."

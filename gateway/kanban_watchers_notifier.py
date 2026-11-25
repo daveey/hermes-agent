@@ -862,7 +862,9 @@ class _KanbanNotification:
             # for child tasks; use it only for legacy rows.
             self.session_key = sub["chat_id"] or getattr(task, "session_id", None) or ""
         # i18n keys: gateway.kanban.wake.<kind> for each _WAKE_KINDS entry.
-        _parts = [t(f"gateway.kanban.wake.{k}") for k in _WAKE_KINDS
+        from hermes_cli.kanban_spend_decision import NOTICE as _SPEND, wake_status
+        _parts = [wake_status([ev.payload for ev in self.d["events"] if ev.kind == _SPEND]) if k == _SPEND
+                  else t(f"gateway.kanban.wake.{k}") for k in _WAKE_KINDS
                   if k in self.wake_kinds and k != "failure_finalized"]
         from hermes_cli.kanban_failure_summary import describe_failure
         _parts.extend(describe_failure(ev.kind, self.title, ev.payload or {})

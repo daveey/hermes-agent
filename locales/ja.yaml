@@ -245,6 +245,7 @@ gateway:
       decision_requested: "is parked until its orchestrator decides"
       parent_held: "前提タスクが保留中です。所有者の判断が必要です"
       spend_budget_decision_ready: "支出予算に達しました。再開またはアーカイブの判断を待っています"
+      caused_stop_decision_ready: "自ら停止しました: {cause}。判断を待っています"
       status_default: "status changed"
       status_joiner: ", "
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."

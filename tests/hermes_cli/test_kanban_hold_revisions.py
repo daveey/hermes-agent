@@ -90,6 +90,7 @@ def test_restriction_revises_local_and_creator_guidance(kanban_home, cause):
         comments = conn.execute('SELECT body FROM task_comments WHERE task_id=? ORDER BY id', (owner,)).fetchall()
         assert len(comments) == 2
         assert ('scope' if cause == 'scope_stopped' else 'no supported execution release') in comments[-1][0]
+        assert comments[-1][0].startswith(f'{tid}: stopped itself: {cause}; awaiting a decision. ')
         assert 'then manually promote it' not in comments[-1][0]
         notices.sweep(conn)
         decision.ensure_producer(conn, tid)

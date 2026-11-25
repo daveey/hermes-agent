@@ -77,8 +77,7 @@ def publish(conn, task_id: str, *, with_producer: bool = False) -> None:
         if with_producer:
             payload = {**payload, 'producer': decision.producer(conn, task_id, payload.get('reason') or 'Hold')}
         kb._append_event(conn, task_id, decision.NOTICE, payload)
-    creator(conn, task_id, payload['revision'],
-            str(payload.get('reason') or 'Hold') + '. ' + decision.notice(payload))
+    creator(conn, task_id, payload['revision'], decision.creator_notice(payload))
 
 
 def sweep(conn) -> None:

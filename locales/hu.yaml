@@ -248,6 +248,7 @@ gateway:
       decision_requested: "is parked until its orchestrator decides"
       parent_held: "egy előfeltétele fel van függesztve; a tulajdonos döntése szükséges"
       spend_budget_decision_ready: "elérte a költségkeretét; újraindítási vagy archiválási döntésre vár"
+      caused_stop_decision_ready: "magától leállt: {cause}; döntésre vár"
       status_default: "állapota megváltozott"
       status_joiner: ", "
       message: "[kanban] A(z) {task_id} feladat {status}.\nCím: {title}\nFelelős: @{assignee}\nTábla: {board}\n\nNézd meg az eredményt, vagy dönts a következő lépésről."

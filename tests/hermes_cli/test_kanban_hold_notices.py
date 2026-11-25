@@ -29,6 +29,8 @@ def test_fresh_hold_notifies_chat_and_creator_once(kanban_home, cause, monkeypat
         assert sub is not None and sub['last_event_id'] < events[0].id
         comments = conn.execute('SELECT body FROM task_comments WHERE task_id=?', (creator,)).fetchall()
         assert len(comments) == 1 and tid in comments[0][0] and 'window ended' in comments[0][0]
+        if cause == 'scope_stopped':
+            assert comments[0][0].startswith(f'{tid}: stopped itself: scope_stopped; awaiting a decision. window ended. ')
         assert kb.get_task(conn, tid).status == 'triage'
         from hermes_state import SessionDB
         from tui_gateway import kanban_unloaded as ku

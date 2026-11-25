@@ -245,6 +245,7 @@ gateway:
       decision_requested: "is parked until its orchestrator decides"
       parent_held: "لها متطلب سابق معلّق؛ يجب أن يقرر مالكه"
       spend_budget_decision_ready: "بلغ ميزانية الإنفاق؛ بانتظار قرار إعادة التشغيل أو الأرشفة"
+      caused_stop_decision_ready: "أوقفت نفسها: {cause}؛ بانتظار قرار"
       status_default: "تغيّرت الحالة"
       status_joiner: "، "
       message: "[kanban] المهمة {task_id} {status}.\nالعنوان: {title}\nالمُكلَّف: @{assignee}\nاللوحة: {board}\n\nراجع النتيجة أو قرّر الخطوة التالية."

@@ -245,6 +245,7 @@ gateway:
       decision_requested: "is parked until its orchestrator decides"
       parent_held: "선행 작업이 보류되어 소유자의 결정이 필요합니다"
       spend_budget_decision_ready: "지출 예산에 도달했습니다. 재개 또는 보관 결정을 기다립니다"
+      caused_stop_decision_ready: "스스로 중지했습니다: {cause}. 결정을 기다립니다"
       status_default: "status changed"
       status_joiner: ", "
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."

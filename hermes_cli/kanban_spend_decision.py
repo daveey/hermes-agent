@@ -260,7 +260,45 @@ def _one_step(task_id, *, for_worker=False) -> str:
     return (WORKER_NOTE if for_worker else ONE_STEP).format(task=task_id or '<task>')
 
 
+CAUSED_STOPS = frozenset({'scope_stopped', 'capability_unavailable', 'safety_refusal'})
+
+
+def caused(payload) -> str | None:
+    """The cause of a stop the worker made itself; ordinary budget stops are None."""
+    cause = payload.get('cause') if isinstance(payload, dict) else None
+    return cause if isinstance(cause, str) and cause in CAUSED_STOPS else None
+
+
+def caused_label(cause: str) -> str:
+    """Caused stops are not budget exhaustion: 'stopped itself: <cause>; awaiting a decision'."""
+    from agent.i18n import t
+    return t('gateway.kanban.wake.caused_stop_decision_ready', cause=cause)
+
+
+def wake_status(payloads) -> str:
+    """Wake status for the newest decision notice in a batch."""
+    from agent.i18n import t
+    cause = caused(([p for p in payloads if isinstance(p, dict)] or [{}])[-1])
+    return caused_label(cause) if cause else t(f'gateway.kanban.wake.{NOTICE}')
+
+
 def notice(payload: dict) -> str:
+    if cause := caused(payload):
+        return caused_label(cause) + '. ' + _detail(payload)
+    return _detail(payload)
+
+
+def creator_notice(payload: dict) -> str:
+    """A recorded creator also reads the stop's own reason; a caused stop's label still leads."""
+    reason, cause = payload.get('reason'), caused(payload)
+    if not cause:
+        return str(reason or 'Hold') + '. ' + notice(payload)
+    if not reason or cause == 'capability_unavailable':  # a capability detail already carries its reason
+        return notice(payload)
+    return caused_label(cause) + '. ' + str(reason) + '. ' + _detail(payload)
+
+
+def _detail(payload: dict) -> str:
     if payload.get('cause') == 'scope_stopped':
         from hermes_cli.kanban_scope_renewal import ROUTE
         from hermes_cli.kanban_hold_audience import chats, guidance
@@ -281,7 +319,9 @@ def notice(payload: dict) -> str:
                 'ordinary promotion, review, comments and timers are not clearance. '
                 'The owning supervisor may resolve the scope/authority boundary or withdraw '
                 'the work without declaring incomplete acceptance satisfied. Do not rerun the refused work.')
-    return (str(payload.get("reason") or "Spend budget reached") + ". Held in triage until a recorded decision: "
+    # A capability stop's reason is the worker's own summary; never default it to a budget claim.
+    reason = payload.get("reason") or (None if caused(payload) else "Spend budget reached")
+    return ((str(reason) + ". " if reason else "") + "Held in triage until a recorded decision: "
             "split or re-scope the work, then manually promote it, or archive it. "
             "Do not requeue unchanged; the stale-triage sweep cannot release this hold. "
             + _one_step(payload.get('task_id'), for_worker=bool(payload.get('for_worker'))) + '.')
