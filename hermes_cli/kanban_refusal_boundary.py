@@ -39,9 +39,10 @@ def require_policy(policy, *, model=_UNSET, provider=_UNSET):
     if policy is None or not getattr(policy, 'kanban_json', None):
         return
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_lockguard import connect
     context = json.loads(policy.kanban_json)
     try:
-        with closing(sqlite3.connect(Path(context['db']).resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+        with closing(connect(Path(context['db']).resolve().as_uri() + '?mode=ro', uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             task = kb.get_task(conn, context['task_id'])
             from hermes_cli.kanban_refusal_fallback import refused_providers
