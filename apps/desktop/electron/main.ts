@@ -15511,8 +15511,6 @@ async function mergeRemoteProfileSessions(
     await tagPrimaryAggregateRows(base, () => ensureBackend(null, { passive: true }), pinned)
   }
 
-  // Over-fetch each remote from offset 0 (limit+offset rows) so the merged window
-  // is correct for this page — mirrors the primary's per-profile over-fetch.
   const remoteParams = new URLSearchParams(searchParams)
   remoteParams.set('limit', String(limit + offset))
   remoteParams.set('offset', '0')
