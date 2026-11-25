@@ -156,7 +156,9 @@ def eligible(conn: sqlite3.Connection, task_id: str, episode: str, cfg: Optional
     if decision.execution_restricted(conn, task_id) or restricted(conn, task_id) or _disposed(conn, task_id, episode):
         return False
     stop = decision.pending_episode(conn, task_id)
-    if stop is not None and _payload(stop.get("payload")).get("cause"):
+    if stop is None or episode_of(stop) != episode or _human_after_stop(conn, task_id, stop):
+        return False
+    if _payload(stop.get("payload")).get("cause"):
         return False  # e.g. capability_unavailable: more runs meet the same wall, so there is no budget to judge
     row = conn.execute("SELECT created_by FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None or row[0] == "kanban-spend-budget" or conn.execute(
@@ -427,18 +429,34 @@ def review(conn: sqlite3.Connection, task_id: str, episode: str) -> str:
     return escalate(conn, task_id, episode, str(verdict.get("reason") or "the reviewer escalated"))
 
 
+def _human_after_stop(conn: sqlite3.Connection, task_id: str, stop: dict) -> bool:
+    """Use portable event ordering for both queue admission and the final writer fence."""
+    from hermes_cli.kanban_sync_divergence import _event_order
+    after = _event_order(stop)
+    return any(_event_order(dict(ev)) > after for ev in conn.execute(
+        "SELECT * FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_valid(payload) "
+        "AND (json_extract(payload, '$.writer_kind') = 'human' "
+        "OR json_extract(payload, '$.relayed_human') IS NOT NULL)", (task_id,)))
+
+
 def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[str]:
     """Inside the write transaction: why this stop can no longer be granted by the reviewer."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_spend_decision as decision
     from hermes_cli.kanban_continuation import HUMAN_BLOCK_KINDS
     from hermes_cli.kanban_sync_divergence import _event_order
+    from hermes_cli.kanban_wake_check import foreign_copy
     row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
     stop = decision.pending_episode(conn, task_id)
-    if row is None or row[0] != "triage" or episode_of(stop) != episode or state(conn, task_id, episode) != STARTED:
+    if row is None or stop is None or row[0] != "triage" or episode_of(stop) != episode or state(conn, task_id, episode) != STARTED:
         return "the stop was decided or changed while the reviewer read it"
-    if not settings()[0]:
+    enabled, max_grants = settings()
+    if not enabled:
         return "the reviewer was turned off while it read the stop"
+    if foreign_copy(conn, task_id):
+        return "the card is no longer owned by this gateway"
+    if consecutive_grants(conn, task_id) >= max_grants:
+        return "the consecutive reviewer grant cap was reached"
     if row[1] or row[2] in HUMAN_BLOCK_KINDS:
         return "the card waits on a human"
     if decision.execution_restricted(conn, task_id) or decision.execution_refusal(conn, task_id):
@@ -459,11 +477,8 @@ def _refusal(conn: sqlite3.Connection, task_id: str, episode: str) -> Optional[s
         if not conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND started_at > ? AND started_at <= ? "
                             "LIMIT 1", (task_id, promoted["created_at"], stop["created_at"])).fetchone():
             return "the card returned to triage after promotion with zero new runs; the owner must reconcile it"
-    for ev in conn.execute("SELECT * FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_valid(payload) "
-                           "AND (json_extract(payload, '$.writer_kind') = 'human' "
-                           "OR json_extract(payload, '$.relayed_human') IS NOT NULL)", (task_id,)):
-        if _event_order(dict(ev)) > after:
-            return "a human commented after the stop"
+    if _human_after_stop(conn, task_id, stop):
+        return "a human commented after the stop"
     if [p for p, st in kb.parent_states(conn, task_id) if st not in ("done", "archived")]:
         return "the card has open parents"
     return None
