@@ -192,7 +192,6 @@ import { useOverviewPreviews } from './use-overview-previews'
 import { useServerSessionSearch } from './use-server-session-search'
 import { useSessionFilters } from './use-session-filters'
 import { useSidebarDndSensors } from './use-sidebar-dnd-sensors'
-import { useSidebarNavCollapsed } from './use-sidebar-nav-collapsed'
 
 export { mergeSearchResults, searchResultToSession, stripFtsMarkers } from './search-results'
 
@@ -252,7 +251,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   /** Create a brand-new session and open it as a tile. `dir` is the dock edge
    *  (or `center` to stack a tab); `anchor`/`before` optionally pin it to a
    *  specific zone / tab-strip slot, and `cwd` pins it to a project's path —
-   *  used by the new-session drags (the "New session" row and the project "+"
+   *  used by the new-session drags (the section and project "+"
    *  buttons), which land a fresh session exactly where it's dropped. The
    *  context-menu "Open in split" path passes just a `dir`. */
   onNewSessionSplit: NewSessionSplitHandler
@@ -368,8 +367,9 @@ export function ChatSidebar({
   const dismissedAutoProjects = useStore($dismissedAutoProjectIds)
   const [searchQuery, setSearchQuery] = useState('')
 
-  const { navCollapsed } = useSidebarNavCollapsed()
-  const visibleNavItems = navCollapsed ? [] : navItems.filter(item => item.id !== 'new-session')
+  // The removed New session row owned the old collapse control. Ignore its
+  // persisted preference so legacy collapsed sidebars cannot strand routes.
+  const visibleNavItems = navItems.filter(item => item.id !== 'new-session')
 
   const [messagingLoadMorePending, setMessagingLoadMorePending] = useState<Record<string, boolean>>({})
   const [recentsLoadMorePending, setRecentsLoadMorePending] = useState(false)
@@ -1599,8 +1599,7 @@ export function ChatSidebar({
                       </div>
                     ) : (
                       <>
-                        {/* The flat-list header "+" is a drag source too — the
-                            same gesture as the nav's "New session" row: drag
+                        {/* The flat-list header "+" is a drag source too: drag
                             it onto a chat zone's tab strip / edge / center to
                             create the session exactly there. Project-overview
                             mode drags its "+" (the "New project" button) with

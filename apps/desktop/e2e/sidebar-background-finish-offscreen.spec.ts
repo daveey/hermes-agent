@@ -71,7 +71,7 @@ test.describe('sidebar — background work finishing off screen', () => {
       })
       .toBeGreaterThan(0)
 
-    await page.locator('button:has-text("New session")').first().click()
+    await page.keyboard.press('ControlOrMeta+n')
     await page.waitForTimeout(2000)
     await page.screenshot({ path: 'test-results/offscreen-bg-before-release.png' })
 

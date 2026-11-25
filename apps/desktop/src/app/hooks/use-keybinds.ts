@@ -196,14 +196,13 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     }
   }
 
-  // Match the sidebar New Session button. A plain keyboard new chat should
+  // A current-gateway keyboard new chat should
   // target the current live profile, not a stale per-profile quick-create
   // selection from a prior action.
   const startNewSessionHere = () => {
     setWorkspaceScope('sessions')
     $newChatProfile.set(null)
     deps.startFreshSession()
-    window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
   }
 
   const goToSession = (sessionId: null | string) => {
@@ -346,8 +345,8 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'nav.agents': () => navigate(AGENTS_ROUTE),
 
     // Fork ⌘N: new chat on the saved new-session gateway (right-click a gateway
-    // in the device switcher → "Use for new sessions"), like the sidebar's New
-    // session row. Opening a session elsewhere never moves it. With no saved
+    // in the device switcher → "Use for new sessions"). Opening a session
+    // elsewhere never moves it. With no saved
     // target: This device — re-homes onto the local gateway when another one is
     // selected (the switch re-homes the fresh draft).
     'session.new': () => {
@@ -355,7 +354,6 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         setWorkspaceScope('sessions')
         prepareDefaultNewSession()
         deps.startFreshSession()
-        window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
 
         return
       }

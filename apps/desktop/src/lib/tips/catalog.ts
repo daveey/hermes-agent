@@ -44,7 +44,7 @@ export type TipId =
 // and the pane on the right. Nothing here is a step in a sequence — any one has
 // to stand alone, because that is how they arrive.
 export const TIP_CATALOG: readonly TipDef[] = [
-  { id: 'new-session', keybind: 'session.new', side: 'right', targets: ['[data-tour="sidebar-nav-new-session"]'] },
+  { id: 'new-session', keybind: 'session.new', side: 'top', targets: ['[data-tour="composer"]'] },
   { id: 'skills', keybind: 'nav.capabilities', side: 'right', targets: ['[data-tour="sidebar-nav-capabilities"]'] },
   { id: 'messaging', keybind: 'nav.messaging', side: 'right', targets: ['[data-tour="sidebar-nav-messaging"]'] },
   { id: 'artifacts', keybind: 'nav.artifacts', side: 'right', targets: ['[data-tour="sidebar-nav-artifacts"]'] },

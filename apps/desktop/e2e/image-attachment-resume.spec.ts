@@ -125,7 +125,7 @@ async function openSeededSession(page: Page): Promise<void> {
  * surface is empty rather than waiting for the old caption to leave the page.
  */
 async function openNewSession(page: Page): Promise<void> {
-  await page.locator('[data-slot="sidebar"] button[aria-label="New session"]').first().click()
+  await page.keyboard.press('ControlOrMeta+n')
   await page.waitForFunction(
     ([expected, surfaceSelector]: [string, string]) => {
       const surfaces = document.querySelectorAll(surfaceSelector)
@@ -164,7 +164,7 @@ test.describe('attached image resume', () => {
     fixture = null
   })
 
-  test('renders a persisted attachment as a thumbnail on first open and after a cold reload', async ({}, testInfo) => {
+  test('renders a persisted attachment as a thumbnail on first open and after a cold reload', async ({ browserName: _browserName }, testInfo) => {
     // Seeding through the real gateway plus two full app boots does not fit the
     // default per-test budget on a cold runner.
     test.slow()

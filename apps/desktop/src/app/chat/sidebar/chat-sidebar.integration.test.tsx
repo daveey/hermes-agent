@@ -269,7 +269,8 @@ describe('ChatSidebar search disclosure', () => {
   it('dismisses empty and whitespace-only search on blur', async () => {
     renderSidebar('/', 'chat')
     act(() => requestSessionSearchFocus())
-    await waitFor(() => expect(search()).not.toBeNull())
+    await waitFor(() => expect(search()).toBe(document.activeElement))
+    expect(search()).not.toBeNull()
     act(() => (search() as HTMLInputElement).blur())
     expect(search()).toBeNull()
     const input = await reveal()
@@ -310,17 +311,30 @@ describe('ChatSidebar search disclosure', () => {
     expect(screen.queryByText('No sessions yet')).toBeNull()
   })
 
-  it('leaves no nav row or bottom padding when the saved nav is collapsed', () => {
+  it('keeps remaining routes accessible even with a legacy collapsed preference', () => {
     localStorage.setItem('sidebar.nav.collapsed', '1')
 
     try {
       const { container } = renderSidebar('/', 'chat')
-      const menu = container.querySelector('[data-sidebar="menu"]')
-      expect(menu?.children).toHaveLength(0)
-      expect(menu?.closest('[data-sidebar="group"]')?.classList.contains('pb-2')).toBe(false)
+      expect(screen.getByRole('button', { name: 'Capabilities' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Messaging' })).toBeTruthy()
+      expect(container.querySelector('[data-tour="sidebar-nav-new-session"]')).toBeNull()
     } finally {
       localStorage.removeItem('sidebar.nav.collapsed')
     }
+  })
+
+  it('clears and dismisses when the clear button is clicked after input blur', async () => {
+    renderSidebar('/', 'chat')
+    const input = await reveal()
+    fireEvent.change(input, { target: { value: 'Tile one' } })
+    const clear = screen.getByRole('button', { name: 'Clear search' })
+    act(() => clear.focus())
+    expect(search()).toBe(input)
+    fireEvent.click(clear)
+    expect(search()).toBeNull()
+    expect(screen.queryByText('Results')).toBeNull()
+    expect((await reveal()).value).toBe('')
   })
 })
 

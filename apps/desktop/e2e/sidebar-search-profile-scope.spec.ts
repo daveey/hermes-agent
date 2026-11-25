@@ -78,6 +78,7 @@ async function selectProfile(page: Page, name: string): Promise<void> {
 
 async function expectSearchScopedTo(page: Page, profile: keyof typeof MARKER): Promise<void> {
   const other = profile === 'default' ? PROFILE_B : 'default'
+  await page.keyboard.press('ControlOrMeta+Shift+f')
   const search = page.getByRole('textbox', { name: 'Search sessions' })
 
   await search.fill('')
@@ -85,7 +86,8 @@ async function expectSearchScopedTo(page: Page, profile: keyof typeof MARKER): P
   // Only the backend can match "zebra" here, so this waits for the server hits.
   await expect(sidebar(page).getByText(MARKER[profile])).toBeVisible({ timeout: 30_000 })
   await expect(sidebar(page).getByText(MARKER[other])).toHaveCount(0)
-  await search.fill('')
+  await search.press('Escape')
+  await expect(search).toHaveCount(0)
 }
 
 test.describe('sidebar session search — profile scope', () => {

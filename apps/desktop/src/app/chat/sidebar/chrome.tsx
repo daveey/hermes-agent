@@ -44,16 +44,13 @@ const HEADER_ACTION_BTN =
   'text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/section:opacity-100 focus-visible:opacity-100'
 
 // The sessions section header's "+" — the flat list's top-level new-session
-// control. Also a drag source, the same gesture as the nav's "New session"
-// row: drag it onto a chat zone's tab strip / edge / center to create the
+// control. Also a drag source: drag it onto a chat zone's tab strip / edge / center to create the
 // session exactly there (stack / split). The pointer drag session owns the
 // gesture — a sub-threshold release falls through to the onClick (ordinary
 // new session), and an engaged drag suppresses that click so it never
 // double-creates. Both paths resolve the session's profile identically: the
 // create path (`openNewSessionTile`) reads `$newChatProfile` at commit, and
-// neither gesture resets it — matching the header "+" click behavior exactly
-// (only the nav "New session" row resets it, since it navigates to the draft
-// composer instead).
+// neither gesture resets it — matching the header "+" click behavior exactly.
 export function SidebarSectionAddButton({
   ariaLabel,
   onNewProjectDrag,

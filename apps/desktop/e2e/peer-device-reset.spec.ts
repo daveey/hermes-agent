@@ -8,6 +8,7 @@ import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as path from 'node:path'
 
+import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import { MOCK_REPLY, startMockServer } from '../../../tests-js/scripts/mock-server'
 
 import {
@@ -16,7 +17,6 @@ import {
   launchDesktop,
   type Sandbox,
 } from './fixtures'
-import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import { collectErrorBanners, type ElectronApplication, expect, installErrorBannerGuard, type Page, test } from './test'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
@@ -139,7 +139,7 @@ async function switchTo(page: Page, label: string): Promise<void> {
 }
 
 async function newSession(page: Page, label: string): Promise<void> {
-  await page.locator('[data-tour="sidebar-nav-new-session"]').click()
+  await page.keyboard.press('ControlOrMeta+n')
   await expectReady(page, label)
   // Query the menu after the reset as well: the checked connection must agree
   // with the ready statusbar, not merely retain its pre-click text for a frame.

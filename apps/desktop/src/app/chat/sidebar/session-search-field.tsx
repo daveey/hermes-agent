@@ -52,6 +52,10 @@ export function SessionSearchField({
         aria-label={t.sidebar.searchAria}
         inputRef={inputRef}
         onChange={onQueryChange}
+        onClear={() => {
+          onQueryChange('')
+          setVisible(false)
+        }}
         onKeyDown={event => {
           if (event.key === 'Escape') {
             event.preventDefault()

@@ -11,8 +11,10 @@
 import type { TourPreset } from '@hermes/shared'
 
 import { runtimeTranslations } from '@/i18n'
+import { formatCombo } from '@/lib/keybinds/combo'
 import { startTour, type TourResult } from '@/lib/tour'
 import { $interfaceMode } from '@/store/interface-mode'
+import { bindingsFor } from '@/store/keybinds'
 import { readLocalSetupEligibility } from '@/store/local-setup-offer'
 
 const SELECTORS = {
@@ -20,7 +22,7 @@ const SELECTORS = {
   composer: '[data-tour="composer"]',
   messaging: '[data-tour="sidebar-nav-messaging"]',
   model: '[data-tour="model-pill"]',
-  newSession: '[data-tour="sidebar-nav-new-session"]',
+  newSession: '[data-tour="composer"]',
   rightPane: '[data-tour="right-pane-toggle"]',
   sessions: '[data-tour="sessions-sidebar"]'
 }
@@ -97,11 +99,17 @@ export async function runBuiltInTour(
   }
 
   const copy = runtimeTranslations().appTour
+  const newSessionHint = bindingsFor('session.new')[0]
 
   return startTour(
     stops.map(id => ({
       selector: SELECTORS[id],
-      text: id === 'model' && localLine ? `${copy.model.text} ${copy.modelLocal}` : copy[id].text,
+      text:
+        id === 'newSession' && newSessionHint
+          ? `${copy.newSession.text} (${formatCombo(newSessionHint)})`
+          : id === 'model' && localLine
+            ? `${copy.model.text} ${copy.modelLocal}`
+            : copy[id].text,
       title: copy[id].title
     }))
   )

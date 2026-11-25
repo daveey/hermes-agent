@@ -323,7 +323,7 @@ async function waitForActiveTranscriptWithoutText(
 
 /** Stack an empty tab while leaving the current transcript mounted and warm. */
 async function openNewSessionTab(page: Page, priorText: string): Promise<void> {
-  await page.locator('[data-slot="sidebar"] button[aria-label="New session"]').first().click()
+  await page.keyboard.press('ControlOrMeta+n')
   await waitForActiveTranscriptWithoutText(page, priorText)
 }
 

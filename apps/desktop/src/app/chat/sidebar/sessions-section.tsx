@@ -339,8 +339,7 @@ export function SidebarSessionsSection({
 
   // Date dividers head a group the same way a repo header does, so they carry
   // the same hover-revealed "+". Only for dates: "new session in WORKING" is
-  // not a thing. The divider "+" is a drag source too (the same gesture as the
-  // nav's "New session" row): drag it onto a chat zone to create the session
+  // not a thing. The divider "+" is a drag source too: drag it onto a chat zone to create the session
   // exactly there; a sub-threshold release stays the ordinary click. The ONE
   // element here feeds both the plain and the virtualized list paths, so this
   // single wiring covers every date-divider "+" on screen.
