@@ -13,6 +13,9 @@ def insert_link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None
     missing = _missing_task_ids(conn, [parent_id, child_id])
     if missing:
         raise missing_dependency_error(missing)
+    from hermes_cli.kanban_helper_parent import check_helper_parent
+
+    check_helper_parent(conn, parent_id, child_id)
     conn.execute(
         "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
         (parent_id, child_id),
@@ -65,6 +68,9 @@ def check_link_parent(conn: sqlite3.Connection, parent_id: str, child_id: str) -
     """Refuse an edge that would cycle or hang under a never-finishing standing card. [daveey]"""
     if would_cycle(conn, parent_id, child_id):
         raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
+    from hermes_cli.kanban_helper_parent import check_helper_parent
+
+    check_helper_parent(conn, parent_id, child_id)
     from hermes_cli.kanban_standing_parent import standing_parent_error, standing_reason
     standing = standing_reason(conn, parent_id)
     if standing:
