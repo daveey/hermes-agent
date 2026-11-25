@@ -24,13 +24,25 @@ def test_green_owner_reaches_real_dispatch(green, all_assignees_spawnable):
 
 
 def test_hold_cap_uses_existing_visible_supervisor_escalation(green, monkeypatch):
+    from types import SimpleNamespace
+
     from hermes_cli import kanban_db_dispatch_guard_notice as notice
+    from hermes_cli import kanban_db_events as events
     green[0]["ok"] = False
     with kbc.connect() as conn:
         tid = helpers.published(conn)
-        now = int(kb.time.time())
-        with kb.write_txn(conn):
-            kb._append_event(conn, tid, "respawn_guarded", {"reason": "active_pr"})
+        sampled_at = int(kb.time.time())
+        # Force the event writer across a wall-second boundary, without changing
+        # the process-wide clock used by the hold-cap consumer.
+        with monkeypatch.context() as writer_clock:
+            writer_clock.setattr(events, "time", SimpleNamespace(time=lambda: sampled_at + 1))
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, "respawn_guarded", {"reason": "active_pr"})
+        now = conn.execute(
+            "SELECT created_at FROM task_events WHERE task_id=? "
+            "AND kind='respawn_guarded' ORDER BY id LIMIT 1", (tid,),
+        ).fetchone()[0]
+        assert now == sampled_at + 1
         monkeypatch.setattr(kb.time, "time", lambda: now + 2099)
         assert not dispatch._block_if_guard_hold_capped(conn, tid, "active_pr")
         assert notice.guard_hold_started_at(conn, tid) == now
