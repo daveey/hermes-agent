@@ -40,6 +40,42 @@ def test_hold_audience_uses_real_renewal_reader(kanban_home, monkeypatch):
 
 
 
+@pytest.mark.parametrize("profile,kind,released,expected", [
+    (None, "created", 0, True),
+    ("default", "created", 0, True),
+    ("research", "created", 0, True),
+    ("", "created", 0, False),
+    (None, "created", 1, False),
+    (None, "shepherd", 0, False),
+])
+def test_hold_audience_accepts_only_renewable_foreign_hash_links(
+        kanban_home, monkeypatch, profile, kind, released, expected):
+    from hermes_cli import kanban_origin
+    from hermes_cli.kanban_chat_links import link_uid
+    from hermes_cli.kanban_hold_audience import describe
+    from hermes_cli.kanban_scope_renewal_cli import resolve_actor
+    from tests.hermes_cli.test_kanban_create_scope_authority import _links_schema
+
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("worker-a1", {"worker-a1", "hub"}))
+    session = "local-" + "dc" * 32  # No worker-local interactive session registration.
+    with kbc.connect_closing() as conn:
+        _links_schema(conn)
+        tid = kb.create_task(conn, title="foreign held owner", assignee="default", settle_owner_chat=False)
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_chat_links "
+                         "(uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,created_at) "
+                         "VALUES (?,?,?,?,?,?,?,1)",
+                         (link_uid(tid, "hub", profile, session, kind), tid, "hub", profile, session, kind, released))
+        audience = describe(conn, tid)
+        assert audience["chats"] == ([{"gateway": "hub", "profile": profile or "default", "session": session}]
+                                     if expected else [])
+        if expected:
+            actor = resolve_actor(conn, tid, writer=("agent", session, "1:HERMES_SESSION_ID"),
+                                  environs=[{"HERMES_SESSION_ID": session}],
+                                  gateway="hub", profile=profile or "default")
+            assert actor.authority == "chat"
+
+
 def test_local_hold_payload_has_authority_and_no_synthetic_guard(kanban_home):
     from hermes_cli import kanban_hold_notices
     from hermes_cli.kanban_spend_decision import notice
