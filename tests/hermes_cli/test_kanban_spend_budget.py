@@ -288,7 +288,8 @@ class _Agent:
 
 def test_usage_fields_from_the_agent():
     assert ksb.usage_fields(_Agent()) == {"usage": {"input_tokens": 1200, "output_tokens": 300,
-                                                    "cache_read_tokens": 2_500_000, "cost_usd": 1.2346}}
+                                                    "cache_read_tokens": 2_500_000, "cache_write_tokens": 0,
+                                                    "cost_usd": 1.2346}}
     assert ksb.usage_fields(None) == {}
     assert ksb.usage_fields(object()) == {}
 

@@ -165,6 +165,12 @@ def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
            for res in results):
         return (msg + " Local updater admission hold blocks claims before the Board lease; "
                 "inspect core-update/holds/hermes-sync and its updater owner.")
+    if any(res is not None and any(reason == "usage_accounting_pending" for _, reason in res.claim_deferred)
+           for res in results):
+        return (msg + " Local usage accounting is pending before the Board lease: a prior admitted/released "
+                "run lacks a consistent final receipt or its canonical run closure. Recover the original bound "
+                "worker's usage and closure through its normal outbox/feed, keyed by run UID; unknown usage is not zero. Do not reset history, "
+                "renew spend or release other holds to bypass this debt.")
     spend_holds = {"decision_pending", "spend_budget_exhausted", "spend_policy_unavailable"}
     if any(res is not None and any(reason in spend_holds for _, reason in res.claim_deferred)
            for res in results):

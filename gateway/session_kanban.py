@@ -382,7 +382,7 @@ def record_start_failure(frame, exc):
     else:
         from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE as code
     _record_worker_result(context, code, start_failure_line(booked), booked,
-                          extra={PROOF_KEY: proof} if proof else None)
+                          extra={PROOF_KEY: proof} if proof else None, no_turn=True)
     exc._kanban_failure_booked = True
 
 
@@ -418,7 +418,7 @@ def start_failure_line(exc):
     return failure_line(exc, 'Worker could not start')
 
 
-def _record_worker_result(context, code, last_output, failure=None, extra=None, *, agent=None):
+def _record_worker_result(context, code, last_output, failure=None, extra=None, *, agent=None, no_turn=False):
     _TURNS_DONE.set()
     import os
     from hermes_cli.kanban_db_connect import connect_closing
@@ -451,13 +451,21 @@ def _record_worker_result(context, code, last_output, failure=None, extra=None, 
                                  {'error': observer_error}, run_id=context['run_id'])
             from hermes_cli.kanban_failed_result_identity import result_identity_fields
             identity_fields = result_identity_fields(conn, context) if strict_death_proof else {}
+            usage = usage_fields(agent)
+            from hermes_cli.kanban_usage_accounting import valid_counter
+            # An interrupted/failed request may have unreturned usage even when
+            # the agent's last counters are numeric. Retain those only as lower bounds.
+            final_usage = (code == 0 and not (extra or {}).get('continuable') and all(
+                valid_counter(usage.get('usage', {}).get(key)) for key in
+                ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens')))
             # Closing a run clears its claim/PID and replaces metadata; keep the
             # result in the immutable attempt event stream instead.
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
                  'last_output': last_output, **quota_fields(failure), **route_fields(failure, agent),
-                 **usage_fields(agent),  # [daveey] the run's tokens, summed by kanban_spend_budget on the home board
+                 **usage,  # the event FK transports as immutable run_uid, never the payload's integer id
                  **(extra or {}), **refusal_fields(failure), **identity_fields,
+                 'usage_final': final_usage, 'usage_no_turn': no_turn is True and agent is None,
                  **({'death_proof_version': 1} if strict_death_proof else {})},
                 run_id=context['run_id'])
 

@@ -252,7 +252,7 @@ def test_renewal_alone_never_places_exhausted_budget(board, monkeypatch):
     assert decision.pending(board, tid)
 
 
-def test_renewal_with_budget_waits_for_parent_then_claims(board, monkeypatch):
+def test_renewal_with_budget_waits_for_parent_then_accounting(board, monkeypatch):
     from hermes_cli.kanban_spend_claim import claim_check
     tid, _, episode = scope.stopped(board, monkeypatch)
     support._runs(board, tid, 16)
@@ -268,8 +268,12 @@ def test_renewal_with_budget_waits_for_parent_then_claims(board, monkeypatch):
         board.execute("UPDATE tasks SET status='done' WHERE id=?", (pid,))
     kb.recompute_ready(board)
     assert kb.get_task(board, tid).status == 'ready'
-    assert not claim_check(board, tid)()
-    assert kb.claim_task(board, tid) is not None
+    # Scope renewal and a new budget do not settle the retained run's unknown
+    # accounting. Parent placement may finish; subsequent spend remains fenced.
+    assert claim_check(board, tid)()
+    from hermes_cli.kanban_db_sync import pop_claim_deferral
+    assert pop_claim_deferral(tid) == 'usage_accounting_pending'
+    assert kb.claim_task(board, tid) is None
 
 
 def _clear(conn, tid):

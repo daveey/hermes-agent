@@ -349,6 +349,13 @@ def test_a_real_run_after_the_grants_blocks_the_resume(env, svc, kind):
             row = conn.execute("SELECT metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
         assert 'unused_grant' not in (row[0] or '')  # the imported ordinary release carries no unused flag
     assert _candidate(tid) is None
+    if kind == 'ordinary_release':
+        # No explicit unused proof and no worker final: do not turn an
+        # ambiguous cross-gateway release into either a resume or new spend.
+        with base._connect() as conn:
+            assert kb.claim_task(conn, tid) is None
+            assert sync.pop_claim_deferral(tid) == 'usage_accounting_pending'
+        return
     run = base._admit_next(env, tid)
     assert 'restart_resume' not in run.events and run.history == []
 

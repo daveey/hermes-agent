@@ -465,15 +465,17 @@ def test_one_failed_control_lookup_is_not_an_offline_exemption(monkeypatch, dns)
 
 
 def _steal(n, conn, context):
-    """Another holder takes the card while this worker waits: released, then claimed elsewhere."""
+    """Reclaim fences the old worker; missing accounting also fences another paid claim."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_sync import pop_claim_deferral
 
     if n == 1:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL, "
                          "worker_pid=NULL, worker_started_at=NULL WHERE id=?", (context["task_id"],))
             kb._end_run(conn, context["task_id"], outcome="reclaimed", status="reclaimed", error="stolen")
-        assert kb.claim_task(conn, context["task_id"], claimer="other-gateway:4242") is not None
+        assert kb.claim_task(conn, context["task_id"], claimer="other-gateway:4242") is None
+        assert pop_claim_deferral(context['task_id']) == 'usage_accounting_pending'
 
 
 def _relock_in_place(n, conn, context):
@@ -486,7 +488,7 @@ def _relock_in_place(n, conn, context):
                          (int(time.time()) + 900, context["task_id"]))
 
 
-@pytest.mark.parametrize("steal", [pytest.param(_steal, id="reclaimed-and-reclaimed-elsewhere"),
+@pytest.mark.parametrize("steal", [pytest.param(_steal, id="reclaimed-accounting-pending"),
                                    pytest.param(_relock_in_place, id="renewed-under-another-lock")])
 def test_stolen_lease_stays_fenced(slept_worker, steal):
     """A lapse is only waited out for OUR lease: once anyone else holds the card the worker never
@@ -498,7 +500,7 @@ def test_stolen_lease_stays_fenced(slept_worker, steal):
     assert run() == KANBAN_RATE_LIMIT_EXIT_CODE
     assert len(entered) == 1  # no recovery turn under a lease that is no longer ours
     task = kb.get_task(conn, context["task_id"])
-    assert task.claim_lock == "other-gateway:4242"
+    assert task.claim_lock == (None if steal is _steal else "other-gateway:4242")
 
 
 def test_lease_never_renewed_gives_up_after_the_awake_budget(slept_worker, monkeypatch):

@@ -35,6 +35,9 @@ def claim_check(conn, task_id):
     def refused():
         if decision.pending(conn, task_id):
             return refuse("decision_pending")
+        from hermes_cli.kanban_usage_accounting import pending
+        if pending(conn, task_id):
+            return refuse("usage_accounting_pending")
         lim = budget.card_limits(conn, task_id, board)
         if budget.over(budget.spend(conn, task_id), lim) is None:
             return False

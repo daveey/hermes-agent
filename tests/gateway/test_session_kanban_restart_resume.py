@@ -7,6 +7,7 @@ session creation is a stand-in that creates the fresh session row the way the ow
 import asyncio
 from contextlib import closing
 import json
+import os
 import time
 from types import SimpleNamespace
 
@@ -70,7 +71,7 @@ def _work_transcript():
     ]
 
 
-def _lose_run(task_id, *, code, state_db, session_id=PRIOR, pid=81001, monkeypatch):
+def _lose_run(task_id, *, code, state_db, session_id=PRIOR, pid=81001, monkeypatch, accounted=True):
     """Claim a run, admit it to ``session_id`` in ``state_db`` like the owner, then let the real sweep book
     its exit ``code`` (76 = the owner restarted under it)."""
     with _connect() as conn:
@@ -81,6 +82,8 @@ def _lose_run(task_id, *, code, state_db, session_id=PRIOR, pid=81001, monkeypat
         with kb.write_txn(conn):
             conn.execute('UPDATE tasks SET worker_pid=?, started_at=? WHERE id=?', (pid, int(time.time()) - 600, task_id))
             conn.execute('UPDATE task_runs SET worker_pid=? WHERE id=?', (pid, task.current_run_id))
+            kb._append_event(conn, task_id, 'worker_bound',
+                             {'pid': os.getpid(), 'claim_lock': task.claim_lock}, run_id=task.current_run_id)
             from hermes_cli.kanban_worker_recovery import _SCHEMA
             conn.execute(_SCHEMA)  # the transcript-tail registry, so the fallback context is observable
             conn.execute('INSERT OR REPLACE INTO worker_recovery_sessions VALUES (?,?,?,?,?,?)',
@@ -104,7 +107,30 @@ def _lose_run(task_id, *, code, state_db, session_id=PRIOR, pid=81001, monkeypat
             kb._append_event(conn, task_id, 'owner_admitted', {'db': str(state_db), 'session_id': session_id,
                              'request_id': 'kanban:old', 'pid': 1, 'birth': 1.0}, run_id=task.current_run_id)
         row = conn.execute('SELECT outcome FROM task_runs WHERE id=?', (task.current_run_id,)).fetchone()
+    if accounted:
+        # Transcript-resume tests require independently settled spend, not an
+        # accounting bypass. The unknown-interruption case below starts without it.
+        from gateway.session_kanban import _record_worker_result
+        _record_worker_result({'db': str(kb.kanban_db_path(board='owned')), 'task_id': task_id,
+                               'run_id': task.current_run_id, 'claim_lock': task.claim_lock}, 0, '',
+                              agent=SimpleNamespace(session_input_tokens=10, session_output_tokens=2,
+                                                    session_cache_read_tokens=123, session_cache_write_tokens=0))
     return task.current_run_id, row[0]
+
+
+def test_unknown_restart_accounting_blocks_transcript_readmission(env):
+    from hermes_cli.kanban_db_sync import pop_claim_deferral
+    tid = _task(env)
+    _prior_session(env.db)
+    run_id, outcome = _lose_run(tid, code=KANBAN_OWNER_RESTART_EXIT_CODE,
+                                state_db=env.db.db_path, monkeypatch=env.monkeypatch, accounted=False)
+    assert outcome == 'reclaimed'
+    with _connect() as conn:
+        assert kb.claim_task(conn, tid) is None
+        assert pop_claim_deferral(tid) == 'usage_accounting_pending'
+        assert conn.execute('SELECT current_run_id FROM tasks WHERE id=?', (tid,)).fetchone()[0] is None
+        assert conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == 1
+        assert conn.execute('SELECT id FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == run_id
 
 
 def _admit_next(env, task_id):

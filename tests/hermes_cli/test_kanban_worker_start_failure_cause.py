@@ -12,10 +12,13 @@ def test_start_failure_books_a_redacted_one_line_cause(monkeypatch):
     from agent.model_routing import ModelRoutingError
     from gateway import session_kanban
     booked = []
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None, extra=None: booked.append((code, out)))
+    monkeypatch.setattr(session_kanban, '_record_worker_result',
+                        lambda ctx, code, out, failure=None, extra=None, *, no_turn=False:
+                        booked.append((code, out, no_turn)))
     frame = {'policy': {'kanban_json': json.dumps({'db': '/nonexistent', 'task_id': 't', 'run_id': 1})}}
     session_kanban.record_start_failure(frame, ModelRoutingError('Class selectors require provider auto;\nuse a concrete model'))
-    (code, out), = booked
+    (code, out, no_turn), = booked
+    assert no_turn is True
     assert code == 1
     assert out == 'Worker could not start: ModelRoutingError: Class selectors require provider auto; use a concrete model'
 
@@ -56,12 +59,14 @@ def test_start_failure_is_not_booked_twice(monkeypatch):
     from agent.model_routing import ModelRoutingError
     from gateway import session_kanban
     booked = []
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None, extra=None: booked.append(out))
+    monkeypatch.setattr(session_kanban, '_record_worker_result',
+                        lambda ctx, code, out, failure=None, extra=None, *, no_turn=False:
+                        booked.append((out, no_turn)))
     frame = {'policy': {'kanban_json': json.dumps({'db': '/nonexistent', 'task_id': 't', 'run_id': 1})}}
     exc = ModelRoutingError('boom')
     session_kanban.record_start_failure(frame, exc)
     session_kanban.record_worker_failure(frame, exc)
-    assert booked == ['Worker could not start: ModelRoutingError: boom']
+    assert booked == [('Worker could not start: ModelRoutingError: boom', True)]
 
 
 def test_worker_failure_outside_kanban_books_nothing_and_never_raises(monkeypatch):

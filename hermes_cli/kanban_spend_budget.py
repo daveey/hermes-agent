@@ -11,11 +11,13 @@ This budget counts *spending runs* since the card last handed work on (a run tha
 person, ``writer_kind='human'``, or a chat's verified relay of one, ``relayed_human``: the no-progress budget's
 rule, so answering a card that spent its budget while blocked gets it a run) or since this budget last sent it
 to triage, and adds up
-the tokens those runs reported. A spending run is a closed run that lasted at least ``MIN_RUN_SECONDS``:
-quota walls, released claims and spawn failures end in seconds and spend nothing. Tokens come from the
-run's own ``worker_result`` receipt (``usage``, written by the managed worker from its agent's session
-counters on the host that ran it, so a card that ran on several workers is still summed on its home board);
-a run with no usage receipt counts as a run only. ``Spend.excluded`` counts only ``owner_unavailable`` /
+the tokens those runs reported. Spending includes short admitted or usage-bearing runs as well as closed
+runs lasting at least ``MIN_RUN_SECONDS``; a short duration alone does not prove no consumption. Tokens
+come from the run's ``worker_result`` observations (``usage``, written by the original bound worker from
+its agent counters and transported with immutable run UID). Per-counter cumulative lower bounds prevent
+reordered/duplicate observations from subtracting or adding the same run twice. Missing usage remains
+unknown, and claim admission separately fences closed admitted/bound turns and ambiguous releases
+until their accounting settles, independently of the renewable spend window. ``Spend.excluded`` counts only ``owner_unavailable`` /
 ``owner_down`` runs (or ``crashed`` with integer exit 69) with no owner admission, no usage receipt, and
 no ``host_refusal`` proof except one whose phase is ``preadmission``. Admitted or interrupted turns count.
 
@@ -301,9 +303,9 @@ def usage_fields(agent) -> dict:
         return {}
     usage: dict[str, Any] = {}
     for key, attr in _AGENT_COUNTERS.items():
-        value = getattr(agent, attr, 0)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-            usage[key] = int(value)
+        value = getattr(agent, attr, None)
+        if type(value) is int and value >= 0:
+            usage[key] = value
     cost = getattr(agent, "session_estimated_cost_usd", 0)
     if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
         usage["cost_usd"] = round(float(cost), 4)
@@ -339,22 +341,9 @@ def _window_start(conn: sqlite3.Connection, task_id: str, cut: int) -> int:
 
 
 def _run_usage(conn: sqlite3.Connection, task_id: str, run_ids: list[int]) -> dict[int, dict]:
-    """``run_id -> usage`` from each run's newest ``worker_result`` that carried one."""
-    out: dict[int, dict] = {}
-    if not run_ids:
-        return out
-    marks = ",".join("?" for _ in run_ids)
-    for run_id, raw in conn.execute(
-            f"SELECT run_id, payload FROM task_events WHERE task_id = ? AND kind = 'worker_result' "
-            f"AND run_id IN ({marks}) AND json_extract(payload, '$.usage') IS NOT NULL ORDER BY id",
-            (task_id, *run_ids)):
-        try:
-            usage = (json.loads(raw or "{}") or {}).get("usage")
-        except (ValueError, AttributeError):
-            continue
-        if isinstance(usage, dict):
-            out[int(run_id)] = usage  # the newest receipt for a run wins
-    return out
+    """Run-local cumulative lower bounds, never summed across duplicate deliveries."""
+    from hermes_cli.kanban_usage_accounting import receipts
+    return receipts(conn, task_id, run_ids)
 
 
 def _refused(outcome: Any, raw_metadata: Any, has_usage: bool, admitted: bool) -> bool:
@@ -379,13 +368,14 @@ def spend(conn: sqlite3.Connection, task_id: str, *, as_of: Optional[int] = None
     """What the card spent since it last handed work on (or was last sent to triage by this budget)."""
     cut = int(time.time()) + 1 if as_of is None else int(as_of)
     since = _window_start(conn, task_id, cut)
-    rows = conn.execute(
-        "SELECT id, outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL AND ended_at < ? "
-        "AND started_at >= ? AND ended_at - started_at >= ?", (task_id, cut, since, MIN_RUN_SECONDS)).fetchall()
-    usage = _run_usage(conn, task_id, [int(r[0]) for r in rows])
+    candidates = conn.execute(
+        "SELECT id, outcome, metadata, ended_at-started_at FROM task_runs WHERE task_id = ? "
+        "AND ended_at IS NOT NULL AND ended_at < ? AND started_at >= ?", (task_id, cut, since)).fetchall()
+    usage = _run_usage(conn, task_id, [int(r[0]) for r in candidates])
     admitted = {int(r[0]) for r in conn.execute(
         "SELECT DISTINCT run_id FROM task_events WHERE task_id = ? AND kind = 'owner_admitted' "
         "AND run_id IS NOT NULL", (task_id,))}
+    rows = [r for r in candidates if r[3] >= MIN_RUN_SECONDS or int(r[0]) in admitted or int(r[0]) in usage]
     run_ids = [int(r[0]) for r in rows if not _refused(r[1], r[2], int(r[0]) in usage, int(r[0]) in admitted)]
     excluded = len(rows) - len(run_ids)
     tokens = {key: 0 for key in USAGE_KEYS}
