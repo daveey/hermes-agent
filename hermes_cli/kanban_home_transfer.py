@@ -102,8 +102,10 @@ def _install(conn: sqlite3.Connection) -> None:
                                    WHERE f.task_id={_TABLE}.task_id AND f.nonce={_TABLE}.nonce)
                     AND NOT EXISTS(SELECT 1 FROM kanban_home_aborted1 a WHERE {abort.predicate()}))
                 BEGIN SELECT RAISE(ABORT, 'home transfer prepared'); END""")
+    # Upgrade the earlier task+nonce-only guard on existing dormant stores.
+    conn.execute("DROP TRIGGER IF EXISTS home_prepared1_marker_delete")
     for action in ("UPDATE", "DELETE"):
-        condition = ("WHEN NOT EXISTS(SELECT 1 FROM kanban_home_aborted1 a WHERE a.task_id=OLD.task_id AND a.nonce=OLD.nonce)"
+        condition = (f"WHEN NOT EXISTS(SELECT 1 FROM kanban_home_aborted1 a WHERE {abort.predicate('OLD')})"
                      if action == "DELETE" else "")
         conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_prepared1_marker_{action.lower()}
             BEFORE {action} ON {_TABLE} {condition}
@@ -136,6 +138,9 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
         _install(conn)
         old = conn.execute(f"SELECT task_id,source,destination,nonce,expected_version FROM {_TABLE} WHERE task_id=?",
                            (task_id,)).fetchone()
+        if (not old or tuple(old) != tuple(record.values())) and conn.execute(
+                'SELECT 1 FROM kanban_home_aborted1 WHERE nonce=?', (nonce,)).fetchone():
+            raise ValueError("home preparation nonce already aborted")
         if old and tuple(old) != tuple(record.values()) and abort.aborted(conn, task_id):
             conn.execute(f"DELETE FROM {_TABLE} WHERE task_id=?", (task_id,))
             old = None

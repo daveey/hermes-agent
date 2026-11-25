@@ -445,7 +445,8 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
                 continue
             last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",
                                 (tid, filed_id, ALIVE_EVENT)).fetchone()[0]
-            silent = now - max(filed_at, int(last or 0))
+            baseline = kanban_home_probe.remote_baseline(conn, tid, filed_id, host, payload.get("probe_host"), now)
+            silent = now - max(filed_at, int(last or 0), baseline)
             if silent <= kwc.ALIVE_EVERY + 2 * int(every) + kwc.SILENT_GRACE:
                 continue
             with kb.write_txn(conn):
