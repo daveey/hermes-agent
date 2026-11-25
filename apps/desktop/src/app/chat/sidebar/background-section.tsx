@@ -4,7 +4,9 @@ import type { ComponentProps } from 'react'
 import { useI18n } from '@/i18n'
 import { Codecs, persistentAtom } from '@/lib/persisted'
 
+import { CardCountsContext } from './card-counts-context'
 import { ownerChatPolicy } from './owner-chats'
+import { aggregateCardColours, CardSquares } from './session-row-card-squares'
 import { SidebarSessionsSection } from './sessions-section'
 
 const $backgroundOpen = persistentAtom('hermes.desktop.sidebarBackgroundOpen', true, Codecs.bool)
@@ -20,18 +22,25 @@ export function SidebarPinnedAndBackgroundSections(props: ComponentProps<typeof 
     <>
       <SidebarSessionsSection {...props} sessions={pinned} sortable={pinned.length > 1} />
       {background.length > 0 && (
-        <SidebarSessionsSection
-          {...props}
-          emptyState={null}
-          label={t.sidebar.background}
-          labelMeta={background.length}
-          onReorderSessions={undefined}
-          onToggle={() => $backgroundOpen.set(!open)}
-          open={open}
-          preserveOrder
-          sessions={background}
-          sortable={false}
-        />
+        <CardCountsContext value>
+          <SidebarSessionsSection
+            {...props}
+            emptyState={null}
+            label={t.sidebar.background}
+            labelMeta={
+              <>
+                {background.length}
+                <CardSquares colours={aggregateCardColours(background)} counts />
+              </>
+            }
+            onReorderSessions={undefined}
+            onToggle={() => $backgroundOpen.set(!open)}
+            open={open}
+            preserveOrder
+            sessions={background}
+            sortable={false}
+          />
+        </CardCountsContext>
       )}
     </>
   )

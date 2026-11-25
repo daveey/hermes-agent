@@ -115,6 +115,105 @@ it('moves only owners with open cards below Pinned and excludes all owners from 
   )
 })
 
+it('counts every Background card colour on rows and the header without changing Pinned marks', () => {
+  $sessions.set([
+    owner('kanban_owner_terminal', { kanban_active: 7, kanban_parked: 5 }),
+    owner('kanban_owner_running', { kanban_active: 1 }),
+    owner('ordinary', { kanban_active: 7, kanban_parked: 5 })
+  ])
+  mount()
+  const background = section('Background')
+  const row = (title: string) => within(background).getByText(title).closest('.group.row-hover') as HTMLElement
+  const squares = (element: HTMLElement) => within(element).getByTestId('session-row-card-squares')
+  const terminal = squares(row('Owner kanban_owner_terminal'))
+  expect(terminal.querySelector('[data-card-colour="grey"]')?.textContent).toBe('5')
+  expect(terminal.querySelector('[data-card-colour="blue"]')?.textContent).toBe('2')
+  const running = squares(row('Owner kanban_owner_running'))
+  expect(running.querySelector('[data-card-colour="blue"]')?.textContent).toBe('1')
+  const header = within(background).getByRole('button', { expanded: true })
+  expect(within(header).getByText('2')).toBeTruthy()
+  const aggregate = squares(header)
+  expect(aggregate.querySelector('[data-card-colour="grey"]')?.textContent).toBe('5')
+  expect(aggregate.querySelector('[data-card-colour="blue"]')?.textContent).toBe('3')
+  expect([...aggregate.querySelectorAll('[data-card-colour]')].map(el => el.getAttribute('data-card-colour'))).toEqual([
+    'blue',
+    'grey'
+  ])
+  expect(aggregate.getAttribute('aria-label')).toBe('Running 3 · Waiting 5')
+  // Non-Background rows retain main's timer policy: no blue or grey trailing squares.
+  expect(within(section('Pinned')).queryByTestId('session-row-card-squares')).toBeNull()
+  act(() =>
+    $sessions.set([
+      owner('kanban_owner_terminal', { kanban_active: 9, kanban_parked: 6 }),
+      owner('kanban_owner_running', { kanban_active: 1 }),
+      owner('ordinary', { kanban_active: 7, kanban_parked: 5 })
+    ])
+  )
+  expect(squares(header).getAttribute('aria-label')).toBe('Running 4 · Waiting 6')
+  fireEvent.click(header)
+  expect(within(background).queryByText('Owner kanban_owner_terminal')).toBeNull()
+  expect(squares(header).getAttribute('aria-label')).toBe('Running 4 · Waiting 6')
+  fireEvent.click(header)
+})
+
+it('keeps elapsed timers beside Background counts and Pinned single squares unnumbered', () => {
+  const fields = {
+    kanban_active: 7,
+    kanban_parked: 5,
+    kanban_blocked: 1,
+    kanban_timed_cards: [{ id: 'card', title: 'Running card', state: 'running', since: Date.now() / 1000 - 45 }]
+  }
+
+  $sessions.set([owner('kanban_owner_timed', fields), owner('ordinary', fields)])
+  mount()
+  const background = section('Background')
+  const row = within(background).getByText('Owner kanban_owner_timed').closest('.group.row-hover') as HTMLElement
+  const marks = within(row).getByTestId('session-row-card-squares')
+  expect(marks.querySelector('[data-card-colour="blue"]')?.textContent).toBe('2')
+  expect(marks.querySelector('[data-card-colour="grey"]')?.textContent).toBe('5')
+  expect(within(row).getByTestId('session-row-card-timers')).toBeTruthy()
+  const pinned = within(section('Pinned')).getByTestId('session-row-card-squares')
+  expect(pinned.textContent).toBe('')
+  expect(pinned.querySelectorAll('[data-card-colour]')).toHaveLength(1)
+  expect(pinned.querySelector('[data-card-colour="red"]')).toBeTruthy()
+})
+
+it('aggregates every colour in urgency order and omits zero totals', () => {
+  const fields = {
+    kanban_active: 12,
+    kanban_parked: 5,
+    kanban_held: 2,
+    kanban_stalled: 1,
+    kanban_blocked: 3,
+    kanban_attention: 4,
+    kanban_unknown: true,
+    kanban_unseen: 6
+  }
+
+  $sessions.set([owner('kanban_owner_one', fields), owner('kanban_owner_two', fields)])
+  mount()
+  const header = within(section('Background')).getByRole('button', { expanded: true })
+  const marks = within(header).getByTestId('session-row-card-squares')
+  expect(
+    [...marks.querySelectorAll('[data-card-colour]')].map(el => [el.getAttribute('data-card-colour'), el.textContent])
+  ).toEqual([
+    ['red', '6'],
+    ['pink', '4'],
+    ['green', '2'],
+    ['amber', '8'],
+    ['blue', '10'],
+    ['grey', '10'],
+    ['violet', '12']
+  ])
+  act(() => $sessions.set([owner('kanban_owner_one', { kanban_active: 1 })]))
+  expect(
+    [...within(header).getByTestId('session-row-card-squares').querySelectorAll('[data-card-colour]')].map(el => [
+      el.getAttribute('data-card-colour'),
+      el.textContent
+    ])
+  ).toEqual([['blue', '1']])
+})
+
 it('hides the section when the last open card closes and keeps normal pins', () => {
   const row = owner('kanban_owner_runner', { kanban_parked: 1 })
   $sessions.set([row, owner('ordinary', { title: 'Normal pinned chat' })])

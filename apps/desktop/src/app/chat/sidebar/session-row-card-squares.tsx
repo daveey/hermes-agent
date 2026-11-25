@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useContext, useEffect, useState } from 'react'
 
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 import { isWaitKind, ORANGE_OVER, type WaitEta, type WaitReadout, waitReadout } from '@/lib/wait-eta'
 import type { SessionStatusStripe } from '@/store/session-dot-state'
 
+import { CardCountsContext } from './card-counts-context'
 import { SessionRowCardTimers } from './session-row-card-timers'
 import { useWaitClock } from './use-wait-clock'
 
@@ -74,6 +75,22 @@ export function sessionCardColours(
   )
 }
 
+export function aggregateCardColours(sessions: SessionInfo[]): ReturnType<typeof sessionCardColours> {
+  const totals = new Map<CardColour, number>()
+
+  for (const session of sessions) {
+    for (const { colour, count } of sessionCardColours(session, 0)) {
+      totals.set(colour, (totals.get(colour) ?? 0) + count)
+    }
+  }
+
+  return (Object.keys(COLOURS) as CardColour[]).flatMap(colour => {
+    const count = totals.get(colour) ?? 0
+
+    return count > 0 ? [{ colour, count }] : []
+  })
+}
+
 export const runningCardCount = (session: SessionInfo): number =>
   sessionCardColours(session, 0).find(item => item.colour === 'blue')?.count ?? 0
 
@@ -87,8 +104,20 @@ export function SessionRowCardSquares({
   session: SessionInfo
   executionUnknown: number
 }) {
+  const counts = useContext(CardCountsContext)
+  const colours = counts ? sessionCardColours(session, 0) : trailingColours(session, executionUnknown)
+
+  return <CardSquares colours={colours} counts={counts} />
+}
+
+export function CardSquares({
+  colours,
+  counts = false
+}: {
+  colours: ReturnType<typeof sessionCardColours>
+  counts?: boolean
+}) {
   const { t } = useI18n()
-  const colours = trailingColours(session, executionUnknown)
 
   if (!colours.length) {
     return null
@@ -104,14 +133,21 @@ export function SessionRowCardSquares({
         data-testid="session-row-card-squares"
         role="img"
       >
-        {colours.map(({ colour }) => (
-          <span
-            aria-hidden="true"
-            className={`size-[6px] shrink-0 rounded-[1.5px] ${COLOURS[colour]}`}
-            data-card-colour={colour}
-            key={colour}
-          />
-        ))}
+        {colours.map(({ colour, count }) =>
+          counts ? (
+            <span className="inline-flex items-center gap-[2px]" data-card-colour={colour} key={colour}>
+              <span aria-hidden="true" className={`size-[6px] shrink-0 rounded-[1.5px] ${COLOURS[colour]}`} />
+              <span className="text-[0.625rem] tabular-nums text-(--ui-text-tertiary)">{count}</span>
+            </span>
+          ) : (
+            <span
+              aria-hidden="true"
+              className={`size-[6px] shrink-0 rounded-[1.5px] ${COLOURS[colour]}`}
+              data-card-colour={colour}
+              key={colour}
+            />
+          )
+        )}
       </span>
     </Tip>
   )
@@ -119,30 +155,32 @@ export function SessionRowCardSquares({
 
 /** Keep the gateway marks last, and don't displace a slot-ending opt-in PR chip on empty rows. On a light-blue row
  *  (CI / deploy / timer wait) the ETA readout replaces the squares. */
-export function flatRowCardMarks(
+export function useFlatRowCardMarks(
   session: SessionInfo,
   executionUnknown: number,
   gatewayIcon: ReactNode,
   statusStripe?: null | SessionStatusStripe
 ): ReactNode {
-  const readouts = statusStripe === 'external' ? sessionWaitEtas(session, Date.now() / 1000) : []
+  return flatRowCardMarks(session, executionUnknown, gatewayIcon, statusStripe, useContext(CardCountsContext))
+}
 
-  if (
-    !gatewayIcon &&
-    !readouts.length &&
-    !trailingColours(session, executionUnknown).length &&
-    !session.kanban_timed_cards?.length
-  ) {
+export function flatRowCardMarks(
+  session: SessionInfo,
+  executionUnknown: number,
+  gatewayIcon: ReactNode,
+  statusStripe?: null | SessionStatusStripe,
+  counts = false
+): ReactNode {
+  const readouts = !counts && statusStripe === 'external' ? sessionWaitEtas(session, Date.now() / 1000) : []
+  const colours = counts ? sessionCardColours(session, 0) : trailingColours(session, executionUnknown)
+
+  if (!gatewayIcon && !readouts.length && !colours.length && !session.kanban_timed_cards?.length) {
     return null
   }
 
   return (
     <span className="pointer-events-none whitespace-nowrap text-[0.625rem] leading-none text-(--ui-text-tertiary)">
-      {readouts.length ? (
-        <SessionRowEtaReadout etas={readouts} />
-      ) : (
-        <SessionRowCardSquares executionUnknown={executionUnknown} session={session} />
-      )}
+      {readouts.length ? <SessionRowEtaReadout etas={readouts} /> : <CardSquares colours={colours} counts={counts} />}
       <SessionRowCardTimers session={session} />
       {gatewayIcon}
     </span>

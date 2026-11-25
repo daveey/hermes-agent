@@ -57,7 +57,7 @@ import {
 } from './chrome'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionContextMenu } from './session-actions-menu'
-import { flatRowCardMarks, runningCardCount } from './session-row-card-squares'
+import { runningCardCount, useFlatRowCardMarks } from './session-row-card-squares'
 import { SessionRowCardTimers } from './session-row-card-timers'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
@@ -279,7 +279,7 @@ function SidebarSessionRowImpl({
   const liveTurn = hasLiveTurn(dotState)
   const { outcomePainted, statusStripe } = useSessionRowStripe(session, dotState, rowHasLiveStatus(session))
   // [daveey] On a light-blue (CI / deploy / timer) row the ETA readout takes the squares' place.
-  const flatMarks = flatRowCardMarks(session, executionUnknown, gatewayIcon, statusStripe)
+  const flatMarks = useFlatRowCardMarks(session, executionUnknown, gatewayIcon, statusStripe)
 
   if (card) {
     // Card meta uses spacing alone (non-breaking: plain spaces collapse);
