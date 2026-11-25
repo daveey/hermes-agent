@@ -82,6 +82,9 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         state_path = ":memory:"
 
     def eligible(route):
+        from agent.model_routing_exclusions import provider_allowed
+        if not provider_allowed(route['provider']):
+            return False
         from hermes_cli.config import is_provider_enabled
         block = config.get("providers", {}).get(route["provider"], {})
         if not is_provider_enabled(block):
@@ -111,6 +114,9 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
 
     def prepare(metadata):
         selected, selected_model = metadata["selected_provider"], metadata["selected_model"]
+        from agent.model_routing_exclusions import provider_allowed
+        if not provider_allowed(selected):
+            raise ModelRoutingError('Safety exclusion refuses final provider allocation')
         runtime._raise_if_provider_disabled(selected)
         pool = pools[selected, metadata["billing_group"]]
         entry = pool.select(model=selected_model)

@@ -480,7 +480,19 @@ def _construct_agent(frame, factory, policy, **kwargs):
     with construction_scope(kanban):
         for _ in range(3):  # fast selection, ordinary selection, one completion-proof retry
             try:
-                return factory(**{**kwargs, **worker_route(policy, kwargs)})
+                from hermes_cli.kanban_refusal_boundary import require_policy
+                from agent.model_routing_exclusions import exclude_providers
+                with exclude_providers(require_policy(policy) or ()):
+                    selected = {**kwargs, **worker_route(policy, kwargs)}
+                    require_policy(policy, model=selected.get('model'), provider=selected.get('provider'))
+                    agent = factory(**selected)
+                try:
+                    if require_policy(policy, model=getattr(agent, 'model', ''), provider=getattr(agent, 'provider', '')):
+                        agent._kanban_refusal_policy = policy
+                except Exception:
+                    retire_agent(agent)
+                    raise
+                return agent
             except Exception as exc:
                 wall = quota_exception(exc)
                 if kanban and wall is not None:

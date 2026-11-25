@@ -147,6 +147,8 @@ def placing_spawn(spawn, policy):
         env = source_worker_env(policy, kwargs.get('env'))
         if env is not kwargs.get('env'):
             kwargs['env'] = env
+        from hermes_cli.kanban_refusal_boundary import require_policy
+        require_policy(policy)
         rendezvous = attach_capsule_transport(policy)
         try:
             process = observing_spawn(spawn, rendezvous, owner_sha=owner_sha)(*args, **kwargs)

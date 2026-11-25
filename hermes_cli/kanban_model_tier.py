@@ -361,6 +361,8 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
     plus the run's resolved ``run_route`` receipt (every spawn, tier off included).
     Returns the reason. Review resolution/receipt failures refuse admission rather than inventing a route."""
     reason = _apply_model_tier(conn, task, lane=lane, cfg=cfg)
+    from hermes_cli.kanban_refusal_boundary import require_route
+    require_route(conn, task, task.model_override, task.provider_override, lane=lane)
     if f"+{_REFUSAL_EXHAUSTED}:" in reason:
         from agent.model_routing import ModelRoutingError
         raise ModelRoutingError(f"Every eligible provider refused this card's work ({reason.rsplit(':', 1)[1]})")
@@ -595,6 +597,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
     if moved:
         model, provider = moved[0], moved[1]
         reason = f"{reason}+{_PACED}:{moved[2]}"
+    from hermes_cli.kanban_refusal_boundary import require_route
+    require_route(conn, task, model, provider, lane=lane)
     origin = (getattr(task, "model_override", None), getattr(task, "provider_override", None))
     repinned = bool(model) and reason.startswith("pinned+pin_quota_reroute")
     paced = _paced_receipt(conn, task, reason, lane=lane, cfg=cfg) if is_review else None
