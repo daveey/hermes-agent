@@ -30,7 +30,9 @@ concurrency:
 jobs:
   composed:
     name: Origin forwarding through the pinned hermes-hub courier
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # The heavy lane: the bounded fast lane admits only measured checks of <= 10 min
+    # (tests/ci/test_fast_runner_routing.py), and a cold setup-pm alone can take longer.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     environment: hermes-hub-read
     steps:
