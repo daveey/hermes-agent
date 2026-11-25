@@ -653,6 +653,9 @@ def _event_refresh(events) -> float | None:
             return due
     else:
         _unsettled.update(_known)  # source/overflow/ownership/explicit wake
+    # Lost notifications (overflow, ignored watch) say nothing about what moved: no part key vouches for the
+    # inputs, so every part reads. Taken before ``replace`` resets the flag.
+    lost = bool(getattr(events, 'coverage_lost', False)) and not getattr(events, 'control_only', False)
     files, directories, controls, scopes = set(), set(), set(), []
     deadlines = []
     for scope, ctx in list(_known.items()):
@@ -712,6 +715,8 @@ def _event_refresh(events) -> float | None:
             # The age is this scope's own: the active count slot belongs to whichever scope was read last.
             with _ksa._cache_lock:
                 read_at = _ksa._count_scopes.read_at_locked(scope)
+            if lost:
+                _parts.failed(scope)
             forced, part_keys = _parts.plan(
                 scope, clock=len(_holder_ctx.deadlines) != len(pending),
                 renew=read_at is None or time.monotonic() - read_at >= STRICT_REFRESH_AGE_S)
