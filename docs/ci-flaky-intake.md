@@ -337,3 +337,113 @@ required CI result, landed commit and deployed producer revision separately. Rea
 natural intake and its corresponding queue/cursor records; never manufacture production
 flakes. If no natural occurrence arrives, leave that proof explicitly pending. Slot-hour
 reduction needs a subsequent measured window, not a projection from card counts.
+
+## Frozen Nov23–25 intake consolidation (through occurrence 826)
+
+This is a historical metadata/routing export, not a claim that the tests are fixed or that
+the producer backlog is empty. Repair evidence, independent exact-head review, required CI
+and landing remain with the named repair owners. No skip, xfail, retry or timeout policy changes.
+
+Validated **728 occurrences (99–826), 60 distinct exact tests**, in four nonoverlapping batches:
+
+| Frozen batch | Occurrences | Exact tests |
+|---|---:|---:|
+| Nov23 (99–331) | 233 | 32 |
+| Nov24 (332–720) | 389 | 30 |
+| Nov25 (721–815) | 95 | 10 |
+| Nov25 supplemental (816–826) | 11 | 4 |
+
+[Machine-readable frozen source and per-test dispositions](ci-flaky-intake-2026-11-23-25.json)
+retains every delivered occurrence record unchanged, including original run/job/attempt,
+slice, source/head SHA and owner hints. Dispositions are separate from source observations.
+SHA256: `15f79e2cd1ea5786c737ab9bd4c986d5af11acccad9a86be1e5e541ec3250056`. Each batch retains its own intake disposition; later recurrences
+do not become fixed merely because an earlier disposition identified a merged repair.
+
+### Per-test routing at intake
+
+Counts in day columns sum occurrences, not independent failures. Owner IDs denote the
+canonical repair scope, not current execution or an uptime guarantee. The MoA entry retains
+the owning chat’s accepted existing-merged-repair disposition; this export did not rerun it.
+
+| Exact test | Nov23 | Nov24 | Nov25 | Supplement | Repair owner / intake disposition |
+|---|---:|---:|---:|---:|---|
+| `tests/acp_adapter/test_gateway_unacked_slash.py::test_repeated_prompt_after_slash_command_is_new_work` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/agent/test_shell_hooks_tree_kill.py::test_interrupt_kills_hook_and_propagates` | 0 | 1 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/ci/test_plugin_catalog_ci_confinement.py::test_a_syncs_own_scanner_cannot_wave_a_payload_through` | 1 | 0 | 0 | 0 | t_01a2117dc0f39dbd |
+| `tests/gateway/test_active_session_command_authz.py::test_a_message_during_a_refusal_after_the_owner_finished_keeps_the_held_burst` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_authority_lane_moves_on.py::test_the_app_keeps_its_old_conversation_and_the_chat_gets_none_of_its_replies` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_command_discovery.py::test_ordinary_daemon_discovery_matches_legacy_extensions` | 0 | 10 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_detached_conversation_lifecycle.py::test_a_background_result_of_the_old_conversation_reaches_the_app_not_the_chat` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_detached_conversation_results.py::test_a_result_the_chat_started_on_the_old_conversation_lands_in_it_once_the_app_used_it` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_internal_wake_never_interrupts.py::test_idle_loop_tick_runs_as_a_fifo_turn_not_beside_it` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_journey_new_session_queued_work.py::test_new_session_never_absorbs_or_drops_earlier_queued_work` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_native_profile_registry_grant.py::test_registry_grant_renames_and_deletes_only_its_own_served_profile` | 10 | 14 | 3 | 1 | t_01a2117deceffea3 |
+| `tests/gateway/test_new_moves_automation_wake.py::test_new_moves_a_queued_wake_to_the_fresh_session` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_plugin_idle_task_housekeeping.py::test_after_an_in_process_restart_only_the_new_housekeeping_records` | 1 | 2 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_responses_disconnected_identity.py::test_disconnected_stream_identity_joins_the_bound_and_never_reruns` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_session_bot_retry.py::test_context_overflow_retries_once_unless_the_failed_dm_is_still_an_open_tail` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_session_deferred_reasoning.py::test_levels_picked_during_a_running_turn_apply_to_the_next_turn_in_pick_order` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_session_hosted_daemon.py::test_room_unknown_discard_releases_only_its_followers` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_session_kanban.py::test_real_dispatcher_lifecycle` | 26 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_session_mutation_model_busy.py::test_a_deferred_pick_that_raises_is_refused_and_the_queue_keeps_draining` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_session_mutation_model_busy.py::test_a_retried_deferred_pick_does_not_undo_a_newer_pick` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_stream_consumer_wecom_native.py::TestClarifyEagerReseed::test_double_clarify_boundary_reseed_chain` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_unviewed_completion_notes.py::test_completion_after_new_is_noted_on_the_closed_session` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_unviewed_completion_notes.py::test_input_admitted_after_the_completion_sees_its_note` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_unviewed_completion_resumes_parent.py::test_successful_manual_cron_run_stays_a_note` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_wake_admitted_before_drain_authority.py::test_a_wake_claimed_just_before_a_drain_runs_rather_than_settling_unrun` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_wake_admitted_before_drain_authority.py::test_authority_route_runs_a_wake_receipted_before_drain_once_after_restart` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/gateway/test_wake_during_restart_drain_authority.py::test_authority_route_refuses_a_wake_when_the_drain_starts_during_admission` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/hermes_cli/test_annotation_native_holder.py::test_foreign_reader_sessions_do_not_project` | 2 | 0 | 0 | 0 | t_01a2117dd47317fc |
+| `tests/hermes_cli/test_annotation_native_holder.py::test_real_projection_idle_and_changed_source` | 4 | 17 | 2 | 0 | t_01a2117dd47317fc |
+| `tests/hermes_cli/test_annotation_native_holder.py::test_wal_commit_racing_its_notification_is_confirmed` | 3 | 1 | 0 | 0 | t_01a2117dd47317fc |
+| `tests/hermes_cli/test_browse_schema_drift.py::test_browse_budget_is_armed_before_the_macos_durability_pragmas` | 45 | 0 | 0 | 0 | t_01a2117dd47317fc |
+| `tests/hermes_cli/test_config_save_integrity.py::test_transient_read_error_is_not_recorded_as_a_corrupt_config` | 9 | 0 | 0 | 0 | t_01a2117dd47317fc |
+| `tests/hermes_cli/test_dashboard_password_command.py::test_a_restart_keeps_sign_ins_and_one_after_a_change_ends_them` | 0 | 0 | 1 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_fact_clock_only.py::test_clock_only_session_owner_advances_state_without_rows` | 0 | 8 | 0 | 0 | t_01a2117dd47317fc |
+| `tests/hermes_cli/test_fact_tree_failures.py::test_native_failure_and_recovery_through_public_read` | 2 | 14 | 0 | 0 | t_01a2117dd47317fc |
+| `tests/hermes_cli/test_gateway_snapshot_restore_live.py::test_snapshot_restore_rejoins_the_restored_authority` | 0 | 11 | 0 | 1 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_hf_browse.py::test_sideload_rejects_non_gguf` | 1 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_kanban_active_pr_idle_custody.py::test_hold_cap_uses_existing_visible_supervisor_escalation` | 0 | 0 | 0 | 1 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_kanban_origin_ledger.py::test_scheduled_owner_record_publishes_its_park` | 1 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_kanban_scratch_archive_retention.py::test_free_bytes_reads_the_real_filesystem` | 1 | 8 | 3 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_kanban_session_activity.py::test_hub_session_rows_do_not_invalidate_the_remote_links_projection` | 1 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_kanban_session_activity.py::test_session_kanban_tasks_endpoint` | 6 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_load_progress.py::test_loading_events_build_snapshot_and_terminal_clears` | 1 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_moa_preset_deletion.py::test_moa_save_refuses_transient_read_failure_without_losing_config` | 5 | 0 | 0 | 0 | Existing merged MoA PR4155 (intake disposition) |
+| `tests/hermes_cli/test_project_plugin_rce_bypass.py::TestProjectPluginsEnvGate::test_falsy_values_keep_project_plugins_disabled` | 3 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_project_plugin_rce_bypass.py::TestProjectPluginsEnvGate::test_truthy_values_enable_project_plugins` | 1 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_session_owner_discovery_starting.py::test_a_gateway_still_starting_past_the_budget_answers_retry_not_drain` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/hermes_cli/test_session_owner_discovery_starting.py::test_concurrent_writes_behind_a_persisting_start_each_answer_the_starting_503` | 0 | 1 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/hermes_cli/test_sessions_capture_process.py::test_faults_are_typed_and_reaped` | 0 | 20 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_spawn_gateway_restart_cooldown.py::TestRepeatRestartWithinCooldown::test_a_storm_of_requests_produces_exactly_one_restart` | 16 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/hermes_cli/test_web_server_files.py::test_directory_listing_skips_vanished_regular_file` | 5 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_web_server_idle_proof.py::test_live_pooled_children_prove_idle_or_busy_over_the_desktop_probe` | 0 | 1 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/hermes_cli/test_webapp_uploads.py::test_browser_document_upload_remains_extractable_after_file_attach` | 0 | 2 | 3 | 0 | t_01a2117e043cbca0 |
+| `tests/plugins/test_board_startup.py::test_native_startup_prewarms_then_serves_without_legacy` | 2 | 0 | 0 | 0 | t_01a2117e043cbca0 |
+| `tests/plugins/test_kanban_dashboard_plugin.py::test_board_card_exposes_current_run_start` | 78 | 252 | 71 | 8 | t_01a2117e043cbca0 |
+| `tests/plugins/test_kanban_dashboard_plugin.py::test_bulk_archive` | 0 | 0 | 1 | 0 | t_01a2117e043cbca0 |
+| `tests/plugins/test_kanban_dashboard_plugin.py::test_bulk_status_ready` | 0 | 0 | 1 | 0 | t_01a2117e043cbca0 |
+| `tests/plugins/test_kanban_dashboard_plugin.py::test_bulk_status_running_rejected` | 0 | 0 | 1 | 0 | t_01a2117e043cbca0 |
+| `tests/tools/test_mcp_child_filter_supervisor.py::test_a_supervisor_whose_spawn_has_not_returned_yet_is_still_not_an_mcp_child` | 1 | 0 | 0 | 0 | t_01a2117deceffea3 |
+| `tests/tui_gateway/test_readiness_singleflight.py::test_probe_outliving_its_budget_answers_retryable_unknown_then_reprobes` | 0 | 13 | 9 | 0 | t_01a2117deceffea3 |
+
+### Provenance and repair boundaries
+
+- Nov23 intake `t_01a205ca02b80d5b`: 80 immutable pages; final archive SHA256
+  `bab63f08772b37ddca39a93fe616dbfdcf6668d39109c2ae836ef690e04c0276`.
+- Nov24 intake `t_01a20adbe87cad02`: 100 immutable pages; archive SHA256
+  `5791093601506b34b0e555b8f9f3c5393d7efa81f3867d1f24aff6806d87748e`.
+- Nov25 intake `t_01a2100379f617aa`: frozen 95 occurrences; archive SHA256
+  `30a1e5a036bbce258e559bbea54ddc2eadd56ebd77ebb0c5ad51da07a5ca66e9`.
+- Supplemental intake `t_01a211893144b05a`: two immutable pages; archive SHA256
+  `7c7539e70f87da3e92b125d4243bd5d9b969e7ccf12c168c232358901aadc17e`.
+- These artifacts are downloadable from the respective intake completion receipts.
+  The journal remains backlog truth; undispatched rows are outside this frozen export.
+- Board current-run-start repair [PR4390](https://github.com/softmax-universe/daveey-hermes/pull/4390)
+  was published for CI/review. That is not a merged/fixed disposition for all occurrences.
+  Original Nov23 first attempts show `503 board_scope_unavailable`; the repair drains only
+  the full-app mounts imported by a bare-router test, preserving the foreign-home refusal.
+- Board/CLI owner `t_01a2117e043cbca0` owns this single consolidation and its remaining repairs.
+  Other intake owners retain their exact-test scopes. Historical closed registry owner
+  `t_01a1b8f8ac4ac8e8` is not an open owner or proof that Nov23–25 recurrences are fixed.
