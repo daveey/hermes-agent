@@ -311,30 +311,50 @@ def by_person(commented: Mapping[str, Any]) -> bool:
             or commented.get("recorded_decision") is not None)
 
 
-def _unread_human(conn: sqlite3.Connection, tid: str, stop: dict, seen: Optional[int]) -> list[Optional[int]]:
-    """Local ids of comments a person wrote (or a chat relayed for one) after the stop, newer than ``seen``; None
-    for one whose text has not synced here (it can never be acknowledged; ``_unread_items``). A synced comment
-    binds by ``comment_uid``: its ``comment_id`` is the writer board's local id, which may be absent here or name
-    another comment. ``comment_id`` binds only an event with no uid to a local comment that has none."""
+HUMAN_ROUTE = ("a human operator's `hermes kanban release` or a Desktop Unblock proceeds without it")
+
+
+def _human_after(conn: sqlite3.Connection, tid: str, stop: dict, seen: Optional[int]) -> tuple[list[int], list[str]]:
+    """``(local ids, missing)`` of comments a person wrote (or a chat relayed for one) after the stop: the local
+    ids newer than ``seen``, and a label for each whose text is not here, which nothing can acknowledge
+    (``_unread_items``). A synced event binds by ``comment_uid``: its ``comment_id`` is the writer board's local
+    id, which may be absent here or name another comment. An event with no uid binds by ``comment_id`` on this
+    card when this board wrote it (no ``origin_gateway``, or one of its own names, as :func:`own_events`): the
+    sync schema step backfills uids onto comment rows but not onto their events. A foreign uid-less event and a
+    uid matching no comment here are missing."""
+    from hermes_cli.kanban_db_sync import sync_state
+    from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.kanban_sync_divergence import _event_order
     synced = "uid" in {r[1] for r in conn.execute("PRAGMA table_info(task_comments)")}
-    local = {int(r[0]): (r[1] if synced else None) for r in conn.execute(
+    local = {int(r[0]): r[1] for r in conn.execute(
         f"SELECT id, {'uid' if synced else 'NULL'} FROM task_comments WHERE task_id=?", (tid,))}
     by_uid = {uid: cid for cid, uid in local.items() if uid}
-    after, out = _event_order(stop), []
+    own = {gateway_names()[0], str((sync_state(conn) or {}).get("gateway_id") or "")}
+    after, ids, missing = _event_order(stop), [], []
     for row in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='commented'", (tid,)):
         event = dict(row)
         p = _payload(event["payload"])
         if not by_person(p) or _event_order(event) <= after:
             continue
-        uid, cid = p.get("comment_uid"), p.get("comment_id")
+        uid, cid, origin = p.get("comment_uid"), p.get("comment_id"), event.get("origin_gateway")
         if uid:
             cid = by_uid.get(uid)
-        elif not (isinstance(cid, int) and cid in local and not local[cid]):
-            cid = None
-        if cid is None or cid > (seen or 0):
-            out.append(cid)
-    return sorted(out, key=lambda c: (c is None, c or 0))
+            label = f"comment uid {uid}"
+        else:
+            if not (isinstance(cid, int) and cid in local and (not origin or origin in own)):
+                cid = None
+            label = f"comment {p.get('comment_id')} from {origin or 'an unknown gateway'} (no uid)"
+        if cid is None:
+            missing.append(label)
+        elif cid > (seen or 0):
+            ids.append(cid)
+    return sorted(ids), sorted(missing)
+
+
+def _unread_human(conn: sqlite3.Connection, tid: str, stop: dict, seen: Optional[int]) -> list[Optional[int]]:
+    """:func:`_human_after` as one list: the local ids, then None for each comment whose text is not here."""
+    ids, missing = _human_after(conn, tid, stop, seen)
+    return ids + [None] * len(missing)
 
 
 def _existing_mandate(conn: sqlite3.Connection, tid: str, stop: dict, body: str, kind: str,
@@ -461,10 +481,11 @@ def _unread_items(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple,
     # Keyed by kind and id: an ``extra`` item may be a budget event (``kind: event``), whose id is a task_events
     # id and never stands for, or collides with, a comment id.
     items: dict = {(item.get("kind", "comment"), item["id"]): dict(item) for item in extra}
-    for cid in _unread_human(conn, tid, stop, None):
-        if cid is None:  # a person's comment whose text has not synced here
-            items[("comment", None)] = {"id": None, "who": "(human)", "time": "", "body": "(not synced here yet)"}
-            continue
+    people, missing = _human_after(conn, tid, stop, None)
+    if missing:  # a person's comment whose text is not here: printed by identity, never acknowledgeable
+        items[("comment", None)] = {"id": None, "who": "(human)", "time": "",
+                                    "body": "(not synced here yet: " + ", ".join(missing) + ")"}
+    for cid in people:
         row = conn.execute("SELECT author, created_at, body FROM task_comments WHERE id=? AND task_id=?",
                            (cid, tid)).fetchone()
         if row is not None:
@@ -550,7 +571,7 @@ def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], write
                       f"{item['who']} | {item['time']}\n{item['body']}" for item in items)
     command = rerun or f"hermes kanban {verb} {tid}"
     how = (f"After reading: `{command} --seen {newest}`" if newest is not None else
-           "A comment's text has not synced here; wait for the sync and rerun")
+           "A comment's text has not synced here; wait for the sync and rerun, or " + HUMAN_ROUTE)
     if newest is not None and not writer[1]:
         how = ("This caller has no session id (HERMES_SESSION_ID), so no refusal can be recorded as shown to it; "
                "a human operator, the owning chat or a delegate chat must do this")
@@ -694,10 +715,12 @@ def _decide(conn: sqlite3.Connection, s) -> str:
         if now is None or now[0] != s.status or not ksd.pending(c, s.tid):
             return f"{s.tid} changed during the release"
         if kind != "human":
-            if people := _unread_human(c, s.tid, s.stop, s.seen):
-                last = max((c for c in people if c is not None), default=None)
-                return (f"a human commented on {s.tid} during the release "
-                        f"({f'comment {last}' if last is not None else 'a comment not synced here yet'})")
+            people, missing = _human_after(c, s.tid, s.stop, s.seen)
+            if people:
+                return f"a human commented on {s.tid} during the release (comment {people[-1]})"
+            if missing:
+                return (f"a human's comment on {s.tid} has not synced here ({', '.join(missing)}); wait for the "
+                        f"sync and rerun, or {HUMAN_ROUTE}")
             unread.check(c, s.tid, session=session, seen=s.seen, verb="release", board=s.board)
         kb._append_event(c, s.tid, RELEASED, record)
         return None

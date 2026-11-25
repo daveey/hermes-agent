@@ -429,3 +429,71 @@ def test_an_ordinary_card_with_many_comments_renders_no_release_or_instructions(
     context = kb.build_worker_context(board, tid)
     assert '## Release mandate' not in context and HUMAN_SECTION not in context
     assert '## Comment thread' in context
+
+
+# --- follow-up 3: a comment the sync schema backfilled binds; a missing one names its uid and the human route --
+
+
+def _backfilled(board, tid, cid, uid='backfilled-uid'):
+    """What the sync schema step leaves: a uid on the comment row, none on its ``commented`` event."""
+    with kb.write_txn(board):
+        board.execute('UPDATE task_comments SET uid=? WHERE id=?', (uid, cid))
+        board.execute("UPDATE task_events SET payload=json_remove(payload,'$.comment_uid') WHERE task_id=? "
+                      "AND kind='commented' AND json_extract(payload,'$.comment_id')=?", (tid, cid))
+
+
+def test_a_backfilled_own_comment_binds_and_is_acknowledged_with_seen(board, monkeypatch):
+    _synced(board)
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Only the docs fix, please.', writer_kind='human')
+    _backfilled(board, tid, said)
+    assert release._unread_human(board, tid, _stop(board, tid), None) == [said]
+    out = rel.as_owner(board, tid)
+    assert out['refusal'] == 'budget_decision_unread' and f'--seen {said}' in out['message']
+    assert rel.as_owner(board, tid, seen=said)['outcome'] == 'released'
+
+
+def test_a_foreign_uidless_human_event_still_blocks_and_names_the_human_route(board, monkeypatch):
+    _synced(board)
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    said = kb.add_comment(board, tid, 'default', 'Foreign words.', writer_kind='human')
+    _backfilled(board, tid, said)
+    with kb.write_txn(board):
+        board.execute("UPDATE task_events SET origin_gateway='some-other-gateway' WHERE task_id=? AND kind='commented'",
+                      (tid,))
+    assert release._unread_human(board, tid, _stop(board, tid), None) == [None]
+    out = rel.as_owner(board, tid)
+    assert out['outcome'] == 'refused'
+    assert "a human operator's `hermes kanban release` or a Desktop Unblock proceeds without it" in out['message']
+    assert f'comment {said} from some-other-gateway (no uid)' in out['message']
+
+
+def test_a_uid_matching_nothing_here_names_that_uid(board, monkeypatch):
+    _synced(board)
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    _remote_human(board, tid, 'remote-missing-uid', 424242)
+    out = rel.as_owner(board, tid)
+    assert out['outcome'] == 'refused' and 'comment uid remote-missing-uid' in out['message']
+    assert 'Desktop Unblock proceeds without it' in out['message']
+
+
+def test_the_in_transaction_check_names_the_uid_and_the_human_route(board, monkeypatch):
+    """A person's comment that lands during the release, with its text not here yet."""
+    _synced(board)
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    scope.link(board, tid)
+    calls = []
+
+    def late(conn):
+        calls.append(1)
+        if len(calls) == 2:  # the second ask is the one inside the deciding transaction
+            kb._append_event(conn, tid, 'commented', {'author': 'david', 'comment_id': 9, 'comment_uid': 'late-uid',
+                                                      'writer_kind': 'human'})
+
+    out = rel.as_owner(board, tid, precondition=late)
+    assert out['outcome'] == 'refused', out
+    assert f"a human's comment on {tid} has not synced here (comment uid late-uid)" in out['message']
+    assert 'Desktop Unblock proceeds without it' in out['message']
