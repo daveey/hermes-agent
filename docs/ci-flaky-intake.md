@@ -1,5 +1,37 @@
 # Daily CI flake intake
 
+## Catalog confinement repair receipt — November 22–23, 2026
+
+Canonical repair owner: `t_01a2117dc0f39dbd`; intake owners:
+`t_01a2055174191bc9` (Nov22), `t_01a205ca02b80d5b` (Nov23).
+The rejected request `placement:worker-a2:faeb7513044182dce903f37a`
+created no repair card; the owning chat established the canonical owner above.
+Intake completion closes triage only, not repair or landing acceptance.
+
+| Occurrence / exact test in `tests/ci/test_plugin_catalog_ci_confinement.py` | Original first-attempt evidence | Disposition |
+|---|---|---|
+| 98 / `test_dot_named_self_updaters_are_scanned` | Run `45074930667`, job `137370140500`, lines 1212–1247: nonzero exit and self-updater rejection pass; the negative `PASS` substring assertion matches `tmp.toJPASSLFh` in the diagnostic path. | Test oracle flake, not a product bypass. Match actual `✅ PASS: ` result records; audit sibling positive and negative assertions. Force the incident path for every dot-name case. |
+| 110 / `test_a_syncs_own_scanner_cannot_wave_a_payload_through` | Run `45133478598`, job `137554235239`, lines 1778–1811: `_delta_fixture` local clone exits 128 copying `.git/objects/bitmap-ref-tips_ajB7Sr` (ENOENT), before scanner assertions. | Fixture setup race at local object-directory copying. Use `--no-local` for fixture clones so upload-pack transfers reachable objects, ignoring transient maintenance files. The historical log does not identify the maintenance process; detached maintenance is consistent with the filename, not directly observed. |
+
+Both original logs were retrieved with `gh run view RUN --job JOB --log`.
+A read-only query of the producer journal on November 25 found **only one
+retained occurrence per exact test**, IDs 98 and 110: there is no second retained
+occurrence to retrieve for either test. This is not a claim of complete CI history.
+The Nov23 evidence bundle covers occurrences 99–331 and contains only 110 for
+this file; occurrence 114 concerns another test, not a second catalog failure.
+The remaining intake backlog is outside this repair's two exact tests.
+
+Deterministic controls retain real rejection, trusted-checkout and injected-scanner
+assertions. The clone regression places an unreadable transient object-store entry
+in the source: explicit local copying fails, while the fixture clone succeeds with
+identical HEAD and plugin bytes. This controls the failure boundary, not the
+historical maintenance schedule. Mutations restoring local copying or the broad
+substring assertion must fail. No tests are deleted/xfail-ed, and no retry policy,
+production scanner, timeout or security admission rule is relaxed. Repair is not
+considered landed until independent exact-head review and required CI pass through
+`hermes-core-wt ship`; PR and final proof receipts belong on the canonical owner
+and both intake threads.
+
 The producer retains metadata-only occurrences in a SQLite journal beside its JSON cursor:
 `ci-flaky-cards.json` → `ci-flaky-cards.intake.sqlite3`. The journal, not the bounded cursor
 or the card thread, is backlog truth. Its sibling `.intake.lock` serializes producers and

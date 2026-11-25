@@ -57,6 +57,11 @@ def _step_env(name_prefix: str, job: str | None = None) -> dict:
 
 
 def _git(cwd: Path, *args: str) -> str:
+    # Local clone's object-directory copy races detached Git maintenance (e.g.
+    # bitmap-ref-tips_* disappearing). Use upload-pack even for fixture paths:
+    # it transfers reachable objects rather than enumerating transient files.
+    if args[0] == "clone":
+        args = ("clone", "--no-local", *args[1:])
     return subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
         cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
@@ -90,6 +95,39 @@ def origin(tmp_path):
     _commit(repo)
     (tmp_path / "mktmp").mkdir()  # mktemp lands here so escape paths are predictable
     return repo
+
+
+def _pass_records(stdout: str) -> list[str]:
+    """Only gate result lines, never PASS embedded in a clone path/diagnostic."""
+    return [line for line in stdout.splitlines() if line.startswith("✅ PASS: ")]
+
+
+@pytest.mark.parametrize("stdout, expected", [
+    ('::error::self-updating code in "/tmp/tmp.toJPASSLFh/plugin/.mjs"\n', []),
+    ("✅ PASS: plugin-catalog/a.yaml\n", ["✅ PASS: plugin-catalog/a.yaml"]),
+    ("✅ PASS: all changed catalog entries validated at their pinned shas\n",
+     ["✅ PASS: all changed catalog entries validated at their pinned shas"]),
+], ids=["path-is-not-a-result", "entry-result", "summary-result"])
+def test_pass_records_match_gate_results_only(stdout, expected):
+    assert _pass_records(stdout) == expected
+
+
+def test_fixture_clone_ignores_transient_object_store_files(tmp_path, origin):
+    # Model the local-copy failure boundary: an enumerated maintenance file no
+    # longer has readable bytes. A dangling link makes that deterministic without
+    # needing the CI runner's newer Git or racing a real maintenance process.
+    transient = origin / ".git" / "objects" / "bitmap-ref-tips_vanished"
+    transient.symlink_to("already-removed")
+    local = subprocess.run(
+        ["git", "clone", "--local", "-q", str(origin), str(tmp_path / "local-copy")],
+        capture_output=True, text=True, check=False)
+    assert local.returncode != 0, local.stdout + local.stderr
+    assert "bitmap-ref-tips_vanished" in local.stderr
+    clone = tmp_path / "transport-clone"
+    _git(tmp_path, "clone", "-q", str(origin), str(clone))
+    assert _git(clone, "rev-parse", "HEAD") == _git(origin, "rev-parse", "HEAD")
+    assert (clone / "plugin" / "plugin.yaml").read_bytes() == (origin / "plugin" / "plugin.yaml").read_bytes()
+    assert not (clone / ".git" / "objects" / transient.name).exists()
 
 
 def _cand(tmp_path: Path) -> Path:
@@ -280,7 +318,7 @@ def test_bypass_fails_the_gate(tmp_path, origin, case):
     out = res.stdout + res.stderr
     assert res.returncode != 0, out
     assert expected in out
-    assert "PASS" not in res.stdout
+    assert not _pass_records(res.stdout), res.stdout
     # PR-controlled values must never smuggle a workflow command into the log.
     assert not any(line.startswith("::error::forged") for line in res.stdout.splitlines())
 
@@ -311,7 +349,7 @@ def test_an_attested_binary_is_verified_against_the_pin_and_then_allowed(tmp_pat
     entry = _entry(tmp_path, "ok.yaml", sha, attested_binaries=[path])
     res = _gate(tmp_path, origin, [entry])
     assert res.returncode == 0, res.stdout + res.stderr
-    assert f"PASS: {_rel(tmp_path, entry)}" in res.stdout
+    assert f"✅ PASS: {_rel(tmp_path, entry)}" in _pass_records(res.stdout)
     [call] = log.read_text(encoding="utf-8").splitlines()
     # The gate strips only a github.com prefix from the repo, so the fixture URL passes whole.
     assert call.startswith("attestation verify ")
@@ -326,7 +364,7 @@ def test_an_attested_binary_without_provenance_fails_the_gate(tmp_path, origin):
     res = _gate(tmp_path, origin, [entry])
     assert res.returncode != 0
     assert "no build-provenance attestation for runtime/host.exe" in res.stdout
-    assert "PASS" not in res.stdout
+    assert not _pass_records(res.stdout), res.stdout
 
 
 def test_an_attested_self_updater_still_fails_the_self_updater_gate(tmp_path, origin):
@@ -341,7 +379,7 @@ def test_an_attested_self_updater_still_fails_the_self_updater_gate(tmp_path, or
     res = _gate(tmp_path, origin, [entry])
     assert res.returncode != 0
     assert "self-updating code" in res.stdout
-    assert "PASS" not in res.stdout
+    assert not _pass_records(res.stdout), res.stdout
 
 
 @pytest.mark.parametrize("declaration", [
@@ -362,7 +400,7 @@ def test_ajv_bundled_meta_schema_url_is_not_a_self_updater(tmp_path, origin, dec
     entry = _entry(tmp_path, "ok.yaml", sha)
     res = _gate(tmp_path, origin, [entry])
     assert res.returncode == 0, res.stdout + res.stderr
-    assert f"PASS: {entry.relative_to(tmp_path / 'cand')}" in res.stdout
+    assert f"✅ PASS: {_rel(tmp_path, entry)}" in _pass_records(res.stdout)
 
 
 @pytest.mark.parametrize("filename", [".js", "..js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx", ".mts", ".cts", "dl.js"])
@@ -370,10 +408,13 @@ def test_dot_named_self_updaters_are_scanned(tmp_path, origin, filename):
     (origin / "plugin" / filename).write_text(
         "fetch('releases/download'); fs.writeFileSync(target, body)\n", encoding="utf-8")
     entry = _entry(tmp_path, "evil.yaml", _commit(origin))
-    res = _gate(tmp_path, origin, [entry])
+    clone_tmp = tmp_path / "tmp.toJPASSLFh"
+    clone_tmp.mkdir()
+    res = _gate(tmp_path, origin, [entry], extra_env={"TMPDIR": str(clone_tmp)})
     assert res.returncode != 0
     assert "self-updating code" in res.stdout
-    assert "PASS" not in res.stdout
+    assert str(clone_tmp) in res.stdout
+    assert not _pass_records(res.stdout), res.stdout
 
 
 _AJV_ID = "https://raw.githubusercontent.com/ajv-validator/ajv/master/lib/refs/data.json#"
@@ -407,7 +448,7 @@ def test_a_real_fetch_near_or_disguised_as_the_ajv_id_still_fails(tmp_path, orig
     res = _gate(tmp_path, origin, [entry])
     assert res.returncode != 0
     assert "self-updating code" in res.stdout
-    assert "PASS" not in res.stdout
+    assert not _pass_records(res.stdout), res.stdout
 
 
 def test_an_attested_binaries_path_that_climbs_out_fails_the_gate(tmp_path, origin):
@@ -438,9 +479,9 @@ def test_one_entry_cannot_skip_or_impersonate_the_others(tmp_path, origin):
                 hermes_stub="#!/bin/sh\ncat >/dev/null\nexit 0\n")
     assert res.returncode != 0, res.stdout + res.stderr
     assert "catalog entry parser failed" in res.stdout
-    assert f"PASS: {_rel(tmp_path, ok)}" in res.stdout
-    assert f"PASS: {_rel(tmp_path, ok2)}" in res.stdout
-    assert f"PASS: {_rel(tmp_path, crash)}" not in res.stdout
+    assert f"✅ PASS: {_rel(tmp_path, ok)}" in _pass_records(res.stdout)
+    assert f"✅ PASS: {_rel(tmp_path, ok2)}" in _pass_records(res.stdout)
+    assert f"✅ PASS: {_rel(tmp_path, crash)}" not in _pass_records(res.stdout)
 
 
 @pytest.mark.parametrize("fields", [
@@ -456,7 +497,7 @@ def test_legit_entry_passes_the_gate(tmp_path, origin, fields):
     entry = _entry(tmp_path, "ok.yaml", _git(origin, "rev-parse", "HEAD"), **fields)
     res = _gate(tmp_path, origin, [entry])
     assert res.returncode == 0, res.stdout + res.stderr
-    assert f"PASS: {_rel(tmp_path, entry)}" in res.stdout
+    assert f"✅ PASS: {_rel(tmp_path, entry)}" in _pass_records(res.stdout)
 
 
 @pytest.mark.parametrize("mut", [
@@ -619,7 +660,7 @@ def test_a_typechanged_entry_fails_the_pinned_gate(tmp_path, origin):
     gate = _gate(tmp_path, origin, files, candidates=Path(_outputs(tmp_path)["candidates"]))
     assert gate.returncode != 0
     assert "must be a regular file" in gate.stdout
-    assert "PASS" not in gate.stdout
+    assert not _pass_records(gate.stdout), gate.stdout
 
 
 # ── upstream sync through the changed-entries step ───────────────────────────
@@ -1001,7 +1042,7 @@ def test_a_syncs_own_tool_or_core_change_never_runs(tmp_path, origin, path):
     files, out, ws, gate = _pinned_pipeline(tmp_path, origin, src, up)
     assert files == ["plugin-catalog/a.yaml"]
     assert gate.returncode == 0, gate.stdout + gate.stderr
-    assert "PASS: plugin-catalog/a.yaml" in gate.stdout
+    assert "✅ PASS: plugin-catalog/a.yaml" in _pass_records(gate.stdout)
     assert not marker.exists()
     base = out["base"]
     assert _git(ws, "rev-parse", "HEAD") == base
@@ -1027,7 +1068,7 @@ def test_a_syncs_own_scanner_cannot_wave_a_payload_through(tmp_path, origin):
     assert files == ["plugin-catalog/a.yaml"]
     assert gate.returncode != 0
     assert "unscannable executable payload" in gate.stdout
-    assert "PASS" not in gate.stdout
+    assert not _pass_records(gate.stdout), gate.stdout
     assert not marker.exists()
 
 
@@ -1318,7 +1359,7 @@ def test_a_sandbox_that_cannot_be_built_fails_the_entry(tmp_path, origin):
     res = _gate(tmp_path, origin, [entry], extra_env={"SANDBOX_STUB_EXIT": "125"})
     assert res.returncode != 0
     assert "hermes plugins validate failed" in res.stdout
-    assert "PASS" not in res.stdout
+    assert not _pass_records(res.stdout), res.stdout
 
 
 def test_leak_probe_control_detects_the_token_without_isolation(tmp_path, origin):
@@ -1362,7 +1403,7 @@ def test_plugin_code_in_the_real_step_sees_no_token_and_cannot_write(tmp_path, o
     out = res.stdout + res.stderr
     assert res.returncode == 0, out
     assert "probe clean" in out
-    assert f"PASS: {_rel(tmp_path, entry)}" in res.stdout
+    assert f"✅ PASS: {_rel(tmp_path, entry)}" in _pass_records(res.stdout)
     assert not (tmp_path / "pmhome" / "poisoned-by-plugin").exists()
 
 
