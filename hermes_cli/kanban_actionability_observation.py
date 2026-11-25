@@ -47,7 +47,11 @@ def _inventory(hub, board, task_id):
             raise _invalid()
         uids.add(event['uid'])
         orders.add(event['ord'])
-    reason = held(task['status'], data['events'])
+    # Release provenance is the Board-stamped envelope of the card's home gateway, never payload actor text.
+    releases = frozenset(e['uid'] for e in data['events'] if e['kind'] == 'stop_released'
+                         and isinstance(task['created_on'], str) and task['created_on']
+                         and e.get('origin_gateway') == task['created_on'])
+    reason = held(task['status'], data['events'], verified_releases=releases)
     if reason is not None:
         raise PrivateHold(task_id, reason)
     return data

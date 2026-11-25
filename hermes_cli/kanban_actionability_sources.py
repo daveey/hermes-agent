@@ -274,7 +274,13 @@ def _private_reason(conn, task, reader) -> str | None:
         verified = covered(Rows(conn), task['id'])
     except EVIDENCE_ERRORS:
         verified = frozenset()  # Missing mandate evidence cannot resolve a scope hold.
-    return held(task['status'], events, verified_cover=verified)
+    # Synced provenance is the Board-stamped envelope, never actor text in the payload.
+    # An unsynced board's own release writer is local; foreign envelopes are not local writes.
+    releases = frozenset(key(row) for row in rows if row['kind'] == 'stop_released' and (
+        (reader.synced and isinstance(task.get('created_on'), str) and task['created_on']
+         and row.get('origin_gateway') == task['created_on'])
+        or (not reader.synced and not row.get('origin_gateway'))))
+    return held(task['status'], events, verified_cover=verified, verified_releases=releases)
 
 
 def _lane_gate_at(conn, tid, reader) -> int | None:

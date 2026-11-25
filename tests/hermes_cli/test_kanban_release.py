@@ -88,6 +88,17 @@ def _legacy_decision(conn, tid):
     return card
 
 
+def test_capability_release_clears_private_diagnostic_through_supported_writer(board):
+    from hermes_cli.kanban_actionability_sources import describe
+    tid = kb.create_task(board, title='Capability stop', assignee='default')
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+        kb._append_event(board, tid, decision.EVENT, {'cause': 'capability_unavailable'})
+    assert run(board, tid)['outcome'] == 'released'
+    assert not decision.pending(board, tid)
+    assert 'private_hold' not in describe(board, tid)['violations']
+
+
 def test_ordinary_spend_stop_released(board):
     tid = spend_stopped(board)
     out = run(board, tid, note='Desktop Unblock, operation op-1')

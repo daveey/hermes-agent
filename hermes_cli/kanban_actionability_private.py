@@ -10,6 +10,8 @@ reruns anything, and a recorded deadline grants no execution. Fail closed:
 * a scope stop needs a later renewal that froze its uid AND a caller-verified mandate digest
   (``verified_cover``). Event bytes alone cannot re-read the mandate comment, so an unverified
   renewal stays ``mandate_unverifiable``;
+* a capability stop needs a caller-authenticated exact-episode ``stop_released`` followed by
+  a decision; payload actor labels are not authentication (``verified_releases``);
 * anything unparseable or unattributable stays held.
 """
 from __future__ import annotations
@@ -18,7 +20,8 @@ import json
 
 STOPS = frozenset({'spend_budget_triaged', 'decision_hold_restricted'})
 RENEWAL = 'scope_renewed'
-PRIVATE = STOPS | {RENEWAL}
+RELEASE = 'stop_released'
+PRIVATE = STOPS | {RENEWAL, RELEASE}
 DECISIONS = frozenset({'promoted_manual', 'archived'})
 
 
@@ -40,7 +43,7 @@ def _payload(event):
     return raw if isinstance(raw, dict) else None
 
 
-def held(status, events, *, verified_cover=frozenset()):
+def held(status, events, *, verified_cover=frozenset(), verified_releases=frozenset()):
     """Reason the private history still holds, or ``None`` when there is none or all of it is resolved."""
     private = [e for e in events if e['kind'] in PRIVATE]
     if not private:
@@ -76,6 +79,15 @@ def held(status, events, *, verified_cover=frozenset()):
                 return 'scope_stop_not_renewed'
             if event['uid'] not in cover:
                 return 'mandate_unverifiable'
+            floor = min(after)
+        elif cause == 'capability_unavailable' and event['kind'] == 'spend_budget_triaged':
+            after = [r['ord'] for r in private if r['kind'] == RELEASE
+                     and r['uid'] in verified_releases and r['ord'] > floor
+                     and type(payloads[r['uid']].get('version')) is int
+                     and payloads[r['uid']]['version'] == 1
+                     and payloads[r['uid']].get('episode') == event['uid']]
+            if not after:
+                return 'restriction_unattributable'
             floor = min(after)
         elif cause is not None or event['kind'] != 'spend_budget_triaged':
             return 'restriction_unattributable'
