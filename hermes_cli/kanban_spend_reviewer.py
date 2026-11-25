@@ -315,7 +315,7 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     """Queue the backlog and start every due review this process has room for. Returns started task ids."""
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_spend_review_request as journal
-    from hermes_cli.kanban_home_transfer import frozen
+    from hermes_cli.kanban_home_transfer import frozen as home_frozen
     cfg = settings()
     if not cfg[0]:
         return []
@@ -372,7 +372,7 @@ def _start_reserved(conn, db: str, task_id: str, episode: str, attempts: int, no
 
     try:
         with kb.write_txn(conn):
-            if frozen(conn, task_id):
+            if home_frozen(conn, task_id):
                 with _LOCK:
                     _INFLIGHT.discard((db, task_id))
                 continue
