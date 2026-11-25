@@ -102,7 +102,7 @@ def test_primary_override_preserves_declared_auxiliary_inheritance(tmp_path, mon
     from gateway.session_worker_credentials import route_environment
 
     class_config.update(model={'default': 'class:standard', 'provider': 'auto'},
-                        auxiliary={'title': {'model': 'class:standard'}})
+                        auxiliary={'title': {}})
     monkeypatch.setattr('gateway.session_worker_credentials._profile_values', lambda *args: {
         'GEMINI_API_KEY': 'synthetic-gemini', 'ANTHROPIC_API_KEY': 'synthetic-anthropic'})
     assert route_environment(SimpleNamespace(profile_id=str(tmp_path)),
