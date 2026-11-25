@@ -1,6 +1,5 @@
 import type { SessionInfo } from '@/hermes'
 import { sessionActivityAt } from '@/lib/session-branch-tree'
-import { hasFreshKanbanObservation } from '@/store/kanban-observation'
 import { sessionHasOpenCards } from '@/store/session-filter'
 
 export function isKanbanOwnerSession(row: SessionInfo): boolean {
@@ -11,7 +10,7 @@ function partition(rows: SessionInfo[]) {
   return {
     pinned: rows.filter(row => !isKanbanOwnerSession(row)),
     background: rows
-      .filter(row => isKanbanOwnerSession(row) && hasFreshKanbanObservation(row) && sessionHasOpenCards(row))
+      .filter(row => isKanbanOwnerSession(row) && sessionHasOpenCards(row))
       .sort((a, b) => sessionActivityAt(b) - sessionActivityAt(a))
   }
 }

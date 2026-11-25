@@ -165,6 +165,8 @@ vi.mock('@/store/windows', async importOriginal => {
 // against the real component. Stub it here so this file stays focused on the
 // row chrome (handoff avatar tip, etc.) — but record the props so the row's
 // own state plumbing (e.g. the archived flag, #98813) is still asserted.
+import { CardCountsContext } from './card-counts-context'
+
 const menuProps = vi.hoisted(() => vi.fn())
 
 vi.mock('./session-actions-menu', () => ({
@@ -1402,6 +1404,35 @@ describe('SidebarSessionRow background process badge', () => {
     expect(screen.queryByTestId('session-row-background-processes')).toBeNull()
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('done')
   })
+})
+
+it.each([false, true])('keeps the stored Background title in both action menus with card=%s', card => {
+  menuProps.mockClear()
+  const session = makeSession({ id: 'kanban_owner_title', title: 'Kanban owner: terminal', kanban_active: 1 })
+  certifyRow(session)
+  render(
+    <CardCountsContext value>
+      <SidebarSessionRow
+        card={card}
+        isPinned={false}
+        isSelected={false}
+        onArchive={noop}
+        onDelete={noop}
+        onPin={noop}
+        onResume={noop}
+        onToggleUnread={noop}
+        session={session}
+        unread={false}
+      />
+    </CardCountsContext>
+  )
+  expect(screen.getByText('terminal')).toBeTruthy()
+  expect(menuProps.mock.calls).toHaveLength(2)
+
+  for (const [props] of menuProps.mock.calls) {
+    expect(props.title).toBe(session.title)
+    expect(props.selectedRow).toBe(session)
+  }
 })
 
 it('passes the exact selected owner to both row action menus', () => {

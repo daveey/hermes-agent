@@ -190,7 +190,7 @@ function SidebarSessionRowImpl({
   const { t } = useI18n()
   const r = t.sidebar.row
   const { cancelPrewarm, notePointerMove, startPrewarm } = useProfilePrewarm(session.profile)
-  const title = useSessionTitle(session)
+  const { title, label } = useSessionTitle(session)
   const density = useStore($sessionListDensity)
   const fmt = t.sidebar
 
@@ -604,13 +604,13 @@ function SidebarSessionRowImpl({
                         OverflowTip stays on the truncating label so its
                         scrollWidth measurement is unchanged. */}
                     <RowButton className={cn('block w-full rounded-sm text-left', SIDEBAR_FOCUS_VISIBLE)}>
-                      <OverflowTip label={title} placement="row">
+                      <OverflowTip label={label} placement="row">
                         <SidebarRowLabel
                           className="hover-marquee block font-normal group-hover:text-foreground group-data-[working=true]:text-foreground/90"
                           onPointerEnter={armMarquee}
                           onPointerLeave={disarmMarquee}
                         >
-                          <span className="hover-marquee-inner">{title}</span>
+                          <span className="hover-marquee-inner">{label}</span>
                         </SidebarRowLabel>
                       </OverflowTip>
                     </RowButton>
@@ -672,7 +672,7 @@ function SidebarSessionRowImpl({
                       button (same contract as the flat row: no onClick of its
                       own — the click bubbles to the body div's resolver). */}
                   <RowButton className={cn('block w-full rounded-sm text-left', SIDEBAR_FOCUS_VISIBLE)}>
-                    <OverflowTip label={title} placement="row">
+                    <OverflowTip label={label} placement="row">
                       <SidebarRowLabel
                         className={cn(
                           'hover-marquee text-[0.8125rem] font-medium text-(--ui-text-primary) group-data-[working=true]:text-foreground',
@@ -681,7 +681,7 @@ function SidebarSessionRowImpl({
                         onPointerEnter={armMarquee}
                         onPointerLeave={disarmMarquee}
                       >
-                        <span className="hover-marquee-inner">{title}</span>
+                        <span className="hover-marquee-inner">{label}</span>
                       </SidebarRowLabel>
                     </OverflowTip>
                   </RowButton>

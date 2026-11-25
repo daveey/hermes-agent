@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
 import { I18nProvider } from '@/i18n'
+import { $kanbanObservationTick } from '@/store/kanban-observation'
 
 import {
+  BackgroundCardSquares,
   flatRowCardMarks,
   runningCardCount,
   sessionCardColours,
@@ -12,6 +14,19 @@ import {
 } from './session-row-card-squares'
 
 const session = (fields: Partial<SessionInfo> = {}) => fields as SessionInfo
+
+it('refreshes retained-state badges on ticks with stable props and no parent rerender', () => {
+  vi.useFakeTimers()
+  const sessions = [session({ kanban_active: 2, kanban_observed_at: Date.now() / 1000 })]
+  const { container } = render(<BackgroundCardSquares sessions={sessions} />)
+  expect(container.querySelector('[data-card-colour="blue"]')?.textContent).toBe('2')
+  act(() => {
+    vi.setSystemTime(Date.now() + 181_000)
+    $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
+  })
+  expect(container.querySelector('[data-card-colour="blue"]')).toBeNull()
+  expect(container.querySelector('[data-card-colour="grey"]')?.textContent).toBe('2')
+})
 
 const draw = (fields: Partial<SessionInfo> = {}, executionUnknown = 0) =>
   render(

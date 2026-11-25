@@ -1,4 +1,5 @@
-import { type ReactNode, useContext, useEffect, useState } from 'react'
+import { useStore } from '@nanostores/react'
+import { type ReactNode, useContext, useEffect, useMemo, useState } from 'react'
 
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
@@ -6,6 +7,7 @@ import { useI18n } from '@/i18n'
 import { deriveExternalVisual } from '@/lib/external-run'
 import { cn } from '@/lib/utils'
 import { isWaitKind, ORANGE_OVER, type WaitEta, type WaitReadout, waitReadout } from '@/lib/wait-eta'
+import { $kanbanObservationTick, hasFreshKanbanObservation } from '@/store/kanban-observation'
 import type { SessionStatusStripe } from '@/store/session-dot-state'
 import { sidebarCardWork } from '@/store/sidebar-card-work'
 
@@ -65,11 +67,26 @@ export function sessionCardColours(
   )
 }
 
+/** Retained work is not completion; expired observations cannot assert its current state. */
+function backgroundCardColours(session: SessionInfo): ReturnType<typeof sessionCardColours> {
+  const colours = sessionCardColours(session, 0)
+
+  if (hasFreshKanbanObservation(session)) {
+    return colours
+  }
+
+  const count = colours
+    .filter(item => item.colour !== 'amber' && item.colour !== 'violet')
+    .reduce((sum, item) => sum + item.count, 0)
+
+  return count > 0 ? [{ colour: 'grey', count }] : []
+}
+
 export function aggregateCardColours(sessions: SessionInfo[]): ReturnType<typeof sessionCardColours> {
   const totals = new Map<CardColour, number>()
 
   for (const session of sessions) {
-    for (const { colour, count } of sessionCardColours(session, 0)) {
+    for (const { colour, count } of backgroundCardColours(session)) {
       totals.set(colour, (totals.get(colour) ?? 0) + count)
     }
   }
@@ -84,6 +101,15 @@ export function aggregateCardColours(sessions: SessionInfo[]): ReturnType<typeof
 export const runningCardCount = (session: SessionInfo): number =>
   sessionCardColours(session, 0).find(item => item.colour === 'blue')?.count ?? 0
 
+export function BackgroundCardSquares({ sessions }: { sessions: SessionInfo[] }) {
+  const tick = useStore($kanbanObservationTick)
+  // The input can stay unchanged while freshness expires. Do not hide its retained work.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const colours = useMemo(() => aggregateCardColours(sessions), [sessions, tick])
+
+  return <CardSquares colours={colours} counts />
+}
+
 const trailingColours = (session: SessionInfo, executionUnknown: number) =>
   sessionCardColours(session, executionUnknown).filter(item => item.colour !== 'blue' && item.colour !== 'grey')
 
@@ -95,9 +121,9 @@ export function SessionRowCardSquares({
   executionUnknown: number
 }) {
   const counts = useContext(CardCountsContext)
-  const colours = counts ? sessionCardColours(session, 0) : trailingColours(session, executionUnknown)
+  const colours = counts ? backgroundCardColours(session) : trailingColours(session, executionUnknown)
 
-  return <CardSquares colours={colours} counts={counts} />
+  return counts ? <BackgroundCardSquares sessions={[session]} /> : <CardSquares colours={colours} />
 }
 
 export function CardSquares({
@@ -168,7 +194,7 @@ export function flatRowCardMarks(
   counts = false
 ): ReactNode {
   const readouts = !counts && statusStripe === 'external' ? sessionWaitEtas(session, Date.now() / 1000) : []
-  const colours = counts ? sessionCardColours(session, 0) : trailingColours(session, executionUnknown)
+  const colours = counts ? backgroundCardColours(session) : trailingColours(session, executionUnknown)
 
   if (!gatewayIcon && !readouts.length && !colours.length && !session.kanban_timed_cards?.length) {
     return null
@@ -176,7 +202,13 @@ export function flatRowCardMarks(
 
   return (
     <span className="pointer-events-none whitespace-nowrap text-[0.625rem] leading-none text-(--ui-text-tertiary)">
-      {readouts.length ? <SessionRowEtaReadout etas={readouts} /> : <CardSquares colours={colours} counts={counts} />}
+      {counts ? (
+        <BackgroundCardSquares sessions={[session]} />
+      ) : readouts.length ? (
+        <SessionRowEtaReadout etas={readouts} />
+      ) : (
+        <CardSquares colours={colours} />
+      )}
       <SessionRowCardTimers session={session} />
       {gatewayIcon}
     </span>

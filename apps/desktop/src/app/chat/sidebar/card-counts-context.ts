@@ -7,9 +7,9 @@ import { sessionTitle } from '@/lib/chat-runtime'
 export const CardCountsContext = createContext(false)
 
 /** Presentation only: retain the original row for search, callbacks and persistence. */
-export function useSessionTitle(session: SessionInfo): string {
+export function useSessionTitle(session: SessionInfo) {
   const background = useContext(CardCountsContext)
   const title = sessionTitle(session)
 
-  return background ? title.replace(/^Kanban owner:\s*/, '') : title
+  return { title, label: background ? title.replace(/^Kanban owner:\s*/, '') : title }
 }
