@@ -1,4 +1,6 @@
 """Real holder part reads, not only equality of counter values."""
+import pytest
+
 from hermes_cli import kanban_annotation_revision as revision
 from hermes_cli import kanban_annotation_host as host
 from hermes_cli import kanban_session_activity as ksa
@@ -53,6 +55,24 @@ def test_undeclared_comment_reader_is_never_certified(world):
         helpers._refresh()
         assert world.checks > before
         assert helpers._published()[10] == {'s1': 1}
+    finally:
+        dispose()
+
+
+@pytest.mark.parametrize('wrap', [lambda v: v, lambda v: {'nested': [v]}], ids=['array', 'nested-array'])
+def test_complete_done_inputs_preserve_stat_tagged_arrays(world, wrap):
+    dispose = ksa.register_done_check('fixture', ksa._done_checks['fixture'],
+        watch_paths=lambda: [world.declared], next_deadline=lambda: None,
+        inputs=lambda: wrap(['stat', 'dependency', world.flagged, 0]))
+    try:
+        helpers._refresh()
+        assert helpers._published()[10] == {'s1': 1}
+        before = world.checks
+        world.flagged = False
+        world.declared.write_text('changed')
+        helpers._refresh()
+        assert world.checks > before
+        assert helpers._published()[10] == {}
     finally:
         dispose()
 

@@ -52,7 +52,9 @@ def _boom():
     raise RuntimeError('x')
 
 
-@pytest.mark.parametrize('cb', [None, lambda: None, _boom, lambda: object(), lambda: {'a': {1, 2}}, 'notcallable'])
+@pytest.mark.parametrize('cb', [None, lambda: None, _boom, lambda: object(), lambda: {'a': {1, 2}},
+                              lambda: {1: 'numeric key'}, lambda: float('nan'), lambda: float('inf'),
+                              lambda: {'nested': [float('-inf')]}, 'notcallable'])
 def test_missing_none_error_nonportable_is_fresh(cb):
     d = ksa.register_done_check('c', _check, inputs=cb)
     try:
@@ -102,6 +104,27 @@ def test_dispose_removes_declaration():
     assert 'c' in di._declared
     d()
     assert 'c' not in di._declared and 'c' not in ksa._done_checks
+
+
+@pytest.mark.parametrize('value', [
+    ['stat'], ['stat', 'dep', True], ['stat', 'dep', True, 0],
+    {'nested': [('stat', 'dep', True, 0), None, 1.5]},
+])
+def test_portable_declarations_preserve_all_data_and_copy_mutable_values(value):
+    d = ksa.register_done_check('c', _check, inputs=lambda: value)
+    try:
+        before, complete = di.inputs(dict(ksa._done_checks))
+        assert complete
+        expected = {'nested': [['stat', 'dep', True, 0], None, 1.5]} if isinstance(value, dict) else value[:]
+        assert before[0][2] == expected
+        if isinstance(value, list):
+            value.append('changed')
+        else:
+            value['nested'].append('changed')
+        assert before[0][2] == expected  # the previous key is a snapshot, not a live alias
+        assert di.inputs(dict(ksa._done_checks))[0] != before
+    finally:
+        d()
 
 
 def test_closure_identity_distinguishes_same_code():

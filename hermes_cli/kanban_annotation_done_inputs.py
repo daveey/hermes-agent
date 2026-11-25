@@ -12,6 +12,7 @@ closure under the same name is undeclared until it declares itself.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 _log = logging.getLogger("hermes_cli.kanban_session_activity")
@@ -35,6 +36,23 @@ def dispose(name: str, fn) -> None:
         _declared.pop(name, None)
 
 
+def _portable_data(value: Any) -> Any:
+    """Copy declared JSON data without interpreting internal fingerprint tags.
+
+    Tuples are accepted as arrays; non-string object keys and non-finite numbers
+    are unknown rather than silently coerced into potentially colliding values.
+    """
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    if type(value) in (tuple, list):
+        return [_portable_data(v) for v in value]
+    if type(value) is dict and all(type(k) is str for k in value):
+        return {k: _portable_data(v) for k, v in value.items()}
+    raise ValueError("done-check input is not JSON-portable")
+
+
 def inputs(checks: dict[str, Any]) -> tuple[list, bool]:
     """``([[name, code id, inputs or "undeclared"]...], complete)``; never raises."""
     from hermes_cli import kanban_annotation_host as host
@@ -52,7 +70,7 @@ def inputs(checks: dict[str, Any]) -> tuple[list, bool]:
             value = declared[1]()
             if value is None:
                 raise ValueError("None is not an explicit declaration")
-            out.append([name, host._code_id(fn), host._portable(value)])
+            out.append([name, host._code_id(fn), _portable_data(value)])
         except Exception:  # health: allow BLE001 -- a provider callback may raise anything; the key is then unknown
             _log.debug("done check inputs failed for %s", name, exc_info=True)
             out.append([name, host._code_id(fn), _UNDECLARED])
