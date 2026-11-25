@@ -61,3 +61,34 @@ def test_explicit_evidence_flag_keeps_exact_current_per_row_proof(configured, ca
     assert audit['evidence'][0]['op_id'] == 'op-original'
     assert audit['execution_authority'] is False
     assert json.loads(audit['evidence'][0]['proof_json'])['receipt']['source_json'] == audit['evidence'][0]['source_json']
+
+
+def test_known_refusal_bypasses_unconfirmed_history_intent_without_changing_it(configured, capsys, monkeypatch):
+    from hermes_cli import kanban_sync_refusal_audit as refusal
+    from hermes_cli.kanban_sync_client import HubError
+    _paths, _hub, calls, _state, connect = configured
+    original = board.transport._request
+    def failed_post(hub, method, path, body):
+        if method == 'POST':
+            calls.append((method,path,body))
+            raise HubError(409, 'history_residue_op_already_known')
+        return original(hub, method, path, body)
+    monkeypatch.setattr(board.transport, '_request', failed_post)
+    with pytest.raises(HubError, match='history_residue_op_already_known'):
+        board.observe_board('default','op-original','Keep history')
+    with board.closing(board._ledger('default')) as ledger:
+        before = list(ledger.iterdump())
+    live = connect(_paths[0])
+    row = dict(live.execute("SELECT * FROM kanban_sync_outbox WHERE op_id='op-original'").fetchone())
+    reason, _, detail = row['last_error'].partition(': ')
+    proof = dict(version=1, board='default', gateway='home', execution_authority=False,
+                 historical_identity_certified=False, receipt=dict(client_op_id='op-original',
+                 status='rejected',reason=reason,detail=detail or None))
+    monkeypatch.setattr(refusal, '_receipt', lambda *a: proof)
+    assert cli.cmd_sync(args('diff','--json')) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['clean'] and result['audited_server_refusals'] == ['op-original']
+    assert not result.get('history_audit_error')
+    assert [c[0] for c in calls] == ['POST']
+    with board.closing(board._ledger('default')) as ledger:
+        assert list(ledger.iterdump()) == before

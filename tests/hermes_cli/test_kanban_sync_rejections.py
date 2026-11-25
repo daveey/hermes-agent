@@ -124,7 +124,9 @@ def test_cli_diff_dirty_then_clean_after_normal_sync(live, svc, kanban_home, mon
     monkeypatch.setattr(cli, "_board", lambda args: BOARD)
     monkeypatch.setattr(cli, "_path", lambda slug: kanban_home / "kanban.db")
     monkeypatch.setattr(client, "load_identity", lambda: svc.hub(ME).ident)
-    monkeypatch.setattr(client, "Hub", lambda ident: svc.hub(ME))
+    hub = svc.hub(ME)
+    monkeypatch.setattr(hub, "close", lambda: None, raising=False)
+    monkeypatch.setattr(client, "Hub", lambda ident: hub)
     assert cli._diff(Namespace(json=True)) == 1
     assert json.loads(capsys.readouterr().out)["clean"] is False
     client.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
@@ -181,7 +183,9 @@ def test_cli_diff_does_not_report_clean_from_failed_refresh(live, svc, kanban_ho
     monkeypatch.setattr(cli, "_board", lambda args: BOARD)
     monkeypatch.setattr(cli, "_path", lambda slug: kanban_home / "kanban.db")
     monkeypatch.setattr(client, "load_identity", lambda: svc.hub(ME).ident)
-    monkeypatch.setattr(client, "Hub", lambda ident: svc.hub(ME))
+    hub = svc.hub(ME)
+    monkeypatch.setattr(hub, "close", lambda: None, raising=False)
+    monkeypatch.setattr(client, "Hub", lambda ident: hub)
     svc.offline = offline
     rc = cli._diff(Namespace(json=True))
     report = json.loads(capsys.readouterr().out)

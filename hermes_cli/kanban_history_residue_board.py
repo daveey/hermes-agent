@@ -74,7 +74,8 @@ def observe_board(board, op_id, reason):
     with ExitStack() as stack:
         stack.callback(hub.close)
         path = kanban_db_path(board=board)
-        pulled = client._pull_replica(board, hub, ident.gateway, path, diagnostic=True)
+        from hermes_cli.kanban_sync_diagnostic import refresh
+        pulled = refresh(board, hub, ident.gateway, path)
         _require(not pulled.busy and not pulled.more, 'diagnostic_refresh_incomplete')
         stack.enter_context(board_sync_lock(path))
         live = kbc.connect(path)
@@ -106,8 +107,7 @@ def observe_board(board, op_id, reason):
             cut._fresh(started)
             first = custody.stage_once(ledger, identity, request_json)
         if first:
-            try:
-                transport._request(hub, 'POST', transport._path(board), request_json.encode('utf-8'))
-            except (OSError, client.HubError, Refused, ValueError):
-                pass  # Only exact GET can reconcile an uncertain outcome; never POST again.
+            # Keep the immutable intent, but never replace the initial failure with
+            # a later observation_unconfirmed. A retry can reconcile by GET only.
+            transport._request(hub, 'POST', transport._path(board), request_json.encode('utf-8'))
         return transport.reconcile(ledger, hub, board, op_id)

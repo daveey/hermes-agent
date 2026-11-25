@@ -104,9 +104,27 @@ def test_real_authenticated_post_exact_body_then_get_readback(db, server):
     assert db.total_changes == before
 
 
+def test_definitive_post_error_surfaces_status_and_code_without_repost(db, server):
+    from hermes_cli.kanban_sync_client import HubError
+    hub, state, raw = server
+    state.update(status=409, reply=b'{"error":"history_residue_op_already_known"}')
+    with pytest.raises(HubError, match='history_residue_op_already_known') as raised:
+        transport.observe(db, hub, 'default', raw)
+    assert raised.value.status == 409
+    assert [c[0] for c in state['calls']] == ['POST']
+    assert custody.lookup(db, scope(hub), 'op-original')['receipt_json'] is None
+    state['status'] = 200
+    state['receipt'] = None
+    with pytest.raises(Refused, match='observation_unconfirmed'):
+        transport.observe(db, hub, 'default', raw)
+    assert [c[0] for c in state['calls']] == ['POST', 'GET']
+
+
 def test_dropped_post_answer_reconciles_without_repost(db, server):
     hub, state, raw = server
     state['post'] = 'drop'
+    with pytest.raises(OSError):
+        transport.observe(db, hub, 'default', raw)
     assert transport.observe(db, hub, 'default', raw)['recorded']
     assert [c[0] for c in state['calls']] == ['POST', 'GET']
 
@@ -155,7 +173,7 @@ def test_redirect_never_forwards_credentials_or_reposts(db, server, status):
         transport.observe(db, hub, 'default', raw)
     assert str(status) in str(result.value)
     assert all('/stolen' not in c[1] for c in state['calls'])
-    assert [c[0] for c in state['calls']] == ['POST', 'GET']
+    assert [c[0] for c in state['calls']] == ['POST']
     assert custody.lookup(db, scope(hub), 'op-original')['receipt_json'] is None
 
 

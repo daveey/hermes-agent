@@ -103,7 +103,12 @@ def _diff(args: argparse.Namespace) -> int:
     refresh_error = None
     pulled = ksc.Pulled()
     try:
-        pulled = ksc._pull_replica(slug, ksc.Hub(ident), ident.gateway, _path(slug), diagnostic=True)
+        from hermes_cli.kanban_sync_diagnostic import refresh
+        refresh_hub = ksc.Hub(ident)
+        try:
+            pulled = refresh(slug, refresh_hub, ident.gateway, _path(slug))
+        finally:
+            refresh_hub.close()
     except (ksc.HubError, ksc.Resync, OSError) as exc:
         refresh_error = str(exc)
     else:
@@ -117,10 +122,24 @@ def _diff(args: argparse.Namespace) -> int:
         if refresh_error is not None:
             report.update(clean=False, unavailable=True, refresh_error=refresh_error)
         elif pulled.busy:
-            report["refresh_skipped"] = "a sync round holds the board; compared against its replica as it stands"
+            report.update(clean=False, refresh_skipped="a sync round holds the board; compared against its replica as it stands")
         else:
             from hermes_cli import kanban_history_residue_board as history
-            if history.ledger_path(slug).exists():
+            if report['rejected_ops']:
+                from hermes_cli import kanban_sync_refusal_audit as refusal
+                from hermes_cli.kanban_sync_guard import board_sync_lock
+                hub = ksc.Hub(ident)
+                try:
+                    with board_sync_lock(_path(slug)):
+                        report = refusal.report(live, shadow, hub, slug, started=started)
+                except (ValueError, OSError, sqlite3.Error, ksc.HubError, ksc.Resync, SyncRoundBusy) as exc:
+                    report.update(clean=False, server_refusal_audit_error=str(exc))
+                finally:
+                    hub.close()
+            proven = set(report.get('audited_server_refusals', [])) | set(report['audited_retain_rejections'])
+            # An unconfirmed history intent must not turn a server-receipted
+            # refusal into unknown custody; it is retained unchanged, not used.
+            if history.ledger_path(slug).exists() and report['rejected_ops'] > len(proven):
                 hub = ksc.Hub(ident)
                 try:
                     audit = history.audit_diff(live, shadow, hub, slug, pulled=pulled, started=started)

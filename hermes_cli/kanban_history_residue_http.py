@@ -71,8 +71,20 @@ def _request(hub, method, path, body):
     try:
         return transfer.run(read)
     except urllib.error.HTTPError as exc:
-        exc.close()
-        raise HubError(exc.code, 'history observation refused') from exc
+        try:
+            raw = transfer.run(lambda error=exc: error.read(MAX_RESPONSE + 1))
+            detail = 'history observation refused'
+            if len(raw) <= MAX_RESPONSE:
+                try:
+                    code = strict_object(raw.decode('utf-8', 'strict')).get('error')
+                    if isinstance(code, str) and code and len(code) <= 200 and all(
+                            c.isascii() and (c.isalnum() or c in '_.:-') for c in code):
+                        detail = code
+                except (ValueError, UnicodeError):
+                    pass  # Untrusted error text is never echoed; HTTP status is still preserved.
+        finally:
+            exc.close()
+        raise HubError(exc.code, detail) from exc
     except http.client.HTTPException as exc:
         raise OSError('incomplete history observation') from exc
 
@@ -96,19 +108,14 @@ def observe(conn, hub, board, request_json):
     Even successful POST replies require a separate authenticated readback. A lost
     reply or malformed answer cannot manufacture custody; missing GET stays open.
     """
-    from hermes_cli.kanban_sync_client import HubError
-
     identity = scope(hub, board)
     _, source = custody._request(request_json)
     op_id = source['op_id']
     if not custody.stage_once(conn, identity, request_json):
         return reconcile(conn, hub, board, op_id)
-    try:
-        # Send the exact durable request bytes, not a re-encoded Python object.
-        _request(hub, 'POST', _path(board), request_json.encode('utf-8'))
-    except (OSError, HubError, Refused, ValueError):
-        # No replacement POST: only exact GET may resolve this uncertain outcome.
-        pass
+    # Surface the original failure. The durable intent survives every error, so a
+    # later invocation is GET-only even when this POST's delivery is uncertain.
+    _request(hub, 'POST', _path(board), request_json.encode('utf-8'))
     return reconcile(conn, hub, board, op_id)
 
 

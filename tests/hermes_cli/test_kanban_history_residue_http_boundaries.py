@@ -48,7 +48,7 @@ def test_failed_post_and_get_remain_get_only_on_repeat(db, server):
     for _ in range(2):
         with pytest.raises(Exception):
             transport.observe(db, hub, 'default', raw)
-    assert [c[0] for c in state['calls']] == ['POST', 'GET', 'GET']
+    assert [c[0] for c in state['calls']] == ['POST', 'GET']
     assert custody.lookup(db, scope(hub), 'op-original')['receipt_json'] is None
 
 
