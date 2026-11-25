@@ -72,7 +72,12 @@ def parse(payload):
         commits = data["commits"]["nodes"]
         if len(commits) != 1 or commits[0]["commit"]["oid"] != data["headRefOid"]:
             return None
-        contexts = commits[0]["commit"]["statusCheckRollup"]["contexts"]
+        rollup = commits[0]["commit"]["statusCheckRollup"]
+        # GitHub returns explicit null when this head has no check/status runs.
+        # It is a valid OPEN observation, not green checks or a failed read.
+        if rollup is None:
+            return data, []
+        contexts = rollup["contexts"]
         if contexts["pageInfo"]["hasNextPage"] is not False or not isinstance(contexts["nodes"], list):
             return None
         buckets = []

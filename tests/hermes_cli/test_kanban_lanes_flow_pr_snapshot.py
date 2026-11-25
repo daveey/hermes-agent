@@ -53,7 +53,7 @@ CONTEXT_PATH = (*COMMIT_PATH, "statusCheckRollup", "contexts")
     ((*CONTEXT_PATH, "pageInfo", "hasNextPage"), True),
     ((*COMMIT_PATH, "oid"), "b" * 40),
     ((*CONTEXT_PATH, "pageInfo"), {}),
-    ((*COMMIT_PATH, "statusCheckRollup"), None),
+    ((*COMMIT_PATH, "statusCheckRollup"), {}),
 ])
 def test_incomplete_or_wrong_head_snapshot_never_reports_success(monkeypatch, path, value):
     payload = snapshot()
@@ -95,6 +95,37 @@ def test_graphql_bot_actor_cannot_supply_comment_approval(monkeypatch):
     monkeypatch.setattr(Reader, "_read", lambda self, args:
         payload if args[:2] == ["api", "graphql"] else view)
     assert Reader().get(URL)["approved"] is False
+
+
+@pytest.mark.parametrize("confirm_ok", [True, False])
+def test_null_rollup_is_observed_without_green_and_still_confirms(monkeypatch, confirm_ok):
+    payload = snapshot({"state": "OPEN", "headRefOid": HEAD, "reviewDecision": None})
+    commit = payload["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
+    commit["statusCheckRollup"] = None
+    calls = []
+
+    def read(self, args):
+        calls.append(args)
+        if args[:2] == ["api", "graphql"]:
+            return payload
+        assert args == ["pr", "view", URL, "--json", "state,headRefOid,reviewDecision"]
+        return {"state": "OPEN", "headRefOid": HEAD if confirm_ok else "b" * 40,
+                "reviewDecision": ""}
+
+    monkeypatch.setattr(Reader, "_read", read)
+    reader = Reader()
+    expected = {"merged": False, "approved": False} if confirm_ok else {}
+    assert reader.get(URL) == expected
+    assert reader.get(URL) == expected
+    assert reader.states == ({URL: "OPEN"} if confirm_ok else {})
+    assert len(calls) == 2
+
+
+def test_missing_rollup_field_is_not_null_evidence():
+    payload = snapshot()
+    commit = payload["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
+    del commit["statusCheckRollup"]
+    assert parse(payload) is None
 
 
 def test_only_required_checks_and_no_empty_green():
