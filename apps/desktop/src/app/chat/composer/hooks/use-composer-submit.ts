@@ -198,7 +198,8 @@ export function useComposerSubmit({
           ...(attachments ? { attachments } : {}),
           composerScope: submittedScope,
           ...assignment,
-          ...(displayKind ? { displayKind } : onRejected ? {} : { unsent: 'restored' as const })
+          // A caller that names where an unsent draft stays (the steer fallback: 'kept') keeps it.
+          ...(displayKind ? { displayKind } : onRejected ? {} : { unsent: target?.unsent ?? ('restored' as const) })
         })
       )
     )
@@ -607,7 +608,9 @@ export function useComposerSubmit({
           ...(hasTerminalTransport ? { displayText: frozen.displayText } : {}),
           fromQueue: true,
           sessionId: sessionId ?? null,
-          storedSessionId: activeQueueSessionKey
+          storedSessionId: activeQueueSessionKey,
+          // Not queued after all: the words go back to the composer, and the notice says so.
+          unsent: 'kept'
         })
       } else {
         enqueueQueuedPrompt(activeQueueSessionKey, {

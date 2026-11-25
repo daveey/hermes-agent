@@ -2,8 +2,11 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { type Dispatch, type PropsWithChildren, type SetStateAction, useLayoutEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { rejectSendOnFailedResume } from '@/app/session/hooks/use-prompt-actions/rejected-optimistic-sends'
+import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
 import * as sessionOwnerUtils from '@/app/session/hooks/use-session-actions/utils'
 import { PaneVisibleContext } from '@/components/pane-shell/pane-visibility'
+import { en } from '@/i18n/en'
 import { $clarifyRequests } from '@/store/clarify'
 import {
   clearComposerTerminalSelections,
@@ -202,6 +205,40 @@ describe('useComposerSubmit external request routing', () => {
     } finally {
       $connection.set(null)
       $queuedPromptsBySession.set({})
+    }
+  })
+
+  it('a refused steer the server queue then fails to take says the words are still in the composer', async () => {
+    $connection.set({ mode: 'local', wsUrl: 'ws://localhost/api/ws?native_dial=unminted' } as never)
+    $queuedPromptsBySession.set({})
+    $notifications.set([])
+    const h = renderSubmitHook({ busy: true, text: 'keep guidance' })
+    h.onSteer.mockResolvedValue(false)
+    // The canonical admission fails before anything left (submit's session.resume timed out).
+    h.onSubmit.mockResolvedValue(false)
+
+    try {
+      act(() => h.hook.result.current.steerDraft())
+      await waitFor(() => expect(h.onSubmit).toHaveBeenCalledTimes(1))
+      const options = (h.onSubmit.mock.calls[0] as unknown[])[1] as SubmitTextOptions
+      expect(options).toMatchObject({ fromQueue: true, unsent: 'kept' })
+
+      // What submit says for those options when its resume fails: the draft was cleared for the
+      // steer and is loaded back, so the user must be told the message was not queued.
+      rejectSendOnFailedResume(new Error('request timed out after 30s: session.resume'), {
+        copy: en.desktop,
+        drift: null,
+        optimisticId: 'user-steer-fallback',
+        options,
+        uncertain: false
+      })
+      expect($notifications.get().map(notice => notice.title)).toEqual([
+        `${en.desktop.promptNotQueued} ${en.desktop.promptStillInComposer}`
+      ])
+    } finally {
+      $connection.set(null)
+      $queuedPromptsBySession.set({})
+      $notifications.set([])
     }
   })
 
