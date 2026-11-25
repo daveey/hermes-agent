@@ -355,7 +355,7 @@ def judge(ctx: dict) -> Optional[dict]:
     def ask():
         with aux.aux_stream_deadline(deadline):
             return aux.call_llm(
-                task="kanban_spend_review", timeout=TIMEOUT, max_tokens=800,
+                task="kanban_spend_review", model="class:standard", timeout=TIMEOUT, max_tokens=800,
                 temperature=0, route_info=route,
                 messages=[{"role": "system", "content": PROMPT.replace("CAP", str(ctx["_cap"]))},
                           {"role": "user", "content": json.dumps(user, ensure_ascii=False)}])

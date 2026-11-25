@@ -241,7 +241,7 @@ def _owner_scope():
 def _ask(aux, body, card_fields, hub_reason, route, deadline):
     with aux.aux_stream_deadline(deadline):
         return aux.call_llm(
-            task="hub_admission", timeout=TIMEOUT,
+            task="hub_admission", model="class:standard", timeout=TIMEOUT,
             max_tokens=1024, temperature=0, route_info=route,
             messages=[{"role": "system", "content": body}, {"role": "user", "content": json.dumps({
                 "title": card_fields.get("title") or "", "body": card_fields.get("body") or "",

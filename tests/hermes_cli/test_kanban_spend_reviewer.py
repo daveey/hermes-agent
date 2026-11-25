@@ -247,7 +247,7 @@ def test_the_judge_answers_only_through_the_subscription_route(monkeypatch, rout
     from agent import auxiliary_client as aux
 
     def call_llm(**kw):
-        assert "model" not in kw and "provider" not in kw
+        assert kw["model"] == "class:standard" and "provider" not in kw
         assert kw["task"] == "kanban_spend_review"
         kw["route_info"].update(route)
         message = types.SimpleNamespace(content='{"decision": "escalate", "reason": "same wait"}')

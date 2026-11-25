@@ -38,7 +38,7 @@ def test_valid_admission(judge):
     assert verdict.admit is True
     assert verdict.need == "hub_chrome"
     assert len(verdict.skill_sha) == 64
-    assert "provider" not in calls[0] and "model" not in calls[0]
+    assert "provider" not in calls[0] and calls[0]["model"] == "class:standard"
     assert calls[0]["task"] == "hub_admission"
     assert calls[0]["timeout"] == 30
     assert "Judge the card." in calls[0]["messages"][0]["content"]

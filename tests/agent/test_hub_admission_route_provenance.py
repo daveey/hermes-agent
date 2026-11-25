@@ -51,7 +51,11 @@ def wire(monkeypatch):
 @pytest.fixture
 def managed(routing_home, streaming_route, tmp_path, monkeypatch):
     routing_home["model_routing"]["enforce_subscription_only"] = True
-    routing_home["auxiliary"] = {"hub_admission": {"model": "class:deep"}}
+    # No auxiliary override: production must not inherit a concrete main-model pin.
+    routing_home["model"] = {"default": "unavailable-main", "provider": "anthropic",
+                             "context_length": 100000}
+    routing_home.pop("auxiliary", None)
+    routing_home["model_routing"]["routes"]["standard"] = routing_home["model_routing"]["routes"]["deep"]
     atomic_config_write(tmp_path / "config.yaml", routing_home)
     skill = tmp_path / "skills" / "devops" / "hub-admission-test" / "SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -63,7 +67,7 @@ def test_real_router_reports_subscription_provenance(managed, wire):
     sent, _ = wire
     route = {}
     from agent import auxiliary_client as aux
-    aux.call_llm(task="hub_admission", max_tokens=64,
+    aux.call_llm(task="hub_admission", model="class:standard", max_tokens=64,
                  temperature=0, route_info=route, messages=[{"role": "user", "content": "x"}])
     assert (route.get("provider"), route.get("model"), route.get("billing_group")) == (
         "anthropic", "anthropic-deep", "subscription")
@@ -79,20 +83,28 @@ def test_real_router_admit_is_honoured(managed, wire):
 
 
 def test_real_router_without_subscription_fence_never_sends(routing_home, streaming_route, tmp_path,
-                                                            monkeypatch, wire):
+                                                            wire):
     """An unmanaged host (no enforce_subscription_only) would route through the legacy resolver,
     which reports no billing group and may fall back to another model: deny without sending."""
     sent, _ = wire
-
     verdict = judge.admit({"title": QUOTE, "body": ""})
     assert verdict.admit is False and verdict.why == "admission unavailable"
     assert sent == []
 
 
+def test_real_router_spend_review_uses_sibling_subscription(managed, wire):
+    from hermes_cli import kanban_spend_reviewer as spend
+    sent, reply = wire
+    reply["text"] = json.dumps({"decision": "grant", "grant": 1, "reason": "one bounded proof remains"})
+    verdict = spend.judge({"_cap": 3, "title": "bounded proof"})
+    assert verdict is not None and verdict["decision"] == "grant"
+    assert len(sent) == 1 and sent[0][1]["model"] == "anthropic-deep"
+
+
 def test_real_router_paid_only_route_is_denied(managed, wire, tmp_path):
     """A configured class the subscription fence cannot serve is refused before any send."""
     sent, _ = wire
-    managed["model_routing"]["routes"]["deep"][0]["billing"] = "paid"
+    managed["model_routing"]["routes"]["standard"][0]["billing"] = "paid"
     atomic_config_write(tmp_path / "config.yaml", managed)
     verdict = judge.admit({"title": QUOTE, "body": ""})
     assert verdict.admit is False and verdict.why == "admission unavailable"
