@@ -15,10 +15,10 @@ _MARKER = '# Hermes installed-checkout controller loader v1'
 
 def refresh_standalone_controller() -> None:
     entry = Path.home() / '.local/share/hermes-always-on/always_on_dashboard.py'
-    if not entry.exists():
-        return
     if entry.is_symlink():
         raise OSError(f'refusing symlink controller entrypoint: {entry}')
+    if not entry.exists():
+        return
     previous = entry.read_text(encoding='utf-8-sig')
     if _MARKER not in previous and 'def _interim_main()' not in previous:
         raise OSError(f'unrecognized standalone controller: {entry}')

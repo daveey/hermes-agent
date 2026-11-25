@@ -61,6 +61,20 @@ def test_unknown_or_symlink_entrypoint_is_preserved_without_restart(tmp_path, mo
     assert entry.read_text() == original
 
 
+def test_dangling_symlink_entrypoint_is_preserved_without_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    entry = tmp_path / '.local/share/hermes-always-on/always_on_dashboard.py'
+    entry.parent.mkdir(parents=True)
+    target = tmp_path / 'missing-controller.py'
+    entry.symlink_to(target)
+    calls = []
+    assert not ro.request_roll(run=lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0))
+    assert not calls
+    assert entry.is_symlink()
+    assert entry.readlink() == target
+    assert not target.exists()
+
+
 def test_loader_uses_current_checkout_not_adjacent_stale_roller(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
     core = tmp_path / 'installed core'
