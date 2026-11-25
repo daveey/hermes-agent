@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from hermes_cli.config_backend import ConfigBackendUnavailable
 from hermes_cli.kanban_actionability import project
 
 NOT_REQUIRED = {'at': None, 'route': 'existing_decision_requested', 'state': 'not_required', 'receipt_uid': None}
@@ -74,10 +75,44 @@ def _config(monkeypatch, value):
     from hermes_cli import config
 
     def load():
-        if isinstance(value, Exception):
+        if isinstance(value, BaseException):
             raise value
         return value
     monkeypatch.setattr(config, 'load_config', load)
+
+
+def test_config_backend_outage_keeps_the_census_and_the_review_row_flagged(tmp_path, monkeypatch):
+    """ConfigBackendUnavailable is a SystemExit: it must not abort describe, report or fields, nor hide other rows."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_actionability_cli import report
+    from hermes_cli.kanban_actionability_evidence import fields
+    from hermes_cli.kanban_actionability_sources import describe
+    from hermes_cli.kanban_db_connect import connect
+    with connect(tmp_path / 'kanban.db') as conn:
+        tid = kb.create_task(conn, title='implemented work', assignee='default')
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        assert kb.request_review(conn, tid, summary='implemented; please review',
+                                 expected_run_id=claimed.current_run_id) is True
+        ready = kb.create_task(conn, title='runnable neighbour', assignee='default')
+        _config(monkeypatch, ConfigBackendUnavailable('config backend down'))
+        listed = {r['task_id']: r for r in report(conn)['rows']}
+        assert set(listed) == {tid, ready}
+        assert listed[ready]['escalation']['state'] == 'not_required' and listed[ready]['violations'] == []
+        carried = fields(conn, kb.get_task(conn, tid))['actionability']
+        for row in (describe(conn, tid), listed[tid], carried):
+            assert row['status'] == 'review' and row['action'] == 'review_current_scope'
+            assert row['escalation']['state'] == 'unavailable'
+            assert row['violations'] == ['escalation_deadline_missing']
+
+
+def test_only_a_config_outage_is_absorbed_not_every_exit(tmp_path, monkeypatch):
+    """KeyboardInterrupt and a plain SystemExit still propagate: the reader names the one outage class."""
+    from hermes_cli.kanban_actionability_sources import _review_dispatch
+    for exc in (KeyboardInterrupt(), SystemExit(3)):
+        _config(monkeypatch, exc)
+        with pytest.raises(type(exc)):
+            _review_dispatch()
 
 
 @pytest.mark.parametrize('config', [
@@ -88,6 +123,7 @@ def _config(monkeypatch, value):
     {},
     None,
     RuntimeError('config unreadable'),
+    ConfigBackendUnavailable('config backend down'),
 ])
 def test_review_handoff_on_a_board_without_review_dispatch_stays_flagged(tmp_path, monkeypatch, config):
     """Human-only review, or a setting that cannot be read: no dispatcher admits a reviewer, so the wait has no clock."""

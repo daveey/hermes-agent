@@ -235,10 +235,12 @@ def _administration(reader: Reader, events: list[dict], episode: str | None) -> 
 
 def _review_dispatch() -> bool:
     """True only when the board's config was read and says reviewers are dispatched; anything else is not established."""
+    from hermes_cli.config_backend import ConfigBackendUnavailable
     try:
         from hermes_cli.config import load_config
         return load_config()['kanban']['review_dispatch'] is True
-    except Exception:  # health: allow BLE001 -- any config read failure means dispatch is not established; the row stays flagged
+    # ConfigBackendUnavailable is a SystemExit, named on purpose: a backend outage must not abort the census.
+    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- any config read failure means dispatch is not established; the row stays flagged
         return False
 
 
