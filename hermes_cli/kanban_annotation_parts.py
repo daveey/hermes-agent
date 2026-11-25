@@ -139,7 +139,7 @@ def _done_key(scope: tuple[str, ...], wall: float) -> object:
     content = tuple((p, ksa._board_content_key(Path(p), ksa._revision.SHADOW_TABLES)) for p in replicas)
     if not ksa._revalidate.revalidatable(content, wall):
         return object()
-    return (tuple(sorted(ksa._done_checks)), content, _signature(scope, paths - set(replicas)))
+    return (tuple(sorted(ksa._done_checks.items())), content, _signature(scope, paths - set(replicas)))
 
 
 def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
