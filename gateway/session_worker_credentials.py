@@ -73,11 +73,14 @@ def _route_names(route, config, values):
     return names
 
 
-def route_environment(authority, policy, config):
+def route_environment(authority, policy, config, *, model=None):
     """Only names selected by declared inference routes, never all profile secrets."""
     values = _profile_values(authority, policy)
     main = config.get('model') if isinstance(config.get('model'), dict) else {}
-    routes = [main]
+    # The launch model is separate from config.model.default (Kanban tier pins,
+    # CLI overrides, held profile selections). Only the primary route uses it:
+    # auxiliary inheritance still follows the declared profile configuration.
+    routes = [{**main, 'default': model, 'model': model} if model else main]
     for key in ('fallback_model', 'fallback_providers'):
         value = config.get(key, [])
         routes.extend(value if isinstance(value, list) else [value])
@@ -110,7 +113,7 @@ def route_environment(authority, policy, config):
     return {name: values[name] for name in names if values.get(name) is not None}
 
 
-def stage_credentials(authority, scope, policy, config, terminal, request):
+def stage_credentials(authority, scope, policy, config, terminal, request, *, model=None):
     """Keep material on the owner; the exact adopted execution is its only handle."""
     from gateway.session_policy import _extract_config_secrets, route_launch_key
     private = {}
@@ -119,7 +122,7 @@ def stage_credentials(authority, scope, policy, config, terminal, request):
     construct = request.get('construct_v1')
     if isinstance(construct, dict) and 'fallback_model' in construct:
         route_config['fallback_model'] = construct['fallback_model']
-    environment = route_environment(authority, policy, route_config)
+    environment = route_environment(authority, policy, route_config, model=model)
     environment.update(tool_environment(authority, policy, config))
     key = route_launch_key(authority, policy, config)
     _extract_config_secrets(config, private)

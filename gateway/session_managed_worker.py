@@ -87,7 +87,7 @@ def _bootstrap(authority, ref, row, policy, scope, text=None):
     from gateway.session_worker_credentials import stage_credentials
     from hermes_cli.process_identity import is_desktop_owned_backend
     request['desktop_completion_owner_v1'] = is_desktop_owned_backend()
-    config, terminal, request, credentials = stage_credentials(authority, scope, policy, config, terminal, request)
+    config, terminal, request, credentials = stage_credentials(authority, scope, policy, config, terminal, request, model=model)
     if credentials:
         request['credentials_v1'] = True
     hydrated = replace(policy, model=model, config_json=json.dumps(config), request_json=json.dumps(request),
