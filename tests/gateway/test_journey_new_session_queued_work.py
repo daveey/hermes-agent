@@ -92,7 +92,16 @@ def test_new_session_never_absorbs_or_drops_earlier_queued_work(tmp_path, restar
             rows = admissions()
             assert {k: (r['target_session_id'], r['status']) for k, r in rows.items() if k.startswith('A_')} == {
                 'A_HEAD': (a, 'started'), **{n: (a, 'queued') for n in A_FOLLOWERS}}, rows
-            b_snapshot = await client.rpc('session.resume', session_id=b)
+            # A terminal admission is committed before the owner publishes completion.
+            # Wait for the viewer contract, not merely the SQLite state sampled above.
+            async with asyncio.timeout(30):
+                while True:
+                    b_snapshot = await client.rpc('session.resume', session_id=b)
+                    if publication_gap and not (home / 'release-b-publication').exists():
+                        assert b_snapshot['pending'], b_snapshot
+                        (home / 'release-b-publication').touch()
+                    if not b_snapshot['pending']:
+                        break
             a_snapshot = (await rpc(other, 'session.resume', session_id=a))['result']
             assert b_snapshot['pending'] == [] and b_snapshot['messages'][0]['content'] == 'B_TURN', b_snapshot
             assert [r['input_id'] for r in a_snapshot['pending']] == ['A_HEAD', *A_FOLLOWERS], a_snapshot['pending']
