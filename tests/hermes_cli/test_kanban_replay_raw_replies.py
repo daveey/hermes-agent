@@ -18,6 +18,28 @@ from tests.hermes_cli.test_kanban_replay_http_session import AckReceiver, servin
 
 live = helpers.live
 
+
+@pytest.fixture(autouse=True)
+def portable_depth_decoder(monkeypatch):
+    """Exercise real recursion failure independently of the C decoder's stack.
+
+    CPython builds differ in how many array levels their C scanner accepts.
+    Only the depth-limit response uses the stdlib Python scanner; all other
+    payloads retain the production decoder and both real HTTP transports.
+    """
+    original = json.loads
+    decoder = json.JSONDecoder()
+    decoder.scan_once = json.scanner.py_make_scanner(decoder)
+    depth_reply = b'[' * 100000 + b'0' + b']' * 100000
+
+    def decode(value, *args, **kwargs):
+        if value == depth_reply:
+            return decoder.decode(value.decode())
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(json, 'loads', decode)
+
+
 BAD_REPLIES = [
     b'{', b'\xff',
     pytest.param(b'[' * 100000 + b'0' + b']' * 100000, id='depth-limit'),

@@ -17,6 +17,9 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_source_clones
 from hermes_cli import kanban_sync_client as client
 from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli import test_kanban_replay_raw_replies as raw_helpers
+
+portable_depth_decoder = raw_helpers.portable_depth_decoder
 
 
 @pytest.mark.parametrize('proxied', [False, True])
