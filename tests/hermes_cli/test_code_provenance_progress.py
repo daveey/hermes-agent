@@ -17,10 +17,12 @@ ledger = helpers.ledger
 def test_fixed_scalar_detached_samples_and_finite_transition_limit(monkeypatch):
     clocks = SimpleNamespace(mono=0, cpu=100)
     monkeypatch.setattr(pp, 'time', SimpleNamespace(monotonic_ns=lambda: clocks.mono,
-                                                 thread_time_ns=lambda: clocks.cpu))
+                                                 thread_time_ns=lambda: clocks.cpu,
+                                                 process_time_ns=lambda: clocks.cpu * 10 + 9000000))
     progress = pp.CaptureProgress()
     progress.set_phase('worker_start')
     first = progress.snapshot()
+    assert first['phase'] == 'worker_start'
     clocks.mono, clocks.cpu = 5000000, 7100100
     progress.set_phase('disk')
     sample = progress.snapshot()
@@ -43,6 +45,25 @@ def test_phase_validation(phase):
         pp.CaptureProgress().set_phase(phase)
 
 
+@pytest.mark.parametrize('failure', [LookupError, ArithmeticError])
+def test_recorder_startup_failure_settles_and_releases_flight(monkeypatch, failure):
+    from gateway import code_provenance_control as control
+    runtime = SimpleNamespace()
+    capture = control.CodeProvenanceControl(runtime)
+    monkeypatch.setattr(capture, 'identity', lambda: {'pid': 1})
+    def fail():
+        raise failure('SECRET_SENTINEL')
+    monkeypatch.setattr(control, 'CaptureProgress', fail)
+    try:
+        result = capture.capture({'expected': {'pid': 1}}, 'fixture-peer')
+        assert result == {**control._error('capture_failed'), 'diagnostics': pp.unavailable()}
+        assert not control._FLIGHT.locked()
+    finally:
+        # A missing-containment mutant must not strand later fixture captures.
+        if control._FLIGHT.locked():
+            control._FLIGHT.release()
+
+
 def test_phase_subclass_rejected_even_with_valid_enum_value():
     class Phase(str):
         pass
@@ -54,7 +75,8 @@ def test_phase_subclass_rejected_even_with_valid_enum_value():
 def test_counters_clamp_without_duration_dependent_encoding(monkeypatch, negative):
     clocks = SimpleNamespace(mono=0, cpu=0)
     monkeypatch.setattr(pp, 'time', SimpleNamespace(monotonic_ns=lambda: clocks.mono,
-                                                 thread_time_ns=lambda: clocks.cpu))
+                                                 thread_time_ns=lambda: clocks.cpu,
+                                                 process_time_ns=lambda: clocks.cpu * 10 + 9000000))
     progress = pp.CaptureProgress()
     progress.set_phase('worker_start')
     clocks.mono = clocks.cpu = -10**100 if negative else 10**100
