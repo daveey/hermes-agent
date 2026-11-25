@@ -103,6 +103,8 @@ def _filter_mcp_children(pids: set) -> set:
             argv = psutil.Process(pid).cmdline()
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             continue  # raced away or zombie — cannot be our fresh server, unsafe to track
+        if not argv:
+            continue  # an exec/zombie snapshot cannot establish this is our fresh MCP server
         if is_owner_death_supervisor(argv):
             continue  # the shared reaper of every owned child; MCP teardown must never kill it
         if not any(marker in arg for arg in argv[1:] for marker in _NON_MCP_CHILD_CMDLINE_MARKERS):

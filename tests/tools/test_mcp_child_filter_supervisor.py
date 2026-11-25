@@ -41,13 +41,47 @@ def test_an_owned_spawn_racing_mcp_discovery_does_not_hand_mcp_the_supervisor(mo
         assert process_identity._supervisor is None, "releasing the last group stops the supervisor"
 
 
-def test_a_supervisor_whose_spawn_has_not_returned_yet_is_still_not_an_mcp_child(monkeypatch):
-    """``_supervisor`` is assigned only after the spawn returns; a scan in that gap must still skip it."""
+@pytest.mark.parametrize("empty_argv", [False, True])
+def test_a_supervisor_whose_spawn_has_not_returned_yet_is_still_not_an_mcp_child(monkeypatch, empty_argv):
+    """The returned supervisor is unpublished; exec can also transiently hide its argv."""
+    import psutil
+
     monkeypatch.setattr(process_identity, "_supervisor", None)
     supervisor = process_identity._spawn_supervisor()  # running, but not yet published as _supervisor
     assert supervisor is not None
+    original_cmdline = psutil.Process.cmdline
+    inspected = []
+
+    def cmdline(proc):
+        if empty_argv and proc.pid == supervisor.pid:
+            inspected.append(proc.pid)
+            return []
+        return original_cmdline(proc)
+
+    monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
     try:
         assert mcp_tool_lifecycle._filter_mcp_children({supervisor.pid}) == set()
+        if empty_argv:
+            assert inspected == [supervisor.pid]
     finally:
         supervisor.stdin.close()
         supervisor.wait(timeout=10)
+
+
+def test_an_uninspectable_child_is_not_adopted_but_an_ordinary_mcp_child_is(monkeypatch):
+    import psutil
+
+    calls = []
+
+    class Child:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def cmdline(self):
+            calls.append(self.pid)
+            return [] if self.pid == 1 else ["python", "fixture_mcp_server.py"]
+
+    monkeypatch.setattr(psutil, "Process", Child)
+    assert mcp_tool_lifecycle._filter_mcp_children({1, 2}) == {2}
+    assert sorted(calls) == [1, 2]
+
