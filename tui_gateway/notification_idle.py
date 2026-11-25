@@ -154,9 +154,18 @@ def state_revision(db):
     from tui_gateway.kanban_replica_observer import fingerprint
 
     path = getattr(db, "db_path", None)
-    writer = getattr(db, "_conn", None)
-    if path is None or (writer is not None and writer.in_transaction):
-        return None
+    lock = getattr(db, "_lock", None)
+    if path is None or lock is None or not lock.acquire(blocking=False):
+        return None  # a busy/unknown writer cannot prove committed absence
+    try:
+        writer = getattr(db, "_conn", None)
+        # SQLite 3.54 locks sqlite3_get_autocommit; CPython's in_transaction
+        # getter retains the GIL. Racing a write with a Python authorizer can
+        # invert GIL/connection-mutex ownership. Properties need the writer lock too.
+        if writer is not None and writer.in_transaction:
+            return None
+    finally:
+        lock.release()
     return fingerprint(path)
 
 
