@@ -78,6 +78,25 @@ def statuses(conn: sqlite3.Connection, ids: Iterable[str], *, replica: Any = ...
     return found
 
 
+def _open_parents(conn: sqlite3.Connection, ids: list[str]) -> dict[str, list[dict]]:
+    """``{authority: [{id, status}]}``: unmet parents of the parked authorities on this board file (a
+    containment-closed archive counts as unmet, as it does for readiness). Unknown elsewhere: absent."""
+    from hermes_cli.kanban_containment_terminal import parent_status_sql
+    out: dict[str, list[dict]] = {}
+    if not ids:
+        return out
+    try:
+        status = parent_status_sql(conn, "p")
+        for child, parent, state in conn.execute(
+                f"SELECT l.child_id, l.parent_id, {status} FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+                "WHERE l.child_id IN (SELECT value FROM json_each(?)) ORDER BY l.parent_id", (json.dumps(ids),)):
+            if state not in TERMINAL:
+                out.setdefault(str(child), []).append({"id": str(parent), "status": str(state)})
+    except sqlite3.Error:
+        logger.debug("contained wait: authority parent lookup failed", exc_info=True)
+    return out
+
+
 def _producer_released(conn: sqlite3.Connection, producer: str, since: Any) -> bool:
     """The producer has a completed run newer than the containment (same board file only; elsewhere unknown)."""
     try:
@@ -104,9 +123,10 @@ def _active_episode(conn: sqlite3.Connection, tid: str, marker: str) -> Optional
 def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..., display: bool = False) -> dict[str, dict[str, Any]]:
     """``{task_id: contained facts}`` for the held triage cards among ``task_ids``::
 
-        {episode, contained_at, authority: {id, status, at}, producer: {id, status, released} | None}
+        {episode, contained_at, authority: {id, status, at, parents?}, producer: {id, status, released} | None}
 
-    ``at`` is when the authority finished (None while open or unknown). Cards that are not held are absent."""
+    ``at`` is when the authority finished (None while open or unknown). ``parents`` lists a ``todo`` authority's
+    unmet parents ``[{id, status}]`` when this board file has them. Cards that are not held are absent."""
     ids = [str(t) for t in dict.fromkeys(task_ids)]
     if not ids:
         return {}
@@ -136,6 +156,8 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..
     need = [spec["authority"]["task_id"] for _, spec in stops.values()]
     need += [spec["producer"]["task_id"] for _, spec in stops.values() if isinstance(spec.get("producer"), dict)]
     known = statuses(conn, need) if replica is ... else statuses(conn, need, replica=replica)
+    parked = _open_parents(conn, [a for a in dict.fromkeys(spec["authority"]["task_id"] for _, spec in stops.values())
+                                  if known.get(a, ("unknown",))[0] == "todo"])
     latest = producer_runs(conn, stops) if display else {}
     out: dict[str, dict[str, Any]] = {}
     for tid, (stop, spec) in stops.items():
@@ -145,6 +167,8 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ..
             "episode": stop["uid"], "contained_at": stop.get("created_at"),
             "authority": {"id": a_id, "status": a_status, "at": a_at if a_status in TERMINAL else None},
             "producer": None}
+        if a_id in parked:
+            info["authority"]["parents"] = parked[a_id]
         producer = spec.get("producer")
         if isinstance(producer, dict) and producer.get("task_id"):
             p_id = producer["task_id"]

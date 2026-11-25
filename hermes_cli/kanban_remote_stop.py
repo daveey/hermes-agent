@@ -131,7 +131,8 @@ def request_archive(conn: sqlite3.Connection, task_id: str, holder: str, *, via:
     return {"status": "archive_pending", "holder": holder}
 
 
-def archive(conn: sqlite3.Connection, task_id: str, *, via: Optional[str] = None, signal_fn=None) -> Optional[dict]:
+def archive(conn: sqlite3.Connection, task_id: str, *, via: Optional[str] = None, signal_fn=None,
+            human=None) -> Optional[dict]:
     """Archive ``task_id``, or send a stop request when another machine holds its live lease.
 
     Returns ``{"status": "archived"}``, ``{"status": "archive_pending", "holder": h}``, or None when the card
@@ -140,6 +141,8 @@ def archive(conn: sqlite3.Connection, task_id: str, *, via: Optional[str] = None
     holder = remote_holder(conn, task_id)
     if holder is not None:
         return request_archive(conn, task_id, holder, via=via)
+    if human is not None:  # a contained card: never leased, and only a human operator's archive
+        return {"status": "archived"} if kb.archive_task(conn, task_id, via=via, signal_fn=signal_fn, human=human) else None
     return {"status": "archived"} if kb.archive_task(conn, task_id, via=via, signal_fn=signal_fn) else None
 
 

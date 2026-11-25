@@ -80,6 +80,26 @@ is refused before any network call. The one supported scope is the operator
 locally, and the Board itself atomically requires the unclaimed triage state. Existing local stop history without durable stop attestation
 also refuses terminal archive; upgrading alone does not authenticate old evidence.
 
+### Human operator archive
+
+When the authority can never run to release the card (for example it is `todo`
+behind open parents, or itself in triage), a human operator closes the hold with
+`hermes kanban archive <id> --reason "<why>"`. The caller is classified exactly as
+`renew-scope` classifies a human (the whole process ancestry is walked; any agent,
+runner or delegate is refused). Every active episode gets a `containment_closed`
+receipt with `reason: human_operator`, `actor_kind: human`, `actor_gateway` and
+`operator_reason`; the `archived` event records `closure`, `actor_kind`,
+`actor_gateway` and `reason`, and the reason is also a `kanban-operator` comment.
+It is refused while an authority has a live run or lease, when the named episode
+is not the card's current one, and while a safety restriction holds the card.
+The authority card is left as it is, and the closed card still never satisfies a
+dependency. Enrolled boards send `human_operator: {version: 1, actor_kind: "human",
+episode, reason}` on the ordinary `archive` op and require
+`containment_human_archive: 1` in the decision-retain capability; without it
+core refuses `board_unsupported` before staging anything. A card whose authority
+is parked like this is reported as stalled, naming the authority and its unmet
+parents.
+
 ## Local and enrolled boards
 
 A genuinely local board uses one SQLite transaction for stop/release, its durable

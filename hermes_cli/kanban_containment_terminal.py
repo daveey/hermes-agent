@@ -27,10 +27,15 @@ def permitted(conn, task):
 
 
 def closure(event, stop):
+    from hermes_cli import kanban_containment_human as human
     data, frozen = _payload(event), _stop(stop)
-    if (not _uid(event.get("uid")) or event.get("task_id") != stop.get("task_id")
-            or frozen is None or data is None or data.keys() != {
-                "version", "episode", "containment_sha256", "reason", "authority", "authority_status", "terminal_status"}):
+    if not _uid(event.get("uid")) or event.get("task_id") != stop.get("task_id") or frozen is None or data is None:
+        return False
+    if data.get("reason") == human.CLOSURE:  # a human operator closed it; the authority is whatever it was
+        return (human.valid_closure(data) and type(data["version"]) is int and data["version"] == 1
+                and data["episode"] == stop["uid"] and data["containment_sha256"] == fingerprint(frozen)
+                and data["authority"] == frozen["policy"]["authority"] and data["terminal_status"] == "archived")
+    if data.keys() != {"version", "episode", "containment_sha256", "reason", "authority", "authority_status", "terminal_status"}:
         return False
     status = data["authority_status"]
     reason = "authority_archived" if status == "archived" else "authority_done_without_producer"
@@ -65,7 +70,10 @@ def closed(conn, task):
             and terminal_closed(events, verify=lambda r, s: verifier(conn, r, s)))
 
 
-def archive_local(conn, task, *, comment=None, precondition=None, via=None, event_extra=None):
+def archive_local(conn, task, *, comment=None, precondition=None, via=None, event_extra=None, human=None):
+    """``human`` (:class:`kanban_containment_human.HumanArchive`): a human operator closes every active episode
+    whatever its authority's status, unless an authority has a live run or claim or a safety restriction holds it."""
+    from hermes_cli import kanban_containment_human as operator
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_containment_lifecycle as life
     from hermes_cli.kanban_reason_comment import reason_comment
@@ -88,6 +96,11 @@ def archive_local(conn, task, *, comment=None, precondition=None, via=None, even
         from hermes_cli.kanban_containment_requests import pending as request_pending
         if request_pending(conn, task, known):
             raise life.ContainmentRefused("unknown containment request")
+        if human is not None:
+            if refusal := operator.safety_refusal(conn, task):
+                raise life.ContainmentRefused(refusal)
+            if row["containment_episode"] not in hold.episodes:
+                raise life.ContainmentRefused("containment_episode_changed: the card's marker is not an active episode")
         closes = []
         for stop in (e for e in events if e["kind"] == "contained" and e["uid"] in hold.episodes):
             frozen = _stop(stop)
@@ -97,13 +110,23 @@ def archive_local(conn, task, *, comment=None, precondition=None, via=None, even
             authority = frozen["policy"]["authority"]
             if authority["board"] != frozen["target"]["board"] or authority["gateway"] != frozen["target"]["gateway"]:
                 raise life.ContainmentRefused("local authority identity differs")
-            at = conn.execute("SELECT status FROM tasks WHERE id=?", (authority["task_id"],)).fetchone()
-            status = at[0] if at else None
+            at = conn.execute("SELECT * FROM tasks WHERE id=?", (authority["task_id"],)).fetchone()
+            status = at["status"] if at else None
+            base = {"version": 1, "episode": stop["uid"], "containment_sha256": fingerprint(frozen),
+                    "authority": authority, "authority_status": status, "terminal_status": "archived"}
+            if human is not None:
+                if at is None:
+                    raise life.ContainmentRefused("frozen authority is not a task on this board")
+                if operator.authority_live(at):
+                    raise life.ContainmentRefused(f"authority_live: authority {authority['task_id']} has a live run "
+                                                  "or claim; let it release the card")
+                closes.append((stop, operator.closure_payload(base, human, frozen["target"]["gateway"])))
+                continue
             if status != "archived" and (status != "done" or "producer" in frozen["policy"]):
-                raise life.ContainmentRefused("authority is neither archived nor done without producer")
-            closes.append((stop, {"version": 1, "episode": stop["uid"], "containment_sha256": fingerprint(frozen),
-                                  "authority": authority, "authority_status": status, "terminal_status": "archived",
-                                  "reason": "authority_archived" if status == "archived" else "authority_done_without_producer"}))
+                raise life.ContainmentRefused("authority is neither archived nor done without producer; "
+                                              + operator.hint(task))
+            closes.append((stop, {**base, "reason": "authority_archived" if status == "archived"
+                                  else "authority_done_without_producer"}))
         if not closes:
             raise life.ContainmentRefused("no active episode to close")
         with writer(conn, task), reason_comment(conn, task, comment) as noted:
@@ -112,7 +135,8 @@ def archive_local(conn, task, *, comment=None, precondition=None, via=None, even
                 conn.execute("INSERT INTO containment_attestations VALUES (?,?,?,?,?)",
                              (task, uid, stop["uid"], fingerprint(payload), fingerprint(_stop(stop))))
             conn.execute("UPDATE tasks SET status='archived' WHERE id=? AND status='triage'", (task,))
-            kb._append_event(conn, task, "archived", {"source_status": "triage", **({"via": via} if via else {}), **(event_extra or {})})
+            kb._append_event(conn, task, "archived", {"source_status": "triage", **({"via": via} if via else {}), **(event_extra or {}),
+                                                      **(operator.audit(human, closes[0][1]["actor_gateway"]) if human else {})})
             noted.keep()
     kb.recompute_ready(conn)
     return True

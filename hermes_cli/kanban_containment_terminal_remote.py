@@ -74,24 +74,27 @@ def _metadata(via, event_extra):
     return json.loads(json.dumps(meta))
 
 
-def _expected_event(meta):
-    """What the Board writes for this metadata: extras, then via, then source_status last."""
+def _expected_event(meta, operator=None):
+    """What the Board writes for this metadata: extras, then via, then a human operator's audit, source_status last."""
     extra = dict((meta or {}).get("event_extra") or {})
     extra.pop("source_status", None)
     via = (meta or {}).get("via")
     if isinstance(via, str):
         extra.pop("via", None)
         extra["via"] = via
+    for key, value in (operator or {}).items():
+        extra.pop(key, None)
+        extra[key] = value
     extra["source_status"] = "triage"
     return extra
 
 
-def _same_metadata(op, meta):
-    return (op.get("archive_metadata") or None) == (meta or None)
+def _same_metadata(op, meta, human_op=None):
+    return (op.get("archive_metadata") or None) == (meta or None) and op.get("human_operator") == human_op
 
 
 
-def _find(conn, board, gateway, task, meta):
+def _find(conn, board, gateway, task, meta, human_op=None):
     """The single durable archive request for this task (metadata must be exactly what was staged), or None."""
     canonical._schema(conn)
     found = []
@@ -104,19 +107,20 @@ def _find(conn, board, gateway, task, meta):
             found.append((uid, op, confirmed))
     if len(found) > 1:
         raise ContainmentRefused("ambiguous canonical archive request custody")
-    if found and not _same_metadata(found[0][1], meta):
+    if found and not _same_metadata(found[0][1], meta, human_op):
         raise ContainmentRefused("canonical archive retry carries different metadata than its durable request")
     return found[0] if found else None
 
 
-def _request(conn, board, gateway, task, meta=None):
+def _request(conn, board, gateway, task, meta=None, human_op=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_sync import uuid7
-    found = _find(conn, board, gateway, task, meta)
+    found = _find(conn, board, gateway, task, meta, human_op)
     if found:
         return found
     uid = uuid7()
-    op = {"op": "archive", "task": task, "client_op_id": uid, **({"archive_metadata": meta} if meta else {})}
+    op = {"op": "archive", "task": task, "client_op_id": uid, **({"archive_metadata": meta} if meta else {}),
+          **({"human_operator": human_op} if human_op else {})}
     with kb.write_txn(conn):
         conn.execute("INSERT INTO containment_delivery(request_uid,board,gateway,op_json,confirmed) VALUES (?,?,?,?,0)",
                      (uid, board, gateway, json.dumps(op, sort_keys=True, separators=(",", ":"))))
@@ -140,7 +144,39 @@ def _scope_refusal(conn, task, precondition):
         raise ContainmentRefused("creator_archive requires a different card created by the requesting task")
 
 
-def archive(conn, task, *, comment=None, precondition=None, via=None, event_extra=None):
+def _human_op(conn, task, human):
+    """The Board ``human_operator`` carriage for the card's current episode, after the local safety check."""
+    from hermes_cli import kanban_containment_human as operator
+    if human is None:
+        return None
+    if refusal := operator.safety_refusal(conn, task):
+        raise ContainmentRefused(refusal)
+    row = conn.execute("SELECT containment_episode FROM tasks WHERE id=?", (task,)).fetchone()
+    episode = row[0] if row is not None else None
+    if not episode:  # the marker row has not synced yet: the one active episode the replica attests
+        from hermes_cli.kanban_containment_connections import verifier
+        from hermes_cli.kanban_containment_lifecycle import _events
+        from hermes_cli.kanban_containment_state import reduce_events
+        hold = reduce_events(_events(conn, task), verify_release=lambda r, s: verifier(conn, r, s))
+        episode = hold.episodes[0] if hold is not None and not hold.unresolved and len(hold.episodes) == 1 else None
+    if not episode:
+        raise ContainmentRefused("the card has no single current containment episode")
+    return operator.wire(human, episode)  # the Board refuses it unless it is the card's current episode
+
+
+def _refusal(task, verdict, human_op):
+    from hermes_cli import kanban_containment_human as operator
+    reason = str(verdict.get("reason"))
+    text = f"Board refused terminal archive: {reason}"
+    if verdict.get("detail"):
+        text += f" ({verdict['detail']})"
+    if reason == "containment_hold" and not human_op:
+        text += "; " + operator.hint(task)
+    return text
+
+
+def archive(conn, task, *, comment=None, precondition=None, via=None, event_extra=None, human=None):
+    from hermes_cli import kanban_containment_human as operator
     from hermes_cli import kanban_containment_remote as remote
     from hermes_cli import kanban_containment_replica as replica
     from hermes_cli import kanban_db as kb
@@ -164,14 +200,20 @@ def archive(conn, task, *, comment=None, precondition=None, via=None, event_extr
         return False
     _scope_refusal(conn, task, precondition)  # before any network operation
     meta = _metadata(via, event_extra)
+    human_op = _human_op(conn, task, human)
     if state:  # a changed retry is refused from local custody alone, before any Board contact
-        _find(conn, state["board_id"], state["gateway_id"], task, meta)
+        _find(conn, state["board_id"], state["gateway_id"], task, meta, human_op)
     hub, board = remote.enrolled(conn)
     try:
         capability = hub.containment_capability(board)
         if not isinstance(capability, dict) or type(capability.get("terminal_archive")) is not int or capability["terminal_archive"] != 1:
             raise ContainmentRefused("Board terminal archive capability is unavailable")
-        request, op, confirmed = _request(conn, board, hub.ident.gateway, task, meta)
+        if human_op is not None:
+            served = hub.decision_retain_capability(board)
+            if not isinstance(served, dict) or served.get(operator.CAPABILITY) != 1:
+                raise ContainmentRefused("board_unsupported: the Board does not support a human operator containment "
+                                         "archive yet; nothing was changed. Retry after the Board deployment")
+        request, op, confirmed = _request(conn, board, hub.ident.gateway, task, meta, human_op)
         if not confirmed:
             response = hub.ops(board, [op])
             results = response.get("results") if isinstance(response, dict) else None
@@ -182,7 +224,7 @@ def archive(conn, task, *, comment=None, precondition=None, via=None, event_extr
             if verdict.get("status") == "rejected":
                 with kb.write_txn(conn):
                     conn.execute("UPDATE containment_delivery SET confirmed=-1 WHERE request_uid=?", (request,))
-                raise ContainmentRefused("Board refused terminal archive: " + str(verdict.get("reason")))
+                raise ContainmentRefused(_refusal(task, verdict, human_op))
             if verdict.get("status") not in ("applied", "merged"):
                 raise canonical.DeliveryUnknown("canonical archive outcome unknown; recover same request", request_uid=request)
         proofs, archived = _inventory(hub, board, task)
@@ -202,7 +244,8 @@ def archive(conn, task, *, comment=None, precondition=None, via=None, event_extr
             audit = json.loads(archived["row"]["payload"]) if archived else None
         except (TypeError, ValueError):
             audit = None
-        if audit is None or audit != _expected_event(meta) or list(audit)[-1] != "source_status":
+        expected = _expected_event(meta, operator.audit(human, hub.ident.gateway) if human_op else None)
+        if audit is None or audit != expected or list(audit)[-1] != "source_status":
             raise ContainmentRefused("canonical archived audit event differs from the staged archive metadata")
         proof = hub.row_evidence(board, "tasks", task)
         row = proof.get("row") if isinstance(proof, dict) else None

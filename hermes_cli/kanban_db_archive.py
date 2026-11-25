@@ -11,7 +11,8 @@ from hermes_cli.kanban_reason_comment import Comment
 @refreshes_origin_outcomes
 def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
                  event_extra: Optional[dict] = None, comment: Comment = None,
-                 precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
+                 precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None,
+                 human=None) -> bool:
     """Archive a task; a *running* task's host-local worker is terminated.
 
     Clearing ``worker_pid`` in the DB alone left the OS process running past its
@@ -26,20 +27,28 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
     the ``archived`` event stays atomic with the status flip. Optional ``precondition``
     runs inside that transaction; a nonempty refusal leaves no transition or comment.
     ``comment`` and ``event_extra`` commit with the archive, before post-commit cleanup.
+    ``human`` (:class:`kanban_containment_human.HumanArchive`) closes a contained card as a human operator; it is
+    refused for a card that is not contained.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_reason_comment import reason_comment
 
     from hermes_cli.kanban_containment_connections import held
+    if human is not None:
+        from hermes_cli.kanban_containment_human import comment as operator_comment
+        if not held(conn, task_id):
+            from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
+            raise ContainmentRefused("--reason (a human operator archive) applies only to a contained card")
+        comment = comment or operator_comment(human)
     if held(conn, task_id):
         from hermes_cli.kanban_db_sync import sync_state
         if sync_state(conn):
             from hermes_cli.kanban_containment_terminal_remote import archive
             return archive(conn, task_id, comment=comment, precondition=precondition,
-                           via=via, event_extra=event_extra)
+                           via=via, event_extra=event_extra, human=human)
         from hermes_cli.kanban_containment_terminal import archive_local
         return archive_local(conn, task_id, comment=comment, precondition=precondition,
-                             via=via, event_extra=event_extra)
+                             via=via, event_extra=event_extra, human=human)
 
     with kb.write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if precondition is not None and precondition(conn):

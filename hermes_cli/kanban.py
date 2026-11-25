@@ -1604,49 +1604,7 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
 from hermes_cli.kanban_cli_release import cmd_promote as _cmd_promote
 
 
-def _cmd_archive(args: argparse.Namespace) -> int:
-    ids = list(args.task_ids or [])
-    purge_ids = list(getattr(args, "purge_ids", None) or [])
-    if ids and purge_ids:
-        return _err("choose either task_ids to archive or --rm archived task_ids")
-    if not ids and not purge_ids:
-        return _err("at least one task_id is required")
-    with kbc.connect_closing() as conn:
-        if purge_ids:
-            return _bulk_apply(purge_ids, lambda tid: kb.delete_archived_task(conn, tid), lambda tid: f"Deleted {tid}",
-                               lambda tid: f"cannot delete {tid} (must already be archived)")
-        vias: dict[str, Optional[str]] = {}
-        for tid in ids:
-            foreign = _foreign_card.refusal(conn, tid)  # [daveey] only a replica copy here: name the owner
-            if foreign:
-                return _err(f"cannot archive {tid}: {_foreign_card.REJECTION}: {foreign}")
-            refusal, vias[tid] = worker_archive_scope(conn, tid)
-            if refusal:
-                return _err(refusal)
-        # A card another machine runs under its live Board lease gets a stop request, not a local status write
-        # the Board would reject (kanban_remote_stop). [daveey]
-        from hermes_cli.kanban_remote_stop import RemoteArchiveRefused, archive as _archive
-        outcomes: dict[str, dict] = {}
-        refusals: dict[str, str] = {}
-
-        def _one(tid: str) -> bool:
-            try:
-                out = _archive(conn, tid, via=vias.get(tid))
-            except RemoteArchiveRefused as exc:
-                refusals[tid] = str(exc)
-                return False
-            if out:
-                outcomes[tid] = out
-            return bool(out)
-
-        def _ok_line(tid: str) -> str:
-            out = outcomes[tid]
-            if out.get("status") == "archive_pending":
-                return (f"Archive pending {tid}: running on {out['holder']} under its live lease; a stop request "
-                        f"was sent and {out['holder']} archives it at its next dispatcher tick")
-            return f"Archived {tid}"
-
-        return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}", conn=conn)
+from hermes_cli.kanban_cli_archive import cmd_archive as _cmd_archive
 
 
 def _host_lock_holders() -> dict:

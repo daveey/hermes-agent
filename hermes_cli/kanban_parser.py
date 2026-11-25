@@ -724,6 +724,8 @@ _SPECS = [
         _arg("task_ids", nargs="*", help="Task ids to archive (default mode)"),
         _arg("--rm", dest="purge_ids", nargs="+",
              help="Permanently delete already-archived task ids from the board"),
+        _reason("Human operator only: archive a contained card whose authority cannot release it (no live run or "
+                "lease), recording why on the archive event and as a comment"),
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
