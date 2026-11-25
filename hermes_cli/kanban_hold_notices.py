@@ -84,6 +84,7 @@ def publish(conn, task_id: str, *, with_producer: bool = False) -> None:
 def sweep(conn) -> None:
     """Repair fresh canonical retains in one dispatch tick, not hours later in the age sweep."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
     from hermes_cli.kanban_hold_effective import current, previous
     from hermes_cli.kanban_wake_check import foreign_ids
     foreign = foreign_ids(conn)
@@ -104,5 +105,7 @@ def sweep(conn) -> None:
                 row = conn.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()
                 if row is not None and row[0] == 'triage':
                     publish(conn, tid)
+        except DispatchWriteContended:
+            raise  # Stop the pass, rather than retrying every hold against the same busy writer.
         except Exception:  # health: allow BLE001 -- rollback this publication, retain its hold and retry next tick
             kb._log.warning('kanban: hold notice failed for %s; hold retained', tid, exc_info=True)

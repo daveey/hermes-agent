@@ -64,13 +64,14 @@ def record_dispatch_pass(
 ) -> Optional[tuple[int, int]]:
     """Stamp this pass; record ``[previous, now]`` as suspended when the gap is over the threshold.
 
-    Returns the recorded span, else ``None``. Never raises: a failure leaves the checks on wall-clock
-    time, which is the pre-ledger behaviour. A dry run (``dispatch_once(dry_run=True)``) is not a pass:
+    Returns the recorded span, else ``None``. Ordinary failures leave checks on wall-clock
+    time; pass-wide storage cancellation propagates. A dry run (``dispatch_once(dry_run=True)``) is not a pass:
     it writes nothing, and its stamp would hide a real suspend gap from the next pass.
     """
     if dry_run:
         return None
     from hermes_cli.kanban_db import write_txn
+    from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
 
     now = int(time.time()) if now is None else int(now)
     threshold = gap_threshold_seconds(interval_seconds)
@@ -89,6 +90,8 @@ def record_dispatch_pass(
                 "ON CONFLICT(id) DO UPDATE SET at = excluded.at "
                 "WHERE kanban_dispatch_stamp.at IS NOT excluded.at", (now,))
             conn.execute("DELETE FROM kanban_suspend_ledger WHERE end < ?", (now - RETENTION_SECONDS,))
+    except DispatchWriteContended:
+        raise  # The dispatcher owns this pass-wide skip, not a ledger failure.
     except (sqlite3.Error, RuntimeError):
         _log.warning("kanban: recording the dispatcher pass stamp failed", exc_info=True)
         return None
