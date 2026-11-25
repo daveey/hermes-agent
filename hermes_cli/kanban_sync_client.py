@@ -818,10 +818,7 @@ def _child_task(conn: sqlite3.Connection, table: str, uid: str) -> Optional[str]
 
 def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
          partition: Optional[str] = None, max_pages: Optional[int] = PULL_PAGE_BUDGET) -> Pulled:
-    """Apply the feed pages after this file's cursor, at most ``max_pages`` (None: to the head). Returns the number
-    of changes read; its ``more`` is true when the budget ran out before the head. On a board with an outbox
-    (primary), fields with an unanswered local edit are not overwritten; ``partition`` (a gateway name) keeps only
-    that gateway's cards. [daveey]"""
+    """Bound feed pages (None: to head), preserving local pending fields and optional gateway partition. [daveey]"""
     from hermes_cli.kanban_sync_stop import checkpoint
     total = pages = 0
     from hermes_cli.kanban_sync_apply_budget import apply_page, service_pushes

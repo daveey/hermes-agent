@@ -1,5 +1,6 @@
 """A cancelled gateway watcher must not leave bootstrap in asyncio's executor."""
 import asyncio
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -33,13 +34,18 @@ def test_gateway_stop_interrupts_active_replica_pages(monkeypatch, snapshot):
     monkeypatch.setattr(client.sync, "apply_remote_changes", lambda *a, **k: applied.append(k["new_cursor"]))
     monkeypatch.setattr(client, "pending_task_fields", lambda conn: {})
     monkeypatch.setattr(client, "IMPORT_ORDER", ["tasks"])
-    conn = SimpleNamespace(execute=lambda *a: None)
 
     def round_loop(keep_running, interval, runstate):
-        if snapshot:
-            client.resync(conn, Hub(), "default", observers=False)
-        else:
-            client.pull(conn, Hub(), "default", observers=False)
+        # Native pull checks durable replay before fetching. Keep that real read,
+        # with SQLite owned and closed by the executor thread using it.
+        conn = sqlite3.connect(":memory:")
+        try:
+            if snapshot:
+                client.resync(conn, Hub(), "default", observers=False)
+            else:
+                client.pull(conn, Hub(), "default", observers=False)
+        finally:
+            conn.close()
 
     monkeypatch.setattr(client, "_run_forever", round_loop)
 
