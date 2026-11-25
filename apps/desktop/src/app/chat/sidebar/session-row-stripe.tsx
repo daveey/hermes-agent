@@ -6,6 +6,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import { reportSessionCommittedStripeRemote, reportSessionStripeRemote, type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { boundDiagnosticSender } from '@/lib/bounded-diagnostic-sender'
 import { canonicalOutcomeStatus, outcomeHasCrons, outcomeHasWatches, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
@@ -26,8 +27,13 @@ import {
 import { externalClockOnly, sessionExternalStripeTip, unknownExternalCloud } from './session-row-stripe-external'
 
 // [daveey] Every red edge (with its reasons) also goes to the session's own gateway, where the agent can read it.
+// Both reporters cap their in-flight POSTs: a wake/stall commits every row's paint at once (74 in one tick), and
+// unbounded they all time out together on a briefly half-open link.
+const sendStripeReason = boundDiagnosticSender(reportSessionStripeRemote)
+const sendCommittedStripe = boundDiagnosticSender(reportSessionCommittedStripeRemote)
+
 setStripeReasonReporter((row, stripe, previous, reasons) =>
-  reportSessionStripeRemote(
+  sendStripeReason(
     { connection_id: row.connection_id, id: row.id, profile: row.profile },
     stripe,
     previous,
@@ -37,7 +43,7 @@ setStripeReasonReporter((row, stripe, previous, reasons) =>
 
 // [daveey] Every committed paint of a row with a canonical envelope (any stripe, not red only) is reported with the
 // revision it painted, so the gateway can compare it with what it published.
-setCommittedStripeReporter(reportSessionCommittedStripeRemote)
+setCommittedStripeReporter(sendCommittedStripe)
 
 /** What a row that is not `needs-input` subscribes to instead of `$stuckPromptInputsKey`: it never changes. */
 const NO_PROMPT_INPUTS = atom('')
