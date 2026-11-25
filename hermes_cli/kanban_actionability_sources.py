@@ -274,12 +274,20 @@ def _private_reason(conn, task, reader) -> str | None:
         verified = covered(Rows(conn), task['id'])
     except EVIDENCE_ERRORS:
         verified = frozenset()  # Missing mandate evidence cannot resolve a scope hold.
-    # Synced provenance is the Board-stamped envelope, never actor text in the payload.
+    # Synced provenance is the Board-stamped envelope, never actor text in the payload. A row this gateway
+    # wrote has no envelope until its Board echo applies, so only the card's home gateway (sync identity ==
+    # created_on) reads its own un-echoed release; elsewhere a pulled row may also lack one and proves nothing.
     # An unsynced board's own release writer is local; foreign envelopes are not local writes.
-    releases = frozenset(key(row) for row in rows if row['kind'] == 'stop_released' and (
-        (reader.synced and isinstance(task.get('created_on'), str) and task['created_on']
-         and row.get('origin_gateway') == task['created_on'])
-        or (not reader.synced and not row.get('origin_gateway'))))
+    home = task.get('created_on') if isinstance(task.get('created_on'), str) and task.get('created_on') else None
+    if reader.synced:
+        from hermes_cli.kanban_db_sync import sync_state
+        origins = set() if home is None else {home}
+        if home is not None and (sync_state(conn) or {}).get('gateway_id') == home:
+            origins.add(None)
+    else:
+        origins = {None, ''}
+    releases = frozenset(key(row) for row in rows
+                         if row['kind'] == 'stop_released' and row.get('origin_gateway') in origins)
     return held(task['status'], events, verified_cover=verified, verified_releases=releases)
 
 

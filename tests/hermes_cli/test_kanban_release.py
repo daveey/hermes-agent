@@ -99,6 +99,36 @@ def test_capability_release_clears_private_diagnostic_through_supported_writer(b
     assert 'private_hold' not in describe(board, tid)['violations']
 
 
+@pytest.mark.parametrize('gateway,echo,clear', [
+    ('home', None, True),        # the home gateway's own release, Board echo not applied yet
+    ('home', 'home', True),      # echoed with the home envelope
+    ('home', 'foreign', False),  # the envelope was replaced by another gateway's write
+    ('replica', None, False),    # a replica's envelope-less row is not proof of a home write
+])
+def test_synced_home_release_clears_private_diagnostic_before_board_echo(board, gateway, echo, clear):
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_actionability_sources import Reader, describe
+    sync.apply_sync_schema_steps(board)
+    board.commit()
+    if not board.execute("SELECT 1 FROM kanban_sync_state").fetchone():
+        board.execute("INSERT INTO kanban_sync_state (board_id, gateway_id, hlc_last, mode) VALUES ('b', 'home', '', 'shadow')")
+        board.commit()
+    sync.set_identity(board, 'b', 'home')
+    sync.set_mode(board, 'primary')
+    assert Reader(board).synced is True
+    tid = kb.create_task(board, title='Capability stop', assignee='default')
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage', created_on='home' WHERE id=?", (tid,))
+        kb._append_event(board, tid, decision.EVENT, {'cause': 'capability_unavailable'})
+    assert run(board, tid)['outcome'] == 'released'
+    rows = board.execute("SELECT uid, origin_gateway FROM task_events WHERE task_id=? AND kind='stop_released'", (tid,)).fetchall()
+    assert len(rows) == 1 and rows[0][0] and rows[0][1] is None  # the real writer: uid yes, no envelope
+    board.execute("UPDATE task_events SET origin_gateway=? WHERE task_id=? AND kind='stop_released'", (echo, tid))
+    board.commit()
+    sync.set_identity(board, 'b', gateway)
+    assert ('private_hold' not in describe(board, tid)['violations']) is clear
+
+
 def test_ordinary_spend_stop_released(board):
     tid = spend_stopped(board)
     out = run(board, tid, note='Desktop Unblock, operation op-1')
