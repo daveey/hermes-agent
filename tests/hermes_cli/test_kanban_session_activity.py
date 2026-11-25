@@ -251,15 +251,52 @@ def test_session_kanban_tasks_endpoint(kanban_root, _isolate_hermes_home):
         ("t_run", "Run", "running", "default", "s_me", 100, 200, None),
         ("t_x", "Theirs", "running", "default", "s_them", 100, 200, None),
     ])
-    from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
-    client = TestClient(app)
-    client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+    # This bare client never enters app lifespan. Own the import's mounts until
+    # the request finishes, then drain them before kanban_root changes again.
+    with imported_dashboard_lifecycles():
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        client = TestClient(app)
+        try:
+            client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+            res = client.get("/api/session-kanban-tasks", params={"ids": "s_me, s_root"})
+            assert res.status_code == 200
+            assert [t["id"] for t in res.json()["tasks"]] == ["t_run"]
+            assert client.get("/api/session-kanban-tasks").status_code == 422
+        finally:
+            client.close()
 
-    res = client.get("/api/session-kanban-tasks", params={"ids": "s_me, s_root"})
 
-    assert res.status_code == 200
-    assert [t["id"] for t in res.json()["tasks"]] == ["t_run"]
-    assert client.get("/api/session-kanban-tasks").status_code == 422
+def test_session_tasks_endpoint_drains_import_mount_before_home_changes(kanban_root, monkeypatch):
+    """An already-cached app must still drain a mount created during import."""
+    import builtins
+    from types import SimpleNamespace
+    from tests._fixtures.board_mount import imported_dashboard_lifecycles
+    with imported_dashboard_lifecycles():
+        from hermes_cli import web_server
+    from hermes_cli.fact_plugin_mount import PluginLifecycles
+    registry = PluginLifecycles()
+    monkeypatch.setattr(web_server.app.state, 'fact_plugin_lifecycles', registry)
+    closed, started = [], []
+    path = kanban_root / 'fixture-plugin.py'
+    module = SimpleNamespace(start_legacy=lambda: SimpleNamespace(close=lambda: closed.append('closed')))
+    real_import = builtins.__import__
+
+    def mounting_import(name, globals=None, locals=None, fromlist=(), level=0):
+        result = real_import(name, globals, locals, fromlist, level)
+        if name == 'hermes_cli.web_server' and 'app' in fromlist:
+            registry.start(path, module)
+            started.append(path)
+        return result
+
+    monkeypatch.setattr(builtins, '__import__', mounting_import)
+    try:
+        test_session_kanban_tasks_endpoint(kanban_root, None)
+        assert started == [path]
+        assert closed == ['closed']
+        assert registry._handles == {}
+    finally:
+        registry.close()
 
 
 def test_kanban_unseen_counts_subscriptions_trailing_a_terminal_event(kanban_root):
