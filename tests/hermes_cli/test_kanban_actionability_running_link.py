@@ -155,3 +155,26 @@ def test_park_after_handoff_uses_the_park_source(tmp_path, monkeypatch):
             assert row['escalation']['at'] is not None
             assert 'escalation_deadline_missing' not in row['violations']
             assert 'creation_intent_invalid' not in row['violations']
+
+
+def test_todo_stamped_link_sorting_after_the_claim_is_not_a_running_handoff(tmp_path, monkeypatch):
+    """A replicated todo-episode `linked` whose clock sorts after the claim: the claim stays the source."""
+    _clock(monkeypatch, T0)
+    with connect(tmp_path / 'kanban.db') as conn:
+        first = kb.create_task(conn, title='first', assignee='default')
+        tid = kb.create_task(conn, title='waiting child', assignee='default', parents=[first])
+        second = kb.create_task(conn, title='second', assignee='default')
+        _clock(monkeypatch, T0 + 5000)
+        kb.link_tasks(conn, second, tid)  # stamped while the child waits in todo
+        linked, data = _event(conn, tid, 'linked')
+        assert data['actionability_intent']['status'] == 'todo'
+        # The card is running now, and its claim carries an earlier clock than the skewed edge event.
+        _clock(monkeypatch, T0 + 100)
+        kb._append_event(conn, tid, 'claimed', {'lock': 'run'})
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+        claimed, _ = _event(conn, tid, 'claimed')
+        assert (linked['created_at'], linked['id']) > (claimed['created_at'], 0)
+        for row in _rows(conn, tid, T0 + 6000):
+            assert row['source_refs'] == _refs(claimed)  # never the todo edge
+            assert row['escalation']['at'] is None
+            assert row['violations'] == ['escalation_deadline_missing']
