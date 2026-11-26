@@ -362,7 +362,9 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         from time import time
         rows = []
         if journal.pending_wire(conn) is None:
+            # one replay capability is pinned per turn; the sender never certifies owner reassessment
             rows, _, _ = select_pending(conn, hub, board, seen, now=int(time()), limit=1, before_head=before_head,
+                                        origin_cap={},
                                         hold_rejected=True)
             from hermes_cli.kanban_actionability_transport import before_send
             before_send(conn, rows, hub, board)
