@@ -68,9 +68,10 @@ def _unlink_lease(path: Path, handle) -> None:
 class ProfileResourceLease:
     """One writer and its pooled readers; acknowledgement follows the last close."""
 
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, *, drain_profile_probes: bool = False):
         from gateway.status import _try_acquire_file_lock
 
+        self._drain_profile_probes = drain_profile_probes
         self.home = home
         self._lock = threading.Lock()
         self._finish_lock = threading.Lock()
@@ -157,16 +158,18 @@ class ProfileResourceLease:
         with self._lock:
             if self._refs or self.handle.closed:
                 return
-        # Header probes also own state.db descriptors. This runs outside registry
-        # teardown's lifecycle mutex, and after the final pooled reader is gone.
-        from hermes_state_registry import _release_header_probes_under
-        from hermes_state_dbfile import all_header_probes_under
-        from hermes_cli.sqlite_safe_read import release_profile_pread_fds
-        _release_header_probes_under(self.home)
-        if all_header_probes_under(self.home):
-            return
-        if not release_profile_pread_fds(self.home):
-            return
+        if self._drain_profile_probes:
+            # Each cache publishes a dedicated probe owner BEFORE opening a raw fd.
+            # Only that lease drains profile-wide probes. A closed SessionDB must not
+            # retain a lease forever behind a different, still-live SQLite owner.
+            from hermes_state_registry import _release_header_probes_under
+            from hermes_state_dbfile import all_header_probes_under
+            from hermes_cli.sqlite_safe_read import release_profile_pread_fds
+            _release_header_probes_under(self.home)
+            if all_header_probes_under(self.home):
+                return
+            if not release_profile_pread_fds(self.home):
+                return
         _unlink_lease(self.path, self.handle)
         self.handle.close()  # the only positive acknowledgement is an actual close
         with _lock:
@@ -205,7 +208,7 @@ def lease_for_path(path: Path) -> ProfileResourceLease | None:
 
 class _ProfileProbeOwner:
     def __init__(self, home: Path):
-        self.lease = ProfileResourceLease(home)
+        self.lease = ProfileResourceLease(home, drain_profile_probes=True)
         self.lease.set_owner(self, retire=_retire_probe_owner)
 
 
