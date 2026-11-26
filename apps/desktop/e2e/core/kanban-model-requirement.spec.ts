@@ -201,7 +201,8 @@ test('the New task form and the drawer store a class requirement, never a concre
       // Exercise a fresh read of the persisted card, independently of the
       // board's live-refresh subscription (the create producer was checked above).
       await page.reload()
-      await waitForInteractive(app, page)
+      // Reload preserves #/kanban, which has no chat composer. openDrawer waits
+      // for the persisted board card and then the real drawer's model selector.
       const drawer = await openDrawer(page, NEW_TITLE)
       await expect(modelSelect(drawer)).toHaveValue('class:fast')
       await modelSelect(drawer).selectOption('')
