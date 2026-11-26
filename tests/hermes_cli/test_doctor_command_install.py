@@ -48,7 +48,7 @@ def _pm_source(project, home):
         "hermes", "hermes_bootstrap.py", "hermes_constants.py", "hermes_cli/__init__.py",
         "hermes_agent/__init__.py", "hermes_agent/compat/__init__.py", "hermes_agent/compat/finder.py",
         "hermes_agent/compat/moves.py",
-        "pm/environments.py", "pm/filesystem.py", "hermes_cli/runtime_state.py",
+        "pm/environments.py", "pm/dependency_imports.py", "pm/filesystem.py", "hermes_cli/runtime_state.py",
         "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
         "hermes_cli/venv_sync.py", "hermes_cli/steward.py", "hermes_cli/stderr_timestamp.py",
         "hermes_cli/launch_malloc.py",

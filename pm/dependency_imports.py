@@ -15,6 +15,11 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 
+_IMPORT_SUFFIXES = tuple(sorted(
+    (*importlib.machinery.SOURCE_SUFFIXES, *importlib.machinery.EXTENSION_SUFFIXES),
+    key=len, reverse=True,
+))
+
 
 def _distribution_name(info: Path) -> str:
     metadata = info / "METADATA"
@@ -35,9 +40,12 @@ def _recorded_modules(info: Path) -> dict[str, str]:
             if not row:
                 continue
             path = PurePosixPath(row[0])
-            if path.is_absolute() or ".." in path.parts or path.suffix not in {".py", ".so", ".pyd"}:
+            if path.is_absolute() or ".." in path.parts:
                 continue
-            stem = path.name.split(".", 1)[0]
+            suffix = next((s for s in _IMPORT_SUFFIXES if path.name.endswith(s)), None)
+            if suffix is None:
+                continue
+            stem = path.name[:-len(suffix)]
             parts = (*path.parts[:-1], *((stem,) if stem != "__init__" else ()))
             if parts and all(part.isidentifier() for part in parts):
                 modules[".".join(parts)] = str(path.parent.parent if stem == "__init__" else path.parent)
@@ -86,8 +94,10 @@ def select_wheel_sources(project_root: Path, selected: Path) -> None:
     for name in owners:
         module = sys.modules.get(name)
         origin = getattr(module, "__file__", None)
-        if origin and Path(origin).resolve().is_relative_to(project_root.resolve()):
-            raise RuntimeError(f"checkout dependency already imported before PM activation: {name}")
+        if origin:
+            loaded = Path(origin).resolve()
+            if loaded.is_relative_to(project_root.resolve()) and not loaded.is_relative_to(selected.resolve()):
+                raise RuntimeError(f"checkout dependency already imported before PM activation: {name}")
     sys.meta_path[:] = [entry for entry in sys.meta_path if not isinstance(entry, _DuplicateWheelFinder)]
     if owners:
         index = sys.meta_path.index(importlib.machinery.PathFinder)

@@ -1,4 +1,5 @@
 """Duplicate installed wheels cannot steal committed dependency ownership."""
+from importlib.machinery import EXTENSION_SUFFIXES
 import json
 import os
 from pathlib import Path
@@ -20,16 +21,19 @@ def _distribution(root, record="ownership_probe/yaml/__init__.py,,\n", *, editab
 
 
 @pytest.mark.parametrize("mutate_namespace_path", [False, True])
-def test_activation_uses_managed_duplicate_without_stealing_namespace(tmp_path, monkeypatch, mutate_namespace_path):
+@pytest.mark.parametrize("nested_environment", [False, True])
+def test_activation_uses_managed_duplicate_without_stealing_namespace(
+    tmp_path, monkeypatch, mutate_namespace_path, nested_environment,
+):
     from pm import environments
 
     root = tmp_path / "repo"
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    root.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str((root if nested_environment else tmp_path) / "home"))
     state = environments.install_state_dir(root)
     selected = state / "environments" / "selected" / "venv"
     site = environments.site_packages(selected)
     site.mkdir(parents=True)
-    root.mkdir()
     (selected / "pyvenv.cfg").write_text("home = fixture\n")
     (state / "facts.json").write_text(json.dumps({"schema": 1, "packages": {
         "venv": {"environment": str(selected)},
@@ -48,6 +52,7 @@ def test_activation_uses_managed_duplicate_without_stealing_namespace(tmp_path, 
         "activate_dependencies(Path(sys.argv[1])); "
         + ("import ownership_probe; sys.path.insert(0, sys.argv[1]); " if mutate_namespace_path else "") +
         "import ownership_probe.yaml as yaml; from ownership_probe import source_member; "
+        "activate_dependencies(Path(sys.argv[1])); "
         "print(yaml.value); print(yaml.__file__); print(source_member.value)"
     )
     process = subprocess.run([sys.executable, "-c", code, str(root)],
@@ -59,8 +64,8 @@ def test_activation_uses_managed_duplicate_without_stealing_namespace(tmp_path, 
 
 @pytest.mark.parametrize("record,expected", [
     ("ordinary.py,,\n", {"ordinary": "."}),
-    ("native.cpython-314-x86_64-linux-gnu.so,,\n", {"native": "."}),
-    ("native.cp314-win_amd64.pyd,,\n", {"native": "."}),
+    ("not.a.module.py,,\n", {}),
+    (f"native{EXTENSION_SUFFIXES[0]},,\n", {"native": "."}),
     ("namespace/member/__init__.py,,\n", {"namespace.member": "namespace"}),
     ("../outside.py,,\n/absolute.py,,\nnot-a-module.py,,\n", {}),
     ("package-1.data/scripts/command.py,,\npackage-1.dist-info/METADATA,,\n", {}),
@@ -135,3 +140,21 @@ def test_repeated_install_preserves_builtin_and_foreign_finders(tmp_path, monkey
     assert sys.meta_path[:3] == [BuiltinImporter, FrozenImporter, sentinel]
     assert isinstance(sys.meta_path[3], _DuplicateWheelFinder)
     assert sys.meta_path[4:] == [PathFinder]
+
+
+@pytest.mark.parametrize("metadata_file,contents", [
+    ("METADATA", bytes([255])),
+    ("direct_url.json", b"{broken"),
+])
+def test_malformed_ownership_evidence_refuses_without_changing_finders(tmp_path, monkeypatch, metadata_file, contents):
+    from pm.dependency_imports import select_wheel_sources
+
+    root, selected = tmp_path / "source", tmp_path / "selected"
+    _distribution(root)
+    info = _distribution(selected)
+    (info / metadata_file).write_bytes(contents)
+    original = list(sys.meta_path)
+    monkeypatch.setattr(sys, "meta_path", original.copy())
+    with pytest.raises((UnicodeError, ValueError)):
+        select_wheel_sources(root, selected)
+    assert sys.meta_path == original
