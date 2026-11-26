@@ -1285,13 +1285,13 @@ describe('typing-aware sessions.changed deferral', () => {
   // identity across the tick-driven re-renders — an unstable prop would
   // re-run the connect-reseed effect and re-subscribe the throttle each
   // render, polluting the counts under observation.
-  function renderTypingSync(refreshSessions: () => Promise<void>) {
+  function renderTypingSync(refreshSessions: () => Promise<void>, refreshMessagingSessions: () => unknown = vi.fn()) {
     const stable = {
       refreshActiveTranscript: async () => undefined,
       refreshCronJobs: vi.fn(),
       refreshCurrentModel: vi.fn(),
       refreshHermesConfig: vi.fn(),
-      refreshMessagingSessions: vi.fn(),
+      refreshMessagingSessions,
       requestGateway: vi.fn(async () => ({ sessions: [] })) as never,
       // Required by the hook's params. This harness never drives the
       // transcript path, so the updater just runs against a throwaway state —
@@ -1439,6 +1439,48 @@ describe('typing-aware sessions.changed deferral', () => {
     })
 
     expect(refreshSessions).toHaveBeenCalledTimes(1)
+  })
+
+  // [daveey] The batched sidebar page refreshSessions reads already carries the
+  // messaging slice, so a change tick must not read that slice a second time.
+  it('reads the session lists once per change tick: no separate messaging read beside the batched page', async () => {
+    vi.useFakeTimers()
+    $changeEventsAvailable.set(true)
+    const refreshSessions = vi.fn(async () => undefined)
+    const refreshMessagingSessions = vi.fn()
+
+    renderTypingSync(refreshSessions, refreshMessagingSessions)
+    await primeThrottle(refreshSessions)
+    refreshMessagingSessions.mockClear()
+
+    // Three throttle windows of continuous backend changes (one per second).
+    for (let second = 0; second < 30; second += 1) {
+      act(() => notifySessionsChanged())
+      await act(async () => {
+        vi.advanceTimersByTime(1_000)
+        await Promise.resolve()
+      })
+    }
+
+    expect(refreshSessions.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(refreshSessions.mock.calls.length).toBeLessThanOrEqual(4)
+    expect(refreshMessagingSessions).not.toHaveBeenCalled()
+  })
+
+  it('keeps the legacy messaging poll against a backend without change events', async () => {
+    vi.useFakeTimers()
+    $changeEventsAvailable.set(false)
+    const refreshSessions = vi.fn(async () => undefined)
+    const refreshMessagingSessions = vi.fn()
+
+    renderTypingSync(refreshSessions, refreshMessagingSessions)
+
+    await act(async () => {
+      vi.advanceTimersByTime(31_000)
+      await Promise.resolve()
+    })
+
+    expect(refreshMessagingSessions).toHaveBeenCalledTimes(3)
   })
 })
 

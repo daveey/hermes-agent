@@ -1463,8 +1463,12 @@ export function useBackgroundSync({
     const run = () => {
       lastRunAt = Date.now()
       markSessionListRefreshReason('sessions.changed')
+      // [daveey] refreshSessions' batched page already carries the messaging
+      // slice (same limit and excludes) and publishes it, so a second
+      // refreshMessagingSessions() here re-read every profile store for rows
+      // this pass had just fetched: one extra aggregate list read per tick,
+      // per window, for as long as the backend keeps changing.
       void refreshSessions()
-      void refreshMessagingSessions()
 
       // Archived sessions use their own capped query. Reload it only while the
       // sidebar is showing that view, matching the on-demand fetch contract.
@@ -1547,7 +1551,6 @@ export function useBackgroundSync({
   }, [
     changeEventsAvailable,
     gatewayState,
-    refreshMessagingSessions,
     refreshSessions,
     requestActiveTranscriptRefresh,
     updateSessionState
