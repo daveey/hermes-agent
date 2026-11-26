@@ -43,7 +43,7 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics, _warnings_summary_from_diagnostics
-from plugins.kanban.dashboard import board_catalog_projection, board_read, board_shadow
+from plugins.kanban.dashboard import board_catalog_projection, board_read, board_shadow, task_detail_flight
 from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the documented column list
     BOARD_COLUMNS, _placeholders, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
@@ -382,7 +382,6 @@ def _runs_with_worker_sessions(conn, task_id: str, runs) -> list[dict]:
     return out
 
 
-@router.get("/tasks/{task_id}")
 def get_task(
     task_id: str,
     board: Optional[str] = Query(None),
@@ -410,6 +409,9 @@ def get_task(
             out = _task_detail(replica, task, run_state_type, run_state_name)
             return {**out, "source": "replica", "owner": None if owner is kfc._UNSET else owner}
     raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+
+task_detail_flight.mount(router, get_task)
 
 
 def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type: Optional[str],
