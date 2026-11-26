@@ -82,7 +82,7 @@ def probe_model(conn, task_id, state):
     """The model the episode's run was routed to (its receipt), else the episode's recorded model."""
     from hermes_cli.kanban_quota_receipt import _owned_receipt
     owned = _owned_receipt(conn, task_id, state['run_id'])
-    model = owned[0].get('route_model') if owned else None
+    model = state.get('wall_model') or (owned[0].get('route_model') if owned else None)
     return model if isinstance(model, str) and model else state.get('model')
 
 
@@ -90,8 +90,15 @@ def verdicts(walls, model, verdict=None):
     """``provider -> Verdict._asdict()`` for every provider *walls* name (``kanban_quota_episode._providers``)."""
     from hermes_cli.kanban_quota_episode import _providers
     verdict = verdict or live_verdict
-    names = sorted({provider for wall in walls for provider in _providers(wall)})
-    return {provider: verdict(provider, model)._asdict() for provider in names}
+    targets = sorted({(provider, wall.get('wall_model') or model) for wall in walls for provider in _providers(wall)},
+                     key=lambda target: (target[0], str(target[1])))
+    found = {}
+    for provider, candidate in targets:
+        value = verdict(provider, candidate)._asdict()
+        # One serving model cannot release another model's confirmed/unknown wall.
+        if provider not in found or found[provider]['state'] == 'headroom' or value['state'] == 'walled':
+            found[provider] = value
+    return found
 
 
 def contradicted(exc, *, verdict=None):

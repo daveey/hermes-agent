@@ -22,8 +22,7 @@ HUB_CFG = {'default_model': 'class:standard', 'strong_model': 'class:deep'}
 
 
 def _codex_wall(reset) -> dict[str, Any]:
-    return dict(text=f'SubscriptionQuotaUnavailable: Subscription quota unavailable for '
-                f'openai-codex/gpt-6-astra; resets at {reset}.0',
+    return dict(text=f'Provider-wide quota unavailable for openai-codex; resets at {reset}.0',
                 fields={'failure_reason': 'rate_limit', 'failure_retryable': True,
                         'failure_resets_at': float(reset),
                         'route_provider': 'openai-codex', 'route_model': 'gpt-6-astra'})

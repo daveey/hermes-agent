@@ -152,3 +152,15 @@ def test_owned_model_episode_can_admit_serving_sibling(board, wallfile, monkeypa
     assert set(pw.active_walls()) == {f'{P}/{A}'}
     assert quota.decision(conn, task, base=(B, P, 'default')) == (None, None)
     assert quota.decision(conn, task, base=('class:standard', 'auto', 'default')) == (None, (B, P))
+
+
+@pytest.mark.parametrize('state', ['walled', 'unknown'])
+def test_release_probes_every_scoped_model_before_releasing_provider(state):
+    from hermes_cli import kanban_quota_probe as probe
+    seen = []
+    def verdict(provider, model):
+        seen.append((provider, model))
+        return probe.Verdict(state if model == A else 'headroom', model)
+    found = probe.verdicts([{'provider': P, 'wall_model': m} for m in (A, B)], B, verdict)
+    assert set(seen) == {(P, A), (P, B)}
+    assert found[P]['state'] == state

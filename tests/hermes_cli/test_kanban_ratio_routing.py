@@ -522,7 +522,8 @@ def test_a_walled_ratio_pick_still_moves_via_its_quota_episode(hub):
         assert pin_tests._events(conn, tid, 'run_route')[-1]['tier_reason'] == 'default+ratio:anthropic'
         clock[0] += 10  # inside the run's doubling backoff: the live pool serving fable never lifts that part
         ratio.begin_tick(conn)
-        assert _route(conn, tid) == (*ASTRA, 'default+ratio:anthropic+quota_reroute')
+        # A model-specific Fable wall leaves its same-class Opus sibling eligible.
+        assert _route(conn, tid) == ('claude-opus-5-5', 'anthropic', 'default+ratio:anthropic+quota_reroute')
 
 
 def test_start_counts_are_this_hosts_default_starts_in_the_window(hub):

@@ -62,7 +62,7 @@ def test_auth_churn_receipt_writes_no_episode_or_wall(board, clock):
 
 def _held(conn):
     tid = kb.create_task(conn, title='held deep card', assignee='a')
-    reap(conn, tid, text=f'Subscription quota unavailable for anthropic/claude-opus-5-5; resets at {RESET}',
+    reap(conn, tid, text=f'Provider-wide quota unavailable for anthropic; resets at {RESET}',
          fields={'failure_reason': 'rate_limit', 'failure_resets_at': RESET})
     walls.record_wall('anthropic', RESET - NOW)
     assert hold_until(conn, tid) == RESET
