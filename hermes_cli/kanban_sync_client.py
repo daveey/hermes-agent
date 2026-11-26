@@ -660,15 +660,15 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
     out, seen = PushResult(), {} if seen is None else seen
     for _ in range(max_batches):
         from hermes_cli.kanban_sync_parent_order import select_pending
+        from hermes_cli.kanban_sync_status_origin import absorb_clock, capability
+        origin_cap = capability(hub, board)  # one snapshot per batch: selection and serialization agree
         rows, selected, stopped = select_pending(conn, hub, board, seen, now=int(time.time()),
-                                                limit=PUSH_BATCH, before_head=before_head)
+                                                limit=PUSH_BATCH, before_head=before_head, origin_cap=origin_cap)
         if not rows:
             break
         command_batch = retain_transport.own_batch(rows)
         retain_split, rows = len(command_batch) < len(rows), command_batch
         retain_transport.before_send(conn, rows, hub, board)
-        from hermes_cli.kanban_sync_status_origin import absorb_clock, capability
-        origin_cap = capability(hub, board)
         with write_txn(conn):
             absorb_clock(conn, origin_cap)
             from hermes_cli.kanban_terminal_guard import strip_stale_push  # no wake reopens a done card [daveey]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from hermes_cli.kanban_owner_reassessment import PENDING_TABLE, ReassessmentRefused
 
@@ -75,3 +76,38 @@ def bind(conn, *, op_id, task_id, event_uid):
     fields['owner_reassessment_v1'] = receipt
     conn.execute('UPDATE kanban_sync_outbox SET fields=? WHERE op_id=? AND wire_json IS NULL',
                  (json.dumps(fields, ensure_ascii=False, separators=(',', ':')), op_id))
+
+
+def pending_park_parent(conn, row):
+    """One exact pending status origin, journal-validated; never search latest task."""
+    if row.get('table_name') != 'task_events' or row.get('op') != 'upsert':
+        return None
+    fields = row.get('fields')
+    fields = json.loads(fields) if isinstance(fields, str) else (fields or {})
+    hit = conn.execute(
+        "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND op='upsert' "
+        "AND state='pending' AND row_uid=? AND status_origin=? LIMIT 1",
+        (fields.get('task_id'), row['row_uid'])).fetchone()
+    parent = dict(hit) if hit else None
+    return parent if parent is not None and bound_park_uid(conn, parent) == row['row_uid'] else None
+
+
+def bound_park_uid(conn, row):
+    """The park event uid this status op exactly carries, else None (never trust a lone field)."""
+    try:
+        fields = row.get('fields')
+        fields = json.loads(fields) if isinstance(fields, str) else (fields or {})
+        receipt = fields.get('owner_reassessment_v1')
+        if not isinstance(receipt, dict) or fields.get('status') != 'scheduled':
+            return None
+        uid = (receipt.get('park_event') or {}).get('uid')
+        if (not uid or row.get('table_name') != 'tasks' or row.get('status_origin') != uid
+                or row.get('evidence_uid') != uid or receipt.get('task_id') != row.get('row_uid')):
+            return None
+        saved = conn.execute(f'SELECT receipt FROM {PENDING_TABLE} WHERE event_uid=? AND task_id=?',
+                             (uid, row['row_uid'])).fetchone()
+        if saved is None or json.loads(saved[0]) != receipt:
+            return None
+        return uid
+    except (sqlite3.Error, ValueError, TypeError, AttributeError, KeyError):
+        return None  # missing journal or malformed fields keep the ordinary order

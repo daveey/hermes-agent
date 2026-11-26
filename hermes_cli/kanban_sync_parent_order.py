@@ -4,21 +4,35 @@ from __future__ import annotations
 import json
 
 
-def select_pending(conn, hub, board, seen, *, now: int, limit: int, before_head: bool):
-    """Dependency selection and the existing pre-head fence share one batch."""
+def reassessment_supported(cap) -> bool:
+    """True only for a valid serving capability advertising owner_reassessment_v1 == 1."""
+    return bool(cap) and type(cap.get('owner_reassessment_v1')) is int and cap['owner_reassessment_v1'] == 1
+
+
+def select_pending(conn, hub, board, seen, *, now: int, limit: int, before_head: bool, origin_cap: dict | None = None):
+    """Dependency selection and the existing pre-head fence share one batch.
+
+    ``origin_cap`` is the caller's one per-push capability snapshot; omitted, it is read normally.
+    """
+    if origin_cap is None:
+        from hermes_cli.kanban_sync_status_origin import capability
+        origin_cap = capability(hub, board)
+    certified = reassessment_supported(origin_cap)
     from hermes_cli import kanban_sync_backlog as backlog
     from hermes_cli.kanban_sync_quarantine import pending_rows
 
     from hermes_cli.kanban_actionability_transport import eligible_pending
-    rows = selected = parent_first(conn, eligible_pending(conn, pending_rows(conn, now), hub, board), now, limit)
+    rows = selected = parent_first(conn, eligible_pending(conn, pending_rows(conn, now), hub, board), now, limit,
+                                   reassessment=certified)
     stopped = False
     if before_head:
         rows, stopped = backlog.sendable_before_head(conn, hub, board, rows, seen)
-        rows = parent_first(conn, rows, now, limit, allowed={r['op_id'] for r in rows})
+        rows = parent_first(conn, rows, now, limit, allowed={r['op_id'] for r in rows}, reassessment=certified)
     return rows, selected, stopped
 
 
-def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None = None) -> list[dict]:
+def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None = None,
+                 reassessment: bool = False) -> list[dict]:
     """Promote the existing FIFO parent, never synthesize a competing retry identity.
 
     Only an unacknowledged card needs this dependency ordering. A parent's backoff
@@ -58,7 +72,7 @@ def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None =
             if parent['op_id'] not in included and all(p['op_id'] != parent['op_id'] for p in required):
                 required.append(parent)
         from hermes_cli.kanban_sync_evidence_order import firsts
-        for event in [] if blocked else firsts(conn, row):
+        for event in [] if blocked else firsts(conn, row, reassessment=reassessment):
             # The status op waits behind its own event exactly as a child waits behind its parent.
             if ((event['retry_after'] or 0) > now or not sendable(conn, [event])
                     or (allowed is not None and event['op_id'] not in allowed)):
@@ -68,6 +82,22 @@ def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None =
                 required.append(event)
         if blocked:
             continue
+        from hermes_cli.kanban_owner_reassessment_transport import pending_park_parent
+        certificate = pending_park_parent(conn, row)
+        frozen = json.loads(certificate['wire_json']) if certificate is not None and certificate.get('wire_json') else {}
+        if certificate is not None and (reassessment or 'owner_reassessment_v1' in frozen.get('fields', {})):
+            # A frozen certificate cannot fall back when support disappears.
+            # Never let its separately captured park consume the uid first.
+            if (not reassessment or (certificate['retry_after'] or 0) > now
+                    or not sendable(conn, [certificate])
+                    or (allowed is not None and certificate['op_id'] not in allowed)):
+                continue
+            if certificate['op_id'] not in included:
+                dependency = parent_first(conn, [certificate], now, limit, allowed=allowed,
+                                          reassessment=reassessment)
+                if not any(p['op_id'] == certificate['op_id'] for p in dependency):
+                    continue
+                required.extend(dependency)
         # Keep both link parents together with their child when possible. If the
         # batch is full, the ordinary next round drains the remaining FIFO rows.
         for item in required + [row]:

@@ -27,6 +27,7 @@ more than one status capture for the card.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 
@@ -106,10 +107,12 @@ def bind(conn: sqlite3.Connection, status_ops: list) -> None:
             pass
 
 
-def firsts(conn: sqlite3.Connection, row: dict) -> list[dict]:
+def firsts(conn: sqlite3.Connection, row: dict, *, reassessment: bool = False) -> list[dict]:
     """Pending ops of this status op's group that go before it, in send order; [] keeps the legacy order.
 
     Once the named event is acknowledged, rejected or gone the status op travels alone.
+    ``reassessment`` (Board advertises owner_reassessment_v1): only the exact bound certified park event
+    is not promoted; the Board inserts and seals it atomically from the status op, so it must follow.
     """
     uid = row.get(COLUMN)
     fields = row.get("fields")
@@ -124,4 +127,11 @@ def firsts(conn: sqlite3.Connection, row: dict) -> list[dict]:
         "ORDER BY o.table_name='tasks', o.rowid", (uid, row["op_id"]))]
     if not any(r["table_name"] == "task_events" and r["row_uid"] == uid for r in group):
         return []
+    frozen = row.get('wire_json')
+    frozen_fields = json.loads(frozen).get('fields', {}) if frozen else {}
+    if reassessment or 'owner_reassessment_v1' in frozen_fields:
+        from hermes_cli.kanban_owner_reassessment_transport import bound_park_uid
+        park = bound_park_uid(conn, row)
+        if park is not None:
+            group = [r for r in group if not (r["table_name"] == "task_events" and r["row_uid"] == park)]
     return group
