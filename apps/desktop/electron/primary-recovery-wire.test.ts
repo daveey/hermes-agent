@@ -89,7 +89,10 @@ async function listen(server: net.Server | http.Server) {
 }
 
 async function fixture() {
-  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 't01a205c8-wire-'))
+  // Vitest nests TMPDIR; OpenSSH appends 17 bytes while publishing the socket.
+  // Keep the owned fixture prefix short and use its root for the control socket.
+  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'w-'))
+  expect(Buffer.byteLength(path.join(dir, '0'.repeat(16) + '.sock.' + 'X'.repeat(16)))).toBeLessThan(108)
   const connections: SshConnection[] = []
   const sockets = new Set<net.Socket>()
   const children: ReturnType<typeof spawn>[] = []
@@ -218,7 +221,7 @@ async function fixture() {
         keyPath: dir + '/key'
       },
       {
-        controlDir: dir + '/mux',
+        controlDir: dir,
         connectTimeoutMs: 3000,
         forwardTimeoutMs: 3000,
         spawnFn: (command: string, args: string[], options: any) =>
