@@ -14,6 +14,8 @@ def _install(world):
     world.conn.execute('ALTER TABLE tasks ADD COLUMN last_heartbeat_at REAL')
     world.conn.execute('CREATE TABLE task_comments (id INTEGER PRIMARY KEY, task_id TEXT, body TEXT)')
     revision.ensure_revisions(world.conn)
+    # Custody requires the inner reader's certificate too, as normal board init installs.
+    ksa._revision.ensure_revision(world.conn, ksa._revision.LOCAL_TABLES)
 
 
 def test_holder_batches_local_parts_with_identical_keys(world, monkeypatch):
@@ -37,27 +39,34 @@ def test_holder_batches_local_parts_with_identical_keys(world, monkeypatch):
 
 
 def test_holder_keys_carry_the_hub_signature_for_every_local_part(world, monkeypatch, tmp_path):
-    """Each batched part key is the per-part fingerprint, hub signature included, and moves with the hub alone."""
+    """Every part covers actual task movement; only COUNTS uses the custody-backed hub key."""
+    import sqlite3
     from hermes_cli import kanban_annotation_parts as parts
+    from hermes_cli import kanban_annotation_hub_key as hub_keys
 
     _install(world)
     hub = tmp_path / 'hub.db'
-    hub.write_bytes(b'')
-    signature = ['hub-1']
+    with sqlite3.connect(hub) as conn:
+        conn.execute('CREATE TABLE replica (gw TEXT,coll TEXT,key TEXT,seq INTEGER,data TEXT)')
+        conn.execute('CREATE TABLE meta (k TEXT PRIMARY KEY,v TEXT)')
+        conn.execute("INSERT INTO replica VALUES ('fixture','tasks','default/t1',1,'{}')")
     monkeypatch.setattr(ksa, '_hub_db_path', lambda: hub)
-    monkeypatch.setattr(ksa, '_hub_content_signature', lambda path: (str(path), signature[0]))
-    local = ('counts', 'links', 'attention')
     before = parts.keys(helpers.SCOPE)
-    for part in local:
+    for part in ('links', 'attention'):
         assert before[part][0] == parts._part_fingerprint(part)
-        assert before[part][0][-1] == (str(hub), 'hub-1')
-    assert parts.keys(helpers.SCOPE)['links'] == before['links']  # unchanged hub and board: stable key
-    signature[0] = 'hub-2'
+    assert before['counts'][0][-1] == hub_keys.capture(hub)[0]
+    assert before.receipt.valid()
+    assert parts.keys(helpers.SCOPE) == before
+    with sqlite3.connect(hub) as conn:
+        conn.execute('UPDATE replica SET seq=2')
+    assert not before.receipt.valid()
     after = parts.keys(helpers.SCOPE)
-    for part in local:
+    for part in ('counts', 'links', 'attention'):
         assert after[part][0] != before[part][0]
-        assert after[part][0][:-1] == before[part][0][:-1]  # only the hub element moved
+        assert after[part][0][:-1] == before[part][0][:-1]
+    for part in ('links', 'attention'):
         assert after[part][0] == parts._part_fingerprint(part)
+    assert after['counts'][0][-1] == hub_keys.capture(hub)[0]
 
 
 def test_irrelevant_board_storm_reads_no_part(world):

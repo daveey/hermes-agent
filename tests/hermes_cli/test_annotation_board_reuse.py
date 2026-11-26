@@ -95,6 +95,10 @@ def test_event_noncontent_refresh_keeps_full_board_reads(world, monkeypatch, rea
 
     part_helpers._refresh()
     if reason == 'renew':
+        from dataclasses import replace
+        from hermes_cli import kanban_annotation_counts as holder_counts
+        source = holder_counts._entries[part_helpers.SCOPE]
+        holder_counts._entries[part_helpers.SCOPE] = replace(source, mono=0)
         monkeypatch.setattr(ksa._count_scopes, 'read_at_locked', lambda scope: 0)
     elif reason == 'clock':
         host._clock_deadlines[part_helpers.SCOPE] = [time.time() - 1]

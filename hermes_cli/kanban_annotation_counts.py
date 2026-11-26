@@ -77,6 +77,8 @@ def read(reader):
     if getattr(ksa._revalidate.force_read, 'scope', None) != scope:
         return reader()
     keys = getattr(_use, 'keys', None) if getattr(_use, 'scope', None) == scope else None
+    if getattr(_use, 'scope', None) != scope:
+        return reader()  # legacy holder: no counts plan or custody to change
     source = _entries.get(scope)
     now, wall = ksa.time.monotonic(), ksa.time.time()
     token = host._mutation.current(scope)
@@ -88,8 +90,8 @@ def read(reader):
             _use.source, _use.reused = source, True
             return value
     # An unforced/missing/expired receipt cannot borrow the request cache's age.
-    forced = ksa._revalidate.force_read.parts
-    content_only = ksa._revalidate.force_read.content_only_boards
+    forced = getattr(ksa._revalidate.force_read, 'parts', None)
+    content_only = getattr(ksa._revalidate.force_read, 'content_only_boards', False)
     if needs_read(scope):
         ksa._revalidate.force_read.content_only_boards = False
     ksa._revalidate.force_read.parts = frozenset(forced or ()) | {parts.COUNTS}

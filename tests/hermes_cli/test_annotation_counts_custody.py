@@ -33,6 +33,47 @@ def clock(world, monkeypatch):
     return state, fake
 
 
+@pytest.mark.parametrize('flags', ['absent', 'none', 'empty'])
+def test_unplanned_legacy_holder_keeps_reader_and_source_unchanged(world, monkeypatch, flags):
+    counts.clear_use()
+    local = SimpleNamespace(scope=holders.SCOPE)
+    if flags != 'absent':
+        local.parts = None if flags == 'none' else frozenset()
+    monkeypatch.setattr(ksa._revalidate, 'force_read', local)
+    sentinel = object()
+    seen = []
+    def reader():
+        seen.append(vars(local).copy())
+        return sentinel
+    before = dict(counts._entries)
+    assert counts.read(reader) is sentinel
+    assert seen == [vars(local)]
+    assert counts._entries == before
+    assert not counts.reused() and counts.observed_at(123.0) == 123.0
+
+
+def test_uncertified_actual_count_source_never_enters_custody(world):
+    # Simulate an archived/partially upgraded board: outer part coverage is known,
+    # but a newly installed input table lacks the request reader's activity triggers.
+    world.conn.execute('CREATE TABLE task_comments (id INTEGER PRIMARY KEY,task_id TEXT,body TEXT)')
+    from hermes_cli import kanban_annotation_revision as revision
+    revision.ensure_revisions(world.conn)
+    holders._refresh()
+    assert not ksa._cache_revalidatable
+    assert holders.SCOPE not in counts._entries
+    before = world.counts
+    holders._refresh()
+    assert world.counts == before + 1
+    assert holders.SCOPE not in counts._entries
+    # A normal writable init restores the raw source certificate; no weakened guard.
+    ksa._revision.ensure_revision(world.conn, ksa._revision.LOCAL_TABLES)
+    holders._refresh()
+    assert holders.SCOPE in counts._entries
+    before = world.counts
+    holders._refresh()
+    assert world.counts == before
+
+
 def test_requests_cannot_extend_own_source_renewal(world, clock, monkeypatch):
     state, fake = clock
     saved = []
