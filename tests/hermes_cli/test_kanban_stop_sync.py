@@ -155,10 +155,61 @@ def test_replica_frozen_before_the_fix_is_resynced_once(shadow, monkeypatch):
         service._put(board, 'tasks', target, {'status': 'archived', 'title': 'M5'}, ME, None, '9999999999999-0000-hub')
         path = ksc.shadow_path(BOARD)
         assert unfreeze.needed(replica, path)
-        assert unfreeze.unfreeze(replica, hub, BOARD, path) > 0
-        assert kb.get_task(replica, target).status == 'archived'
-        assert not unfreeze.needed(replica, path)
-        assert unfreeze.unfreeze(replica, hub, BOARD, path) == 0
+        replica.close()
+        with ksc._pulled_replica(BOARD, hub, ME) as (rebuilt, pulled, changed):
+            assert pulled > 0 and changed
+            assert kb.get_task(rebuilt, target).status == 'archived'
+            assert not unfreeze.needed(rebuilt, path)
+        with ksc._pulled_replica(BOARD, hub, ME) as (_, _, changed):
+            assert not changed
     finally:
         replica.close()
         ksc.shadow_path(BOARD).with_name(ksc.shadow_path(BOARD).name + unfreeze.SUFFIX).unlink(missing_ok=True)
+
+
+def test_replica_rebuild_removes_consumed_link_delete(shadow, monkeypatch):
+    from hermes_cli import kanban_stop_sync
+    from hermes_cli import kanban_sync_replica_unfreeze as unfreeze
+    service = FakeService()
+    hub = service.hub(ME)
+    target, replica = _replica_after_stop(shadow, service, hub)
+    path = ksc.shadow_path(BOARD)
+    try:
+        board = service.board(BOARD)
+        uid = next(u for u in board['rows']['task_links'] if target in u.split('>'))
+        parent, child = uid.split('>')
+        board['rows']['task_links'][uid]['deleted_at'] = 1
+        service._emit(board, 'task_links', uid, 'delete', None, ME, None)
+        with monkeypatch.context() as patch:
+            patch.setattr(kanban_stop_sync, 'is_replica', lambda conn: False)
+            ksc.pull(replica, hub, BOARD, observers=False)
+        query = 'SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?'
+        assert replica.execute(query, (parent, child)).fetchone()
+        replica.close()
+        with ksc._pulled_replica(BOARD, hub, ME) as (rebuilt, _, changed):
+            assert changed
+            assert rebuilt.execute(query, (parent, child)).fetchone() is None
+            assert not unfreeze.needed(rebuilt, path)
+    finally:
+        replica.close()
+        path.with_name(path.name + unfreeze.SUFFIX).unlink(missing_ok=True)
+
+
+def test_replica_failed_rebuild_does_not_mark_done(shadow, monkeypatch):
+    from hermes_cli import kanban_sync_replica_unfreeze as unfreeze
+    service = FakeService()
+    hub = service.hub(ME)
+    _, replica = _replica_after_stop(shadow, service, hub)
+    replica.close()
+    path = ksc.shadow_path(BOARD)
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise RuntimeError('snapshot unavailable')
+        patch.setattr(hub, 'snapshot_page', fail)
+        with pytest.raises(RuntimeError, match='snapshot unavailable'):
+            with ksc._pulled_replica(BOARD, hub, ME):
+                pytest.fail('failed rebuild must not publish')
+    assert not path.with_name(path.name + unfreeze.SUFFIX).exists()
+    with ksc._pulled_replica(BOARD, hub, ME) as (rebuilt, pulled, _):
+        assert pulled > 0
+        assert rebuilt.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] > 0

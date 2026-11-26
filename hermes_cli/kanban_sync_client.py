@@ -937,13 +937,19 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str, max_pages: Optional[int] 
         replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
         rebuilt = False
         generation = lag.pull_started(path)  # done only below: a failed pull leaves this gateway's pushes lagging
+        from hermes_cli import kanban_sync_replica_unfreeze as unfreeze
+        repair_stop = not diagnostic and unfreeze.needed(replica, path)
         try:
+            if repair_stop:
+                unfreeze.begin(path)
+                raise Resync('replica consumed changes while stop-frozen')
             pulled = pull(replica, hub, slug, observers=False, max_pages=max_pages)
         except Resync as exc:
             if diagnostic:
                 raise
             before = acw.statuses(replica, getattr(exc, "status_changed", None))  # read before the file goes
-            _log.warning("kanban sync: %s replica cursor below the retention floor; rebuilding from a snapshot", slug)
+            reason = 'consumed changes while stop-frozen' if repair_stop else 'cursor below the retention floor'
+            _log.warning("kanban sync: %s replica %s; rebuilding from a snapshot", slug, reason)
             from hermes_cli import kanban_sync_quarantine as quarantine
             quarantine.save_rebuild(replica, path)
             stack.close()
@@ -952,9 +958,8 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str, max_pages: Optional[int] 
             replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
             pulled = Pulled(resync(replica, hub, slug, observers=False), status_changed=acw.rebuilt(before, replica))
-        if not diagnostic and not pulled.more:
-            from hermes_cli.kanban_sync_replica_unfreeze import unfreeze
-            unfreeze(replica, hub, slug, path)
+            if repair_stop:
+                unfreeze.finish(path)  # only a complete fresh snapshot certifies recovery
         if not diagnostic:
             from hermes_cli.kanban_sync_closure_backfill import backfill
             pulled.status_changed.update(backfill(replica, hub, slug))
