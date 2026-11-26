@@ -12,6 +12,9 @@ name: E2E Desktop core
 # it was wired in.
 
 on:
+  # Ordinary PR CI deliberately masks E2E lanes. This runs the same isolated
+  # Linux job on the selected branch without dispatching every release lane.
+  workflow_dispatch:
   workflow_call:
     inputs:
       commit:
