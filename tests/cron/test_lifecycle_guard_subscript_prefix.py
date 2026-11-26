@@ -40,9 +40,9 @@ def marker_payload(tmp_path_factory):
 @pytest.mark.parametrize("name", NAMES)
 @pytest.mark.parametrize("prior", PRIOR)
 @pytest.mark.parametrize("builtin", BUILTINS)
-@pytest.mark.parametrize("wrapper", WRAPPERS[0::4])
+@pytest.mark.parametrize("wrapper", WRAPPERS[0::14])
 def test_prior_expansion_cross_product(tmp_path, marker_payload, name, prior, builtin, wrapper):
-    """Wrapper shard 0 of 4; shards 1-3 live in ..._prefix_shard{1,2,3}.py (per-file time cap)."""
+    """Wrapper shard 0 of 14; shards 1-13 keep native execution below the per-file cap."""
     check_prior_expansion(tmp_path, marker_payload, name, prior, builtin, wrapper)
 
 

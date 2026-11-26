@@ -1,4 +1,4 @@
-"""Wrapper shard 2 of 4 of the prior-expansion cross product (per-file time cap)."""
+"""Wrapper shard 2 of 14 of the prior-expansion cross product (per-file time cap)."""
 
 import pytest
 
@@ -16,6 +16,6 @@ def marker_payload(tmp_path_factory):
 @pytest.mark.parametrize("name", NAMES)
 @pytest.mark.parametrize("prior", PRIOR)
 @pytest.mark.parametrize("builtin", BUILTINS)
-@pytest.mark.parametrize("wrapper", WRAPPERS[2::4])
+@pytest.mark.parametrize("wrapper", WRAPPERS[2::14])
 def test_prior_expansion_cross_product_shard(tmp_path, marker_payload, name, prior, builtin, wrapper):
     check_prior_expansion(tmp_path, marker_payload, name, prior, builtin, wrapper)
