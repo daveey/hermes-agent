@@ -90,6 +90,11 @@ def report(live, shadow, hub, board, *, started=None):
         _require([_generation(c) for c in (live, shadow)] == generations and _rows(live) == rows,
                  'local_cut_inputs_changed')
         result = diff(live, shadow, identity[2])
+        from hermes_cli.kanban_sync_actionability_drift import audited_rejection
+
+        diagnostic_audits = [r['op_id'] for r in rows
+                             if audited_rejection(live, shadow, r, fresh_gateway=identity[2])]
+        result['audited_retain_rejections'] = sorted(set(result['audited_retain_rejections']) | set(diagnostic_audits))
         result['audited_server_refusals'] = [p['op_id'] for p in proofs]
         audits = set(result['audited_server_refusals']) | set(result['audited_retain_rejections'])
         result['clean'] = not (result['missing_in_shadow'] or result['extra_in_shadow']

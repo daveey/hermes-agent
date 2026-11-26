@@ -30,7 +30,22 @@ def _valid_facts(facts, *, portable_only=False):
             and [d['id'] for d in deps] == sorted({d['id'] for d in deps}))
 
 
-def _source(conn, task_id):
+def _foreign_parent(shadow, parent_id, gateway):
+    """Only a fresh report cut may supply an intentionally unimported parent."""
+    if shadow is None or not isinstance(gateway, str) or not gateway:
+        return None
+    row = shadow.execute('SELECT * FROM tasks WHERE id=?', (parent_id,)).fetchone()
+    if row is None:
+        return None
+    parent = dict(row)
+    owner, version = parent.get('created_on'), parent.get('sync_version')
+    if (not isinstance(owner, str) or not owner or owner == gateway
+            or parent.get('deleted_at') is not None or type(version) is not int or version <= 0):
+        return None
+    return parent['status'], parent['containment_episode']
+
+
+def _source(conn, task_id, *, parent_shadow=None, gateway=None):
     from hermes_cli.kanban_actionability_selection import select
 
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
@@ -59,6 +74,8 @@ def _source(conn, task_id):
     for (pid,) in conn.execute('SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id', (task_id,)):
         parent = conn.execute('SELECT status,containment_episode FROM tasks WHERE id=?', (pid,)).fetchone()
         if parent is None:
+            parent = _foreign_parent(parent_shadow, pid, gateway)
+        if parent is None:
             return None
         status = 'triage' if parent[0] in ('done', 'archived') and parent[1] else parent[0]
         deps.append({'id': pid, 'status': status})
@@ -67,7 +84,7 @@ def _source(conn, task_id):
             'source_uids': [{'uid': event['uid']}], 'dependencies': deps}
 
 
-def audited_rejection(live, shadow, op):
+def audited_rejection(live, shadow, op, *, fresh_gateway=None):
     """Require intact rejected command custody and agreeing, changed source facts."""
     if (op.get('op') != transport.KIND or op.get('table_name') != 'tasks'
             or op.get('state') != 'rejected' or op.get('last_error') != 'actionability_source_changed'):
@@ -102,7 +119,11 @@ def audited_rejection(live, shadow, op):
             from hermes_cli.kanban_sync_actionability_terminal import superseded
             return superseded(live, shadow, wire['task'], frozen['source_uids'][0]['uid'])
         comparable = {**frozen, 'source_uids': [{'uid': s['uid']} for s in frozen['source_uids']]}
-        current, replica = _source(live, wire['task']), _source(shadow, wire['task'])
+        # fresh_gateway is supplied only under the refusal report's authenticated
+        # empty-feed/generation cut. Direct diff/retirement callers get no fallback.
+        current = _source(live, wire['task'], parent_shadow=shadow if fresh_gateway else None,
+                          gateway=fresh_gateway)
+        replica = _source(shadow, wire['task'])
         return _valid_facts(current, portable_only=True) and current == replica and current != comparable
     except (ValueError, TypeError, KeyError, sqlite3.Error):
         return False  # Unknown schema, malformed custody or missing source stays dirty.
