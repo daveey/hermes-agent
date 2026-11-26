@@ -37,11 +37,12 @@ def policy():
 
 def collect(count):
     """Use a single census for the scalar and both pools, or omit the entire tuple."""
-    settings = policy()
+    from hermes_cli.kanban_sync_cpu import detail as diagnostic
+    settings = diagnostic("collect.policy", policy)
     if not settings:
-        return {"active_card_runs": count()}
+        return {"active_card_runs": diagnostic("collect.census", count)}
     detail = {"pools": {"regular": 0, "priority": 0}}
-    active = count(detail=detail)
+    active = diagnostic("collect.census", lambda: count(detail=detail))
     out = {"active_card_runs": active}
     pools = detail["pools"]
     if type(active) is int and active >= 0 and all(type(v) is int and v >= 0 for v in pools.values()) and sum(pools.values()) == active:

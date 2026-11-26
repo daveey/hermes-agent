@@ -33,6 +33,7 @@ def census(watch: Any, fallback: Optional[Callable[..., Optional[int]]] = None) 
         from hermes_cli import kanban_db as kb
         from hermes_cli import machine_metrics as mm
         from hermes_cli.kanban_db_boards import named_board_db_files
+        from hermes_cli.kanban_sync_cpu import detail as diagnostic
 
         uncached = fallback or mm.active_card_runs
         try:
@@ -40,9 +41,9 @@ def census(watch: Any, fallback: Optional[Callable[..., Optional[int]]] = None) 
             total = 0
             receipts: list = []
             seen = set()
-            for path in (default, *(p for _, p in named_board_db_files())):
+            for path in (default, *(p for _, p in diagnostic("collect.census.boards", named_board_db_files))):
                 try:
-                    stat = path.stat()
+                    stat = diagnostic("collect.census.stat", path.stat)
                 except FileNotFoundError:
                     if path == default:
                         continue  # a never-created default board holds no runs
@@ -51,9 +52,10 @@ def census(watch: Any, fallback: Optional[Callable[..., Optional[int]]] = None) 
                 if identity in seen:
                     continue
                 seen.add(identity)
-                got = watch.read(path, TAG, mm._running_rows, unchanged_ok=True)
+                got = diagnostic("collect.census.read",
+                                 lambda: watch.read(path, TAG, mm._running_rows, unchanged_ok=True))
                 if got is None or got[1] is None:
-                    return uncached(detail=detail)  # unreadable here, or a schema the long path must decide
+                    return diagnostic("collect.census.fallback", lambda: uncached(detail=detail))
                 synced, own_id, rows = got[1]
                 if synced and not own_id:
                     return None
@@ -62,7 +64,9 @@ def census(watch: Any, fallback: Optional[Callable[..., Optional[int]]] = None) 
             if detail is not None:
                 if "pools" in detail:
                     from hermes_cli.kanban_admission_pools import count_pools
-                    for pool, n in count_pools(receipts, origins=detail.get("capacity_origins")).items():
+                    pools = diagnostic("collect.census.pools",
+                                       lambda: count_pools(receipts, origins=detail.get("capacity_origins")))
+                    for pool, n in pools.items():
                         detail["pools"][pool] += n
                 detail["excluded"] = 0
             return total

@@ -222,9 +222,11 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     from hermes_cli import machine_admission_metrics, machine_drain_metrics, machine_throughput_metrics
     from hermes_cli import worker_compute_capacity as capacity
     from hermes_cli.worker_resource_admission import occupied_count_for_host
+    # Inclusive, fixed-name diagnostics overlap report.collect; never add them to step/thread CPU.
+    from hermes_cli.kanban_sync_cpu import detail
     out: dict[str, Any]
     try:
-        worker = capacity.worker_enabled()
+        worker = detail("collect.worker", capacity.worker_enabled)
     except Exception:  # health: allow BLE001 -- malformed worker observations must report unknown capacity
         worker = None
     if worker is None:
@@ -232,31 +234,32 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     elif worker:
         # [daveey] Worker occupancy includes parked owners' detached cgroups; hub pool telemetry does not apply.
         try:
-            out = {"active_card_runs": occupied_count_for_host()}
+            out = {"active_card_runs": detail("collect.occupancy", occupied_count_for_host)}
         except Exception:  # health: allow BLE001 -- malformed worker observations must report unknown capacity
             out = {"active_card_runs": None}
     else:
-        out = machine_admission_metrics.collect(getattr(_REPORT, "census", None) or active_card_runs)
+        out = detail("collect.admission", machine_admission_metrics.collect,
+                     getattr(_REPORT, "census", None) or active_card_runs)
     from hermes_cli import machine_persistent_jobs
-    out.update(machine_persistent_jobs.collect())
-    out.update(machine_drain_metrics.collect())
+    out.update(detail("collect.persistent", machine_persistent_jobs.collect))
+    out.update(detail("collect.drain", machine_drain_metrics.collect))
     from hermes_cli.kanban_sync_claims import claiming_bit
-    out["claiming"] = claiming_bit()
-    out.update(machine_throughput_metrics.cached_counters())
+    out["claiming"] = detail("collect.claiming", claiming_bit)
+    out.update(detail("collect.throughput", machine_throughput_metrics.cached_counters))
     try:
-        out["cpu_load1"] = round(os.getloadavg()[0], 2)
+        out["cpu_load1"] = round(detail("collect.load", os.getloadavg)[0], 2)
     except (OSError, AttributeError):
         pass
-    if os.cpu_count():
-        out["cpus"] = int(os.cpu_count())
-    mem = _mem_used_pct()
+    if detail("collect.cpus", os.cpu_count):
+        out["cpus"] = int(detail("collect.cpus", os.cpu_count))
+    mem = detail("collect.memory", _mem_used_pct)
     if mem is not None:
         out["mem_used_pct"] = mem
     try:
         if disk_path is None:
             from hermes_cli import kanban_db
             disk_path = kanban_db.kanban_home()
-        usage = shutil.disk_usage(disk_path)
+        usage = detail("collect.disk", shutil.disk_usage, disk_path)
         out["disk_free_gb"] = round(usage.free / _GB, 1)
         out["disk_total_gb"] = round(usage.total / _GB, 1)
     except (OSError, ImportError):
