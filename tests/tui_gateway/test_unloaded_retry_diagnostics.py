@@ -1,9 +1,19 @@
 """Actual card fanout retry-site provenance, with unchanged immediate deadlines."""
+import json
 import sqlite3
 import pytest
 
+from hermes_cli import loop_accounting as la
 from tui_gateway import notice_fanout as fanout
 from tui_gateway.notice_fanout_result import FanoutResult
+
+
+@pytest.fixture(autouse=True)
+def reset(record_property):
+    la.reset()
+    yield
+    record_property('counter_snapshot', json.dumps(la.counters(), sort_keys=True))
+    la.reset()
 
 
 @pytest.mark.parametrize('reason', ['enumeration_failed', 'set_cursor_failed', 'top_gt_cursor', 'board_error', 'remote_error'])
@@ -38,5 +48,6 @@ def test_real_retry_sites_preserve_earliest_deadline(monkeypatch, tmp_path, reas
     assert result.incomplete
     assert result.next_deadline == (100 if reason == 'top_gt_cursor' else 101)
     assert result.retry_origin == (result.next_deadline, 'card_change_pass', reason)
+    assert la.counters()['unloaded.diag.retry.site.' + reason]['runs'] == 1
     conn.close()
     assert list(result) == []

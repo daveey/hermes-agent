@@ -1,5 +1,6 @@
 """Real scheduler admission and lexical host CPU partition controls."""
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,20 @@ from tui_gateway import unloaded_diagnostics as diagnostic
 def metric(family):
     prefix = 'unloaded.diag.' + family + '.'
     return {k[len(prefix):]: v for k, v in la.counters().items() if k.startswith(prefix)}
+
+
+@pytest.mark.parametrize(('reset', 'health', 'expected'), [(True, False, 'reset'), (False, True, 'health'),
+                                                      (False, False, 'unknown')])
+def test_actual_delta_sources_are_bounded(scheduler, monkeypatch, reset, health, expected):
+    _store, owner, schedule, _now, _cpu = scheduler
+    monkeypatch.setattr(unloaded, '_host_pass', lambda *a, **k: None)
+    schedule.run('host', unloaded.host_pass)
+    la.reset()
+    delta = SimpleNamespace(reset=reset, health=health, upserts=(), deletes=() if reset or health else (SimpleNamespace(kind='private'),))
+    owner._signal(owner.token, delta)
+    schedule.run('host', unloaded.host_pass)
+    assert metric('host.fact') == {expected: metric('host.fact')[expected]}
+    assert metric('host.fact')[expected]['runs'] == 1
 
 
 @pytest.fixture
@@ -145,4 +160,19 @@ def test_static_label_and_registry_overflow_are_visible(monkeypatch):
     monkeypatch.setattr(la, 'MAX_NAMES', 1)
     diagnostic.emit('remote.cert', 'certified')
     assert la.counters()['_overflow']['runs'] == 1
+    la.reset()
+
+
+def test_actual_host_work_has_real_thread_cpu_in_the_primary_partition(monkeypatch, record_property):
+    la.reset()
+    monkeypatch.setattr(unloaded, '_host_pass', lambda *a, **k: sum(range(100_000)))
+    unloaded.host_pass()
+    counters = la.counters()
+    parent = counters['unloaded.host_pass']
+    primary = counters['unloaded.diag.host.primary.unknown']
+    assert primary['runs'] == parent['runs'] == 1
+    assert 0 < primary['cpu_s'] <= parent['cpu_s']
+    assert primary['errors'] == parent['errors'] == 0
+    assert counters['unloaded.diag.host.exit.complete']['runs'] == 1
+    record_property('counter_snapshot', json.dumps(counters, sort_keys=True))
     la.reset()

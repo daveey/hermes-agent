@@ -38,7 +38,10 @@ def remote(monkeypatch, record_property):
         return controls['prints']
     monkeypatch.setattr(nf, '_known_prints', prints)
     monkeypatch.setattr(nf, 'chat_skip_reason', lambda *a: controls['skipped'])
-    monkeypatch.setattr('hermes_state_outcome.refresh_outcomes_quietly', lambda *a, **k: controls['refreshed'])
+    def refresh(*a, **k):
+        controls['calls'].append('refresh')
+        return controls['refreshed']
+    monkeypatch.setattr('hermes_state_outcome.refresh_outcomes_quietly', refresh)
     monkeypatch.setattr(fact_links_health, 'acknowledge', lambda *a, **k: controls['calls'].append(('health', k['complete'])))
     @contextlib.contextmanager
     def opener(chat):
@@ -68,6 +71,7 @@ def test_empty_projection_certification(remote, after, cert):
     remote['polls'][1] = after
     assert remote['run']() == []
     assert runs('cert') == {cert: 1}
+    assert runs('cert.flag') == ({} if cert == 'certified' else {cert: 1})
     assert runs('call') == {'refreshed': 1}
     assert remote['calls'] == ['poll', 'prints', 'poll', ('health', True)]
     assert (nf._remote_memo is not None) == (cert == 'certified')
@@ -112,6 +116,7 @@ def test_chat_results(remote, monkeypatch, kind, result):
     remote['run']()
     assert runs('chat.trigger') == {'snapshot_diff': 1}
     assert runs('chat.result') == {result: 1}
+    assert remote['calls'].count('refresh') == (1 if kind in ('ok', 'refresh') else 0)
     assert runs('cert') == {('certified' if kind in ('ok', 'skip') else 'not_all_acked'): 1}
     conservation(chats=1)
 
@@ -125,6 +130,7 @@ def test_equal_chat_trigger_and_independent_health(remote, health):
     remote['run']()
     assert runs('chat.trigger') == {('unchanged_skip' if health is None else 'health_forced'): 1}
     assert runs('chat.result') == {('unchanged_skip' if health is None else 'acked_refreshed'): 1}
+    assert runs('chat.flag') == ({} if health is None else {'health_pending': 1})
     assert runs('health') == {('no_generation' if health is None else 'complete_true'): 1}
     conservation(chats=1)
 
@@ -136,6 +142,14 @@ def test_prints_none_still_polls_and_preserves_overlapping_flags(remote):
     assert runs('cert') == {'prints_none': 1}
     assert runs('cert.flag') == {'prints_none': 1, 'after_poll_none': 1}
     assert remote['calls'] == ['poll', 'prints', 'poll', ('health', True)]
+    conservation()
+
+
+def test_malformed_comparison_is_not_silenced_when_prints_present(remote):
+    remote['polls'][1] = {}
+    with pytest.raises(KeyError):
+        remote['run']()
+    assert runs('cert') == {'exception': 1}
     conservation()
 
 
@@ -159,7 +173,7 @@ def test_exceptions_are_terminal_once(remote, monkeypatch, step):
     with pytest.raises(RuntimeError, match=step):
         remote['run']()
     assert runs('call') == {'exception': 1}
-    assert runs('cert') == {'exception': 1}
+    assert runs('cert') == {('certified' if step == 'health' else 'exception'): 1}
     assert runs('health') == {('exception' if step == 'health' else 'not_reached'): 1}
     conservation()
 
@@ -167,6 +181,7 @@ def test_exceptions_are_terminal_once(remote, monkeypatch, step):
 @pytest.mark.parametrize(('failure', 'cert'), [('inputs', 'inputs_unavailable'), ('initial_poll', 'inputs_unavailable'),
                                             ('ack', 'ack_failed')])
 def test_certification_precedence_and_input_failures(remote, monkeypatch, failure, cert):
+    remote['health'] = 1 if failure == 'ack' else None
     if failure == 'inputs':
         def fail():
             raise OSError('input unavailable')
@@ -183,6 +198,9 @@ def test_certification_precedence_and_input_failures(remote, monkeypatch, failur
     assert runs('miss.initial_poll_failed') == {('not_evaluated' if failure == 'inputs' else
                                               'true' if failure == 'initial_poll' else 'false'): 1}
     assert 'prints' not in remote['calls']
+    if failure != 'ack':
+        assert runs('miss.no_memo') == {'not_evaluated': 1}
+    assert runs('health') == {('complete_false' if failure == 'ack' else 'no_generation'): 1}
     conservation()
 
 
@@ -207,6 +225,18 @@ def test_evaluated_miss_and_short_circuit_receipts(remote, monkeypatch, miss):
     conservation()
 
 
+@pytest.mark.parametrize('failure', ['db', 'recovery'])
+def test_health_has_independent_failures(remote, failure):
+    remote['health'] = 1
+    remote['cards'] = [dict(key='key', status='running', session='chat')]
+    remote['db'] = None if failure == 'db' else remote['db']
+    remote['recovered'] = failure != 'recovery'
+    remote['run']()
+    assert runs('health') == {'complete_false': 1}
+    assert runs('cert') == {('not_all_acked' if failure == 'db' else 'certified'): 1}
+    conservation(1)
+
+
 @pytest.mark.parametrize('reason', ['ledger_changed', 'boards_not_quiet'])
 def test_evaluated_failure_is_unknown_not_unevaluated(remote, monkeypatch, reason):
     nf._remote_memo = (('base',), (), {'board': 10}, {})
@@ -223,6 +253,7 @@ def test_evaluated_failure_is_unknown_not_unevaluated(remote, monkeypatch, reaso
 @pytest.mark.parametrize(('prints', 'after', 'cert', 'flag'), [
     (None, {'board': (set(), 11)}, 'prints_none', 'cursor_moved'),
     (None, {}, 'prints_none', 'unknown'),
+    (None, {'board': (set(), 10)}, 'prints_none', None),
     ({}, {'board': (set(), 10), 'extra': (set(), 999)}, 'certified', None),
 ])
 def test_simultaneous_flags_and_real_per_board_comparison(remote, prints, after, cert, flag):
@@ -232,6 +263,7 @@ def test_simultaneous_flags_and_real_per_board_comparison(remote, prints, after,
     assert runs('cert') == {cert: 1}
     if flag is not None:
         assert runs('cert.flag')[flag] == 1
+    assert (nf._remote_memo is not None) == (cert == 'certified')
     conservation()
 
 

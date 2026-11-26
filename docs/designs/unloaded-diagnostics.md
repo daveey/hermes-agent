@@ -53,7 +53,8 @@ Remote refreshed means attempted refresh, not memo certification. The second
 poll still occurs after fingerprint collection even if prints are None. Existing
 per-board cursor comparisons, seed/ack behavior and health acknowledgement order
 remain intact. Unevaluated short-circuit tests are never reported false. Health,
-certification, chat and call receipts are different units.
+certification, chat and call receipts are different units. A later health failure
+keeps the finalized certification outcome (including a successful memo assignment).
 
 ## Proof surface
 

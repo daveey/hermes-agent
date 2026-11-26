@@ -2,6 +2,7 @@
 import contextlib
 import json
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -76,6 +77,8 @@ def test_actual_fallback_reasons_conserve(gate, monkeypatch, branch):
     assert sum(reasons().values()) == la.counters()['unloaded.remote_notices']['fallbacks']
     if branch == 'other_pending':
         assert la.counters()['unloaded.diag.remote_notices.pending_detail.identity_unknown']['runs'] == 1
+    else:
+        assert not any(k.startswith('unloaded.diag.remote_notices.pending_detail.') for k in la.counters())
     if branch == 'self_holder':
         assert controls['liveness'] == []
     if branch in ('dead_holder', 'held_with_report'):
@@ -90,6 +93,25 @@ def test_nonpending_change_and_skip_are_not_fallbacks(gate):
     assert reasons() == {}
     row = la.counters()['unloaded.remote_notices']
     assert (row['runs'], row['fallbacks'], row['changes'], row['skips']) == (2, 0, 1, 1)
+
+
+def test_other_kind_does_not_emit_remote_fallback(gate, monkeypatch):
+    monkeypatch.setattr(gates, 'probe', lambda *a, **k: gates.Inputs())
+    gates.run('notices', list, live=set())
+    assert reasons() == {}
+
+
+def test_result_provenance_reaches_report(gate, monkeypatch):
+    monkeypatch.setattr(time, 'monotonic', lambda: 0)
+
+    from gateway.kanban_notification_schedule import PassReport
+    from tui_gateway.notice_fanout_result import FanoutResult
+    result = FanoutResult()
+    result.retry(4, subpass='remote_card_change', reason='remote_error')
+    with gates.scheduling(report := PassReport()):
+        assert gates.run('card_change_pass', lambda: result, live=set()) is result
+    assert report.retry_origin == ('remote_card_change', 'remote_error')
+    assert report.retry_deadline == (4, 'remote_card_change', 'remote_error')
 
 
 @pytest.mark.parametrize('detail', ['snapshot_changed', 'no_ledger', 'unsettled', 'chat_reactivated'])

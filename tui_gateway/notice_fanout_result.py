@@ -38,5 +38,6 @@ class FanoutResult(list[dict]):
             if other.next_deadline is not None:
                 self.next_deadline = (other.next_deadline if self.next_deadline is None
                                       else min(self.next_deadline, other.next_deadline))
-            if other.retry_origin is not None:
-                self.retry_origin = earliest(self.retry_origin, *other.retry_origin)
+            source = getattr(other, 'retry_origin', None)
+            if source is not None:
+                self.retry_origin = earliest(self.retry_origin, *source)
