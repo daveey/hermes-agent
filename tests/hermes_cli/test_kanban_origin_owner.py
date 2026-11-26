@@ -301,6 +301,14 @@ def test_untyped_dispatch_failure_stays_pending(world, monkeypatch, capsys):
     assert result == {'status': 'pending', 'code': 'origin_dispatch_pending', 'handoff_complete': False}
 
 
+def test_bare_selfwork_capability_refusal_keeps_its_own_rule():
+    from hermes_cli import kanban_origin_owner as owner
+    from hermes_cli.kanban_runs_on_capabilities import PlacementCapabilityMismatch
+
+    exc = PlacementCapabilityMismatch('fixture-profile', ['pool:worker'], {'worker-a1': ['terminal']})
+    assert owner.origin_refusal(exc, origin=False) is None
+
+
 def test_waiting_create_authority_refusal_stays_pending():
     from hermes_cli import kanban_create_authority as kca
     from hermes_cli import kanban_origin_owner as owner
