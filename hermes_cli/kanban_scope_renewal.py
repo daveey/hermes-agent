@@ -70,8 +70,11 @@ def digest(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def _columns(conn: sqlite3.Connection, table: str) -> set:
-    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+def _columns(conn: sqlite3.Connection, table: str) -> frozenset:
+    """Column names in one result row (kanban_table_columns), not one row per column: the actionability reader asks
+    for task_comments on every card and parent each session-panel pass (2,652 probes a hub pass, 2026-11-26). [daveey]"""
+    from hermes_cli.kanban_table_columns import table_columns
+    return table_columns(conn, table)
 
 
 def comment_ref(row: dict) -> str:
