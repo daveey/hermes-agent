@@ -9,11 +9,26 @@ Importing it once here, before any window opens, keeps boot out of the mocked im
 
 import threading
 import time
+from types import SimpleNamespace
 
 import hermes_bootstrap
 import pytest
 
 from tests.waiting import DEFAULT_TIMEOUT
+
+
+@pytest.fixture(autouse=True)
+def _profile_lifetime_thread_isolation(monkeypatch, request):
+    """Prompt-worker fakes must not synchronously run the lifetime monitor.
+
+    These two files replace the shared threading.Thread with an immediate worker
+    across the server's helper graph. Preserve that contract, but keep the real
+    process-lifetime profile monitor on its own unmodified threading namespace.
+    """
+    if request.node.path.name not in {"test_tui_gateway_server.py", "test_profile_resume_cwd.py"}:
+        return
+    import hermes_profile_resources
+    monkeypatch.setattr(hermes_profile_resources, "threading", SimpleNamespace(**vars(threading)))
 
 
 @pytest.fixture(autouse=True)

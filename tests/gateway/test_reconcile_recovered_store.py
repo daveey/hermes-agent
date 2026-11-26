@@ -27,9 +27,16 @@ async def test_watcher_retries_recovered_store_but_not_fatal_config(tmp_path, mo
         first = await runner.reconcile_served_profiles(reason='control-socket')
         assert set(first['parked']) == {'recovering', 'fatal'}
         recovery = True
+        passive = await runner.reconcile_served_profiles(reason='request')
+        assert passive['added'] == []
+        assert calls.count('recovering') == 1
         second = await runner.reconcile_served_profiles(reason='watcher')
         assert second['added'] == ['recovering']
         assert calls.count('recovering') == 2
         assert calls.count('fatal') == 1
         assert 'fatal' in runner.session_runtime_descriptor['parked_profiles']
         assert 'recovering' not in runner.session_runtime_descriptor['parked_profiles']
+        # Watcher recovery must not swallow the explicit control-socket retry.
+        third = await runner.reconcile_served_profiles(reason='control-socket')
+        assert third['added'] == ['fatal']
+        assert calls.count('fatal') == 2
