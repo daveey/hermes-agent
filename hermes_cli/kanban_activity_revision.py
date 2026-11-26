@@ -39,6 +39,11 @@ trigger (re)install) upserts the ``FULL_MARK`` row, which tells a cursor older t
 this design carry ``EPOCH_MARK`` in their SQL; ``ensure_revision`` never drops or rewrites triggers a newer epoch
 installed, so a newer writer's coverage survives this one's init (an older writer still replaces ours: the cursor's
 trust rules catch that).
+
+Epoch 4 additionally stamps ``kanban_task_change.settlement_rev`` on local settlement-value writes only
+(``SETTLEMENT_COLUMNS``). Unlike a value hash this generation survives A-B-A, and unlike the broad ``rev``
+it ignores comment/run/title churn. Deletion marks remain as tombstones; never prune or reset these generations.
+Type-only and binary-text differences count, even under a column's case-insensitive collation.
 """
 
 from __future__ import annotations
@@ -95,7 +100,8 @@ _BUMP_PROJECTION = (f"UPDATE {REVISION_TABLE} SET projection_revision = projecti
 # [daveey] P2 per-task change cursor (t_01a1d59d3ef805c4): which tasks each bump touched.
 CHANGE_TABLE = "kanban_task_change"
 FULL_MARK = ""  # a bump no task explains (trigger (re)install): cursors older than its rev read in full
-EPOCH = 3  # 1 = bump-only; 2 = bump + kanban_task_change; 3 = projection_revision beside revision
+EPOCH = 4  # 2 = task marks; 3 = projection revision; 4 = monotonic settlement generations
+SETTLEMENT_COLUMNS = ("id", "status", "block_kind", "completed_at")
 EPOCH_MARK = f"/* kanban-activity-epoch:{EPOCH} */"
 _EPOCH_RE = re.compile(r"/\* kanban-activity-epoch:(\d+) \*/")
 # The task(s) a row belongs to. Every other watched table names it in ``task_id``.
@@ -104,7 +110,7 @@ CHANGE_INDEX = f"idx_{CHANGE_TABLE}_rev"
 # A rowid table, not WITHOUT ROWID: generic every-table readers (``SELECT * ... ORDER BY rowid`` snapshots, recovery
 # scans) expect a rowid on every board table, and the cost difference on a one-row-per-task table is noise.
 _CHANGE_DDL = (f"CREATE TABLE IF NOT EXISTS {CHANGE_TABLE} (task_id TEXT PRIMARY KEY NOT NULL, "
-               "rev INTEGER NOT NULL)",
+               "rev INTEGER NOT NULL, settlement_rev INTEGER NOT NULL DEFAULT 0)",
                f"CREATE INDEX IF NOT EXISTS {CHANGE_INDEX} ON {CHANGE_TABLE}(rev)")
 
 
@@ -172,6 +178,24 @@ def _projection_bump(table: str, op: str, columns: list[str]) -> str:
     return _BUMP_PROJECTION
 
 
+def _settlement_changed(columns: list[str]) -> str:
+    return " OR ".join(
+        f"(OLD.{_quote(c)} COLLATE BINARY IS NOT NEW.{_quote(c)} COLLATE BINARY OR "
+        f"typeof(OLD.{_quote(c)}) IS NOT typeof(NEW.{_quote(c)}))"
+        for c in SETTLEMENT_COLUMNS if c in columns)
+
+
+def _settlement_mark(table: str, op: str, columns: list[str]) -> str:
+    """Preserve tombstones: deletion/reinsertion must never reset a selected generation."""
+    if table != "tasks" or "id" not in columns:
+        return ""
+    refs = "NEW.id" if op == "INSERT" else "OLD.id" if op == "DELETE" else "OLD.id, NEW.id"
+    when = f" AND ({_settlement_changed(columns)})" if op == "UPDATE" else ""
+    return (f"UPDATE {CHANGE_TABLE} SET settlement_rev = "
+            f"(SELECT revision FROM {REVISION_TABLE} WHERE id = 1) "
+            f"WHERE task_id IN ({refs}){when};")
+
+
 def wanted_triggers(conn: sqlite3.Connection, tables: Iterable[str]) -> dict[str, str]:
     """Trigger name -> CREATE statement for the ``tables`` present in ``conn``, from their live columns."""
     out: dict[str, str] = {}
@@ -186,12 +210,16 @@ def wanted_triggers(conn: sqlite3.Connection, tables: Iterable[str]) -> dict[str
             if op == "INSERT" and table == "task_events" and "kind" in columns:
                 when = " WHEN COALESCE(NEW.kind, '') NOT IN ({})".format(", ".join(f"'{k}'" for k in UNREAD_EVENT_KINDS))
             out[name] = (f"CREATE TRIGGER {name} AFTER {op} ON {_quote(table)}{when} BEGIN {EPOCH_MARK} {_BUMP} "
-                         f"{_projection_bump(table, op, columns)} {_marks(op, keys)} END")
+                         f"{_projection_bump(table, op, columns)} {_marks(op, keys)} "
+                         f"{_settlement_mark(table, op, columns)} END")
         read = [c for c in columns if c not in BOOKKEEPING_COLUMNS.get(table, frozenset())]
         changed = " OR ".join(_moved(table, c) for c in read)
+        if table == "tasks" and set(columns).intersection(SETTLEMENT_COLUMNS):
+            changed = f"({changed}) OR ({_settlement_changed(columns)})"
         name = f"{PREFIX}{table}_update"
         out[name] = (f"CREATE TRIGGER {name} AFTER UPDATE ON {_quote(table)} WHEN {changed} BEGIN {EPOCH_MARK} "
-                     f"{_BUMP} {_projection_bump(table, 'UPDATE', columns)} {_marks('UPDATE', keys)} END")
+                     f"{_BUMP} {_projection_bump(table, 'UPDATE', columns)} {_marks('UPDATE', keys)} "
+                     f"{_settlement_mark(table, 'UPDATE', columns)} END")
     return out
 
 
@@ -214,7 +242,9 @@ def ensure_revision(conn: sqlite3.Connection, tables: Iterable[str]) -> None:
     if REVISION_TABLE in present:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({_quote(REVISION_TABLE)})")}
         has_projection = "projection_revision" in cols
-    if has_row and has_projection and found == wanted:
+    has_settlement = CHANGE_TABLE in present and "settlement_rev" in {
+        r[1] for r in conn.execute(f"PRAGMA table_info({_quote(CHANGE_TABLE)})")}
+    if has_row and has_projection and has_settlement and found == wanted:
         return
     from hermes_cli.kanban_db_connect import write_txn
     with write_txn(conn):
@@ -226,6 +256,9 @@ def ensure_revision(conn: sqlite3.Connection, tables: Iterable[str]) -> None:
         conn.execute(f"INSERT OR IGNORE INTO {REVISION_TABLE} (id, revision) VALUES (1, 0)")
         for ddl in _CHANGE_DDL:
             conn.execute(ddl)
+        change_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({_quote(CHANGE_TABLE)})")}
+        if "settlement_rev" not in change_cols:
+            conn.execute(f"ALTER TABLE {CHANGE_TABLE} ADD COLUMN settlement_rev INTEGER NOT NULL DEFAULT 0")
         conn.execute(_BUMP)
         conn.execute(_BUMP_PROJECTION)
         conn.execute(_mark("NULL"))  # whatever changed while the triggers were absent or older is unknown

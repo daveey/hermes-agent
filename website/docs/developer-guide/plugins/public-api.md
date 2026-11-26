@@ -19,6 +19,8 @@ with a name allows that one name only.
 
 | Module | Name | Listed from |
 |---|---|---|
+| `hermes_cli.kanban_task_change` | `changed_since` | certified read-only Kanban settlement generations (caller-owned SQLite snapshot) |
+| `hermes_cli.kanban_task_change` | `settlement_marks` | certified read-only Kanban settlement generations (caller-owned SQLite snapshot) |
 | `agent.account_usage` | whole module | developer-guide / plugins docs |
 | `agent.acp_client` | whole module | developer-guide / plugins docs |
 | `agent.browser_page_backend` | `BrowserPageBackend` | developer-guide / plugins docs |

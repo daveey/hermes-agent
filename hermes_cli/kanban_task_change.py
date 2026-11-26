@@ -19,7 +19,7 @@ DELETE-trigger/outbox/tombstone behavior and is not part of this cursor's contra
 Subject to that writer precondition, a cursor is trusted only when all of these hold in the reader's snapshot;
 otherwise the answer is ``FULL``:
 
-- the file carries every trigger of epoch >= 2 for the tables it watches, and the change table (``_covered``);
+- the file carries every trigger of epoch >= 3 for the tables it watches, and the change table (``_covered``);
 - (a) ``MAX(kanban_task_change.rev) == kanban_activity_revision.revision``. An older writer's init replaces our
   triggers with bump-only ones (and bumps): the counter then runs ahead of the change table;
 - (b) the revision is not below the cursor's (a database restored in place: same inode, regressed counter);
@@ -33,6 +33,7 @@ re-arms the incremental path.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -103,8 +104,8 @@ def _scan_covered(conn: sqlite3.Connection, tables: tuple[str, ...]) -> bool:
         if table not in names:
             continue  # absent table: nothing to watch
         for op in ("insert", "update", "delete"):
-            if rev.trigger_epoch(triggers.get(f"{rev.PREFIX}{table}_{op}")) < rev.EPOCH:
-                return False  # missing, or an older writer's bump-only trigger
+            if rev.trigger_epoch(triggers.get(f"{rev.PREFIX}{table}_{op}")) < 3:
+                return False  # broad epoch-3 marks suffice; settlement coverage is checked separately
     return True
 
 
@@ -171,6 +172,30 @@ def changed_since(conn: sqlite3.Connection, cursor: Optional[Cursor], *,
     except OSError:
         return FULL, None
     return changed, fresh
+
+
+def settlement_marks(conn: sqlite3.Connection, tails: Iterable[str], cursor: Cursor) -> dict[str, int] | None:
+    """Selected monotonic settlement generations, including deleted tasks, in caller's snapshot.
+
+    Broad task-change coverage predates settlement generations. An older writer/schema may still certify
+    broad marks but never the narrow ones: return None so consumers keep their broad per-task key.
+    Tombstones must not be pruned: delete/reinsert and value ABA must always move these generations.
+    """
+    if not conn.in_transaction:
+        raise ValueError("settlement marks require caller transaction")
+    _changed, fresh = changed_since(conn, cursor, tables=cursor.tables)
+    if fresh != cursor:
+        return None
+    triggers = dict(conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='tasks'"))
+    if any(rev.trigger_epoch(triggers.get(f"{rev.PREFIX}tasks_{op}")) < 4
+           for op in ("insert", "update", "delete")):
+        return None
+    if "settlement_rev" not in {r[1] for r in conn.execute(f"PRAGMA table_info({rev.CHANGE_TABLE})")}:
+        return None
+    return dict(conn.execute(
+        f"SELECT task_id, settlement_rev FROM {rev.CHANGE_TABLE} "
+        "WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(tails)),)))
 
 
 def _reset_for_tests() -> None:

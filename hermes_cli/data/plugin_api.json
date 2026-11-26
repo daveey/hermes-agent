@@ -9,6 +9,13 @@
   ],
   "groups": [
     {
+      "source": "certified read-only Kanban settlement generations (caller-owned SQLite snapshot)",
+      "entries": [
+        "hermes_cli.kanban_task_change:changed_since",
+        "hermes_cli.kanban_task_change:settlement_marks"
+      ]
+    },
+    {
       "source": "developer-guide / plugins docs",
       "entries": [
         "agent.account_usage",
