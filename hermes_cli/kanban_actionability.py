@@ -174,6 +174,12 @@ def _schedule(row: dict, facts: dict, now: int) -> None:
     _block(row, trigger or 'Named finite producer and recovery condition',
            trigger or 'Repair the missing wake/producer through existing scheduling APIs',
            action='repair_lifecycle_contract' if row['violations'] else 'wait_for_named_producer')
+    # The producer's own words say what the park waits FOR; the clock/probe/producer trigger is only the next
+    # check. Keep them apart so a timer never stands in for the prerequisite.
+    why = ' '.join(str(awaiting.get('why') or '').split())
+    if why and trigger:
+        row['blocker']['prerequisite'] = why
+        row['instruction'] = f'Waiting on: {why}. Next check: {trigger}'
 
 
 def project(facts: dict, *, now: int) -> dict:

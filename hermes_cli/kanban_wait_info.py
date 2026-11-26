@@ -397,7 +397,7 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
         if awaited["kind"] == "clock":
             # A declared window (a soak, a cooldown, a release slot): the clock produces it.
             label = _clock_label(wake_at) if wake_at else "a declared window"
-            return out("scheduled", label + (f" ({awaited['why'][:80]})" if awaited["why"] else ""), False,
+            return out("scheduled", label + (f" ({awaited['why'][:200]})" if awaited["why"] else ""), False,
                        eta="clock")
         return out("scheduled:no_producer", f"{awaited['kind'] or 'something'} with no named producer", True)
     found = producer_from_wake_check(payload.get("wake_check"))
