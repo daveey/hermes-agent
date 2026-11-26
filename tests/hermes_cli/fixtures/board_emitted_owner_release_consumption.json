@@ -1,0 +1,45 @@
+{
+  "consume": {
+    "client_op_id": "consume-mwxia1de-18",
+    "digest": "5c548082242f98b782d37aa53d6c777d6bda393c3bfd452fc115f765e337c49f",
+    "intent_uid": "intent-mwxia1bd-17",
+    "op": "consume_owner_release",
+    "seen_comments": [],
+    "task": "t_mwxia10q-5"
+  },
+  "digest": "5c548082242f98b782d37aa53d6c777d6bda393c3bfd452fc115f765e337c49f",
+  "intent": {
+    "actor": {
+      "gateway": "origin-mwxia0xj-2",
+      "profile": "default",
+      "session": "chat-mwxia10q-7"
+    },
+    "board": "release-mwxia10q-4",
+    "capability_episodes": [
+      "capability-mwxia158-10"
+    ],
+    "episode": "01a217bf-1ad5-7b78-99ef-70fecfbbd896",
+    "home": "home-mwxia0xj-1",
+    "intent_uid": "intent-mwxia1bd-17",
+    "note": "Finish the original acceptance within existing independent limits.",
+    "runs": 3,
+    "task_id": "t_mwxia10q-5",
+    "version": 1
+  },
+  "renewal": {
+    "created_at": 1795694730,
+    "deleted_at": null,
+    "hlc": "1795694730121-0000-server",
+    "kind": "scope_renewed",
+    "ord": 7,
+    "origin_gateway": "home-mwxia0xj-1",
+    "payload": "{\"version\":1,\"episode\":\"01a217bf-1ad5-7b78-99ef-70fecfbbd896\",\"covered_restriction_uids\":[\"01a217bf-1ad5-7b78-99ef-70fecfbbd896\",\"receipt-mwxia188-15\"],\"request_uid\":\"consume-mwxia1de-18\",\"owner_release_intent_uid\":\"intent-mwxia1bd-17\",\"owner_release_digest\":\"5c548082242f98b782d37aa53d6c777d6bda393c3bfd452fc115f765e337c49f\",\"actor_kind\":\"agent\",\"actor_gateway\":\"origin-mwxia0xj-2\",\"actor_profile\":\"default\",\"actor_session\":\"chat-mwxia10q-7\",\"authority_kind\":\"chat\",\"authority_ref\":null,\"reason\":\"Finish the original acceptance within existing independent limits.\"}",
+    "run_uid": null,
+    "seq": 18,
+    "task_id": "t_mwxia10q-5",
+    "uid": "consume-mwxia1de-18",
+    "updated_at": 1795694730121,
+    "version": 1
+  },
+  "version": 1
+}

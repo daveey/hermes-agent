@@ -27,6 +27,19 @@ class HubRoutesMixin:
 
         return self._call("GET", f"/v2/boards/{quote(board, safe='')}/decision-retain/capability")
 
+    def owner_release_evidence(self, board: str, intent_uid: str) -> dict:
+        """Private canonical certification, never inferred from ordinary event rows."""
+        from urllib.parse import quote
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/owner-release/" + quote(intent_uid, safe=''),
+                          max_response_bytes=131072)
+
+    def owner_release_consumption(self, board: str, intent_uid: str) -> dict:
+        """Historical private winning consume certificate, not local release clearance."""
+        from urllib.parse import quote
+        from hermes_cli.kanban_release_certificate import MAX_BYTES
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/owner-release/" + quote(intent_uid, safe='') + "/consumption",
+                          max_response_bytes=MAX_BYTES)
+
     def scope_delegates(self, board: str) -> dict:
         """Delegated scope-renewal grants (``kanban_scope_delegate``); ask only after ``scope_delegate: 1``."""
         from urllib.parse import quote

@@ -437,12 +437,6 @@ class Hub(HubRoutesMixin):
         bounded: dict[str, Any] = {} if max_response_bytes is None else {"max_response_bytes": max_response_bytes}
         return self._call("GET", f"/v2/boards/{board}/evidence?" + urlencode({"table": table, "uid": uid}), **bounded)
 
-    def owner_release_evidence(self, board: str, intent_uid: str) -> dict:
-        """Private canonical certification, never inferred from ordinary event rows."""
-        from urllib.parse import quote
-        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/owner-release/" + quote(intent_uid, safe=''),
-                          max_response_bytes=131072)
-
     def sessions(self, board: str, body: dict) -> dict:
         """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal
         returns its body (``{reason, owner}``) instead of raising."""
