@@ -16,6 +16,7 @@ from hermes_cli.fact_capture import CaptureBudgetExceeded
 from hermes_cli.fact_contract import Fact, evolve
 from hermes_cli.fact_source_watch import NativeSourceWatch
 from hermes_cli.fact_store import view_key
+from hermes_cli.sessions_capture_timing import CaptureTimingLog
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ class SessionsSource:
         self._serial = 0
         self._next_capture = 0
         self._refresh = time.monotonic() + refresh_seconds
+        self._timings = CaptureTimingLog.from_environment()
+        self._capture_seq = 0
 
     def watch(self, wake):
         with self._lock:
@@ -142,12 +145,23 @@ class SessionsSource:
         except Exception as error:  # health: allow BLE001 -- transport fault invalidates each selected view
             bodies = [error] * len(keys)
         facts = tuple(self._fact(key, body, started, budget) for key, body in zip(keys, bodies))
+        timing = None
         with self._lock:
             # <=50% duty charges the WHOLE batch, including spawn and serialization.
             ended = time.monotonic()
             self._next_capture = ended + max(.2, ended - started)
             due = self._deadline()
-        return SessionViewCapture(self._serial, due, facts[0], facts)
+            if self._timings is not None:
+                self._capture_seq += 1
+                timing = (self._capture_seq, self._serial, self._next_capture)
+        capture = SessionViewCapture(self._serial, due, facts[0], facts)
+        if self._timings is not None and timing is not None:
+            seq, serial_last, notbefore = timing
+            self._timings.emit('sessions.capture.timing', seq=seq,
+                               serial_first=serial_last - len(facts) + 1, serial_last=serial_last,
+                               selected=len(facts), failed=sum(bool(f.error_code) for f in facts),
+                               started=started, ended=ended, notbefore=notbefore)
+        return capture
 
     def _fact(self, key, body, started, budget):
         observed = time.time()
