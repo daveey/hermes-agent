@@ -128,6 +128,37 @@ PATHS = {"origin courier CLI": _via_origin_courier,
 
 
 @pytest.mark.parametrize("path", list(PATHS))
+def test_created_event_records_truthful_source_without_task_authority(chat, monkeypatch, capsys, path):
+    task_id = PATHS[path](f"source via {path}", monkeypatch)
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        event = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created'",
+                             (task_id,)).fetchone()
+        payload = json.loads(event[0])
+        assert payload["creator_source"] == {"author": task.created_by, "session_id": SID}
+        assert payload["creator_task_id"] is None
+
+
+@pytest.mark.parametrize("author", ["default", "agent", "spin-out"])
+def test_direct_creation_records_source_even_without_creator_card(chat, author):
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="direct producer source", assignee="default",
+                                 created_by=author, session_id=SID, idempotency_key="source-probe",
+                                 placement_audit={"creator_source": {"author": "fabricated", "session_id": "foreign"}})
+        event = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created'",
+                             (task_id,)).fetchone()
+        payload = json.loads(event[0])
+        assert payload["creator_source"] == {"author": author, "session_id": SID}
+        assert payload["creator_task_id"] is None
+        # An idempotent replay cannot rewrite the original attribution.
+        assert kb.create_task(conn, title="replayed source", created_by="other",
+                              idempotency_key="source-probe") == task_id
+        assert conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created'",
+                            (task_id,)).fetchall() == [event]
+
+
+@pytest.mark.parametrize("path", list(PATHS))
 def test_card_shows_in_the_creating_chats_task_list(chat, monkeypatch, capsys, path):
     task_id = PATHS[path](f"card via {path}", monkeypatch)
     ksa._reset_cache_for_tests()

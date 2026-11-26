@@ -79,6 +79,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_consent import snapshot
 
+    source = conn.execute("SELECT created_by, session_id, priority FROM tasks WHERE id=?", (task_id,)).fetchone()
     kb._append_event(conn, task_id, "created", {
         "assignee": assignee,
         "status": status,
@@ -97,8 +98,11 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         # Why a worker pool can or cannot take it (kanban_worker_placement.creation_audit); absent with no pool.
         **(placement_audit if isinstance(placement_audit, dict) else {}),
         # Final insertion policy, not a later assignment or a caller's diagnostic override.
+        # Audit stored origin, independently of creator-card authority and any
+        # caller diagnostic override (interactive and spin-out creates included).
+        "creator_source": {"author": source[0], "session_id": source[1]},
         "placement_policy": placement_policy,
-        "priority": conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0],
+        "priority": source[2],
         "consent_stops": snapshot(conn, task_id, creator_task_id),
     })
     from hermes_cli.kanban_fairness_creation import stage
