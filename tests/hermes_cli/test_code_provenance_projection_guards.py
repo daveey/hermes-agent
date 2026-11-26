@@ -75,7 +75,8 @@ def test_post_inventory_deadline_prevents_later_projection(ledger, monkeypatch):
     ticks = [0]
     monkeypatch.setattr(projection, 'disk_identity', lambda *args: {})
     monkeypatch.setattr(projection.time, 'monotonic', lambda: ticks[0])
-    monkeypatch.setattr(ledger, '_inventory_modules', lambda **kw: ticks.__setitem__(0, 10))
+    monkeypatch.setattr(ledger, '_inventory_modules_diagnostic',
+                        lambda *, deadline=None, progress=None: ticks.__setitem__(0, 10))
     monkeypatch.setattr(projection, '_Builder', lambda *args: pytest.fail('projected after inventory deadline'))
     with pytest.raises(TimeoutError, match='snapshot_deadline'):
         projection.snapshot(ledger, deadline=5)
