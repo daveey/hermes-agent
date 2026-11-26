@@ -35,7 +35,7 @@ async function serverFor(handler: http.RequestListener) {
 afterEach(() => { vi.restoreAllMocks(); destroyKeepaliveAgents() })
 
 describe('request-stage capture', () => {
-  it('executes the actual main dispatcher wrapper with trace and error identity intact', async () => {
+  it.each([route, '/api/plugins/session-mentions/result'])('executes the actual main dispatcher wrapper for %s with trace and error identity intact', async selectedPath => {
     const source = await fs.readFile(new URL('./main.ts', import.meta.url), 'utf8')
     const ast = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true)
     const declaration = ast.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'handleHermesApiRequest')!
@@ -53,8 +53,8 @@ describe('request-stage capture', () => {
       declaration.getText(ast) + '; return handleHermesApiRequest')(
       (request, run) => tracing.withApiRequestStages(request, run, buffer), operation)
 
-    expect(await handle({ path: route })).toBe(42)
-    await expect(handle({ path: route, fail: true })).rejects.toBe(failure)
+    expect(await handle({ path: selectedPath })).toBe(42)
+    await expect(handle({ path: selectedPath, fail: true })).rejects.toBe(failure)
     await buffer.flush()
     expect(operation).toHaveBeenCalledTimes(2)
     expect(rows.map(row => row.stage)).toEqual(['api_call', 'api_end', 'api_call', 'api_error'])
@@ -83,7 +83,7 @@ describe('request-stage capture', () => {
     } finally { await fs.rm(directory, { recursive: true, force: true }) }
   })
 
-  it('records real JSON helper stages, header and logical gate wait without private data', async () => {
+  it.each([route, '/api/plugins/session-mentions/result'])('records real JSON helper stages for %s without private data', async selectedPath => {
     const { rows, buffer } = capture()
     const real = tracing.requestStages
     vi.spyOn(tracing, 'requestStages').mockImplementation((url, method) => real(url, method, buffer))
@@ -91,16 +91,19 @@ describe('request-stage capture', () => {
 
     const server = await serverFor((req, res) => {
       ids.push(String(req.headers['x-hermes-req-id']))
+      expect(req.method).toBe('POST')
+      req.resume()
       res.end('{"ok":true}')
     })
 
     try {
-      for (const fetch of [fetchJsonWith, (_deps, url) => fetchPublicJsonWith(_deps, url)]) {
-        const answer = await tracing.withApiRequestStages({ path: route + '?token=DO_NOT_LOG' }, async () => {
+      for (const fetch of [fetchJsonWith, (_deps: typeof deps, url: string, _token: string | null, options: { method: string; body: unknown }) => fetchPublicJsonWith(_deps, url, options)]) {
+        const answer = await tracing.withApiRequestStages({ path: selectedPath + '?token=DO_NOT_LOG', method: 'POST' }, async () => {
           // Yield before fetch, as a real asynchronous dial/gate does.
           await Promise.resolve()
 
-          return fetch(deps, server.base + route + '?token=DO_NOT_LOG', null)
+          return fetch(deps, server.base + selectedPath + '?token=DO_NOT_LOG', null,
+            { method: 'POST', body: { private: 'DO_NOT_LOG' } })
         }, buffer)
 
         expect(answer).toEqual({ ok: true })

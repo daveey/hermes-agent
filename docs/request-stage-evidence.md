@@ -6,6 +6,7 @@ observe every request on these exact paths (all methods, no completion-rate cap)
 
 - `/api/plugins/user-steps/requests`
 - `/api/plugins/hub-sync/status`
+- `/api/plugins/session-mentions/result` (including result POSTs; payloads remain excluded)
 - `/api/plugins/kanban/board`
 - `/api/sessions`
 - `/api/health`

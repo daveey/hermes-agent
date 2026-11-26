@@ -10,7 +10,8 @@ import { resolveDesktopHermesHome } from './data-paths'
 
 const POLL_PATHS = new Set([
   '/api/plugins/user-steps/requests', '/api/plugins/hub-sync/status',
-  '/api/plugins/kanban/board', '/api/sessions', '/api/health'
+  '/api/plugins/kanban/board', '/api/sessions', '/api/health',
+  '/api/plugins/session-mentions/result'
 ])
 
 type Row = Record<string, string | number | boolean>

@@ -23,6 +23,7 @@ _request_trace: ContextVar[tuple | None] = ContextVar("request_stage_trace", def
 POLL_PATHS = frozenset({
     "/api/plugins/user-steps/requests", "/api/plugins/hub-sync/status",
     "/api/plugins/kanban/board", "/api/sessions", "/api/health",
+    "/api/plugins/session-mentions/result",
 })
 _ID = re.compile(r"^[a-f0-9]{32}$")
 _SCOPE_KEY = "hermes.request_stages"

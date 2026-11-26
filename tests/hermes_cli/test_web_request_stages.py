@@ -23,7 +23,8 @@ def scope(path="/api/plugins/user-steps/requests", headers=()):
 
 
 @pytest.mark.asyncio
-async def test_full_asgi_order_bytes_and_sanitization():
+@pytest.mark.parametrize('selected_path', ['/api/plugins/user-steps/requests', '/api/plugins/session-mentions/result'])
+async def test_full_asgi_order_bytes_and_sanitization(selected_path):
     sink = Sink()
     rid = b"a" * 32
 
@@ -41,12 +42,14 @@ async def test_full_asgi_order_bytes_and_sanitization():
     async def send(message):
         messages.append(message)
 
-    await stages.RequestStageIngress(gate, sink)(scope(headers=[(b"x-hermes-req-id", rid)]), None, send)
+    request_scope = scope(path=selected_path, headers=[(b"x-hermes-req-id", rid)])
+    request_scope["method"] = "POST"
+    await stages.RequestStageIngress(gate, sink)(request_scope, None, send)
     assert [r["stage"] for r in sink.rows] == [
         "ingress", "handler_dispatch", "response_start", "response_start_sent",
         "response_body", "response_body", "response_end", "app_exit",
     ]
-    assert all(r["id"] == rid.decode() and r["client_id"] for r in sink.rows)
+    assert all(r["id"] == rid.decode() and r["client_id"] and r["method"] == "POST" for r in sink.rows)
     assert sink.rows[-2]["bytes"] == 9
     assert "DO_NOT_LOG" not in json.dumps(sink.rows)
     assert "private" not in json.dumps(sink.rows)
@@ -191,6 +194,28 @@ async def test_production_middleware_chain_preserves_shared_id_and_payload(monke
     assert all(r["id"] == "b" * 32 for r in sink.rows)
     end = next(r for r in sink.rows if r["stage"] == "response_end")
     assert end["bytes"] == len(response.content)
+
+
+@pytest.mark.asyncio
+async def test_result_auth_refusal_retains_correlated_ingress(monkeypatch):
+    import httpx
+    from fastapi import FastAPI
+    from hermes_cli import web_server
+
+    sink = Sink()
+    monkeypatch.setattr(stages, "journal", lambda: sink)
+    monkeypatch.setattr(web_server, "_SESSION_TOKEN", "test-stage-token")
+    monkeypatch.setattr(web_server.app.state, "bound_host", None, raising=False)
+    application = FastAPI(middleware=web_server.app.user_middleware)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://127.0.0.1") as client:
+        response = await client.post("/api/plugins/session-mentions/result?token=DO_NOT_LOG",
+                                     json={"private": "DO_NOT_LOG"}, headers={"X-Hermes-Req-Id": "b" * 32})
+    assert response.status_code == 401
+    assert sink.rows[0]["stage"] == "ingress"
+    assert all(r["id"] == "b" * 32 and r["client_id"] and r["method"] == "POST" for r in sink.rows)
+    assert "handler_dispatch" not in [r["stage"] for r in sink.rows]
+    assert next(r for r in sink.rows if r["stage"] == "response_start")["status"] == 401
+    assert "DO_NOT_LOG" not in json.dumps(sink.rows)
 
 
 def test_rotation_retains_exactly_four_bounded_files(tmp_path, monkeypatch):
