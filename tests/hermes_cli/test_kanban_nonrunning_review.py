@@ -71,3 +71,35 @@ def test_remote_conflict_survives_local_snapshot_composition(gws, remote_conflic
     else:
         assert why['code'] == 'capacity', why
         assert why['freshness'] == 'current', why
+
+
+@pytest.mark.parametrize('clock_delta', [0, 1])
+def test_same_observer_conflict_clock_composition(gws, clock_delta):
+    home, worker, tid = helpers.prepared(gws)
+    at = helpers.publish(worker, tid)
+    worker.enter()
+    captured = cap.capture(worker.conn, now=at + clock_delta)
+    result = dispatch.DispatchResult(claim_deferred=[(tid, 'capacity')])
+    assert skips.record_tick(worker.conn, result, captured=captured, machine=worker.name) == 1
+    worker.round()
+    home.round()
+    home.enter()
+    remote = transport.read(home.conn, [tid], board='default', now=at + 2)[tid]
+    captured = cap.capture(home.conn, now=at + 2)
+    assert cap.record(home.conn, result, board='default', machine=home.name, now=at + 2, captured=captured)
+    with source.transaction(home.conn):
+        sources = source.assemble(home.conn, [tid], board='default', gateway=home.name,
+                                  profile='default', observed_at=at + 3)
+    why = source.raw({'id': tid}, sources[tid])['non_running_reason']
+    if clock_delta == 0:
+        # Equal-clock contradictory decisions must not become ordinary missing
+        # evidence, which would permit the current local snapshot to win.
+        for reason in (remote, why):
+            assert reason['freshness'] == 'unknown', reason
+            assert reason['unknown_reason'] == 'dispatcher_evidence_conflict', reason
+            assert reason['actor'] == 'unknown'
+    else:
+        # A strictly newer decision supersedes its observer's old refusal.
+        for reason in (remote, why):
+            assert reason['code'] == 'capacity', reason
+            assert reason['freshness'] == 'current', reason

@@ -111,6 +111,24 @@ def replica_fields(row, source, *, qualified, now):
     return {'execution_observations': [raw]}
 
 
+def _observer_reason(observers):
+    """Keep explicit contradictions distinct from missing observer evidence."""
+    values = []
+    for history in observers.values():
+        newest = max(clock for clock, _ in history)
+        latest = [v for clock, v in history if clock == newest]
+        if len({(v['code'], v['disposition']) for v in latest}) > 1:
+            latest = [_unknown_reason('dispatcher_evidence_conflict')]
+        values.append(latest[0])
+    if any(v.get('unknown_reason') == 'dispatcher_evidence_conflict' for v in values):
+        return _unknown_reason('dispatcher_evidence_conflict')
+    if any(v['freshness'] != 'current' for v in values):
+        return _unknown_reason('dispatcher_evidence_missing')
+    if len({(v['code'], v['disposition']) for v in values}) > 1:
+        return _unknown_reason('dispatcher_evidence_conflict')
+    return max(values, key=lambda r: r['observed_at'])
+
+
 def _read(conn, ids, *, board, now):
     """Batched acquisition from feed-stamped origin_gateway, never payload authority.
 
@@ -189,19 +207,7 @@ def _read(conn, ids, *, board, now):
             for tid, observers in candidates.items():
                 if tid in corrupt:
                     continue
-                values = []
-                for history in observers.values():
-                    newest = max(clock for clock, _ in history)
-                    latest = [v for clock, v in history if clock == newest]
-                    if len({(v['code'], v['disposition']) for v in latest}) > 1:
-                        latest = [_unknown_reason('dispatcher_evidence_conflict')]
-                    values.append(latest[0])
-                if any(v['freshness'] != 'current' for v in values):
-                    out[tid] = _unknown_reason('dispatcher_evidence_missing')
-                elif len({(v['code'], v['disposition']) for v in values}) > 1:
-                    out[tid] = _unknown_reason('dispatcher_evidence_conflict')
-                else:
-                    out[tid] = max(values, key=lambda r: r['observed_at'])
+                out[tid] = _observer_reason(observers)
         except (sqlite3.Error, TypeError, ValueError):
             # Missing old schema, corrupt data, or unavailable authority is unknown.
             continue
