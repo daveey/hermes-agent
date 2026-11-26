@@ -666,6 +666,8 @@ class SessionDB(
         self._read_budget = _read_budget_for(self.db_path)
         self._read_permits = self._read_budget.permits
         self._read_conns_lock = threading.Lock()
+        # A live reopen replaces the writer lease, not outstanding readers' custody.
+        self._read_conn_leases = {}
         # Set when close() begins; an in-flight reader then closes its own connection
         # instead of re-populating a pool nobody will drain again.
         self._read_conns_closed = False
@@ -964,6 +966,9 @@ class SessionDB(
                 self._read_open_failed_at = time.monotonic()
             logger.debug("read-only connection open failed for %s", self.db_path, exc_info=True)
             return None
+        if lease is not None:
+            with self._read_conns_lock:
+                self._read_conn_leases[conn] = lease
         return conn
 
     def _evict_one_idle_read_conn(self) -> bool:
@@ -979,8 +984,10 @@ class SessionDB(
         """Close a pooled read connection and release its permit even when the close fails (withholding
         it would narrow the read path forever). Over-releasing the BoundedSemaphore raises ValueError."""
         try:
-            if self._profile_lease is not None:
-                self._profile_lease.close_connection(conn, reader=True)
+            with self._read_conns_lock:
+                lease = self._read_conn_leases.pop(conn, None)
+            if lease is not None:
+                lease.close_connection(conn, reader=True)
             else:
                 self._close_conn_logged(conn, "read-conn")
         finally:

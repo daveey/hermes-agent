@@ -64,13 +64,19 @@ def test_failed_writer_close_is_retained_and_retried(profile_home, monkeypatch, 
             db.close()
 
 
-def test_failed_pooled_close_withholds_ack_until_retried(profile_home):
+def test_failed_pooled_close_withholds_ack_until_retried(profile_home, monkeypatch):
     from hermes_profile_resources import wait_profile_resources
     allow = threading.Event()
     db = SessionDB(profile_home / 'state.db')
-    conn = db._get_read_conn()
-    assert conn is not None
-    proxy = DelayedClose(conn, allow)
+    original = db._connect_read_only
+
+    def open_reader(**kwargs):
+        return DelayedClose(original(**kwargs), allow)
+
+    monkeypatch.setattr(db, '_connect_read_only', open_reader)
+    proxy = db._get_read_conn()
+    assert proxy is not None
+    conn = proxy.connection
     try:
         db._close_read_conn(proxy)
         mark_named_profile_deleted(profile_home)
