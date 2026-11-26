@@ -182,9 +182,23 @@ for (const shape of shapes) {
           return
         }
 
-        // Approved presentation-only contract: retain base multiplicity even where base duplicates
-        // a foreign row or omits a colliding foreign id. No placement repair belongs in grouping.
-        expect(result).toEqual(oracle[`${shape}/${hidden}/${stamped}` as keyof typeof oracle])
+        // Unfiltered placement keeps the historical oracle. Explicit filtering
+        // now shows loaded matches only, dropping snapshot-only rows and empty nodes.
+        const expected = oracle[`${shape}/${hidden}/${stamped}` as keyof typeof oracle]
+        const loadedTitles = new Set(live.map(row => row.title))
+
+        const loadedSnapshot = (snapshot: typeof before) => ({
+          all: snapshot.all.filter(title => loadedTitles.has(title)),
+          blocks: Object.fromEntries(
+            Object.entries(snapshot.blocks)
+              .map(([key, titles]) => [key, titles.filter(title => loadedTitles.has(title))] as const)
+              .filter(([, titles]) => titles.length > 0)
+          )
+        })
+
+        expect(result).toEqual(
+          hidden ? { before: loadedSnapshot(expected.before), after: loadedSnapshot(expected.after) } : expected
+        )
       })
     }
   }

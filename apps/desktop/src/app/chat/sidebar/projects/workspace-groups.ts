@@ -80,6 +80,8 @@ export interface SidebarProjectTree {
   lastActive?: number
   // Up to N most-recent sessions for the overview preview (set by `projects.tree`).
   previewSessions?: SessionInfo[]
+  /** Display-only loaded filter matches: render all, never hydrate stale expanded rows. */
+  filteredOverview?: boolean
   // Every session id the backend assigned to this project — the authoritative
   // owner set the live overlay keys on (complete, unlike `previewSessions`).
   sessionIds?: string[]
@@ -633,8 +635,7 @@ export function withProvisionalHome(
 
   const rows = uniqueConversations(
     live.filter(
-      session =>
-        !removed.has(session.id) && sessionBucketId(session, explicitProjects, owners, known) === NO_PROJECT_ID
+      session => !removed.has(session.id) && sessionBucketId(session, explicitProjects, owners, known) === NO_PROJECT_ID
     )
   ).sort((a, b) => sessionRecency(b) - sessionRecency(a))
 
@@ -1162,6 +1163,7 @@ export function reconcileEnteredProjectSessions(
 }
 
 interface PreviewOverlayOptions {
+  bucketId?: (session: SessionInfo) => null | string
   owners?: ReadonlyMap<string, string>
   known?: KnownProjects
   ownerKey?: SessionOwnerKey
@@ -1177,6 +1179,7 @@ export function overlayLivePreviews(
   explicitProjects: ProjectInfo[],
   limit: number,
   {
+    bucketId,
     ownerKey,
     removed = NO_REMOVED,
     rank,
@@ -1191,7 +1194,7 @@ export function overlayLivePreviews(
       continue
     }
 
-    const projectId = sessionBucketId(session, explicitProjects, owners, known)
+    const projectId = bucketId ? bucketId(session) : sessionBucketId(session, explicitProjects, owners, known)
 
     if (!projectId) {
       continue

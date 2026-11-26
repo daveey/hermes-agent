@@ -44,6 +44,7 @@ import {
   SidebarWorkspaceGroup,
   type SidebarWorkspaceTree
 } from './projects'
+import { overviewFilterPolicy as filter } from './projects/filtered-overview'
 import { PresentationOverviewList } from './projects/presentation-overview-list'
 import { WorkspaceAddButton } from './projects/workspace-header'
 import { ReorderableList, useSortableBindings } from './reorderable-list'
@@ -273,8 +274,7 @@ export function SidebarSessionsSection({
     projectMemberBody || (projectContent && (projectContent.sessionCount > 0 || projectContent.repos.length > 0))
   )
 
-  const showEmptyState =
-    forceEmptyState || (!hasGroupedSessions && !hasProjectOverview && !hasProjectContent && sessions.length === 0)
+  const showEmptyState = filter.empty(forceEmptyState, hasGroupedSessions, projectOverview, hasProjectContent, sessions)
 
   // The flat recents/pinned list is the only place sessions reorder by hand;
   // grouped/tree views always sort by creation date and never drag.

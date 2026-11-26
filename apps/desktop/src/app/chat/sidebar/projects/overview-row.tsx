@@ -26,17 +26,17 @@ import {
 } from '../chrome'
 import { shellOwnsPress } from '../reorderable-list'
 
+import { overviewFilterPolicy as filterPolicy } from './filtered-overview'
 import { ownedNewSessionHandlers } from './gateway-project-rows'
 import {
   expandedProjectSessions,
   latestProjectSessions,
-  PROJECT_PREVIEW_COUNT,
   PROJECT_SESSION_PAGE,
   useRevealedRows,
   useWorkspaceNodeOpen
 } from './model'
 import { ProjectContextMenu, ProjectMenu } from './project-menu'
-import { excludeProjectSessions, type SidebarProjectTree } from './workspace-groups'
+import { type SidebarProjectTree } from './workspace-groups'
 import { WorkspaceAddButton, WorkspaceShowMoreRow } from './workspace-header'
 
 // A bare color dot (no icon) or an icon glyph — tinted by `color` when set, else
@@ -167,22 +167,29 @@ export function ProjectOverviewRow({
   // rather than widening every project's preview window.
   const [expanded, setExpanded] = useState<SidebarProjectTree | null>(null)
   const [expanding, setExpanding] = useState(false)
-  const limit = showAllSessions || expanded ? Infinity : PROJECT_PREVIEW_COUNT
+  const limit = filterPolicy.limit(project.filteredOverview, showAllSessions, expanded)
   const fetched = (previewSessions ?? []).slice(0, limit)
   // A preview override (even an empty one: its rows moved away) is the live
   // overlay's answer; only its absence falls back to the snapshot lanes.
   const recent = previewSessions ? fetched : latestProjectSessions(project, limit)
   // The hydrated lanes come straight from the backend, so — like the drill-in
   // (index.tsx) — they haven't been through the tree's exclusion filter yet.
-  const visible = expanded && isSessionHidden ? excludeProjectSessions(expanded, isSessionHidden) : expanded
+  const visible = filterPolicy.expanded(project, expanded, isSessionHidden)
   const preview = renderRows ? (visible ? expandedProjectSessions(recent, visible) : recent) : []
   // Once hydrated, the whole project is reachable but mounts a page at a time
   // (a project can hold thousands of chats; the collapsed preview stays 3).
   const page = useRevealedRows(preview, PROJECT_SESSION_PAGE)
-  const rows = expanded ? page.shown : preview
+  const rows = filterPolicy.rows(project.filteredOverview, expanded, page.shown, preview)
   const total = project.sessionCount - hiddenSessionCount
   const hiddenCount = total - preview.length
-  const offerShowAll = !showAllSessions && !expanded && preview.length > 0 && hiddenCount > 0
+
+  const offerShowAll = filterPolicy.offer(
+    project.filteredOverview,
+    showAllSessions,
+    expanded,
+    preview.length,
+    hiddenCount
+  )
 
   // #124808: a path-less explicit project (multi-folder, never assigned a
   // primary_path) still carries repo roots. Its trunk "+" must anchor at

@@ -24,7 +24,6 @@ import { sessionCreatedAt } from '@/lib/session-branch-tree'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { cn } from '@/lib/utils'
-import { markSidebarFirstRows } from '@/store/boot-snapshot'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
@@ -91,7 +90,6 @@ import {
   $projectTree,
   $projectTreeLoading,
   $reposScanning,
-  enterProject,
   followEnteredProjectCwd,
   openProjectCreate,
   refreshProjects,
@@ -189,7 +187,11 @@ import { buildSessionByAnyId, resolvePinnedSessions, useOfflineFallback } from '
 import { SessionSearchField } from './session-search-field'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
-import { useOverviewPreviews } from './use-overview-previews'
+import {
+  useEnterOverviewProject,
+  useMarkSidebarRows,
+  useOverviewPreviews as useOverview
+} from './use-overview-previews'
 import { useServerSessionSearch } from './use-server-session-search'
 import { useSessionFilters } from './use-session-filters'
 import { useSidebarDndSensors } from './use-sidebar-dnd-sensors'
@@ -452,7 +454,7 @@ export function ChatSidebar({
 
   const executionNow = useExecutionObservationClock(executionRows)
 
-  const { filtersNarrow, pluginFilters, sessionMatchesFilters, visibleSessions } = useSessionFilters({
+  const { filtersNarrow, overviewNarrow, pluginFilters, sessionMatchesFilters, visibleSessions } = useSessionFilters({
     dotStates,
     executionNow,
     gatewayRegistry,
@@ -949,10 +951,13 @@ export function ChatSidebar({
   }, [projectScope, projectsActive, enteredProject])
 
   // The project overview (drill-in list) vs. the entered project's content.
-  const projectOverview = projectsActive && !inProject ? agentProjectTree : undefined
+  const overviewCandidates = projectsActive && !inProject ? agentProjectTree : undefined
 
-  const overviewPreviews = useOverviewPreviews(projectOverview, agentSessions, projects, showAllSessions, {
-    ownerKey,
+  const [projectOverview, overviewPreviews] = useOverview(overviewCandidates, agentSessions, projects, {
+    showAllSessions,
+    narrow: overviewNarrow,
+    isHidden: isHiddenFromProjects,
+    ownerPolicy: owners,
     removed: removedSessionIds,
     owners: projectOwners,
     known: knownProjects,
@@ -980,18 +985,7 @@ export function ChatSidebar({
     return { isHidden, counts }
   }, [sessions, projects, projectOwners, knownProjects, isHiddenFromProjects, removedSessionIds])
 
-  const onEnterProject = useCallback(
-    (id: string) => {
-      const project = projectModel.find(node => node.id === id)
-
-      if (project) {
-        syncProjectCwd(project)
-      }
-
-      enterProject(id)
-    },
-    [projectModel, syncProjectCwd]
-  )
+  const onEnterProject = useEnterOverviewProject(projectModel, syncProjectCwd)
 
   // The section header must name what the section is showing. Grouped mode
   // reads "Projects" only while there IS a project switcher to show: a real
@@ -1248,13 +1242,7 @@ export function ChatSidebar({
 
   // [daveey] Cold-start timing: when this launch's sidebar first drew rows, and whether they were live or the boot
   // snapshot (hub.db rows / last projects tree) painted before the backend was up.
-  const drawnRows = sortedSessions.length + (projectOverview?.length ?? 0)
-
-  useEffect(() => {
-    if (drawnRows > 0) {
-      markSidebarFirstRows(drawnRows, !sessionsLoading)
-    }
-  }, [drawnRows, sessionsLoading])
+  useMarkSidebarRows(sortedSessions.length + (projectOverview?.length ?? 0), sessionsLoading)
 
   const showSessionSections = hasSessionArea({
     cronJobs: showsAdvancedChrome ? cronJobs.length : 0,

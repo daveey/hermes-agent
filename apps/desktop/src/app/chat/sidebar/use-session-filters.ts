@@ -180,5 +180,8 @@ export function useSessionFilters(inputs: SessionFilterInputs) {
 
   useEffect(() => () => $sidebarSessionsPrePlugin.set([]), [])
 
-  return { filtersNarrow, pluginFilters, sessionMatchesFilters, visibleSessions }
+  // Default automated hiding is not an explicit overview filter (Reset restores it).
+  const overviewNarrow = sidebarFiltersNarrow({ ...inputs, showAutomated: true, pluginFilters })
+
+  return { filtersNarrow, overviewNarrow, pluginFilters, sessionMatchesFilters, visibleSessions }
 }

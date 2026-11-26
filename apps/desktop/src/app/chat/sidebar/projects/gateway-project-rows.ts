@@ -39,7 +39,7 @@ const projectRows = (node: SidebarProjectTree): SessionInfo[] => [
 
 /** Complete profile-scoped overview membership survives limited previews and unhydrated lanes.
  * Legacy single-profile nodes still use their declared owner/profile for bare ids. */
-function projectMembership(node: SidebarProjectTree, ownerOf: (s: SessionInfo) => string): string[] {
+export function projectMembership(node: SidebarProjectTree, ownerOf: (s: SessionInfo) => string): string[] {
   const keys = projectRows(node).map(session => sessionIdentityKey(ownerOf(session), session))
   const owner = node.connectionId ?? node.remoteProject?.connectionId
 
