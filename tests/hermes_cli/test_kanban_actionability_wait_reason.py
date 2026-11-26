@@ -222,6 +222,22 @@ def test_replica_card_carries_the_owners_published_reason_and_watch():
     assert 'prerequisite' not in unpublished and 'watching' not in unpublished
 
 
+@pytest.mark.parametrize('why', ['ci', 'x' * 900])
+def test_actionability_keeps_short_reasons_and_bounds_long_ones(why):
+    row = project({'task': {'id': 'f', 'status': 'scheduled', 'assignee': 'default'}, 'wake_at': WAKE,
+                   'awaiting': {'kind': 'ci', 'ref': 'https://example.com/run/1', 'why': why}}, now=T0)
+    assert row['blocker']['prerequisite'] == why[:kwi.PREREQUISITE_MAX]
+    assert row['instruction'].startswith('Waiting on: ')
+
+
+def test_actionability_does_not_promote_inferred_reason():
+    row = project({'task': {'id': 'f', 'status': 'scheduled', 'assignee': 'default'}, 'wake_at': WAKE,
+                   'awaiting': {'kind': 'chat', 'ref': 'owning orchestrator', 'why': 'inferred wording', 'inferred': True},
+                   'probe': 'test -f result'}, now=T0)
+    assert 'inferred wording' not in row['instruction']
+    assert 'inferred wording' not in row['blocker']['prerequisite']
+
+
 def test_reason_is_flattened_and_bounded():
     park = {'awaiting': {'kind': 'clock', 'why': 'a\n  b ' + 'x' * 900}, 'wake_at': T0 + 600}
     wait = _described('scheduled', park=park, since=T0, now=T0 + 10)

@@ -44,7 +44,7 @@ def test_reducer_schedule_trigger_and_clock_boundaries(wake, awaiting, probe, ac
     assert row['action'] == action
     assert trigger in row['blocker']['trigger']
     assert row['blocker']['prerequisite'] == (
-        'Named finite producer and recovery condition' if violation else row['blocker']['trigger'])
+        'Named finite producer and recovery condition' if violation else awaiting.get('why') or row['blocker']['trigger'])
     assert ('scheduled_wake_missing' in row['violations']) == (violation == 'scheduled_wake_missing')
     assert ('recovery_trigger_missing' in row['violations']) == (violation is not None)
     assert row['escalation']['at'] == (1600 if wake else None)

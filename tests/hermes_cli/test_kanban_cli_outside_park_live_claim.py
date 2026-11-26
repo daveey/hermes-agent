@@ -149,6 +149,28 @@ def test_a_ready_card_is_still_parked_via_the_cli(home, capsys, verb, extra):
     assert _status(tid) == "scheduled"
 
 
+@pytest.mark.parametrize("verb,extra", [("schedule", ()), ("block", ("--kind", "time"))])
+def test_park_reason_survives_cli_schedule_and_show(home, capsys, verb, extra):
+    tid = _ready()
+    assert _cli()(verb, tid, COOLDOWN, *extra, "--clock-only", *WHY) == 0
+    capsys.readouterr()
+    assert _cli()("show", tid, "--json") == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown['actionability']['blocker']['prerequisite'] == 'the cooldown window'
+    assert shown['actionability']['instruction'].startswith('Waiting on: the cooldown window. Next check:')
+
+
+def test_park_reason_survives_tool_schedule_and_show(home, capsys):
+    from tools import kanban_tools as kt
+    tid = _ready()
+    out = json.loads(kt._handle_schedule({'task_id': tid, 'reason': COOLDOWN, 'clock_only': True,
+                                         'awaiting': {'kind': 'clock', 'why': 'the cooldown window'}}))
+    assert out.get('ok'), out
+    shown = json.loads(kt._handle_show({'task_id': tid}))
+    assert shown['actionability']['blocker']['prerequisite'] == 'the cooldown window'
+    assert shown['actionability']['instruction'].startswith('Waiting on: the cooldown window. Next check:')
+
+
 def test_tool_and_cli_refusals_carry_the_same_facts(home, capsys):
     """One helper decides both paths: the tool's typed error and the CLI line name the same holder and run."""
     tid, run_id = _claimed()
