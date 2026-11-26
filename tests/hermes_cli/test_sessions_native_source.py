@@ -36,6 +36,87 @@ def step(source, clock):
     return capture
 
 
+def test_duplicate_pending_demand_does_not_recapture(source):
+    owner, clock, calls = source
+    original = owner.reader
+    selector = {'id': 'one'}
+    def read(name, selected):
+        # Another HTTP request sees Pending while this capture is running.
+        owner.demand(name, selected)
+        return original(name, selected)
+    owner.reader = read
+    owner.demand('sessions', selector)
+    capture = owner.capture(None, CaptureBudget())
+    # Publication has not happened yet: this is also the same pending work.
+    owner.demand('sessions', selector)
+    owner.commit(capture)
+    clock[0] += 1
+    second = step(owner, clock)
+    assert second.fact is None
+    assert calls == [('sessions', 'one')]
+    assert owner.store.snapshot(owner.source.scope).view('sessions', selector).encoded == b'one'
+
+
+@pytest.mark.parametrize('hint', ['during_read', 'before_commit', 'lost'])
+def test_pending_demand_preserves_real_change_and_reconciliation(source, hint):
+    owner, clock, calls = source
+    original = owner.reader
+    selector = {'id': 'one'}
+    def read(name, selected):
+        owner.demand(name, selected)
+        if hint == 'during_read':
+            owner.invalidate()
+        return original(name, selected)
+    owner.reader = read
+    owner.demand('sessions', selector)
+    capture = owner.capture(None, CaptureBudget())
+    if hint == 'before_commit':
+        owner.invalidate()
+    owner.demand('sessions', selector)
+    owner.commit(capture)
+    owner.reader = original
+    clock[0] += 1 if hint != 'lost' else 31
+    step(owner, clock)
+    assert calls == [('sessions', 'one'), ('sessions', 'one')]
+    clock[0] += 1
+    assert step(owner, clock).fact is None
+
+
+def test_pending_demand_is_released_after_publication_failure(source, monkeypatch):
+    owner, clock, calls = source
+    selector = {'id': 'one'}
+    owner.demand('sessions', selector)
+    capture = owner.capture(None, CaptureBudget())
+    def fail(*args, **kwargs):
+        raise RuntimeError('publication failed')
+    with monkeypatch.context() as patch:
+        patch.setattr(owner.store, 'publish', fail)
+        with pytest.raises(RuntimeError, match='publication failed'):
+            owner.commit(capture)
+    owner.failure()
+    clock[0] += 1
+    step(owner, clock)
+    assert calls == [('sessions', 'one'), ('sessions', 'one')]
+    # A later missing-view demand is not permanently suppressed by the fence.
+    owner.store.publish([], deleted_keys=[view_key(owner.source.scope, 'sessions', selector)])
+    owner.demand('sessions', selector)
+    step(owner, clock)
+    assert len(calls) == 3
+
+
+def test_evicted_inflight_selector_can_be_demanded_again(source):
+    owner, clock, calls = source
+    owner.max_views = 1
+    owner.demand('sessions', {'id': 'one'})
+    capture = owner.capture(None, CaptureBudget())
+    owner.demand('sessions', {'id': 'two'})
+    owner.demand('sessions', {'id': 'one'})
+    owner.commit(capture)
+    clock[0] += 1
+    step(owner, clock)
+    assert calls == [('sessions', 'one'), ('sessions', 'one')]
+
+
 def test_hot_hints_do_not_starve_and_failure_is_per_selector(source):
     owner, clock, calls = source
     owner.demand('sessions', {'id': 'bad'})

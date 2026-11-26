@@ -41,6 +41,7 @@ class SessionsSource:
         self._lock = threading.Lock()
         self._selectors = OrderedDict()
         self._dirty = OrderedDict()
+        self._capturing = set()
         self._sizes, self._retry = {}, {}
         self._failed = set()
         self._retired = set()
@@ -63,6 +64,7 @@ class SessionsSource:
     def _evict(self, key):
         self._selectors.pop(key)
         self._dirty.pop(key, None)
+        self._capturing.discard(key)
         self._retry.pop(key, None)
         self._failed.discard(key)
         self._retired.add(key)
@@ -84,7 +86,11 @@ class SessionsSource:
                     self._evict(peers[0])
                 self._selectors[key] = (name, dict(selector))
             self._selectors.move_to_end(key)
-            self._dirty.setdefault(key, None)
+            # Pending HTTP reads join the capture already admitted for this key.
+            # Only real invalidation may request its trailing refresh. Keep this
+            # fence through commit: a completed reader is not yet a Ready view.
+            if key not in self._capturing:
+                self._dirty.setdefault(key, None)
             wake = self._wake
         if wake is not None:
             wake()  # ChangeFeed condition only; no file descriptor writes.
@@ -134,6 +140,7 @@ class SessionsSource:
             views = [self._selectors[key] for key in keys]
             for key in keys:
                 self._dirty.pop(key)
+            self._capturing.update(keys)
         try:
             bodies = (self.reader_many(views) if self.reader_many is not None else
                       [self.reader(*views[0])])
@@ -224,12 +231,14 @@ class SessionsSource:
                 self._sizes[fact.key] = size
                 retained.append(fact)
             self.store.publish([fact for fact in retained if fact.key in self._selectors], deleted_keys=deleted)
+            self._capturing.difference_update(fact.key for fact in facts)
 
     def failure(self):
         # Watch/publication failure (not one selector failure) invalidates all.
         snapshot = self.store.snapshot(self.source.scope)
         with self._lock:
             keys = tuple(self._selectors)
+            self._capturing.clear()
             for key in keys:
                 self._dirty.setdefault(key, None)
         stale = [evolve(fact, health='stale', error_code='sessions_source_failed')
