@@ -8,6 +8,10 @@ from threading import Lock
 
 from hermes_cli.kanban_origin_admission import AdmissionRefused
 
+_RELEASE_STAGES = (
+    "intent_journaled_unsent", "authorized_pending_home", "read_first_pending", "consumed_or_applied",
+)
+
 
 class LaunchGate:
     def __init__(self):
@@ -15,11 +19,13 @@ class LaunchGate:
         self._accepting = True
         self._requests = []
 
-    def dispatch(self):
+    def dispatch(self, *, operation="create"):
+        if operation not in ("create", "release"):
+            raise ValueError("unknown native CLI operation")
         with self._lock:
             if not self._accepting:
                 raise AdmissionRefused("CLI launch retired before dispatch")
-            request = RequestGate(self)
+            request = RequestGate(self, operation)
             self._requests.append(request)
             return request
 
@@ -31,17 +37,25 @@ class LaunchGate:
 
 
 class RequestGate:
-    def __init__(self, launch):
+    def __init__(self, launch, operation="create"):
         self._launch = launch
+        self._operation = operation
+        self._intent_uid = None
+        self._release_stage = None
         self._admitted = None
         self._finished = False
         self._verified = False
 
-    def admit(self, task_id):
+    def admit(self, task_id, *, intent_uid=None):
         with self._launch._lock:
             if not self._launch._accepting or self._admitted is not None or self._finished:
                 raise AdmissionRefused("CLI launch retired or request already admitted/finished")
+            if self._operation == "release" and (not isinstance(intent_uid, str) or not intent_uid):
+                raise AdmissionRefused("release admission requires an exact intent")
+            if self._operation == "create" and intent_uid is not None:
+                raise AdmissionRefused("creation admission cannot journal a release intent")
             self._admitted = task_id
+            self._intent_uid = intent_uid
 
     def finish(self, result=None):
         """A failed/absent reply cannot undo an admission or establish rollback."""
@@ -49,16 +63,25 @@ class RequestGate:
             if self._finished:
                 raise AdmissionRefused("CLI request already finished")
             self._finished = True
-            self._verified = (self._admitted is not None and isinstance(result, dict)
-                              and result.get("ok") is True and result.get("task_id") == self._admitted)
+            if (self._admitted is not None and isinstance(result, dict)
+                    and result.get("ok") is True and result.get("task_id") == self._admitted):
+                self._verified = True
+                if self._operation == "release":
+                    self._verified = (result.get("intent_uid") == self._intent_uid
+                                      and result.get("release_stage") in _RELEASE_STAGES)
+                    if self._verified:
+                        self._release_stage = result["release_stage"]
             return self._report()
 
     def _report(self):
         # Called only under the launch lock.
         if self._verified:
-            outcome = "created"
+            outcome = self._release_stage if self._operation == "release" else "created"
         elif self._admitted is not None:
             outcome = "outcome_unknown"
         else:
             outcome = "no_board_commit"
-        return {"outcome": outcome, "task_id": self._admitted, "finished": self._finished}
+        report = {"outcome": outcome, "task_id": self._admitted, "finished": self._finished}
+        if self._operation == "release":
+            report.update(operation="release", intent_uid=self._intent_uid)
+        return report
