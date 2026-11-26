@@ -10,7 +10,7 @@ from hermes_cli.kanban_origin_admission import AdmissionRefused
 
 _RELEASE_FAILURES = ("expired", "refused")
 _RELEASE_STAGES = (
-    "intent_journaled_unsent", "authorized_pending_home", "read_first_pending", "consumed_or_applied",
+    "intent_journaled_unsent", "authorized_pending_home", "read_first_pending", "acknowledged_pending_home", "consumed_or_applied",
 )
 
 

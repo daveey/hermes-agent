@@ -25,7 +25,7 @@ def _proof(hub, body):
     return proof
 
 
-def _send(conn, hub, body):
+def _send(conn, hub, body, *, seen=None):
     stage = intent.stage(conn, body)  # Fresh custody, not authority from a prior read.
     if stage in {"expired", "refused", "applied"}:
         return {"ok": stage == "applied", "task_id": body["task_id"], "intent_uid": body["intent_uid"],
@@ -50,6 +50,9 @@ def _send(conn, hub, body):
     if stage == "send_pending":
         if not intent.advance(conn, body, expected=stage, stage="authorized_pending_home"):
             raise ValueError("release journal changed after authorization")
+    if proof["state"] == "authorized":
+        from hermes_cli.kanban_release_read import prepare
+        return prepare(conn, hub, body, seen=seen)
     # Consumption/application are not inferred from a writable event. HOME's
     # exact result is reconciled separately; authorization only promises pending.
     return {"ok": True, "task_id": body["task_id"], "intent_uid": body["intent_uid"],
@@ -62,10 +65,11 @@ def dispatch(args: dict, *, gate) -> dict:
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, kanban_sync_client as client
     from hermes_cli.kanban_origin_native import _primary_scope
 
-    if not isinstance(args, dict) or set(args) not in (_FIELDS, _FIELDS | {"fresh_after_expiry"}):
+    if not isinstance(args, dict) or set(args) - {"fresh_after_expiry", "seen_release"} != _FIELDS:
         raise ValueError("native release accepts only exact action fields, never caller or HOME overrides")
     expired_intent = args.get("fresh_after_expiry")
-    args = {k: v for k, v in args.items() if k != "fresh_after_expiry"}
+    seen = args.get("seen_release")
+    args = {k: v for k, v in args.items() if k not in {"fresh_after_expiry", "seen_release"}}
     from hermes_cli.kanban_release import default_runs
     args = {**args, "board": kb._normalize_board_slug(args["board"]) or kb.get_current_board(),
             "runs": default_runs() if args["runs"] is None else args["runs"]}
@@ -88,7 +92,7 @@ def dispatch(args: dict, *, gate) -> dict:
             # Reconcile the immutable request before capability/current HOME reads.
             # prepare still reauthenticates and admits this exact actor/action.
             body = intent.prepare(conn, {**args, "home": recorded["home"]}, gate=gate, expired_intent=expired_intent)
-            return _send(conn, hub, body)
+            return _send(conn, hub, body, seen=seen)
         capability = hub.decision_retain_capability(args["board"])
         if not isinstance(capability, dict) or type(capability.get("owner_release")) is not int or capability["owner_release"] != 1:
             return {"ok": False, "reason": "board_unsupported", "error": "Board owner-release v1 is not available; nothing sent"}
@@ -100,4 +104,4 @@ def dispatch(args: dict, *, gate) -> dict:
         if captured.validated() is None:
             raise ValueError("native release custody expired before preparation")
         body = intent.prepare(conn, {**args, "home": home}, gate=gate, expired_intent=expired_intent)
-        return _send(conn, hub, body)
+        return _send(conn, hub, body, seen=seen)

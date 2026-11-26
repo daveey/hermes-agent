@@ -699,6 +699,8 @@ _SPECS = [
         _arg("--runs", type=int, default=None,
              help="More runs the card gets (default: kanban.release_runs, 10), on top of the runs already counted"),
         _arg("--note", default=None, help="Text appended to the mandate comment as its own paragraph"),
+        _arg("--seen-release", default=None, metavar="NONCE",
+             help="Acknowledge the complete native release comment inventory emitted on an earlier invocation"),
         _arg("--fresh-after-expiry", default=None, metavar="EXPIRED_INTENT_UID",
              help="Explicitly acknowledge this exact definitively expired native intent; replace it once, never an uncertain send"),
         _arg("--episode", default=None,

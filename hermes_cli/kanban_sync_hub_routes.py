@@ -33,6 +33,12 @@ class HubRoutesMixin:
         return self._call("GET", f"/v2/boards/{quote(board, safe='')}/owner-release/" + quote(intent_uid, safe=''),
                           max_response_bytes=131072)
 
+    def owner_release_comments(self, board: str, intent_uid: str) -> dict:
+        """Complete current-valid private comment inventory, not display proof."""
+        from urllib.parse import quote
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/owner-release/" + quote(intent_uid, safe='') + "/comments",
+                          max_response_bytes=2 * 1024 * 1024)
+
     def owner_release_consumption(self, board: str, intent_uid: str) -> dict:
         """Historical private winning consume certificate, not local release clearance."""
         from urllib.parse import quote

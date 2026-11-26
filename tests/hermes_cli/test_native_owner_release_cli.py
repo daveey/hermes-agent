@@ -45,6 +45,10 @@ def transport(monkeypatch):
                 assert json.loads(row[0]) == ops[0]["intent"]
             self.sent.extend(ops)
             return {"results": [{"status": "applied"}]}
+        comments = []
+        def owner_release_comments(self, board, uid):
+            body = self.sent[-1]["intent"]
+            return {"version": 1, "intent": body, "digest": intent.digest(body), "comments": self.comments}
         def owner_release_evidence(self, board, uid):
             body = self.sent[-1]["intent"]
             return self.evidence or {"version": 1, "state": "authorized", "intent": body, "digest": intent.digest(body),
@@ -87,14 +91,14 @@ def test_actual_cli_freezes_native_actor_and_reports_pending_not_release(turn, t
         result = cli(native)
         assert result.returncode == 0, (result.stdout, result.stderr)
         value = json.loads(result.stdout)
-        assert value["release_stage"] == "authorized_pending_home" and value["ok"]
+        assert value["release_stage"] == "read_first_pending" and value["ok"]
         assert "released" not in value and "created" not in value
         body = transport.sent[0]["intent"]
         assert body["actor"] == {"gateway": "here", "profile": "default", "session": turn.agent.session_id}
         assert body["home"] == "foreign-home"
         assert body["episode"] == "01a216f3-6633-7617-9d00-d3779607ae0b"
         with kbc.connect_closing() as conn:
-            assert conn.execute("SELECT stage FROM native_owner_release_intents").fetchone()[0] == "authorized_pending_home"
+            assert conn.execute("SELECT stage FROM native_owner_release_intents").fetchone()[0] == "read_first_pending"
             assert conn.execute("SELECT COUNT(*) FROM task_events WHERE kind='stop_released'").fetchone()[0] == 0
         again = cli(native)
         assert again.returncode == 0, (again.stdout, again.stderr)

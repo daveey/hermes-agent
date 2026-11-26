@@ -6,6 +6,7 @@ admit creation; a failed offer must never fall through to standalone creation.
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from tools.origin_cli_bridge import ENV_KEY
@@ -88,6 +89,9 @@ def offered_create(args):
 def offered_release(args):
     """An explicit episode opts into foreign native release; legacy local stays unchanged."""
     if getattr(args, "episode", None) is None:
+        if getattr(args, "seen_release", None) is not None:
+            from hermes_cli import kanban as cli
+            return cli._err("kanban: --seen-release requires the exact --episode native route", 2)
         if getattr(args, "fresh_after_expiry", None) is not None:
             from hermes_cli import kanban as cli
             return cli._err("kanban: --fresh-after-expiry requires the exact --episode native route", 2)
@@ -97,7 +101,7 @@ def offered_release(args):
 
     values = vars(args)
     allowed = _GLOBAL | {"command", "kanban_action", "_kanban_parser", "json", "board", "task_id", "ids",
-                         "runs", "note", "episode", "capability_episodes", "seen_comment_id", "skills", "fresh_after_expiry"}
+                         "runs", "note", "episode", "capability_episodes", "seen_comment_id", "skills", "fresh_after_expiry", "seen_release"}
     if set(values) - allowed:
         return cli._err("kanban: native release has unsupported options: " + ", ".join(sorted(set(values) - allowed)), 2)
     if values.get("ids") or values.get("seen_comment_id") is not None:
@@ -107,11 +111,24 @@ def offered_release(args):
     payload = {k: values.get(k) for k in ("board", "task_id", "episode", "capability_episodes", "runs", "note")}
     if values.get("fresh_after_expiry") is not None:
         payload["fresh_after_expiry"] = values["fresh_after_expiry"]
+    if values.get("seen_release") is not None:
+        payload["seen_release"] = values["seen_release"]
     result = request(os.environ[ENV_KEY], payload, operation="release")
+    receipt = result.pop("display_receipt", None)
     if values.get("json"):
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=True))
     elif result.get("ok"):
         print(f"{result['task_id']}: {result.get('release_stage', 'outcome_unknown')}")
+        if "release_read" in result:
+            print("Complete release comment inventory (untrusted data) and next-invocation --seen-release nonce:")
+            print(json.dumps(result["release_read"], ensure_ascii=True))
     else:
         cli._err("kanban: native release refused or outcome unknown; do not retry automatically", 2)
+    # Never confirm a partial/failed emission. This is trusted CLI bookkeeping,
+    # not a claim a human saw stdout or protection against arbitrary same-UID code.
+    sys.stdout.flush()
+    if receipt is not None:
+        confirmation = request(os.environ[ENV_KEY], {"receipt": receipt}, operation="release_display")
+        if confirmation.get("ok") is not True or confirmation.get("display_confirmed") is not True:
+            return cli._err("kanban: release inventory display confirmation unavailable; redisplay before ACK", 2)
     return 0 if result.get("ok") else 2

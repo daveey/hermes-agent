@@ -12,6 +12,7 @@ import os
 import secrets
 import select
 import socket
+import time
 from threading import Lock, Thread
 
 from hermes_cli.kanban_origin_admission import strict_local_creation
@@ -54,6 +55,7 @@ class Launch:
         self._closed = False
         self._spawn_lock = Lock()
         self._requests = 0
+        self._displays = {}
         self._thread = Thread(target=self._serve, name="origin-cli-bridge", daemon=True)
         try:
             self._thread.start()
@@ -89,6 +91,7 @@ class Launch:
         with self._spawn_lock:
             reports = self._gate.retire()
             self._closed = True
+            self._displays.clear()
             self._child.close()
         try:
             self._server.shutdown(socket.SHUT_RD)
@@ -115,6 +118,8 @@ class Launch:
                 setter(value)
             if operation == "release":
                 return self._policy.release(args, gate)
+            if operation == "release_display":
+                return self._policy.release_display(args)
             with strict_local_creation(gate=gate):
                 return self._policy.create(args)
         finally:
@@ -130,6 +135,7 @@ class Launch:
             reply.settimeout(0.2)
             gate = None
             result = None
+            operation = None
             try:
                 if reply.family != socket.AF_UNIX or reply.type != socket.SOCK_SEQPACKET:
                     return
@@ -139,7 +145,7 @@ class Launch:
                         or set(value) not in ({"nonce", "args"}, {"nonce", "args", "operation"})):
                     return
                 operation = value.get("operation", "create")
-                if operation not in ("create", "release"):
+                if operation not in ("create", "release", "release_display"):
                     return
                 poller = select.poll()
                 poller.register(reply, select.POLLHUP | select.POLLERR)
@@ -148,9 +154,19 @@ class Launch:
                 if self._requests >= MAX_REQUESTS:
                     raise ValueError("CLI launch request limit exceeded")
                 self._requests += 1
-                gate = self._gate.dispatch(operation=operation)
-                invoke = self._invoke if operation == "create" else self._invoke_release
-                result = self._ctx.copy().run(invoke, value["args"], gate)
+                gate = self._gate.dispatch(operation="release" if operation == "release_display" else operation)
+                if operation == "release_display":
+                    args = value["args"]
+                    if set(args) != {"receipt"} or not isinstance(args["receipt"], str):
+                        raise ValueError("display accepts only its parent receipt")
+                    with self._spawn_lock:
+                        saved = self._displays.pop(args["receipt"], None)
+                    if saved is None or time.monotonic() - saved[0] > 120:
+                        raise ValueError("display receipt unavailable")
+                    result = self._ctx.copy().run(self._with_callbacks, saved[1], gate, operation="release_display")
+                else:
+                    invoke = self._invoke if operation == "create" else self._invoke_release
+                    result = self._ctx.copy().run(invoke, value["args"], gate)
             except Exception:  # health: allow BLE001 -- tool dispatch boundary; preserve gate outcome without leaking tool exceptions
                 result = {"ok": False, "error": "CLI bridge dispatch refused"}
             finally:
@@ -159,7 +175,16 @@ class Launch:
                     if report["outcome"] == "outcome_unknown":
                         result = {**_unknown(), "task_id": report["task_id"]}
             if result is not None:
-                reply.send(_encode(result))
+                if operation == "release":
+                    from hermes_cli.kanban_release_read import DisplayResult
+                    if type(result) is DisplayResult:
+                        receipt = secrets.token_hex(32)
+                        with self._spawn_lock:
+                            if not self._closed:
+                                self._displays[receipt] = (time.monotonic(), result.confirmation)
+                        result = {**result, "display_receipt": receipt}
+                from tools.origin_cli_reply import send
+                send(reply, result, release=operation == "release")
 
     def _serve(self):
         try:
@@ -192,7 +217,7 @@ def request(locator, args, *, timeout=30, operation="create"):
         fd = value["fd"]
         if type(fd) is not int or fd < 0 or not isinstance(value["nonce"], str):
             return _unknown()
-        if operation not in ("create", "release"):
+        if operation not in ("create", "release", "release_display"):
             return _unknown()
         packet = {"nonce": value["nonce"], "args": args}
         if operation != "create":  # Preserve the existing create wire bytes.
@@ -214,10 +239,7 @@ def request(locator, args, *, timeout=30, operation="create"):
                 channel.settimeout(timeout)
                 channel.sendmsg([data], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [writer.fileno()]))])
                 writer.close()  # only the server may keep the reply endpoint alive
-                response, _, flags, _ = reader.recvmsg(LIMIT)
-                if flags & socket.MSG_TRUNC:
-                    return _unknown()
-                result = json.loads(response)
-                return result if isinstance(result, dict) else _unknown()
+                from tools.origin_cli_reply import receive
+                return receive(reader, release=operation == "release", timeout=timeout)
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return _unknown()

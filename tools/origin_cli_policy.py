@@ -26,16 +26,9 @@ class _Policy:
                 result[key] = list(result[key])
         return result
 
-    def release(self, args, gate):
-        """Release is the captured terminal operation, not a new public tool grant.
-
-        Native custody and canonical ownership are checked separately downstream.
-        A terminal locator or a tool_call grant cannot manufacture terminal access.
-        """
+    def _release_granted(self):
         from agent.delegation_context import is_delegated_child_context
         from model_tools import _select_tool_names
-        from hermes_cli.kanban_release_native import dispatch
-
         if is_delegated_child_context():
             return {"ok": False, "error": "delegated children cannot use native CLI custody"}
         kwargs = self.kwargs()
@@ -43,6 +36,30 @@ class _Policy:
             return {"ok": False, "error": "terminal is not granted to this launch"}
         if "terminal" not in _select_tool_names(kwargs["enabled_toolsets"], kwargs["disabled_toolsets"], quiet_mode=True):
             return {"ok": False, "error": "terminal is not in this session's toolsets"}
+        return None
+
+    def release_display(self, confirmation):
+        """Only an in-memory parent receipt, never child coordinates or actors."""
+        refusal = self._release_granted()
+        if refusal is not None:
+            return refusal
+        from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, kanban_sync_client as client
+        from hermes_cli import kanban_release_intent as intent, kanban_release_read as read
+        body = intent.validate(read.certificate.parse(confirmation.body_bytes))
+        with kb.scoped_current_board(body["board"]), kbc.connect_closing() as conn:
+            intent.stage(conn, body)
+            from contextlib import closing
+            with closing(client.Hub(client.load_identity())) as hub:
+                if hub.ident.gateway != body["actor"]["gateway"]:
+                    raise ValueError("native release display transport identity changed")
+                return read.confirm(conn, hub, confirmation)
+
+    def release(self, args, gate):
+        """Release is captured terminal policy, not a new public tool grant."""
+        refusal = self._release_granted()
+        if refusal is not None:
+            return refusal
+        from hermes_cli.kanban_release_native import dispatch
         return dispatch(args, gate=gate)
 
     def create(self, args):
