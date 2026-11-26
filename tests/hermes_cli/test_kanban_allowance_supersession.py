@@ -1,4 +1,5 @@
 """Only a human operator's canonical renewal replaces the Board's reviewer allowance; everything else holds."""
+from contextlib import contextmanager
 import json
 import time
 from types import SimpleNamespace
@@ -172,6 +173,52 @@ def test_stuck_names_the_held_allowance_only_for_a_generic_newest_budget(primary
     _generic(primary, plain)
     assert observation.stuck(primary, plain) is None
     assert len(calls) == before  # neither asked the Board
+
+
+@pytest.mark.parametrize("lane", ["ready", "review"])
+def test_declined_claim_transaction_never_reaches_allowance_or_cas(primary, monkeypatch, lane):
+    tid = kb.create_task(primary, title="Declined admission", assignee="worker")
+    with fixtures.kbc.write_txn(primary):
+        primary.execute("UPDATE tasks SET status=? WHERE id=?", (lane, tid))
+    fixtures.sync.set_mode(primary, "off")
+    entered = []
+
+    @contextmanager
+    def declined(conn, **kwargs):
+        entered.append(True)
+        yield False
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("declined transaction reached allowance check or claim CAS")
+
+    monkeypatch.setattr(kb, "claim_transaction", declined)
+    monkeypatch.setattr(kb._spend_allowance, "claim_refused", forbidden)
+    monkeypatch.setattr(kb, "claim_and_open_run", forbidden)
+    claim = kb.claim_task if lane == "ready" else kb.claim_review_task
+    assert claim(primary, tid) is None
+    assert entered == [True]
+    row = primary.execute("SELECT status,current_run_id FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert tuple(row) == (lane, None)
+    assert not primary.execute("SELECT 1 FROM task_runs WHERE task_id=?", (tid,)).fetchone()
+
+
+def test_stuck_preserves_the_callers_shorter_deadline(primary, monkeypatch):
+    tid, _, calls = _decided(primary, monkeypatch)
+    monkeypatch.setattr(observation.time, "monotonic", lambda: 100.0)
+    assert observation.stuck(primary, tid, deadline=100.0) is None
+    assert calls == []
+    held = observation.stuck(primary, tid, deadline=102.0)
+    assert held.deadline == 102.0
+    assert calls[0] == ("open", 102.0)
+
+
+def test_primary_sweep_without_sync_identity_does_not_read_or_pace(primary, monkeypatch):
+    tid, _, calls = _decided(primary, monkeypatch)
+    monkeypatch.setattr(fixtures.sync, "board_mode", lambda conn: "primary")
+    monkeypatch.setattr(fixtures.sync, "sync_state", lambda conn: None)
+    assert maintenance.sweep(primary) == []
+    assert calls == [] and not maintenance._CURSORS
+    assert kb.get_task(primary, tid).status == "ready"
 
 
 def test_stuck_is_not_claimed_when_the_board_holds_none_or_is_unknown(primary, monkeypatch):
