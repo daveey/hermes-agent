@@ -119,9 +119,14 @@ def origin_refusal(exc, *, origin: bool = True):
     ``pending / origin_dispatch_pending``."""
     from hermes_cli.kanban_create_authority import CreateAuthorityRefused
     from hermes_cli.kanban_origin import OriginError
+    from hermes_cli.kanban_runs_on_capabilities import PlacementCapabilityMismatch
     from tools.registry import tool_error
     if isinstance(exc, OriginError):
         return tool_error(str(exc), code=exc.code, handoff_complete=False)
+    if origin and isinstance(exc, PlacementCapabilityMismatch):
+        # Raised by create_task's assignment validation before any row is written, and fixed only by the
+        # request's own runs_on/requires, so replaying it cannot succeed: a terminal rejection with the reason.
+        return tool_error(str(exc), code=exc.code, created=False, handoff_complete=False)
     if origin and isinstance(exc, CreateAuthorityRefused):
         if getattr(exc, "wait", None):  # local state that can still change: keep the create, retry it
             return tool_error(str(exc), status="pending", code=exc.wait, refusal=exc.code, handoff_complete=False)

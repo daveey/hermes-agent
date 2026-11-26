@@ -257,3 +257,53 @@ def test_adoption_entry_rejects_wrong_route_or_missing_capability(world, monkeyp
     with kbc.connect_closing() as conn:
         assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='origin_creation_intents'").fetchone()
+
+
+def _refuse_placement(monkeypatch, exc):
+    from hermes_cli import kanban_runs_on_capabilities as roc
+
+    def check_create(*args, **kwargs):
+        raise exc
+    monkeypatch.setattr(roc, 'check_create', check_create)
+
+
+def _written(tmp_path):
+    with kbc.connect_closing() as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return {table: conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+                for table in ('tasks', 'task_events', 'origin_creation_intents') if table in tables}
+
+
+def test_capability_refusal_on_every_machine_is_a_terminal_rejection(world, monkeypatch, capsys, tmp_path):
+    """A create no candidate machine's profile can run is refused before any write: the sender must learn why
+    and stop, not retry ``pending / origin_dispatch_pending`` for ever."""
+    from hermes_cli.kanban_runs_on_capabilities import PlacementCapabilityMismatch
+    exc = PlacementCapabilityMismatch('ci-sweeper', ['capability:hub-write', 'pool:worker'],
+                                      {'worker-a1': ['terminal', 'file', 'kanban'],
+                                       'worker-a2': ['terminal', 'file', 'kanban']})
+    _refuse_placement(monkeypatch, exc)
+    before = _written(tmp_path)
+    result = invoke(world, monkeypatch, capsys)
+    assert result['status'] == 'rejected'
+    assert result['code'] == 'runs_on_capability_mismatch'
+    assert str(exc) in result['error']
+    assert result['created'] is False
+    assert result['handoff_complete'] is False
+    assert _written(tmp_path) == before
+    assert before.get('tasks', 0) == 0 and before.get('task_events', 0) == 0
+    assert before.get('origin_creation_intents', 0) == 0
+
+
+def test_untyped_dispatch_failure_stays_pending(world, monkeypatch, capsys):
+    """An exception whose write outcome is unknown must remain retryable."""
+    _refuse_placement(monkeypatch, RuntimeError('unknown after a possible write'))
+    result = invoke(world, monkeypatch, capsys)
+    assert result == {'status': 'pending', 'code': 'origin_dispatch_pending', 'handoff_complete': False}
+
+
+def test_waiting_create_authority_refusal_stays_pending():
+    from hermes_cli import kanban_create_authority as kca
+    from hermes_cli import kanban_origin_owner as owner
+    exc = kca.CreateAuthorityRefused('owner board not synced yet', wait='origin_owner_unsynced')
+    out = owner._dispatch_result(owner.origin_refusal(exc, origin=True))
+    assert out['status'] == 'pending' and out['code'] == 'origin_owner_unsynced'
