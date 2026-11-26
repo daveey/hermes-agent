@@ -103,6 +103,9 @@ class ReservedReplay(helpers.Receiver):
     def __getattr__(self, name):
         return getattr(self.rows, name)
 
+    def row_evidence(self, *args, **kwargs):
+        return self.rows.row_evidence(*args, **kwargs)
+
     def _call(self, method, path, body=None):
         if not path.endswith('/ops'):
             return super()._call(method, path, body)
