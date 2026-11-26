@@ -4,7 +4,21 @@ import math
 import sqlite3
 import time
 
+from pathlib import Path
+
 from hermes_cli.kanban_table_columns import table_columns
+
+
+def _selected_board(conn):
+    """Name only recognized selected-file layouts; never discover ambient boards."""
+    from hermes_cli.kanban_db_sync import board_slug_for_path
+    path = next((r[2] for r in conn.execute('PRAGMA database_list') if r[1] == 'main'), '')
+    if not path:
+        return None
+    file = Path(path)
+    if file.name == 'kanban.db' or file.parent.name in ('sync-shadow', 'sync-links'):
+        return board_slug_for_path(path)
+    return None
 
 
 def overlay(conn, info, parked, now=None):
@@ -37,7 +51,10 @@ def overlay(conn, info, parked, now=None):
     refs = json.dumps(list({a['ref'] for _, a, _ in candidates}))
     producers = {r[0]: (r[1], r[2]) for r in conn.execute(
         f'SELECT id, status, {owner} FROM tasks WHERE id IN (SELECT value FROM json_each(?))', (refs,))}
+    board = _selected_board(conn)
     for tid, awaited, since in candidates:
+        if awaited.get('board') is not None and awaited['board'] != board:
+            continue
         state, gateway = producers.get(awaited['ref'], (None, None))
         if state not in ('running', 'review') or (awaited.get('gateway') and awaited['gateway'] != gateway):
             continue

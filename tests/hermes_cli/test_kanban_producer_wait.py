@@ -26,6 +26,48 @@ def board():
     conn.close()
 
 
+@pytest.mark.parametrize('selected, requested, expected', [
+    ('kanban.db', None, True),
+    ('kanban.db', 'default', True),
+    ('kanban.db', 'other', False),
+    ('kanban/boards/other/kanban.db', 'other', True),
+    ('kanban/boards/other/kanban.db', 'default', False),
+    ('sync-shadow/other.db', 'other', True),
+    ('sync-shadow/other.db', 'default', False),
+    ('unidentified.db', 'default', False),
+])
+@pytest.mark.parametrize('consumer', ['status', 'timer'])
+def test_selected_board_identity_reaches_status_and_timer(
+        board, tmp_path, monkeypatch, selected, requested, expected, consumer):
+    from hermes_cli import kanban_db
+    def no_discovery(*args, **kwargs):
+        pytest.fail('selected snapshot must not discover ambient boards')
+    monkeypatch.setattr(kanban_db, 'list_boards', no_discovery)
+    monkeypatch.setattr(kanban_db, 'kanban_db_path', no_discovery)
+    path = tmp_path / selected
+    path.parent.mkdir(parents=True, exist_ok=True)
+    board.commit()
+    with sqlite3.connect(path) as conn:
+        board.backup(conn)
+        awaiting = {'kind': 'card', 'ref': 'review', 'gateway': 'hub'}
+        if requested is not None:
+            awaiting['board'] = requested
+        conn.execute('UPDATE tasks SET awaiting=? WHERE id=?', (json.dumps(awaiting), 'owner'))
+        info = _local_wait_info(conn, ['owner'], now=820)['owner']
+        raw = timers.local(conn, {('ordinary', 'owner')})['owner']
+        if consumer == 'status':
+            assert ('producer_wait' in info) is expected
+        else:
+            assert (timers.card_timer(raw) is not None) is expected
+
+
+def test_explicit_board_without_selected_identity_is_unknown(board):
+    board.execute('UPDATE tasks SET awaiting=? WHERE id=?',
+                  (json.dumps({'kind': 'card', 'ref': 'review', 'board': 'default'}), 'owner'))
+    assert 'producer_wait' not in _local_wait_info(board, ['owner'], now=820)['owner']
+    assert timers.card_timer(timers.local(board, {('ordinary', 'owner')})['owner']) is None
+
+
 @pytest.mark.parametrize('producer_state', ['running', 'review'])
 def test_real_park_wait_drives_timer_and_canonical_status(board, monkeypatch, producer_state):
     board.execute("UPDATE tasks SET status=? WHERE id='review'", (producer_state,))
