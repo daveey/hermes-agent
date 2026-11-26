@@ -19,7 +19,8 @@ _TRANSITIONS = {
     "intent_journaled_unsent": {"send_pending"},
     "send_pending": {"authorized_pending_home", "expired", "refused"},
     "authorized_pending_home": {"read_first_pending", "consumed", "expired", "refused"},
-    "read_first_pending": {"consumed", "expired", "refused"},
+    "read_first_pending": {"delivery_pending", "consumed", "expired", "refused"},
+    "delivery_pending": {"consumed", "expired", "refused"},
     "consumed": {"applied", "refused"},
     "applied": set(), "expired": set(), "refused": set(),
 }

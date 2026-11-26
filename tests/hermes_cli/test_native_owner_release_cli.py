@@ -28,6 +28,9 @@ def transport(monkeypatch):
         evidence = None
         proof_changes = {}
         calls = []
+        carriers = []
+        carrier_rows = {}
+        drop_carrier_reply = False
         def __init__(self, *args):
             pass
         def close(self):
@@ -37,8 +40,25 @@ def transport(monkeypatch):
             return {"owner_release": self.support}
         def row_evidence(self, board, table, uid, **kwargs):
             self.calls.append(("row", board, table, uid))
+            if table == "task_events":
+                row = self.carrier_rows.get(uid)
+                return {"board": board, "table": table, "uid": uid, "state": "live" if row else "never_existed",
+                        "row": row, "tombstone": None, "floor": 0}
             return {"state": "live", "row": {"id": uid, "created_on": "foreign-home"}}
         def ops(self, board, ops):
+            if ops[0].get("table") == "task_events":
+                wire = ops[0]
+                with kbc.connect_closing() as conn:
+                    saved = conn.execute("SELECT wire,stage FROM native_owner_release_deliveries WHERE delivery_uid=?",
+                                         (wire["uid"],)).fetchone()
+                    assert json.loads(saved[0]) == wire and saved[1] == "send_pending"
+                    assert not conn.in_transaction
+                self.carriers.append(wire)
+                self.carrier_rows[wire["uid"]] = {**wire["fields"], "uid": wire["uid"], "origin_gateway": "here",
+                                                 "hlc": wire["hlc"], "deleted_at": None, "seq": 1, "version": 1}
+                if self.drop_carrier_reply:
+                    raise OSError("carrier reply lost after commit")
+                return {"results": [{"status": "applied"}]}
             with kbc.connect_closing() as conn:
                 row = conn.execute("SELECT body, stage FROM native_owner_release_intents WHERE intent_uid=?", (ops[0]["intent"]["intent_uid"],)).fetchone()
                 assert row[1] == "send_pending" and not conn.in_transaction

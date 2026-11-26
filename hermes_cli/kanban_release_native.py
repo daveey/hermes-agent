@@ -26,6 +26,9 @@ def _proof(hub, body):
 
 
 def _send(conn, hub, body, *, seen=None):
+    from hermes_cli import kanban_release_delivery as delivery
+    if delivery.existing(conn, body) is not None:
+        return delivery.send(conn, hub, body)
     stage = intent.stage(conn, body)  # Fresh custody, not authority from a prior read.
     if stage in {"expired", "refused", "applied"}:
         return {"ok": stage == "applied", "task_id": body["task_id"], "intent_uid": body["intent_uid"],
@@ -52,7 +55,11 @@ def _send(conn, hub, body, *, seen=None):
             raise ValueError("release journal changed after authorization")
     if proof["state"] == "authorized":
         from hermes_cli.kanban_release_read import prepare
-        return prepare(conn, hub, body, seen=seen)
+        result = prepare(conn, hub, body, seen=seen)
+        if result.get("release_stage") == "acknowledged_pending_home":
+            delivery.prepare(conn, body, nonce=seen)
+            return delivery.send(conn, hub, body)
+        return result
     # Consumption/application are not inferred from a writable event. HOME's
     # exact result is reconciled separately; authorization only promises pending.
     return {"ok": True, "task_id": body["task_id"], "intent_uid": body["intent_uid"],

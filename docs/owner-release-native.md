@@ -30,8 +30,40 @@ A later invocation may supply `--seen-release NONCE` alongside the **same exact
 action**. It is accepted only against unchanged complete rows already confirmed
 emitted on a different invocation. Supplying an unconfirmed nonce redisplays it;
 that invocation cannot ACK its own subsequent confirmation. The reply label is
-`acknowledged_pending_home`, but the durable intent remains `read_first_pending`.
-No consume or HOME carrier is implemented by this slice.
+`acknowledged_pending_home`. The accepted ACK now freezes a separate delivery
+journal and advances the durable intent to `delivery_pending`. No HOME consume or
+application is implemented by this slice.
+
+## Durable canonical carrier
+
+`native_owner_release_deliveries` freezes the complete `task_events` row-upsert
+operation before networking: distinct application/intent, carrier-event/delivery
+and client-operation IDs, exact payload, HLC, timestamp and replay mode. The carrier
+is the existing `operator_call_requested` event with `carrier: owner_release` and
+`action: owner_release`; it deliberately has no generic worker caller. HOME must
+use its separate private-intent verifier, not exempt it from worker authentication.
+The ordinary operator handler currently refuses this unsupported action; publishing
+it is **not** consume/application permission. Capability advertisement stays absent.
+
+The native producer resolves its own frozen delivery before current authorization,
+TTL or comments reads. Unknown/deleted/conflicting evidence cannot resend or mint a
+new identity. Only authoritative `never_existed` with uncompacted history permits
+sending the exact stored operation. A reply loss after commit reconciles the exact
+canonical event and authenticated origin without resending. HTTP `applied` alone is
+not publication proof. A previously confirmed event disappearing fails closed.
+Terminal intent stages never send a carrier; missing/corrupt/multiple journals
+cannot silently replace it. The intent's atomic `delivery_pending` marker also
+fences loss of the delivery table/row. This is recovery integrity, not protection
+against a same-UID actor rewriting all local journals.
+
+This cut has one outstanding delivery per intent and refuses every unknown or
+multiple historical row. The protocol's later definitive stale-comments refusal +
+fresh display/ACK successor path remains unimplemented, as do private application
+result publication/read and the HOME application queue. Never overwrite a frozen
+delivery to implement that future path. Final escaped row-operation size is bounded
+at 256 Ki characters, independently of the 128 KiB source comment bound; some valid
+large/escaping-heavy inventories therefore refuse safely before the delivery/HLC
+transaction commits rather than producing a permanently unsendable carrier.
 
 ## Trust and bounds
 
