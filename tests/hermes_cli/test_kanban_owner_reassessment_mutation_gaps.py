@@ -15,7 +15,9 @@ from hermes_cli import kanban_owner_reassessment_transport as transport
 from hermes_cli import kanban_sync_evidence_order as eo
 from hermes_cli import kanban_sync_parent_order as ordering
 from tests.hermes_cli.test_kanban_owner_reassessment_board_compat import BASE_CAP
-from tests.hermes_cli.test_kanban_owner_reassessment_transport import _park_only, lifecycle, worker
+from tests.hermes_cli.test_kanban_owner_reassessment_transport import _park_only, lifecycle
+
+worker = lifecycle.worker
 
 
 def _group(conn, ctx, cap, evidence):
