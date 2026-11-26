@@ -133,14 +133,15 @@ def test_identity_replacement_during_census_cannot_publish(tmp_path, monkeypatch
         assert not path.with_name(path.name + fast.SUFFIX).exists()
 
 
-def test_read_census_is_bounded_and_excludes_disabled_review(tmp_path):
+@pytest.mark.parametrize("limit", [1, 10])
+def test_read_census_is_bounded_and_excludes_disabled_review(tmp_path, limit):
     from hermes_cli import kanban_governor_storage as observation
     path = tmp_path / "kanban.db"
     with closing(kbc.connect(path)) as conn:
         conn.executemany("INSERT INTO tasks(id, status, created_at, title) VALUES (?, ?, 1, 'fixture')", [
             ("a", "ready"), ("b", "ready"), ("c", "review")])
         conn.commit()
-        rows, counts = observation._census(path, False, 1)
+        rows, counts = observation._census(path, False, limit)
         assert [tuple(row) for row in rows] == [("a", "ready"), ("b", "ready")]
         assert counts == {"ready": 2, "review": 1}
 
