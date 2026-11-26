@@ -876,11 +876,14 @@ class Attestation:
         # Keep Windows' case-folding/drive semantics on its existing pathlib path.
         parts = path.parts if isinstance(path, PurePosixPath) else None
         for component, (root, kind, digests) in self._components.items():
-            contained = (path.anchor == root.anchor and parts[:len(root.parts)] == root.parts
-                         if parts is not None and isinstance(root, PurePosixPath)
-                         else path.is_relative_to(root))
-            if contained:
-                return component, kind, path, path.relative_to(root).as_posix(), digests
+            if parts is not None and isinstance(root, PurePosixPath):
+                if path.anchor != root.anchor or parts[:len(root.parts)] != root.parts:
+                    continue
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
+            return component, kind, path, relative.as_posix(), digests
         return None
 
     def _trusted_stdlib(self, filename):
