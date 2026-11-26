@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli import kanban_annotation_disk as _disk
+from hermes_cli.kanban_annotation_fairness import stalest_first
 from hermes_cli import kanban_annotation_mutation as _mutation
 from hermes_cli import kanban_annotation_parts as _parts
 
@@ -740,7 +741,7 @@ def _event_refresh(events) -> float | None:
         raise
     _coverage_stale.clear()
     _event_ready.clear()
-    for scope, ctx in scopes:
+    for scope, ctx in stalest_first(scopes):
         def refresh_scope():
             if not _scope_interested(scope):
                 _clock_deadlines.pop(scope, None)
@@ -862,10 +863,8 @@ def _holder_pass() -> int:
     another input's, or aging. A scope whose watched files have not moved since the holder last verified it, and
     whose due time has not come, costs a signature and nothing else. Returns how many it refreshed."""
     refreshed = 0
-    for scope, ctx in list(_known.items()):
+    for scope, ctx in stalest_first(list(_known.items()), asleep=_asleep):
         try:
-            if ctx.run(_asleep, scope):
-                continue
             refreshed += bool(ctx.run(_holder_refresh, scope))
         except Exception:  # health: allow BLE001 -- one scope's failed read must not stop the others
             _gates.pop(scope, None)

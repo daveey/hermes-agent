@@ -5,6 +5,7 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { hasFreshKanbanObservation } from '@/store/kanban-observation'
 
+import { rememberRowTimers, rowTimers } from './session-row-timer-memory'
 import { useWaitClock } from './use-wait-clock'
 
 type TimedCard = NonNullable<SessionInfo['kanban_timed_cards']>[number]
@@ -27,12 +28,16 @@ export function compactElapsed(seconds: number): string {
 
 /** At most 40% of the row (160px), preserving title, PR chip and the final gateway mark. */
 export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
+  'use no memo' // The retained evidence expires on local display ticks, not only on row replacements.
+
   const { t } = useI18n()
   const ref = useRef<HTMLSpanElement>(null)
   const [budget, setBudget] = useState(160)
 
-  // Retained rows are historical, not evidence of current running work or a live ask.
-  const cards = [...(session.offline_cached ? [] : (session.kanban_timed_cards ?? []))]
+  useEffect(() => rememberRowTimers(session), [session])
+  const timers = rowTimers(session)
+
+  const cards = [...timers.cards]
     .filter(
       c =>
         Number.isFinite(c.since) &&
@@ -91,14 +96,19 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
     return used <= budget
   })
 
-  const more = cards.length - visible.length + (session.kanban_timed_more ?? 0)
-  const title = label + (session.kanban_timed_more ? `\n… +${session.kanban_timed_more}` : '')
+  const more = cards.length - visible.length + timers.more
+
+  const confirmation = timers.confirmedAt
+    ? `\n${t.sidebar.row.timersLastConfirmed(Math.max(0, Math.floor((now * 1000 - timers.confirmedAt) / 60_000)))}`
+    : ''
+
+  const title = label + (timers.more ? `\n… +${timers.more}` : '') + confirmation
 
   return (
     <Tip label={<span className="whitespace-pre-line">{title}</span>} side="top">
       <span
         aria-label={title}
-        className="pointer-events-auto ml-1 inline-flex items-baseline gap-1 align-middle tabular-nums"
+        className={`pointer-events-auto ml-1 inline-flex items-baseline gap-1 align-middle tabular-nums${timers.confirmedAt ? ' opacity-60' : ''}`}
         data-testid="session-row-card-timers"
         ref={ref}
       >

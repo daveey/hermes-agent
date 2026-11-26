@@ -66,6 +66,7 @@ export const enSessionRowStatus = {
   outcomeMuted: 'Muted',
   outcomeRunning: 'Running',
   outcomeWaiting: 'Waiting',
+  timersLastConfirmed: minutes => `last confirmed ${minutes}m ago`,
   pausedQueue: 'A message queued before a restart may not have run: Send again or Discard',
   outcomeUnresolved: reason =>
     reason && Object.hasOwn(UNRESOLVED_REASONS, reason) ? UNRESOLVED_REASONS[reason] : 'Unresolved',

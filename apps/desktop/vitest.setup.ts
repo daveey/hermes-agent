@@ -1,6 +1,7 @@
 import { configure } from '@testing-library/react'
 import { afterAll, afterEach } from 'vitest'
 
+import { resetRowTimersForTests } from './src/app/chat/sidebar/session-row-timer-memory'
 import { resetSubmissionIdSupportForTests } from './src/app/session/hooks/use-prompt-actions/submission-identity-support'
 import { resetSingleTabsForTests } from './src/components/pane-shell/tree/single-tab-memory'
 import { clearPlaybackSourceCache } from './src/lib/playback-source-cache'
@@ -100,3 +101,4 @@ afterEach(() => resetParkRowsForTests())
 afterEach(() => resetSubmissionIdSupportForTests())
 // Single-tab bookkeeping must not restore a prior test's displaced panes.
 afterEach(() => resetSingleTabsForTests())
+afterEach(() => resetRowTimersForTests())

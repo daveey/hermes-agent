@@ -23,6 +23,7 @@ export interface SessionRowStatusCopy {
   outcomeMuted: string
   outcomeRunning: string
   outcomeWaiting: string
+  timersLastConfirmed: (minutes: number) => string
   /** [daveey] The red is a queue card a restart may have lost (this app's queue, not the backend's status). */
   pausedQueue: string
   outcomeUnresolved: (reason: null | string) => string

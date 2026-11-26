@@ -2039,6 +2039,7 @@
   "sidebar.row.outcomeMuted": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeRunning": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeWaiting": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "sidebar.row.timersLastConfirmed": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeUnresolved": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.muteFailed": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.backgroundProcesses": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
