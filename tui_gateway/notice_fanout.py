@@ -497,6 +497,7 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
             out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
                         "status": None, "skipped": skipped, "source": "remote"})
             observed.result = 'acked_refreshed' if skipped is None else 'acked_intentionally_skipped'
+    diagnostic.cert_active = True
     committed = state.ack_remote(acked)
     if not committed:
         out.retry()
@@ -504,6 +505,7 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
     diagnostic.cert = ('ack_failed' if not committed else 'inputs_unavailable' if inputs is None else 'not_all_acked')
     if committed and inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
         _certify_remote(inputs, polled, known, diagnostic)
+    diagnostic.cert_active = False
     diagnostic.health = 'exception'
     complete = committed and recovered_all and (previous.keys() | snapshot.keys()) <= acked.keys()
     fact_links_health.acknowledge(origin, health_generation, complete=complete)

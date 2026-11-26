@@ -53,8 +53,12 @@ Remote refreshed means attempted refresh, not memo certification. The second
 poll still occurs after fingerprint collection even if prints are None. Existing
 per-board cursor comparisons, seed/ack behavior and health acknowledgement order
 remain intact. Unevaluated short-circuit tests are never reported false. Health,
-certification, chat and call receipts are different units. A later health failure
-keeps the finalized certification outcome (including a successful memo assignment).
+certification, chat and call receipts are different units. Certification entry is
+observed immediately before projection acknowledgment, and ends after the final
+certification decision, before health acknowledgment. Earlier projection acquisition,
+iteration, load or seed failures retain `not_attempted`; failures inside that interval
+emit `exception`. A later health failure keeps the finalized certification outcome
+(including a successful memo assignment).
 
 ## Proof surface
 

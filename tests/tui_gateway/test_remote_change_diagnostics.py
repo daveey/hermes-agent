@@ -153,13 +153,18 @@ def test_malformed_comparison_is_not_silenced_when_prints_present(remote):
     conservation()
 
 
-@pytest.mark.parametrize('step', ['cards', 'load', 'ack', 'prints', 'poll', 'health'])
+@pytest.mark.parametrize('step', ['origin', 'pending', 'cards_call', 'cards', 'load', 'seed',
+                                 'ack', 'recovery', 'prints', 'poll', 'ledger', 'health'])
 def test_exceptions_are_terminal_once(remote, monkeypatch, step):
     def fail(*a, **k):
         raise RuntimeError(step)
-    targets = {'cards': (activity, '_remote_cards'), 'load': (state, 'load_remote'),
-               'ack': (state, 'ack_remote'), 'prints': (nf, '_known_prints'),
-               'health': (fact_links_health, 'acknowledge')}
+    targets = {'origin': (activity, '_origin_scope'), 'pending': (fact_links_health, 'pending'),
+               'cards_call': (activity, '_remote_cards'), 'load': (state, 'load_remote'),
+               'seed': (state, 'seed_remote'), 'ack': (state, 'ack_remote'),
+               'recovery': (notice_links_health, 'recover_into'), 'prints': (nf, '_known_prints'),
+               'ledger': (nf, '_ledger_content_key'), 'health': (fact_links_health, 'acknowledge')}
+    if step == 'seed':
+        remote['previous'] = None
     if step == 'cards':
         def cards(*a, **k):
             yield from ()
@@ -173,7 +178,9 @@ def test_exceptions_are_terminal_once(remote, monkeypatch, step):
     with pytest.raises(RuntimeError, match=step):
         remote['run']()
     assert runs('call') == {'exception': 1}
-    assert runs('cert') == {('certified' if step == 'health' else 'exception'): 1}
+    expected_cert = ('not_attempted' if step in {'origin', 'pending', 'cards_call', 'cards', 'load', 'seed'}
+                     else 'certified' if step == 'health' else 'exception')
+    assert runs('cert') == {expected_cert: 1}
     assert runs('health') == {('exception' if step == 'health' else 'not_reached'): 1}
     conservation()
 

@@ -53,6 +53,7 @@ class RemoteCall:
     def __init__(self):
         self.call = 'unknown'
         self.cert = 'not_attempted'
+        self.cert_active = False
         self.health = 'not_reached'
         self.miss = {}
 
@@ -70,9 +71,9 @@ class RemoteCall:
     def __exit__(self, kind, exc, tb):
         if kind is not None:
             self.call = 'exception'
-            # Health acknowledgment follows the finalized certification stage;
-            # its failure cannot undo a memo assignment or conflate their units.
-            if self.health == 'not_reached':
+            # Only an entered, unfinished certification stage owns this failure.
+            # Projection failures precede it; health acknowledgment follows it.
+            if self.cert_active:
                 self.cert = 'exception'
         emit('remote.call', self.call)
         emit('remote.cert', self.cert)
