@@ -85,3 +85,28 @@ Native journal and confirmation tests exercise reopen, changed rows, revoked
 custody, earlier-invocation ACK, single-use/expired/foreign-launch receipts, failed
 stdout flush and a complete 100 kB inventory through a real CLI subprocess/socket.
 Their fake canonical adapter is **not** a composed Board DO-to-HOME deployment proof.
+
+## HOME consume custody (still no application)
+
+The dispatcher now gives native-owner carriers a separate bounded durable intake
+and consume queue before worker-caller authentication. A generic operator refusal
+or an advanced ordinary operator watermark cannot suppress this queue. Intake
+captures at most sixteen payloads of at most 256 KiB per tick; two pending entries
+rotate through authenticated processing. A missing local HOME row stays pending
+rather than being permanently skipped during replica catch-up. Invalid observed
+siblings do not acquire authority to suppress a valid authenticated delivery.
+
+HOME checks the enrolled transport identity, local board/card HOME, canonical live
+carrier fields and authenticated original gateway, and the exact private intent.
+It freezes a distinct complete consume operation before networking. Immutable
+carrier/wire custody and monotonic stages preserve that UID on reopen and reply
+loss; no uncertain retry chooses a new identity. Exact private winning consumption
+is required to reach `consumed_pending_apply`; copied public events or HTTP success
+alone are insufficient. Expired/refused/unavailable evidence stays held. There is
+no automatic successor, journal GC or broader-principal grant.
+
+This queue does **not** release historical capability stops, write a local renewal
+mandate, change budgets/status, publish an applied result, or confer coverage or
+execution permission. Private consumption remains historical only. Applied-only
+consumers, atomic HOME application, canonical result transport and full composed
+CLI/DO/HOME/deployment proof remain required before capability advertisement.

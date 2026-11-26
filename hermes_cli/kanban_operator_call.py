@@ -785,6 +785,9 @@ def _incoming(conn: sqlite3.Connection, own: str, raw: Optional[str]) -> Optiona
         payload = json.loads(raw or "{}")
     except ValueError:
         return None
+    from hermes_cli.kanban_release_home_queue import carrier
+    if carrier(payload):
+        return None  # native-owner custody has its own queue, not worker caller authority
     uid, target = payload.get("request_uid"), payload.get("target_task_id")
     if payload.get("action") == LABEL_PUBLISH:
         # A machine has no home card: the call names its executor, and only that gateway takes it.
@@ -829,6 +832,8 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     with _replica(conn) as rep:
         if rep is None:
             return []
+        from hermes_cli import kanban_release_home as owner_release
+        owner_release.tick(conn, rep, own, board)
         if not _has_log(conn) or not conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_call_scan'").fetchone() \
                 or not conn.execute(
