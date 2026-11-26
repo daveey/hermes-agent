@@ -5,11 +5,14 @@ import json
 import math
 
 
-def publish(conn, task: dict) -> dict | None:
-    """Read inside the collector snapshot; never infer withdrawal from status."""
+def publish(conn, task: dict, *, latest: tuple | None = None) -> dict | None:
+    """Read inside the collector snapshot; never infer withdrawal from status.
+
+    ``latest`` is ``(row,)`` when the caller already read this card's latest ``request_withdrawn`` event
+    ``(id, created_at, payload)`` in this snapshot (row None when it has none)."""
     if task.get("status") != "archived":
         return None
-    row = conn.execute(
+    row = latest[0] if latest is not None else conn.execute(
         "SELECT id,created_at,payload FROM task_events WHERE task_id=? "
         "AND kind='request_withdrawn' ORDER BY id DESC LIMIT 1", (task["id"],)).fetchone()
     if row is None:

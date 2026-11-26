@@ -46,35 +46,48 @@ def test_projection_shares_opens_but_not_snapshots(world, board, monkeypatch, fl
             opened.append(conn)
         return conn
     monkeypatch.setattr(origin, '_open_ro', opener)
-    original = local.observe_local_binding
     visited = []
-    def observe(binding, **kw):
-        result = original(binding, **kw)
-        visited.append(binding['owner']['task_id'])
+    def mutate_after_first(task_id):
+        visited.append(task_id)
         if len(visited) == 1:
-            # The previous borrow must release its snapshot before this commit.
+            # A single-card borrow must release its snapshot before this commit; the batched pass keeps the one
+            # snapshot it read every card in.
             with kbc.connect_closing() as conn:
                 if change == 'blocked':
                     conn.execute("UPDATE tasks SET status='blocked' WHERE id != ?", (visited[0],))
                 else:
                     conn.execute('DELETE FROM origin_creation_intents WHERE task_id != ?', (visited[0],))
+    original = local.observe_local_binding
+    def observe(binding, **kw):
+        result = original(binding, **kw)
+        mutate_after_first(binding['owner']['task_id'])
         return result
     monkeypatch.setattr(local, 'observe_local_binding', observe)
+    original_prefetched = local._observe_prefetched
+    def observe_prefetched(conn, binding, read, **kw):
+        result = original_prefetched(conn, binding, read, **kw)
+        mutate_after_first(binding['owner']['task_id'])
+        return result
+    monkeypatch.setattr(local, '_observe_prefetched', observe_prefetched)
     rows = ledger.project(world[0], replica=None, gateway='owner', profile='default')
     assert len(rows) == len(tasks) == 3
     by_id = {row['id']: row for row in rows}
     assert by_id[visited[0]]['status'] == 'ready'
-    assert {by_id[tid]['status'] for tid in visited[1:]} == ({'blocked'} if change == 'blocked' else {'unknown'})
+    changed = {'blocked'} if change == 'blocked' else {'unknown'}
+    # One pass is one snapshot when batched: a commit during the pass is the next projection's news.
+    assert {by_id[tid]['status'] for tid in visited[1:]} == ({'ready'} if flag == '1' else changed)
     assert len(opened) == (1 if flag == '1' else 3)
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute('SELECT 1')
     # The next call cannot reuse the prior call's connection or observations.
     monkeypatch.setattr(local, 'observe_local_binding', original)
+    monkeypatch.setattr(local, '_observe_prefetched', original_prefetched)
     with kbc.connect_closing() as conn:
         conn.execute("UPDATE tasks SET status='running' WHERE id=?", (visited[0],))
     again = ledger.project(world[0], replica=None, gateway='owner', profile='default')
     assert next(row for row in again if row['id'] == visited[0])['status'] == 'running'
+    assert {row['status'] for row in again if row['id'] != visited[0]} == changed
     assert len(opened) == (2 if flag == '1' else 6)
 
 
@@ -89,11 +102,11 @@ def test_projection_closes_shared_handles_after_failure(world, board, monkeypatc
         opened.append(conn)
         return conn
     monkeypatch.setattr(origin, '_open_ro', opener)
-    original = local.observe_local_binding
-    def fail_after_borrow(binding, **kw):
-        original(binding, **kw)
+    original = local.observe_local_bindings
+    def fail_after_borrow(bindings, **kw):
+        original(bindings, **kw)
         raise ValueError('projection_failure')
-    monkeypatch.setattr(local, 'observe_local_binding', fail_after_borrow)
+    monkeypatch.setattr(local, 'observe_local_bindings', fail_after_borrow)
     with pytest.raises(ValueError, match='projection_failure'):
         ledger.project(world[0], replica=None, gateway='owner', profile='default')
     assert len(opened) == 2

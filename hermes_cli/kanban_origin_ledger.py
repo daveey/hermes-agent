@@ -203,7 +203,7 @@ def completion_verdict(task_id, row, event, run, archived, *, bound_event, curre
 
 
 def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
-                       local_only: bool = False) -> dict:
+                       local_only: bool = False, read: dict | None = None) -> dict:
     """Attach owner evidence during the collector's existing read transaction.
 
     The collector must call this on the owner, never on a replica. A completion
@@ -212,33 +212,42 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
     judge-success receipt; unavailable judges never supply release evidence.
     Explicit-home callers set local_only: upstream presentation is confined to
     this connection, never an implicitly discovered process-home shadow.
+    ``read`` carries this card's rows when the caller already read them in this same transaction
+    (``kanban_origin_local._prefetch``): the task row, its markers, its latest completed/archived/withdrawn
+    events and its latest run. Every check below is unchanged; only the keyed reads are skipped.
     """
     if not conn.in_transaction:
         raise ValueError('origin_observation_snapshot_required')
-    row = conn.execute(
+    row = read['row'] if read is not None else conn.execute(
         "SELECT status,completed_at,current_run_id,goal_mode,completion_contract FROM tasks WHERE id=?",
         (task['id'],)).fetchone()
     if row is None or row[0] != task.get('status'):
         raise ValueError('origin_observation_task_changed')
     supplied = task.get('origin_bindings', [])
-    has_intents = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone()
-    authoritative = [json.loads(r[0]) for r in conn.execute(
-        'SELECT binding_json FROM origin_creation_intents WHERE task_id=?', (task['id'],))] if has_intents else []
+    if read is not None:
+        authoritative = read['markers']
+    else:
+        has_intents = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone()
+        authoritative = [json.loads(r[0]) for r in conn.execute(
+            'SELECT binding_json FROM origin_creation_intents WHERE task_id=?', (task['id'],))] if has_intents else []
     if (not isinstance(supplied, list) or any(not isinstance(m, dict) for m in supplied)
             or sorted(_json({k: v for k, v in m.items() if k != 'publication_version'}) for m in supplied)
             != sorted(_json(m) for m in authoritative)
             or any(m.get('owner') != {**{k: task.get(k) for k in ('gateway', 'profile', 'board')},
                                        'task_id': task['id']} for m in authoritative)):
         raise ValueError('origin_observation_binding_changed')
-    event = conn.execute(
-        "SELECT id,run_id,created_at,payload FROM task_events WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
-        (task['id'],)).fetchone()
-    run = conn.execute(
-        "SELECT id,status,outcome,ended_at,summary FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
-        (task['id'],)).fetchone()
-    archived = conn.execute(
-        "SELECT id,payload FROM task_events WHERE task_id=? AND kind='archived' ORDER BY id DESC LIMIT 1",
-        (task['id'],)).fetchone() if row[0] == 'archived' and event else None
+    if read is not None:
+        event, run, archived = read['event'], read['run'], read['archived']
+    else:
+        event = conn.execute(
+            "SELECT id,run_id,created_at,payload FROM task_events WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
+            (task['id'],)).fetchone()
+        run = conn.execute(
+            "SELECT id,status,outcome,ended_at,summary FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (task['id'],)).fetchone()
+        archived = conn.execute(
+            "SELECT id,payload FROM task_events WHERE task_id=? AND kind='archived' ORDER BY id DESC LIMIT 1",
+            (task['id'],)).fetchone() if row[0] == 'archived' and event else None
     verified, legacy, terminal = completion_verdict(
         task['id'], row, event, run, archived,
         # [daveey] By uid, else id; a replayed legacy completion binds its run's receipt (kanban_completion_refs).
@@ -258,7 +267,7 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
     if (ask := publish_ask(conn, task)) is not None:
         payload['ask_notice'] = ask
     from hermes_cli.kanban_withdrawal_notice import publish
-    withdrawal = publish(conn, task)
+    withdrawal = publish(conn, task) if read is None else publish(conn, task, latest=(read['withdrawn'],))
     if withdrawal is not None:
         from hermes_cli.kanban_withdrawal_recipients import published
         payload['withdrawal_notice'] = withdrawal
@@ -632,6 +641,8 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
             from hermes_cli.kanban_origin_batch import task_rows, lookup
             task_snapshot = task_rows(source, (b for _, b, *_ in obligations
                                                if (b['origin']['gateway'], b['origin']['profile']) == (gateway, profile))) if fresh else {}
+            from hermes_cli.kanban_origin_batch import _enabled as batched
+            own: dict | None = {} if batched() else None  # id(binding) -> this pass's same-owner observation
             for raw, binding, resolved, payload, version, released in obligations:
                 origin, owner = binding['origin'], binding['owner']
                 if (origin['gateway'], origin['profile']) != (gateway, profile):
@@ -679,9 +690,21 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 if final is None:
                     continue
                 if (owner['gateway'], owner['profile']) == (gateway, profile):
-                    from hermes_cli.kanban_origin_local import observe_local_binding
-                    local = (observe_local_binding(binding, profile=profile, now=now) if home is None else
-                             observe_local_binding(binding, profile=profile, now=now, home=home))
+                    from hermes_cli import kanban_origin_local
+                    if own is None:
+                        observe = kanban_origin_local.observe_local_binding
+                        local = (observe(binding, profile=profile, now=now) if home is None else
+                                 observe(binding, profile=profile, now=now, home=home))
+                    else:
+                        if not own:
+                            # [daveey] Every same-owner card in one snapshot and one batched read per board, at the
+                            # first one reached: 384 cards cost 4,036 statements per projection on the hub.
+                            mine = [b for _, b, *_ in obligations
+                                    if (b['origin']['gateway'], b['origin']['profile']) == (gateway, profile)
+                                    and (b['owner']['gateway'], b['owner']['profile']) == (gateway, profile)]
+                            own.update(zip(map(id, mine), kanban_origin_local.observe_local_bindings(
+                                mine, profile=profile, now=now, home=home)))
+                        local = own[id(binding)]
                     # An unreadable local authority must not fall back to a stale
                     # own replica, even one which previously proved completion.
                     current = local is not None
