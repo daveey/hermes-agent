@@ -488,7 +488,7 @@ def resolve_review_model(conn, task, cfg, *, collector=None):
             _candidate(collector, level, model, norm, now, (), ["provider_unresolved"])
             return True
         live_wall = pw.live_quota_wall(norm, model)
-        sources = (walls.get(norm), holds.get(norm), live_wall)
+        sources = (pw.wall_until(walls, norm, model), holds.get(norm), live_wall)
         def finite_future(value):
             return (isinstance(value, (int, float)) and not isinstance(value, bool)
                     and math.isfinite(value) and value > now)

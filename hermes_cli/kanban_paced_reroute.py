@@ -81,7 +81,7 @@ def _review_peer(conn, task, cfg, held, now, *, registered=False):
     walled = pw.active_walls(now=now)
     for alt_model, alt_provider in independent_routes(set(), cfg, assignee):
         alt_provider = pw._norm(alt_provider)
-        if (not alt_provider or alt_provider == "auto" or alt_provider in held or alt_provider in walled
+        if (not alt_provider or alt_provider == "auto" or alt_provider in held or pw.wall_until(walled, alt_provider, alt_model)
                 or alt_provider in safety_refused or pw.live_quota_wall(alt_provider, alt_model)):
             continue
         if registered and registry_refusal(alt_model, alt_provider, assignee):

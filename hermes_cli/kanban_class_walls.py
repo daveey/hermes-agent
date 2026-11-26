@@ -97,20 +97,19 @@ def class_wall_routes(task, model, *, now, extra_walls=None):
                                  eligible=lambda r: is_provider_enabled(providers.get(r['provider'], {})))
     # Only walls that constrain this class may force a concrete per-run alternate.
     # Unrelated provider state must leave healthy weighted allocation deferred.
-    candidate_providers = {route['provider'] for route in candidates}
-    known = {provider: until for provider, until in pw.active_walls(now=now).items()
-             if provider in candidate_providers}
-    for provider, until in (extra_walls or {}).items():
-        if provider in candidate_providers:
-            known[provider] = max(known.get(provider, 0), until)
-    provider_walls = dict(known)
+    recorded = {**pw.active_walls(now=now)}
+    for key, until in (extra_walls or {}).items():
+        recorded[key] = max(recorded.get(key, 0), until)
+    known = {}
     routes = []
     for route in candidates:
         provider = route['provider']
-        until = pw.live_quota_wall(provider, route['model'])
+        until = pw.wall_until(recorded, provider, route['model'])
+        live = pw.live_quota_wall(provider, route['model'])
+        until = max((u for u in (until, live) if u is not None), default=None)
         if until is not None:
             # Observed deadlines inform holds/reroute receipts, not sibling eligibility.
             known[provider] = max(known.get(provider, 0), until)
-        if provider not in provider_walls and until is None:
+        if until is None:
             routes.append(route)
     return routes, known

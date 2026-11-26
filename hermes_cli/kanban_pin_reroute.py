@@ -127,10 +127,10 @@ def fresh_live_wall(conn: Any, task: Any, now: Optional[float] = None,
 def known_wall(pinned: tuple[str, str], now: Optional[float] = None) -> Optional[dict[str, float]]:
     """``{provider: reset}`` when the pin's provider is walled right now in ``provider_walls.json`` or the live
     pool is quota-walled for the pinned model (the later reset of the two), whatever the card's history."""
-    from hermes_cli.kanban_provider_walls import active_walls, live_quota_wall
+    from hermes_cli.kanban_provider_walls import active_walls, live_quota_wall, wall_until
     now = time.time() if now is None else now
     model, provider = pinned
-    resets = [until for until in (active_walls(now=now).get(provider), live_quota_wall(provider, model))
+    resets = [until for until in (wall_until(active_walls(now=now), provider, model), live_quota_wall(provider, model))
               if isinstance(until, (int, float)) and until > now]
     return {provider: float(max(resets))} if resets else None
 
@@ -179,7 +179,7 @@ def peer_route(task: Any, model: str, walled: dict) -> Optional[tuple[str, str]]
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
     from hermes_cli.kanban_model_assignment import _assignee_config
-    from hermes_cli.kanban_provider_walls import live_quota_wall
+    from hermes_cli.kanban_provider_walls import live_quota_wall, wall_until
     config = _assignee_config(getattr(task, "assignee", None)) or {}
     policy = config.get("model_routing") or {}
     try:
@@ -195,7 +195,7 @@ def peer_route(task: Any, model: str, walled: dict) -> Optional[tuple[str, str]]
         return None
     providers = config.get("providers") or {}
     routes = eligible_routes(policy, levels[0], class_requirements(config), eligible=lambda r: (
-        r["provider"] not in walled and is_provider_enabled(providers.get(r["provider"], {}))))
+        not wall_until(walled, r["provider"], r["model"]) and is_provider_enabled(providers.get(r["provider"], {}))))
     for route in routes:
         if live_quota_wall(route["provider"], route["model"]) is None:
             return route["model"], route["provider"]

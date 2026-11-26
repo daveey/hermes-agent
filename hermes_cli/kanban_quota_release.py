@@ -31,6 +31,7 @@ def prepare(conn, row):
         else:
             state = kb._json_dict(event[0])
             state['write_wall'] = bool(state.get('provider') and state['until'] - time.time() >= walls.MIN_WALL_SECONDS)
+            state['wall_model'] = walls.receipt_wall_model(conn, row['task_id'], row['run_id'], state.get('provider'))
         conn.execute("INSERT INTO kanban_quota_effects (run_uid,state) VALUES (?,?)",
                      (row['run_uid'], json.dumps(state)))
     return state
@@ -38,7 +39,8 @@ def prepare(conn, row):
 
 def finish(state):
     if state['write_wall'] and state['until'] > time.time():
-        persist_wall(state['provider'], state['until'])
+        from hermes_cli.kanban_provider_walls import wall_key
+        persist_wall(wall_key(state['provider'], state.get('wall_model')), state['until'])
 
 
 def persist_wall(provider, until, *, now=None, path=None):

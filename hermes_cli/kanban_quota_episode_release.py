@@ -112,9 +112,11 @@ def _drop_walls(walls):
     deadline = {}
     for wall in walls:
         for name in _providers(wall):
-            deadline[name] = max(deadline.get(name, 0), wall["until"])
-    for name, until in deadline.items():
-        pw.drop_wall(name, not_after=until)
+            key = pw.wall_key(name, wall.get('wall_model'))
+            deadline[key] = max(deadline.get(key, 0), wall["until"])
+    for key, until in deadline.items():
+        provider, model = pw._wall_route(key)
+        pw.drop_wall(provider, model=model, not_after=until)
 
 
 def release(conn, task_id: str, *, reason: str, actor: str, probe=None) -> dict:

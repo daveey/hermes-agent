@@ -458,11 +458,11 @@ def _review_off_wall(conn, task, base, cfg):
         return None
     now = time.time()
     walled = pw.active_walls(now=now)
-    if not (walled.get(provider) or pw.live_quota_wall(provider, model)):
+    if not (pw.wall_until(walled, provider, model) or pw.live_quota_wall(provider, model)):
         return None
     for alt_model, alt_provider in independent_routes(set(), cfg, getattr(task, 'assignee', None)):
         alt_provider = pw._norm(alt_provider)
-        if (not alt_provider or alt_provider == 'auto' or alt_provider == provider or alt_provider in walled
+        if (not alt_provider or alt_provider == 'auto' or alt_provider == provider or pw.wall_until(walled, alt_provider, alt_model)
                 or pw.live_quota_wall(alt_provider, alt_model)):
             continue
         return alt_model, alt_provider, provider
@@ -494,10 +494,10 @@ def _class_alternate_off_wall(conn, task, base):
         return routes[0]['model'], routes[0]['provider'], sorted(known)[0]
     if not provider or provider == 'auto':
         return None
-    until = pw.active_walls(now=now).get(provider) or pw.live_quota_wall(provider, model)
+    until = pw.wall_until(pw.active_walls(now=now), provider, model) or pw.live_quota_wall(provider, model)
     if not until:
         return None
-    route = alternate_route(conn, task, {provider: until}, base, now)
+    route = alternate_route(conn, task, {pw.wall_key(provider, model): until}, base, now)
     if not route or pw.live_quota_wall(route[1], route[0]):
         return None
     return route[0], route[1], provider

@@ -82,11 +82,13 @@ def episode(conn, task_id, *, run_id=None):
     actual = receipt_route(conn, task_id, latest['id'])
     actual, admitted = (p.strip().lower() if p else None for p in (actual, admitted))
     providers = sorted({p for p in (actual, admitted) if p})
+    from hermes_cli.kanban_provider_walls import receipt_wall_model
     return {'episode_id': runs[-1]['id'], 'run_id': latest['id'], 'count': len(runs),
             'until': until if until is not None else time.time() + MAX_BACKOFF_SECONDS,
             'backoff_until': backoff, 'hinted': reset is not None,
             'provider': actual or admitted, 'providers': providers,
-            'model': route.get('model'), 'auth_churn': churn}
+            'model': route.get('model'), 'auth_churn': churn,
+            'wall_model': receipt_wall_model(conn, task_id, latest['id'], actual or admitted)}
 
 
 def _providers(state):
@@ -107,7 +109,7 @@ def _disproved(wall, now, memo):
     names = _providers(wall)
     if not wall.get('hinted') or not names:
         return False
-    model = wall.get('model')
+    model = wall.get('wall_model') or wall.get('model')
     if not isinstance(model, str) or not model or is_class_selector(model) or len(names) > 1:
         model = None
     if 'walls' not in memo:
@@ -115,7 +117,7 @@ def _disproved(wall, now, memo):
     for name in names:
         if (name, model) not in memo:
             memo[name, model] = pw.live_pool_serving(name, model)
-    return all(memo['walls'].get(name, 0) <= wall['until'] and memo[name, model] for name in names)
+    return all((pw.wall_until(memo['walls'], name, model) or 0) <= wall['until'] and memo[name, model] for name in names)
 
 
 def _unhinted(conn, task_id, wall):
@@ -172,7 +174,7 @@ def _base_route(task, base):
 def _walled_elsewhere(model, provider, now):
     """Deadline of a wall on *provider* that this episode never saw (another card's, or the live pool's)."""
     from hermes_cli import kanban_provider_walls as pw
-    known = pw.active_walls(now=now).get(provider)
+    known = pw.wall_until(pw.active_walls(now=now), provider, model)
     return known if known is not None else pw.live_quota_wall(provider, model)
 
 
@@ -253,7 +255,7 @@ def alternate_route(conn, task, walls, base, now):
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
     from hermes_cli.kanban_model_assignment import _assignee_config
-    from hermes_cli.kanban_provider_walls import active_walls, live_pool_serving
+    from hermes_cli.kanban_provider_walls import active_walls, live_pool_serving, wall_until
     model, _provider, reason = base
     strong = _strong_class(base)
     if ((reason not in {'default', 'off', 'profile_out_of_scope', 'class'} and not strong) or not walls):
@@ -282,7 +284,7 @@ def alternate_route(conn, task, walls, base, now):
     walled = {**active_walls(now=now), **walls}
     providers = config.get('providers') or {}
     routes = eligible_routes(policy, level, class_requirements(config), eligible=lambda r: (
-        r['provider'] not in walled and is_provider_enabled(providers.get(r['provider'], {}))))
+        not wall_until(walled, r['provider'], r['model']) and is_provider_enabled(providers.get(r['provider'], {}))))
     if strong:
         routes = [r for r in routes if live_pool_serving(r['provider'], r['model'])]
     return (routes[0]['model'], routes[0]['provider']) if routes else None
@@ -315,7 +317,7 @@ def _wall_models(task, wall, provider):
     """Concrete models this gateway would run *provider* on for the walled route (a class's routes), or []."""
     from agent.model_routing import is_class_selector
     from hermes_cli.kanban_model_assignment import _assignee_config
-    model = wall.get('model')
+    model = wall.get('wall_model') or wall.get('model')
     if not isinstance(model, str) or not model:
         return []
     if not is_class_selector(model):
@@ -344,6 +346,7 @@ def _served_here(conn, task, wall, now):
 
 def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     """Return (guard reason, alternate route); never writes or allocates quota."""
+    from hermes_cli.kanban_provider_walls import wall_key, wall_until
     from hermes_cli.kanban_model_tier import resolve_model_tier
     from hermes_cli.kanban_model_neutral import routing_view
     task = routing_view(task)
@@ -370,7 +373,8 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
         names = _providers(wall)
         unknown = unknown or not names
         for name in names:
-            walls[name] = max(walls.get(name, 0), wall['until'])
+            key = wall_key(name, wall.get('wall_model'))
+            walls[key] = max(walls.get(key, 0), wall['until'])
     episode_walls = dict(walls)  # this episode's own walls: a pin moves only off a wall its own run hit
     try:
         base = base or resolve_model_tier(conn, task, lane=lane, cfg=cfg)
@@ -378,14 +382,14 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
         if target is None and lifted:
             # A class route: the worker allocates it against this gateway's live pool, which has room.
             return None, None
-        if target is not None and not unknown and target[1] not in walls:
+        if target is not None and not unknown and not wall_until(walls, target[1], target[0]):
             # A provider this episode never hit may still be walled (another card's wall, the live pool):
             # admitting it would send a card moved off codex, then walled on anthropic, back to codex.
             elsewhere = _walled_elsewhere(*target, now)
             if elsewhere is None:
                 # The route admission will use is a known, free, different provider (e.g. a re-pinned card).
                 return None, None
-            walls[target[1]] = elsewhere
+            walls[wall_key(target[1], target[0])] = elsewhere
     except sqlite3.Error:
         raise
     except Exception:

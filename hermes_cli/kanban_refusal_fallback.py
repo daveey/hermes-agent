@@ -103,10 +103,9 @@ def class_peers(task, model: str) -> list[tuple[str, str]]:
     walled = pw.active_walls(now=time.time())
     out: list[tuple[str, str]] = []
     for pool, models in _pool_routes(task, model):
-        if pool in walled:
-            continue
         for candidate in models:
-            if not pw.live_quota_wall(pool, candidate) and pw.live_pool_serving(pool, candidate):
+            if (not pw.wall_until(walled, pool, candidate) and not pw.live_quota_wall(pool, candidate)
+                    and pw.live_pool_serving(pool, candidate)):
                 out.append((candidate, pool))
                 break
     return out

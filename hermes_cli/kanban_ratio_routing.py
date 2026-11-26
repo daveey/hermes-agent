@@ -291,7 +291,7 @@ def _eligible(pool: str, model: str, entry: Any, walled: dict[str, float]) -> Op
         return None
     # ``live_pool_serving`` is the one credential-pool load per pool and pick: it is False on a quota wall for
     # ``model`` (``quota_unavailable``, the evidence ``live_quota_wall`` reads) as well as with no live credential.
-    if pool in walled or not pw.live_pool_serving(pool, model):
+    if pw.wall_until(walled, pool, model) or not pw.live_pool_serving(pool, model):
         return None
     return ratio
 

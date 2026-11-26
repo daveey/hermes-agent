@@ -3,7 +3,7 @@
 2026-10-26: the hub spawned workers on openai-codex that died ~60 s later with ``retry after 524389s``
 (~6 days), 285 times in 24h. A ``rate_limited`` exit is requeued as neutral, so nothing noticed.
 
-* :func:`record_wall` stores ``provider -> until`` in ``provider_walls.json``.
+* :func:`record_wall` stores ``provider -> until`` (broad) or ``provider/model -> until`` in ``provider_walls.json``.
   Reaped attempts use their exact receipt/episode deadline; the log reader is
   retained only for older callers without an episode.
 * :func:`retier_for_walls` moves ordinary default routing (``tier_reason: default``, no pin) off a walled
@@ -81,9 +81,33 @@ def profile_provider() -> str:
         return ""
 
 
-def record_wall(provider: str, retry_after: Optional[int], *, now: Optional[float] = None,
+def wall_key(provider: str, model: Optional[str] = None) -> str:
+    """Legacy provider key, or an exact model key (class selectors are not concrete)."""
+    provider = _norm(provider)
+    return f"{provider}/{model}" if model and not model.startswith('class:') else provider
+
+
+def wall_until(walls: dict[str, float], provider: str, model: Optional[str]) -> Optional[float]:
+    """Later matching broad/model deadline; a sibling model's wall never matches."""
+    return max((walls[key] for key in {_norm(provider), wall_key(provider, model)} if key in walls), default=None)
+
+
+def quota_model(text: str, provider: str) -> Optional[str]:
+    """Narrow only explicit model-naming subscription quota evidence, never a route alone."""
+    names = re.findall(r'Subscription quota unavailable for ([^\s/;]+)/([^\s;]+)', text or '', re.IGNORECASE)
+    models = {model for name, model in names if _norm(name) == _norm(provider)}
+    return next(iter(models)) if len(models) == 1 else None
+
+
+def receipt_wall_model(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], provider: Optional[str]) -> Optional[str]:
+    from hermes_cli.kanban_quota_receipt import _owned_receipt
+    owned = _owned_receipt(conn, task_id, run_id)
+    return quota_model(str(owned[0].get('last_output') or ''), provider or '') if owned else None
+
+
+def record_wall(provider: str, retry_after: Optional[int], *, model: Optional[str] = None, now: Optional[float] = None,
                 path: Optional[Path] = None) -> Optional[float]:
-    """Mark ``provider`` unavailable for ``retry_after`` s. Returns the expiry, or None if too short to track."""
+    """Mark the provider (or only its concrete model) unavailable; return expiry, or None for a short wall."""
     provider = _norm(provider)
     if not provider or provider == "auto":
         return None
@@ -94,7 +118,8 @@ def record_wall(provider: str, retry_after: Optional[int], *, now: Optional[floa
     until = now + seconds
     p = path or walls_path()
     walls = active_walls(now=now, path=p)
-    walls[provider] = max(until, walls.get(provider, 0))
+    key = wall_key(provider, model)
+    walls[key] = max(until, walls.get(key, 0))
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
@@ -102,7 +127,7 @@ def record_wall(provider: str, retry_after: Optional[int], *, now: Optional[floa
         tmp.replace(p)
     except OSError as exc:
         logger.warning("kanban walls: cannot write %s (%s)", p, exc)
-    return walls[provider]
+    return walls[key]
 
 
 def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
@@ -118,7 +143,9 @@ def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional
         # pool already disproves is mirrored as its backoff only.
         if _disproved(state, time.time(), {}):
             state = _unhinted(conn, task_id, state)
-        return record_wall(state.get('provider'), max(0, state['until'] - time.time()))
+        provider = state.get('provider')
+        return record_wall(provider, max(0, state['until'] - time.time()),
+                           model=receipt_wall_model(conn, task_id, run_id, provider))
     provider = ""
     try:
         for row in conn.execute(
@@ -129,14 +156,15 @@ def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional
     except Exception as exc:
         logger.debug("kanban walls: provider lookup failed for %s (%s)", task_id, exc)
     provider = provider or profile_provider()
-    retry = None
+    retry, model = None, None
     try:
         if log_path and log_path.exists():
             data = log_path.read_bytes()[-20000:].decode("utf-8", "replace")
             retry = parse_retry_after(data)
+            model = quota_model(data, provider)
     except OSError:
         pass
-    return record_wall(provider, retry)
+    return record_wall(provider, retry, model=model)
 
 
 def retier_for_walls(task: Any, cfg: dict[str, Any], *, now: Optional[float] = None,
@@ -152,7 +180,7 @@ def retier_for_walls(task: Any, cfg: dict[str, Any], *, now: Optional[float] = N
     provider = _norm(getattr(task, "provider_override", None)) or (profile_provider() if not task_model else "")
     if not provider or provider == "auto":
         return None
-    if provider not in walls and not live_quota_wall(provider, task_model or profile_model()):
+    if not wall_until(walls, provider, task_model or profile_model()) and not live_quota_wall(provider, task_model or profile_model()):
         return None
     # 2026-11-01: kanban.default_model moved to gpt-6-astra/openai-codex, so a Codex wall's only fallback was
     # Codex itself and every default-tier card waited out a 2.3-day wall while Anthropic had room. Try the
@@ -160,7 +188,7 @@ def retier_for_walls(task: Any, cfg: dict[str, Any], *, now: Optional[float] = N
     for key in ("default", "strong"):
         model = str(cfg.get(f"{key}_model") or "").strip()
         fb = _norm(cfg.get(f"{key}_provider"))
-        if not model or not fb or fb == "auto" or fb == provider or fb in walls:
+        if not model or not fb or fb == "auto" or fb == provider or wall_until(walls, fb, model):
             continue
         if live_quota_wall(fb, model):
             continue
@@ -286,7 +314,7 @@ def prune_disproved_walls(*, now: Optional[float] = None, path: Optional[Path] =
     p = path or walls_path()
     walls = active_walls(now=now, path=p)
     dropped = [name for name, until in walls.items()
-               if until - now > MAX_BACKOFF_SECONDS and live_pool_serving(name, None)]
+               if until - now > MAX_BACKOFF_SECONDS and live_pool_serving(*_wall_route(name))]
     if dropped:
         current = active_walls(now=now, path=p)
         for name in dropped:
@@ -298,13 +326,18 @@ def prune_disproved_walls(*, now: Optional[float] = None, path: Optional[Path] =
     return dropped
 
 
-def drop_wall(provider: str, *, not_after: float, path: Optional[Path] = None) -> bool:
+def _wall_route(key: str) -> tuple[str, Optional[str]]:
+    provider, sep, model = key.partition('/')
+    return provider, model if sep else None
+
+
+def drop_wall(provider: str, *, not_after: float, path: Optional[Path] = None, model: Optional[str] = None) -> bool:
     """Remove ``provider``'s wall when it ends no later than ``not_after`` (an operator-released episode's deadline:
     the reaper copied the wall from that hint). A later wall came from other evidence and stays. True when removed.
 
     ``record_wall`` only ever extends, so without this a released hint's wall outlived its episode's release.
     """
-    provider = _norm(provider)
+    provider = wall_key(provider, model)
     p = path or walls_path()
     walls = _load(p)
     until = walls.get(provider)

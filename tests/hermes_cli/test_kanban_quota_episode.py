@@ -270,8 +270,7 @@ def test_new_unpinned_card_created_after_a_known_wall_never_routes_to_it(board, 
     reset = clock[0] + 55 * 3600
     with kbc.connect() as conn:
         first = kb.create_task(conn, title='walled first', assignee='a')
-        reap(conn, first, admit=cfg, text=f'SubscriptionQuotaUnavailable: Subscription quota unavailable for '
-             f'openai-codex/gpt-6-astra; resets at {reset}.0',
+        reap(conn, first, admit=cfg, text=f'Provider-wide quota unavailable for openai-codex; resets at {reset}.0',
              fields={'failure_reason': 'rate_limit', 'failure_retryable': True, 'failure_resets_at': float(reset),
                      'route_provider': 'openai-codex', 'route_model': 'gpt-6-astra'})
         assert walls.active_walls(now=clock[0]).get('openai-codex') == pytest.approx(reset, abs=1)
