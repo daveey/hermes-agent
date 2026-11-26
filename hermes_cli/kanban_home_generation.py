@@ -21,6 +21,8 @@ def install(conn: sqlite3.Connection) -> None:
                  "(task_id TEXT PRIMARY KEY, nonce TEXT NOT NULL)")
     add_column_if_missing(conn, "kanban_home_generations1", "version", "version INTEGER NOT NULL DEFAULT 0")
     add_column_if_missing(conn, "kanban_home_generations1", "pending", "pending INTEGER NOT NULL DEFAULT 1")
+    from hermes_cli import kanban_home_revision as revision
+    revision.install(conn, ('kanban_home_generations1',))
     add_column_if_missing(conn, "kanban_sync_outbox", "home_generations", "home_generations TEXT")
     # Keep this independent from removable sync capture triggers. Do not retrofit
     # a generation onto an extant pending op even if its source row now has one.

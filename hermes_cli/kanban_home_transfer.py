@@ -62,6 +62,8 @@ def _install(conn: sqlite3.Connection) -> None:
             AND json_type(NEW.receipt,'$.expected_version') IS 'integer')
         BEGIN SELECT RAISE(ABORT, 'home finalization scope mismatch'); END""")
     abort.install(conn)
+    from hermes_cli import kanban_home_revision as revision
+    revision.install(conn, ('kanban_home_prepared1', 'kanban_home_finalized1', 'kanban_home_aborted1'))
     valid = finalized.predicate('p', 'NEW')
     conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_finalized1_manifest
         BEFORE INSERT ON kanban_home_finalized1

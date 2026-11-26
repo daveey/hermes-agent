@@ -51,7 +51,7 @@ def test_actual_delivery_retry_distinguishes_presend_failure_from_legacy(board, 
     if fault != 'legacy':
         assert labels._deliver(board, 'hub', 'default', now=10) == 0
         assert not sent
-        assert board.execute('SELECT delivery_attempts FROM operator_label_jobs').fetchone()[0] == 1
+        assert board.execute('SELECT delivery_attempts FROM operator_label_jobs').fetchone()[0] == int(fault != 'pending')
         if fault == 'pending':
             assert labels._deliver(board, 'hub', 'default', now=15) == 0
             assert not sent, 'an attempted pre-send retry bypassed pending validation'

@@ -11,6 +11,10 @@ import json
 from hermes_cli import kanban_home_generation as epochs
 from hermes_cli.sqlite_util import add_column_if_missing
 
+class Pending(ValueError):
+    """Temporary custody refusal before submission; not a failed transmission."""
+
+
 _TABLES = frozenset({'kanban_failure_commands', 'kanban_actionability_commands',
                     'kanban_protect_commands', 'containment_delivery', 'kanban_home_delivery1'})
 
@@ -62,7 +66,7 @@ def capture(conn, wire: dict) -> str | None:
     from hermes_cli.kanban_home_transfer import frozen
     tasks = touched(wire)
     if any(frozen(conn, task) for task in tasks):
-        raise ValueError('home transfer pending')
+        raise Pending('home transfer pending')
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_home_generations1'").fetchone():
         return None
     values = {}
@@ -82,7 +86,7 @@ def from_evidence(task: str, row: dict) -> str | None:
     if not isinstance(row, dict) or row.get('id') != task:
         raise ValueError('home evidence identity mismatch')
     if row.get('home_transfer_pending') is not None:
-        raise ValueError('home transfer pending')
+        raise Pending('home transfer pending')
     nonce = row.get('home_generation')
     if nonce is None:
         return None
@@ -93,4 +97,6 @@ def from_evidence(task: str, row: dict) -> str | None:
 
 def outbound(owned: dict, semantic: dict) -> dict:
     """Read only the durable sidecar; no lookup of today's task/epoch is allowed."""
+    if owned.get('capture_pending'):
+        raise Pending('home capture still pending; decision is not a transport request')
     return epochs.add_captured(owned, semantic)

@@ -315,6 +315,7 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     """Queue the backlog and start every due review this process has room for. Returns started task ids."""
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_spend_review_request as journal
+    from hermes_cli import kanban_home_command as home
     cfg = settings()
     if not cfg[0]:
         return []
@@ -335,12 +336,20 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
                 escalate(conn, task_id, episode, f"{cause} stops are excluded from spend review; hold retained")
                 continue
             frozen = journal.get(conn, task_id, episode)
+            if journal.waiting_for_custody(conn, frozen):
+                continue  # no model/submission retry while only the prerequisite is frozen
+            if frozen and frozen.get('capture_pending'):
+                # Bind under the writer BEFORE consuming another STARTED attempt.
+                # A target that refreezes after the read must remain a no-send wait.
+                frozen = journal.capture_deferred(conn, task_id, episode)
             if frozen and attempts >= journal.MAX_RECONCILE_ATTEMPTS:
                 journal.escalate_unconfirmed(conn, task_id, episode)
                 continue
             if attempts >= MAX_ATTEMPTS and not frozen:
                 escalate(conn, task_id, episode, f"the spend reviewer did not finish after {attempts} attempts")
                 continue
+        except home.Pending:
+            continue  # target/source custody raced selection; no STARTED charge
         except Exception:  # health: allow BLE001 -- per-card boundary; this hold is retained, siblings proceed
             logger.exception("kanban: spend review not started for %s; hold retained", task_id)
             continue

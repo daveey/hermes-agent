@@ -89,7 +89,11 @@ def key(conn: sqlite3.Connection, extra: Optional[Callable[[sqlite3.Connection],
     if revision is None:
         return None
     try:
-        return (ident, revision, extra(conn) if extra is not None else None)
+        from hermes_cli import kanban_home_revision as custody
+        home_revision = custody.read(conn)
+        if home_revision is None:
+            return None
+        return (ident, revision, home_revision, extra(conn) if extra is not None else None)
     except sqlite3.Error:
         return None
 

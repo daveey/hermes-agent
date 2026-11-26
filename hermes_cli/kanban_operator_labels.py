@@ -410,11 +410,13 @@ def _delivery_due(tries: int, last: Optional[int], now: int) -> bool:
 
 def _deliver(conn: sqlite3.Connection, own: str, board: str, now: Optional[int] = None) -> int:
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_home_command as home
+    from hermes_cli.kanban_home_transfer import frozen
     now = int(time.time()) if now is None else now
     rows = conn.execute("SELECT request_uid, board, machine, labels, caller, result_task_id, outcome, detail, "
                         "labels_after, event_uid, delivery_attempts, last_delivery_at FROM operator_label_jobs "
                         "WHERE state='done' AND delivered_at IS NULL ORDER BY created_at").fetchall()
-    rows = [r for r in rows if _delivery_due(int(r[10] or 0), r[11], now)][:MAX_DELIVERIES_PER_TICK]
+    rows = [r for r in rows if _delivery_due(int(r[10] or 0), r[11], now) and not frozen(conn, r[5])][:MAX_DELIVERIES_PER_TICK]
     sent = 0
     for (uid, jboard, machine, labels, caller, task, outcome, detail, after, euid, tries, _last) in rows:
         payload = {"request_uid": uid, "action": ACTION, "outcome": outcome, "detail": detail,
@@ -422,6 +424,10 @@ def _deliver(conn: sqlite3.Connection, own: str, board: str, now: Optional[int] 
                    "labels_after": json.loads(after) if after else None, "caller": json.loads(caller or "{}")}
         try:
             status, why = _push_event(conn, jboard or board, own, task, euid, payload)
+        except home.Pending:
+            # No bytes left: do not consume retries or reinterpret new jobs as
+            # historical attempts. The durable original intent, if any, stays.
+            continue
         except Exception as exc:  # health: allow BLE001 -- unreachable Board: retried next tick
             status, why = "error", f"{type(exc).__name__}: {exc}"
         done = status in ("applied", "merged") or (status == "rejected" and why.startswith("not_found")) \

@@ -180,17 +180,26 @@ def canonical(conn, task_id, episode, fields, max_grants, *, resend=True):
             if prior["board"] != board or prior["gateway"] != hub.ident.gateway:
                 raise Unconfirmed("frozen request belongs to another Board or gateway")
             wire = prior["wire"]
+            if prior.get('capture_pending'):
+                if not resend:
+                    raise Unconfirmed('uncaptured decision retained; current holds prohibit submission')
+                owned = journal.capture_deferred(conn, task_id, episode)
         else:
             capability = hub.decision_retain_capability(board)
             if not isinstance(capability, dict) or type(capability.get("spend_review")) is not int or capability["spend_review"] != 1:
                 raise ValueError("Board spend_review v1 unavailable")
             owned = journal.freeze(conn, board, hub.ident.gateway, wire)
             wire = owned["wire"]
+        from hermes_cli import kanban_home_command as home
+        if owned is None:
+            raise Unconfirmed('decision custody disappeared before capture')
+        if owned.get('capture_pending'):
+            raise home.Pending('home capture pending; decision retained without submission')
         uid = wire["event_uid"]
         fields = wire
         digest = hashlib.sha256(json.dumps(wire, sort_keys=True, separators=(",", ":"),
                                          ensure_ascii=False).encode()).hexdigest()
-        proof = hub.row_evidence(board, "task_events", uid) if prior else None
+        proof = hub.row_evidence(board, "task_events", uid) if prior and not prior.get('capture_pending') else None
         if not isinstance(proof, dict) or proof.get("state") != "live":
             if not resend:
                 raise Unconfirmed("frozen request readback pending; current holds prohibit resubmission")

@@ -130,9 +130,15 @@ def test_review_target_is_captured_not_just_source(consumer_board, phase):
     support.freeze(c, 't_target', phase)
     wire = {**wire, 'verdict': 'wait_on', 'target': 't_target'}
     if phase != 'completed':
-        with pytest.raises(ValueError, match='home transfer'):
-            journal.freeze(c, 'board', 'worker-a3', wire)
-        assert journal.get(c, 't_A', ep) is None
+        request = journal.freeze(c, 'board', 'worker-a3', wire)
+        assert request['capture_pending'] is True
+        assert request['home_generations'] is None
+        assert request['wire'] == wire
+        from hermes_cli import kanban_home_command as home
+        with pytest.raises(home.Pending, match='home capture'):
+            home.outbound(request, wire)
+        assert c.execute('SELECT 1 FROM spend_review_requests WHERE task=? AND episode=?', ('t_A', ep)).fetchone() is None
+        assert journal.get(c, 't_A', ep) == request
     else:
         request = journal.freeze(c, 'board', 'worker-a3', wire)
         assert json.loads(request['home_generations']) == {'t_target': 'fixture-generation-0001'}

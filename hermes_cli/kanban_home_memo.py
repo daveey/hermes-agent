@@ -41,7 +41,7 @@ def reserve(conn, key, task, op, *, epoch=None, foreign=False):
         return old
     from hermes_cli.kanban_home_transfer import frozen
     if frozen(conn, task):
-        raise ValueError('home transfer pending')
+        raise home.Pending('home transfer pending')
     captured = epoch if foreign else home.capture(conn, op)
     raw = json.dumps(op, sort_keys=True, separators=(',', ':'), allow_nan=False)
     conn.execute(f'INSERT INTO {_TABLE}(request_uid,task_id,request_json,home_generations) VALUES (?,?,?,?)',
