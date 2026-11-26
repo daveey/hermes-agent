@@ -1911,11 +1911,12 @@ def _write_txn_body(conn, allow_nested, boundary):
     boundary.execute("BEGIN IMMEDIATE")
     opt_in = bool(boundary.no_retry or boundary.done is not None)
     try:
-        home_schema_before = home_schema.begin(conn)
-        annotation_scope = annotation_mutation.arm(conn)
-        _local_status_wake.arm(conn)  # [daveey] record this txn's status changes for the awaited-card wake
-        origin_armed = status_origin.arm(conn)
-        yield conn
+        with home_schema.first_install_scope(conn) as home_schema_first:
+            home_schema_before = home_schema.begin(conn)
+            annotation_scope = annotation_mutation.arm(conn)
+            _local_status_wake.arm(conn)  # [daveey] record this txn's status changes for the awaited-card wake
+            origin_armed = status_origin.arm(conn)
+            yield conn
     except Exception:
         # SQLite may already have auto-rolled-back (EIO, contention, corruption);
         # don't let this secondary failure shadow the real one.
@@ -1930,7 +1931,7 @@ def _write_txn_body(conn, allow_nested, boundary):
     else:
         try:
             status_origin.bind(conn, origin_armed)
-            home_schema_after = home_schema.finish(conn, home_schema_before)
+            home_schema_after = home_schema.finish(conn, home_schema_before, home_schema_first)
             boundary.execute("COMMIT")
         except (Exception, _DispatchWriteContended):
             # COMMIT exhausted retries with the txn still open; roll back so the

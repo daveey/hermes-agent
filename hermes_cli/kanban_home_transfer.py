@@ -36,6 +36,7 @@ def _restrictive_appends(conn: sqlite3.Connection) -> None:
 
 
 def _install(conn: sqlite3.Connection) -> None:
+    first = not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (_TABLE,)).fetchone()
     conn.execute(f"""CREATE TABLE IF NOT EXISTS {_TABLE} (
         task_id TEXT PRIMARY KEY, source TEXT NOT NULL, destination TEXT NOT NULL,
         nonce TEXT NOT NULL, expected_version INTEGER NOT NULL)""")
@@ -151,6 +152,8 @@ def _install(conn: sqlite3.Connection) -> None:
     conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_prepared1_marker_insert
         BEFORE INSERT ON {_TABLE} WHEN EXISTS(SELECT 1 FROM {_TABLE} WHERE task_id=NEW.task_id)
         BEGIN SELECT RAISE(ABORT, 'home transfer preparation immutable'); END""")
+    from hermes_cli.kanban_home_schema import installed_first
+    installed_first(conn, first)
 
 
 def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination: str,

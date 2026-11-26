@@ -216,6 +216,16 @@ def _run_check(command: str) -> tuple[object, str]:
         return "timeout", output[-OUTPUT_TAIL_CHARS:].strip()
 
 
+def _carriers(conn, task_ids):
+    """Evidence carriers must still be locally writable, not merely home-owned."""
+    from hermes_cli import kanban_blocker_rows as rows
+    from hermes_cli.kanban_home_transfer import frozen
+
+    tasks = set(task_ids)
+    foreign = rows.foreign_among(conn, tasks)
+    return sorted(t for t in tasks - foreign if not frozen(conn, t))
+
+
 @input_pass
 def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
     """Check each open registered wall on its home, even with a worker probe in flight.
@@ -241,7 +251,7 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
     for bid, st in states.items():
         command = commands.get(bid)
         # Events need a real card FK; a home-owned card carries evidence only.
-        homes = sorted(set(st.behind) - foreign)
+        homes = _carriers(conn, set(st.behind) - foreign)
         if not st.is_open or not command or not homes:
             continue
         token = tokens.get(bid)
@@ -276,7 +286,8 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
                    "started_at": ts, "checked_at": checked_at, "assertion_id": token, "fails": fails}
         with kb.write_txn(conn):
             # A shell check can overlap a new assertion or a home ownership change.
-            if blocker_rows.foreign_among(conn, (homes[0],)):
+            homes = _carriers(conn, homes)
+            if not homes:
                 continue
             if _assertion_tokens(conn, ts).get(bid) != token:
                 kb._append_event(conn, homes[0], ATTEMPT_EVENT, {

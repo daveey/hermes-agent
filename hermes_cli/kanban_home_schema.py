@@ -13,6 +13,8 @@ custody and arbitrary external DDL writers are outside this protocol.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from hermes_cli import kanban_home_abort as abort
 from hermes_cli import kanban_home_finalized as finalized
@@ -21,6 +23,32 @@ _TABLE = 'kanban_home_prepared1'
 _EXEMPT = {_TABLE, 'kanban_home_finalized1', 'kanban_home_aborted1',
            'containment_canonical_receipts'}
 _RESTRICTIVE = {'containment_sync_quarantine', 'containment_sync_quarantine_tasks'}
+_FIRST_INSTALL: ContextVar[tuple[sqlite3.Connection, list[tuple | None]] | None] = ContextVar(
+    'home_schema_first_install', default=None)
+
+
+@contextmanager
+def first_install_scope(conn):
+    """Keep speculative installation evidence only for this outer writer.
+
+    A nested savepoint can roll back the first install. A later fresh install
+    replaces that snapshot; ordinary repeated prepare calls cannot rebaseline
+    already installed guards after intervening DDL.
+    """
+    snapshot: list[tuple | None] = [None]
+    token = _FIRST_INSTALL.set((conn, snapshot))
+    try:
+        yield snapshot
+    finally:
+        _FIRST_INSTALL.reset(token)
+
+
+def installed_first(conn, first):
+    """Called immediately after the first guard installation, before user DDL."""
+    scope = _FIRST_INSTALL.get()
+    if first and scope is not None and scope[0] is conn:
+        scope[1][0] = (conn.execute('PRAGMA schema_version').fetchone()[0],
+                       _identities(conn, _tables(conn)))
 
 
 def _quote(name):
@@ -95,12 +123,14 @@ def begin(conn):
     return conn.execute('PRAGMA schema_version').fetchone()[0], _identities(conn, tables)
 
 
-def finish(conn, before):
+def finish(conn, before, first_install=None):
     """Fail closed before COMMIT; all failures use write_txn's ordinary rollback."""
     if not _installed(conn):
         if before is not None:
             raise sqlite3.IntegrityError('home transfer prepared: preparation schema removed')
         return
+    if before is None and first_install is not None:
+        before = first_install[0]
     version = conn.execute('PRAGMA schema_version').fetchone()[0]
     if before is not None and before[0] == version:
         return before
