@@ -23,6 +23,24 @@ def install(conn, table: str) -> None:
                  f'BEFORE UPDATE OF home_generations ON {table} '
                  'WHEN NEW.home_generations IS NOT OLD.home_generations '
                  "BEGIN SELECT RAISE(ABORT,'captured command home generation is immutable'); END")
+    # REPLACE may delete a conflicting row without firing its DELETE trigger.
+    # Include all unique identities, not just the primary request identifier.
+    identities = []
+    for index in conn.execute(f'PRAGMA index_list({table})'):
+        if not index[2]:
+            continue
+        quoted = '"' + index[1].replace('"', '""') + '"'
+        columns = [row[2] for row in conn.execute(f'PRAGMA index_info({quoted})')]
+        if not columns or any(column is None for column in columns) or index[4]:
+            raise ValueError('unsupported command epoch identity')
+        identities.append(' AND '.join(f'"{col}"=NEW."{col}"' for col in columns))
+    if not identities:
+        raise ValueError('command epoch identity missing')
+    conflict = ' OR '.join(f'({identity})' for identity in identities)
+    conn.execute(f'CREATE TRIGGER IF NOT EXISTS home_epoch1_{table}_insert '
+                 f'BEFORE INSERT ON {table} WHEN EXISTS(SELECT 1 FROM {table} '
+                 f'WHERE ({conflict}) AND home_generations IS NOT NEW.home_generations) '
+                 "BEGIN SELECT RAISE(ABORT,'captured command home generation is immutable'); END")
 
 
 def touched(wire: dict) -> set[str]:

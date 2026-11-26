@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import contextmanager
 
 from hermes_cli import kanban_home_abort as abort
 from hermes_cli import kanban_home_finalized as finalized
@@ -205,6 +206,10 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
                     and conn.execute("SELECT 1 FROM containment_delivery WHERE confirmed=0 AND "
                         "(json_extract(op_json,'$.task')=? OR json_extract(op_json,'$.actor_task')=?)", (task_id, task_id)).fetchone()):
                 raise ValueError("home preparation requires drained containment intent")
+            if (conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_protect_commands'").fetchone()
+                    and conn.execute("SELECT 1 FROM kanban_protect_commands WHERE delivery_state!='confirmed' AND "
+                        "(task_id=? OR json_extract(request_json,'$.actor_task')=?)", (task_id, task_id)).fetchone()):
+                raise ValueError("home preparation requires drained protect intent")
             from hermes_cli.kanban_home_probe import require_source_probe
             require_source_probe(conn, task_id, source)
             conn.execute(f"INSERT INTO {_TABLE}(task_id,source,destination,nonce,expected_version) VALUES (?,?,?,?,?)",
@@ -257,6 +262,16 @@ def frozen(conn: sqlite3.Connection, task_id: str) -> bool:
                     and current[1] >= row[4] + 1 and epoch and epoch[0] == row[3])
     except (ValueError, TypeError, sqlite3.Error):
         return True
+
+
+@contextmanager
+def mutable_writer(conn: sqlite3.Connection, task_id: str):
+    """Refuse before entering any mutation-bearing context in an owned writer."""
+    if not conn.in_transaction:
+        raise ValueError('home custody check requires writer transaction')
+    if frozen(conn, task_id):
+        raise ValueError('home transfer pending')
+    yield
 
 
 def finalize_source(conn: sqlite3.Connection, record: dict) -> dict:

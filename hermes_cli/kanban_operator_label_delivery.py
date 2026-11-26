@@ -17,6 +17,9 @@ def _legacy(conn, event_uid, task):
     pre-upgrade attempted jobs without this durable discriminator stay unknown.
     """
     with kb.write_txn(conn):
+        from hermes_cli.kanban_home_transfer import frozen
+        if frozen(conn, task):
+            raise ValueError('home transfer pending')
         conn.execute('CREATE TABLE IF NOT EXISTS kanban_home_label_capture1 '
                      '(event_uid TEXT PRIMARY KEY, task_id TEXT NOT NULL, legacy INTEGER NOT NULL)')
         row = conn.execute('SELECT task_id,legacy FROM kanban_home_label_capture1 WHERE event_uid=?', (event_uid,)).fetchone()

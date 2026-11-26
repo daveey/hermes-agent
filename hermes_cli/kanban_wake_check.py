@@ -1014,6 +1014,9 @@ def _wake(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> O
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_continuation import pending_wake
 
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        return None  # custody exclusion is write-free, unlike terminal cleanup
     from hermes_cli.kanban_terminal_guard import skip_wake
     if skip_wake(conn, task_id, kind):  # a stale scheduled copy of a done card: no wake [daveey]
         # Every producer reaching a held card here (shared-blocker clear, supervisor-request wake, CI progress, dead

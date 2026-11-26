@@ -431,6 +431,9 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
         reason = latest_block_reason(conn, tid) or info["reason"] or (
             "Parked in scheduled with no wake while waiting on a human answer.")
         with kb.write_txn(conn):
+            from hermes_cli.kanban_home_transfer import frozen
+            if frozen(conn, tid):
+                return False
             cur = conn.execute(
                 "UPDATE tasks SET status = 'blocked', current_run_id = NULL WHERE id = ? AND status = 'scheduled'",
                 (tid,))

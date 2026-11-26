@@ -2784,8 +2784,7 @@ def block_task(
     durable repair card and the original waits in ``todo`` on that dependency
     (including explicit classification of a breaker-parked card).
 
-    ``comment`` (``(author, body)``) is written in the same txn, before the transition event,
-    and only when the block lands (``kanban_reason_comment``).
+    ``comment`` (``(author, body)``) is written in the same txn only when the block lands (``kanban_reason_comment``).
     """
     from hermes_cli.kanban_ask_resolved import filing_fields, request_json, sync_row
     from hermes_cli.kanban_human_request import reject_timed_request
@@ -2794,7 +2793,8 @@ def block_task(
     from hermes_cli.kanban_reason_comment import reason_comment
     human_request = validate_block_request(human_request, kind)
     pin = _park_pin.plan(conn, task_id, reason)  # git reads stay outside the write txn
-    with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
+    from hermes_cli.kanban_home_transfer import mutable_writer
+    with write_txn(conn), mutable_writer(conn, task_id), reason_comment(conn, task_id, comment) as noted:
         if not record_block(conn, task_id, goal_rejection, reason, expected_run_id, kind, human_request):
             return False
         cur_row = conn.execute("SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,)).fetchone()
