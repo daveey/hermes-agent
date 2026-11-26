@@ -627,6 +627,7 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
     free = 0  # guard-held copies take no budget: they `continue` before room.take
+    debt_free = 0  # usage-debt copies (``_usage_pending``) take no budget either, in their own slots
     from hermes_cli.kanban_admission_pools import PoolBudget, row_class
     room = PoolBudget(limit.regular, limit.priority, limit.limit) if isinstance(limit, PoolBudget) else \
         PoolBudget(limit, 0)  # an int is a classless budget; a hub's pool budget never copies unstartable work
@@ -656,11 +657,16 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
             hold = debt
         if hold is not None:
             # A debt copy is not kept by evict (no guard holds it), so it is re-copied each tick, never
-            # remembered: the recheck window would evict it and leave its local guards unrun.
-            if held is not None and free < kph.FREE_PER_TICK and (
-                    debt is not None or not kph.recently_copied(card["id"], hold[1])):
-                if debt is None:
-                    held[card["id"]] = hold[1]
+            # remembered: the recheck window would evict it and leave its local guards unrun. Debts get their
+            # own FREE_PER_TICK slots: sharing the guard-hold slots let always-recopied debts ranked first
+            # crowd a guard-held copy out of every tick (review of 19bdb081, PR #4496).
+            if debt is not None:
+                if held is not None and debt_free < kph.FREE_PER_TICK:
+                    picked.append(card["id"])
+                    debt_free += 1
+                    continue
+            elif held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):
+                held[card["id"]] = hold[1]
                 picked.append(card["id"])
                 free += 1
                 continue

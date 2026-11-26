@@ -83,3 +83,20 @@ def test_a_failed_accounting_check_does_not_refuse(gws, monkeypatch):
         assert wn._usage_pending(replica, card) is None
     finally:
         replica.close()
+
+
+def test_debts_do_not_take_the_guard_hold_slots(gws, imports):
+    """Review of 19bdb081: debts sharing the guard-hold slots crowded a guard-held copy out of every tick."""
+    from hermes_cli import kanban_pickup_held as kph
+    from tests.hermes_cli.test_kanban_pickup_held_budget import _held_on_board
+    kph.reset()
+    hub, worker = gws
+    debts = [_indebted(hub, title=f"debt {i}", priority=1000 - i, runs_on=PIN)
+             for i in range(kph.FREE_PER_TICK + 2)]
+    held = _held_on_board(hub, 0, runs_on=PIN)
+    worker.round()
+    worker.enter()
+    picked = wn.pickup(worker.conn, budget=1)
+    assert held in picked
+    assert len(set(picked) & set(debts)) == kph.FREE_PER_TICK
+    kph.reset()
