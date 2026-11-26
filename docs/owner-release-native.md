@@ -167,17 +167,37 @@ hides the old mandate without removing historical coverage; restricted accountin
 floor remains cumulative. Decided-triage maintenance never reuses an application
 renewal as permission for another placement.
 
-There is still **no production HOME assembler**. The internal writer proves
-transaction custody, not caller eligibility. Budget/promotion event bytes are
-frozen, not an independent semantic budget/placement adjudicator. In particular,
-freezing a pre-existing budget/promotion event does not prove it was created for
-this intent; the assembler must emit and bind the actual effects in its own
-transaction, with exact original-agent allowance/attribution. The HOME assembler
-must still perform every live actor/current-episode/selected-history,
-complete-comment, lease, safety, containment, private/accounting/spend and dependency
-veto in that same writer, execute the actual budget/promotion bodies, and record the
-receipt last. Every postwrite refusal must raise. Its narrowly scoped transaction-
-internal promotion admission must not enable consumed-only global coverage.
-Completed queue/result publication, certified executor transfer and composed
-CLI/DO/HOME proof remain required before capability advertisement.
+### Atomic local assembler (not yet connected to production queue)
+
+`kanban_release_assemble.apply` now exercises ONE real application transaction:
+actual original-agent budget planning/attribution and budget body, exact selected
+release effects, real internal promotion body, result event and private receipt.
+Private receipt and actual APPLIED private-history veto run before COMMIT; a later
+refusal rolls back task status, budget comment, events and receipt together. This
+also refuses omitted historical capability stops rather than clearing them.
+Unlimited cards do not receive a fabricated budget override. Dependencies remain
+strictly refused for now; no dependency edge is deleted or silently satisfied.
+Historical exact result replay is checked both before and inside the writer, so a
+concurrent winner or later stop cannot turn replay into a second release.
+
+Promotion admission is an immutable object whose constructor performs the actual
+local actor/task/current-episode/selected-history/comment/claim/run/lease/hold
+validation against private winning consumption. It binds exact connection, task,
+proof bytes, delivery and unique writer invocation. Only the private promotion
+composition seam accepts it; the public APIs never do. It projects only positively
+identified current scope evidence. Ordinary persisted coverage stays APPLIED-only,
+provider safety and administrative stops stay restrictive, and the cumulative
+accounting floor never changes. Reusing the object in another writer, connection,
+or task is refused.
+
+**The production queue remains consumed-only.** A historical private consumption
+GET does not certify the current canonical owner, holds, task or comments after
+consumption. Local live checks cannot repair that distributed freshness gap. The
+trial queue hook was removed rather than treating a cached consumed certificate as
+canonical permission. Canonical current-application/result custody, APPLIED-result
+publication/read and certified executor transfer must be composed before connecting
+this assembler or advertising capability. Local comments compare every available
+logical field, not foreign integer IDs; Board-only version/HLC metadata are not
+present in the local schema and still need the canonical application boundary.
+No completed real CLI/DO/HOME/executor transport or live recovery proof is claimed.
 

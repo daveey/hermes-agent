@@ -1,7 +1,9 @@
 """Authenticated HOME consume queue. Consumption is NOT local application.
 
-No local scope release, budget, promotion, result or execution authority exists
-here. The separate applied transaction must be implemented before advertising.
+The atomic assembler is separately exercised, but is not connected here until
+canonical current-application/result custody exists. A historical consumption
+GET does not attest the latest canonical owner/holds/comments. Never advertise
+capability or invoke the assembler from this queue on that historical proof alone.
 """
 from __future__ import annotations
 

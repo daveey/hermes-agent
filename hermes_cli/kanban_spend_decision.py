@@ -193,11 +193,21 @@ def restricted_since(conn, task_id: str) -> int | None:
 
 
 def _restricted_since(conn, task_id: str) -> int | None:
-    import json
     from hermes_cli import kanban_scope_renewal as renewal
     renewed = renewal.covered(conn, task_id)
     if not renewed:
         return restricted_floor(conn, task_id)
+    return _uncovered_since(conn, task_id, renewed)
+
+
+def _uncovered_since(conn, task_id, renewed):
+    """Scope-only projection, also used by exact writer-bound HOME admission.
+
+    Ordinary readers always supply persisted APPLIED coverage above. Safety
+    receipts and safety causes never disappear from this projection.
+    """
+    import json
+    from hermes_cli import kanban_scope_renewal as renewal
     times = [e['created_at'] or 0 for e in receipt_restrictions(conn, task_id)
              if renewal.key(e) not in renewed or json.loads(e['payload']).get('superseded_by_safety_stop') is True]
     for row in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind IN "

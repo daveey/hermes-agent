@@ -5,9 +5,14 @@ import sqlite3
 from typing import Callable, Optional
 
 
-def _promotion_status(conn: sqlite3.Connection, task_id: str) -> tuple[Optional[str], Optional[str]]:
+def _promotion_status(conn: sqlite3.Connection, task_id: str, *, admission=None) -> tuple[Optional[str], Optional[str]]:
     from hermes_cli.kanban_spend_decision import execution_refusal, pending
-    if refusal := execution_refusal(conn, task_id):
+    if admission is None:
+        refusal = execution_refusal(conn, task_id)
+    else:
+        from hermes_cli.kanban_release_assemble import _admission_refusal
+        refusal = _admission_refusal(conn, task_id, admission)
+    if refusal:
         return None, refusal
     status = _kb._task_status(conn, task_id)
     if status is None:
@@ -62,10 +67,16 @@ def promote_in_txn(
     so its outer transaction rolls back. Preconditions also belong to that outer
     transaction. No network or lifecycle wrapper may run inside this body.
     """
+    return _promote_in_txn(conn, task_id, actor=actor, reason=reason, precondition=precondition,
+                           expected_status=expected_status)
+
+
+def _promote_in_txn(conn, task_id, *, actor, reason=None, precondition=None, expected_status=None, admission=None):
+    """Private composition seam; public promotion never accepts an admission."""
     if not conn.in_transaction:
         raise RuntimeError("promotion body requires an outer write transaction")
     from hermes_cli.kanban_spend_decision import pending
-    status, refusal = _promotion_status(conn, task_id)
+    status, refusal = _promotion_status(conn, task_id, admission=admission)
     if refusal:
         return False, refusal
     if expected_status is not None and status != expected_status:

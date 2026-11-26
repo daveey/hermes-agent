@@ -19,6 +19,7 @@ TABLE = 'owner_release_applied_receipts'
 EVENT_FIELDS = ('uid', 'task_id', 'kind', 'payload', 'created_at', 'origin_gateway')
 _RESULT_FIELDS = {'version', 'intent_uid', 'consume_uid', 'delivery_uid', 'outcome', 'mandate', 'effect_uids'}
 _PERMIT = contextvars.ContextVar('owner_release_application_writer', default=None)
+_INVOCATION = contextvars.ContextVar('owner_release_application_invocation', default=None)
 
 
 def native_record(payload):
@@ -58,9 +59,11 @@ def _writer(conn):
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
         token = _PERMIT.set(conn)
+        invocation = _INVOCATION.set(object())
         try:
             yield
         finally:
+            _INVOCATION.reset(invocation)
             _PERMIT.reset(token)
 
 
