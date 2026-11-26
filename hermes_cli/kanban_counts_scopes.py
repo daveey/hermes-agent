@@ -17,6 +17,7 @@ _BOXES = ("_waiting_cache", "_parked_cache", "_stalled_cache", "_remote_keys_cac
 class CountSnapshot(tuple):
     """Keep the legacy nine-part read shape, with evidence bound to that generation."""
     execution: dict
+    source: tuple | None = None
 
     def __new__(cls, values, execution):
         snapshot = super().__new__(cls, values)
@@ -79,9 +80,13 @@ def result_locked(include_waiting: bool, include_snapshot: bool) -> tuple:
     counts = ksa._cache[1:5]
     if include_snapshot:
         parked, held = ksa._parked_cache[0]
-        return CountSnapshot((*counts, dict(ksa._waiting_cache[0]), parked, held, ksa._stalled_cache[0],
-                              ksa._identity.merge_keys(ksa._remote_keys_cache[0], ksa._local_keys_cache[0])),
-                             ksa._execution_cache[0])
+        snapshot = CountSnapshot((*counts, dict(ksa._waiting_cache[0]), parked, held, ksa._stalled_cache[0],
+                                  ksa._identity.merge_keys(ksa._remote_keys_cache[0], ksa._local_keys_cache[0])),
+                                 ksa._execution_cache[0])
+        # Source custody is captured under the same lock as the returned maps.
+        snapshot.source = (ksa._cache_scope, ksa._cache_read_at, ksa._cache_fingerprint,
+                           ksa._cache_revalidatable, ksa._cache_generation)
+        return snapshot
     return (*counts, dict(ksa._waiting_cache[0])) if include_waiting else counts
 
 

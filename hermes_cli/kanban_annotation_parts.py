@@ -97,6 +97,9 @@ def _plain_key(scope: tuple[str, ...]) -> object:
     dbs, files = host._watch_paths(scope)
     discovery, _dirs = host._discovery_paths()
     keyed = {str(p) for p in ksa._board_db_paths()} | {str(p) for p in ksa._replica_paths()}
+    hub = ksa._hub_db_path()
+    if hub is not None:
+        keyed.add(str(hub))  # covered by the transactional hub key, including literal metadata
     from hermes_cli import kanban_annotation_lineage as lineage
     from hermes_constants import get_hermes_home
 
@@ -152,6 +155,12 @@ def _part_fingerprint(part: str, *, shadows: bool = False) -> tuple:
     return values + ((ksa._hub_content_signature(hub),) if hub is not None else ())
 
 
+class _Keys(dict):
+    """The raw receipt is publication custody, not part of semantic equality."""
+
+    receipt: object = None
+
+
 def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
     """One key per part, read now in ``scope``'s context; None when the inputs cannot be vouched for."""
     from hermes_cli import kanban_session_activity as ksa
@@ -159,15 +168,22 @@ def keys(scope: tuple[str, ...]) -> dict[str, object] | None:
 
     wall = time.time()
     local = [(str(p), revision.content_keys(p)) for p in ksa._board_db_paths()]
+    from hermes_cli import kanban_annotation_hub_key as hub_key_reader
+
     hub = ksa._hub_db_path()
-    hub_key = (ksa._hub_content_signature(hub),) if hub is not None else ()
-    fingerprints = {part: tuple((path, values[part]) for path, values in local) + hub_key
+    hub_value, receipt = hub_key_reader.capture(hub, wall) if hub is not None else (None, None)
+    hub_key = (hub_value,) if hub is not None else ()
+    raw_hub = (ksa._hub_content_signature(hub),) if hub is not None else ()
+    fingerprints = {part: tuple((path, values[part]) for path, values in local)
+                    + (hub_key if part == COUNTS else raw_hub)
                     for part in (COUNTS, LINKS, ATTENTION)}
     shadows = _part_fingerprint(COUNTS, shadows=True)
     ledger = ksa._origin_ledger_fingerprint()
     plain = _plain_key(scope)
-    return {COUNTS: (fingerprints[COUNTS], shadows, ledger, plain), LINKS: (fingerprints[LINKS], ledger),
-            ATTENTION: (fingerprints[ATTENTION], _done_key(scope, wall)), WAITING: _waiting_key()}
+    result = _Keys({COUNTS: (fingerprints[COUNTS], shadows, ledger, plain), LINKS: (fingerprints[LINKS], ledger),
+                    ATTENTION: (fingerprints[ATTENTION], _done_key(scope, wall)), WAITING: _waiting_key()})
+    result.receipt = receipt
+    return result
 
 
 def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[frozenset, dict[str, object] | None]:
@@ -180,6 +196,10 @@ def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[f
     except Exception:  # health: allow BLE001 -- an unreadable key is a change: every part reads
         log.debug("kanban annotation part keys unavailable", exc_info=True)
         now = None
+    from hermes_cli import kanban_annotation_counts as counts
+
+    counts.begin(scope, now)
+    renew = renew or counts.needs_read(scope)
     before = _seen.get(scope)
     if clock or now is None or before is None:
         return ALL, now
@@ -190,6 +210,10 @@ def plan(scope: tuple[str, ...], *, clock: bool, renew: bool = False) -> tuple[f
 def done(scope: tuple[str, ...], now: dict[str, object] | None) -> None:
     """The read planned with ``now`` completed: its forced parts answered those keys."""
     _seen.pop(scope, None)
+    receipt = getattr(now, 'receipt', None)
+    if receipt is not None and not receipt.valid():
+        failed(scope)
+        return  # a racing result cannot authorize heartbeat-normalized suppression
     if now is not None:
         while len(_seen) >= _MAX_SCOPES:
             del _seen[next(iter(_seen))]
@@ -200,6 +224,8 @@ def failed(scope: tuple[str, ...]) -> None:
     """A holder read of ``scope`` raised: nothing is vouched for."""
     _seen.pop(scope, None)
     _waiting.pop(scope, None)
+    from hermes_cli import kanban_annotation_counts as counts
+    counts.failed(scope)
 
 
 def measured(part: str, read):
@@ -219,3 +245,5 @@ def measured(part: str, read):
 def reset() -> None:
     _seen.clear()
     _waiting.clear()
+    from hermes_cli import kanban_annotation_counts as counts
+    counts.reset()

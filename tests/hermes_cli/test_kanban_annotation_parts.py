@@ -280,9 +280,11 @@ def test_the_renewal_reads_this_scopes_counts_age_not_the_last_scope_read(world,
     _refresh()
     assert world.counts == 1
     monkeypatch.setattr(host, 'STRICT_REFRESH_AGE_S', 5.0)
-    with ksa._cache_lock:  # this scope's counts were read a while ago
-        ksa._cache_read_at -= 10.0
-        ksa._count_scopes.remember_locked()
+    # Holder custody owns its source age independently of the shared request cache.
+    from dataclasses import replace
+    from hermes_cli import kanban_annotation_counts as counts
+    source = counts._entries[SCOPE]
+    counts._entries[SCOPE] = replace(source, mono=source.mono - 10.0, wall=source.wall - 10.0)
     monkeypatch.setattr(ksa, '_origin_scope', lambda: ('annotation-parts-test', 'other'))
     ksa._all_counts()  # another profile's poll now owns the active count slot, read just now
     assert world.counts == 2

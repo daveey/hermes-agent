@@ -360,7 +360,9 @@ def read_annotation_parts() -> tuple:
     attention, frozen. Every helper is looked up on that module (tests replace them there)."""
     from hermes_cli import kanban_session_activity as _ksa
 
-    snapshot = _parts.measured(_parts.COUNTS, lambda: _ksa._all_counts(include_snapshot=True))
+    from hermes_cli import kanban_annotation_counts as counts
+
+    snapshot = _parts.measured(_parts.COUNTS, lambda: counts.read(lambda: _ksa._all_counts(include_snapshot=True)))
     active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys = snapshot[:9]
     execution = getattr(snapshot, "execution", {})
     extra = _parts.measured(_parts.WAITING, lambda: _parts.waiting(_ksa._extra_waiting))
@@ -381,6 +383,32 @@ def read_annotation_parts() -> tuple:
     frozen = _ksa._identity.freeze_annotation(raw)
     frozen_parts[scope] = frozen
     return frozen
+
+
+def refresh_locked(scope: tuple[str, ...], read_at: float | None = None) -> tuple:
+    """Read and publish under the caller's annotation lock, retaining count-source age."""
+    from hermes_cli import kanban_annotation_counts as holder_counts
+    from hermes_cli import kanban_session_activity as ksa
+
+    ksa._annotate_flight_scope, ksa._annotate_flight_result = scope, None
+    read_at = ksa.time.time() if read_at is None else read_at
+    prepared = prepare(scope)
+    try:
+        if getattr(ksa._revalidate.force_read, 'scope', None) != scope:
+            holder_counts.clear_use()
+        try:
+            value = ksa._read_annotation_parts()
+        finally:
+            finish(scope)
+        ksa._bounded.record(scope, value, holder_counts.observed_at(read_at))
+        ksa._last_annotation[scope] = value
+        ksa._annotate_flight_result = value
+        if not holder_counts.reused():
+            ksa._annotation_copy.published(scope, value)
+        publish(scope, prepared, value)
+        return value
+    finally:
+        holder_counts.clear_use()
 
 
 # -- adopt --------------------------------------------------------------------------------------------------------
@@ -546,6 +574,10 @@ def publish(scope: tuple[str, ...], prepared: tuple | None, parts: tuple) -> boo
     fingerprint and revalidatable. ``read_at`` = when those counts were read (never the later wall time)."""
     from hermes_cli import kanban_session_activity as _ksa
 
+    from hermes_cli import kanban_annotation_counts as counts
+
+    if counts.reused():
+        return False  # retained counts cannot acknowledge a new raw fingerprint or mutation token
     if prepared is None or prepared[2] is None:
         return False
     full, wall, (digest, _complete), token, display_identity, narrow, watch = prepared
@@ -713,8 +745,11 @@ def _event_refresh(events) -> float | None:
             # counts are also read once their last read is ``STRICT_REFRESH_AGE_S`` old, so the published
             # ``read_at`` is renewed before exact adopters drop the copy at ``_COUNTS_MAX_AGE_S``.
             # The age is this scope's own: the active count slot belongs to whichever scope was read last.
-            with _ksa._cache_lock:
-                read_at = _ksa._count_scopes.read_at_locked(scope)
+            from hermes_cli import kanban_annotation_counts as counts
+            read_at = counts.read_at(scope)
+            if read_at is None:
+                with _ksa._cache_lock:
+                    read_at = _ksa._count_scopes.read_at_locked(scope)
             if lost:
                 _parts.failed(scope)
             clock = len(_holder_ctx.deadlines) != len(pending)
@@ -747,6 +782,7 @@ def _event_refresh(events) -> float | None:
                 _event_ready.add(scope)
                 return min(_clock_deadlines[scope], default=None)
             finally:
+                counts.clear_use()
                 _holder_ctx.deadlines = None
                 _ksa._revalidate.force_read.scope = None
                 _ksa._revalidate.force_read.parts = None

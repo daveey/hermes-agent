@@ -1770,21 +1770,7 @@ _frozen_parts = _host_copy.frozen_parts
 @_la.accounted("annotation.refresh")
 def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = None) -> tuple:
     """Read this scope's parts and publish them. Caller holds ``_annotate_refresh_lock``."""
-    global _annotate_flight_scope, _annotate_flight_result
-    _annotate_flight_scope = scope
-    _annotate_flight_result = None
-    read_at = time.time() if read_at is None else read_at
-    prepared = _host_copy.prepare(scope)  # [daveey] the inputs this read answers, for the host copy
-    try:
-        parts = _read_annotation_parts()
-    finally:
-        _host_copy.finish(scope)
-    _bounded.record(scope, parts, read_at)
-    _last_annotation[scope] = parts
-    _annotate_flight_result = parts
-    _annotation_copy.published(scope, parts)  # [daveey] a restart serves it while its first read runs
-    _host_copy.publish(scope, prepared, parts)  # other processes adopt it instead of reading again
-    return parts
+    return _host_copy.refresh_locked(scope, read_at)
 
 
 @_la.accounted("annotation.poll")
