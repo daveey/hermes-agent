@@ -629,29 +629,8 @@ import logging
 import threading
 from datetime import datetime
 
-from hermes_cli.model_setup_flows import (
-    _model_flow_openrouter,
-    _model_flow_nous,
-    _model_flow_openai_codex,
-    _model_flow_xai_oauth,
-    _model_flow_qwen_oauth,
-    _model_flow_minimax_oauth,
-    _model_flow_custom,
-    _model_flow_azure_foundry,
-    _model_flow_named_custom,
-    _model_flow_kimi,
-    _model_flow_stepfun,
-    _model_flow_bedrock,
-    _model_flow_vertex,
-    _model_flow_api_key_provider,
-    _model_flow_anthropic,
-    _model_flow_moa,
-    _model_flow_ai_gateway,
-    _model_flow_plugin_provider,
-    _is_profile_plugin_flow_provider,
-    _profile_model_setup_flow,
-)
-from hermes_cli.model_setup_flows_local import _model_flow_local
+
+
 logger = logging.getLogger(__name__)
 from hermes_cli.main_agent_cmds import (
     cmd_acp,
@@ -684,19 +663,7 @@ from hermes_cli.main_dashboard import (
 from hermes_cli.main_dashboard import (  # frozen updater surface: update_cmd*.py resolve these via _m()
     _respawn_dashboard_processes,
 )
-from hermes_cli.main_provider_setup import (
-    _GENERIC_API_KEY_PROVIDERS,
-    _aux_config_menu,
-    _build_provider_picker_rows,
-    _clear_stale_openai_base_url,
-    _is_profile_api_key_provider,
-    _model_choice_save_count,
-    _named_custom_provider_map,
-    _offer_reasoning_after_pick,
-    _prompt_main_reasoning_effort,
-    _prompt_provider_choice,
-    _remove_custom_provider,
-)
+
 # Frozen external updater API: old in-memory siblings still import these names
 # after a checkout swap. Keep their inert shims separate from live launch helpers.
 from hermes_cli.old_updater_main import (
@@ -1717,22 +1684,22 @@ def cmd_model(args):
 # ``custom:*``, remove-custom and the generic API-key set are the fallthrough
 # branches in select_provider_and_model.
 _PROVIDER_MODEL_FLOWS = {
-    "openrouter": lambda c, m, a: _model_flow_openrouter(c, m),
-    "moa": lambda c, m, a: _model_flow_moa(c, m),
-    "ai-gateway": lambda c, m, a: _model_flow_ai_gateway(c, m),
-    "nous": lambda c, m, a: _model_flow_nous(c, m, args=a),
-    "openai-codex": lambda c, m, a: _model_flow_openai_codex(c, m),
-    "xai-oauth": lambda c, m, a: _model_flow_xai_oauth(c, m, args=a),
-    "qwen-oauth": lambda c, m, a: _model_flow_qwen_oauth(c, m),
-    "minimax-oauth": lambda c, m, a: _model_flow_minimax_oauth(c, m, args=a),
-    "custom": lambda c, m, a: _model_flow_custom(c),
-    "llamacpp": lambda c, m, a: _model_flow_local(c, m),
-    "anthropic": lambda c, m, a: _model_flow_anthropic(c, m),
-    "kimi-coding": lambda c, m, a: _model_flow_kimi(c, m),
-    "stepfun": lambda c, m, a: _model_flow_stepfun(c, m),
-    "bedrock": lambda c, m, a: _model_flow_bedrock(c, m),
-    "vertex": lambda c, m, a: _model_flow_vertex(c, m),
-    "azure-foundry": lambda c, m, a: _model_flow_azure_foundry(c, m),
+    "openrouter": lambda c, m, a: _command_export('_model_flow_openrouter')(c, m),
+    "moa": lambda c, m, a: _command_export('_model_flow_moa')(c, m),
+    "ai-gateway": lambda c, m, a: _command_export('_model_flow_ai_gateway')(c, m),
+    "nous": lambda c, m, a: _command_export('_model_flow_nous')(c, m, args=a),
+    "openai-codex": lambda c, m, a: _command_export('_model_flow_openai_codex')(c, m),
+    "xai-oauth": lambda c, m, a: _command_export('_model_flow_xai_oauth')(c, m, args=a),
+    "qwen-oauth": lambda c, m, a: _command_export('_model_flow_qwen_oauth')(c, m),
+    "minimax-oauth": lambda c, m, a: _command_export('_model_flow_minimax_oauth')(c, m, args=a),
+    "custom": lambda c, m, a: _command_export('_model_flow_custom')(c),
+    "llamacpp": lambda c, m, a: _command_export('_model_flow_local')(c, m),
+    "anthropic": lambda c, m, a: _command_export('_model_flow_anthropic')(c, m),
+    "kimi-coding": lambda c, m, a: _command_export('_model_flow_kimi')(c, m),
+    "stepfun": lambda c, m, a: _command_export('_model_flow_stepfun')(c, m),
+    "bedrock": lambda c, m, a: _command_export('_model_flow_bedrock')(c, m),
+    "vertex": lambda c, m, a: _command_export('_model_flow_vertex')(c, m),
+    "azure-foundry": lambda c, m, a: _command_export('_model_flow_azure_foundry')(c, m),
 }
 
 
@@ -1803,10 +1770,10 @@ def _pick_provider(config, active, provider_labels, custom_provider_map):
     """Provider picker (+ group member sub-picker) -> concrete slug, or None on cancel."""
     # Group rows drill into a member sub-picker that resolves back to a
     # concrete slug, so the flow dispatch is unchanged.
-    ordered, default_idx = _build_provider_picker_rows(
+    ordered, default_idx = _command_export('_build_provider_picker_rows')(
         config, active, provider_labels, custom_provider_map
     )
-    provider_idx = _prompt_provider_choice(
+    provider_idx = _command_export('_prompt_provider_choice')(
         [label for _, label, _ in ordered],
         default=default_idx,
     )
@@ -1817,7 +1784,7 @@ def _pick_provider(config, active, provider_labels, custom_provider_map):
         return selected_key
     # Default to the active member when it lives in this group. The group row
     # carries the descriptive text, so member rows show only their short label.
-    member_idx = _prompt_provider_choice(
+    member_idx = _command_export('_prompt_provider_choice')(
         [provider_labels.get(m, m) for m in selected_members],
         default=selected_members.index(active) if active in selected_members else 0,
         title=f"Select {group_label.split(' ▸', 1)[0]} provider:",
@@ -1846,7 +1813,7 @@ def select_provider_and_model(args=None):
     effective_provider = config_provider or os.getenv("HERMES_INFERENCE_PROVIDER") or "auto"
 
     # User-defined custom providers from config.yaml: key → {name, base_url, api_key}
-    _custom_provider_map = _named_custom_provider_map(config)
+    _custom_provider_map = _command_export('_named_custom_provider_map')(config)
     active = _resolve_active_provider(config, model_cfg, effective_provider, _custom_provider_map)
 
     from hermes_cli.models import _PROVIDER_LABELS
@@ -1867,47 +1834,47 @@ def select_provider_and_model(args=None):
         print("No change.")
         return
     if selected_provider == "aux-config":
-        _aux_config_menu()
+        _command_export('_aux_config_menu')()
         return
     if selected_provider == "reasoning":
         # Effort for the CURRENT default model, no model change.
-        _prompt_main_reasoning_effort(current_model, active or "")
+        _command_export('_prompt_main_reasoning_effort')(current_model, active or "")
         return
 
     # Provider-specific setup + model selection. Flows resolve the
     # _model_flow_* names at call time so test monkeypatches on
     # hermes_cli.main keep intercepting.
-    saves_before = _model_choice_save_count()
+    saves_before = _command_export('_model_choice_save_count')()
     from hermes_cli.observability.shared_metrics_setup import cli_provider_setup
     with cli_provider_setup(selected_provider):
         # Bespoke core flow, else the profile's own (``model_setup_flow``), else the generic one.
-        flow = _PROVIDER_MODEL_FLOWS.get(selected_provider) or _profile_model_setup_flow(selected_provider)
-        if flow is None and _is_profile_plugin_flow_provider(selected_provider):
+        flow = _PROVIDER_MODEL_FLOWS.get(selected_provider) or _command_export('_profile_model_setup_flow')(selected_provider)
+        if flow is None and _command_export('_is_profile_plugin_flow_provider')(selected_provider):
             # Registered plugin profile with no bespoke flow: the generic one, keyed by its auth_type.
-            flow = lambda c, m, a: _model_flow_plugin_provider(c, selected_provider, m)
+            flow = lambda c, m, a: _command_export('_model_flow_plugin_provider')(c, selected_provider, m)
         if flow is not None:
             flow(config, current_model, args)
         elif (
             selected_provider.startswith("custom:")
             or selected_provider in _custom_provider_map
         ):
-            provider_info = _named_custom_provider_map(load_config()).get(selected_provider)
+            provider_info = _command_export('_named_custom_provider_map')(load_config()).get(selected_provider)
             if provider_info is None:
                 print(
                     "Warning: the selected saved custom provider is no longer available. "
                     "It may have been removed from config.yaml. No change."
                 )
                 return
-            _model_flow_named_custom(config, provider_info)
+            _command_export('_model_flow_named_custom')(config, provider_info)
         elif selected_provider == "remove-custom":
-            _remove_custom_provider(config)
+            _command_export('_remove_custom_provider')(config)
         elif (
-            selected_provider in _GENERIC_API_KEY_PROVIDERS
-            or _is_profile_api_key_provider(selected_provider)
+            selected_provider in _command_export('_GENERIC_API_KEY_PROVIDERS')
+            or _command_export('_is_profile_api_key_provider')(selected_provider)
         ):
-            _model_flow_api_key_provider(config, selected_provider, current_model)
+            _command_export('_model_flow_api_key_provider')(config, selected_provider, current_model)
 
-    _offer_reasoning_after_pick(current_model, saves_before)
+    _command_export('_offer_reasoning_after_pick')(current_model, saves_before)
 
     # Post-switch cleanup: switching to a named provider (anything except
     # "custom") leaves a stale OPENAI_BASE_URL in ~/.hermes/.env that poisons
@@ -1917,7 +1884,7 @@ def select_provider_and_model(args=None):
         "cancel",
         "remove-custom",
     } and not selected_provider.startswith("custom:"):
-        _clear_stale_openai_base_url()
+        _command_export('_clear_stale_openai_base_url')()
 
 
 def _detect_venv_python_processes(*, exclude_pids: set[int] | None = None) -> list[tuple[int, str, str]]:
@@ -1968,8 +1935,22 @@ _FROZEN_ATTR_SOURCES: dict[str, str] = {
 }
 
 
+# Command-only compatibility exports. Not the frozen updater surface.
+from hermes_cli.main_command_exports import COMMAND_ATTR_SOURCES as _COMMAND_ATTR_SOURCES
+
+def _command_export(name):
+    # LOAD_GLOBAL does not invoke module __getattr__. Preserve call-time patches.
+    if name in globals():
+        return globals()[name]
+    return __getattr__(name)
+
 def __getattr__(name):
     """Resolve the frozen updater surface on first read (see _FROZEN_UPDATER_SURFACE)."""
+    command_module = _COMMAND_ATTR_SOURCES.get(name)
+    if command_module is not None:
+        import importlib
+        value = getattr(importlib.import_module(command_module), name)
+        return globals().setdefault(name, value)
     module = _FROZEN_ATTR_SOURCES.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
