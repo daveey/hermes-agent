@@ -775,7 +775,13 @@ def release(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = Non
             board=board, seen=seen, precondition=precondition, env=os.environ if env is None else env,
             ancestry=ancestry))
     except _Refusal as exc:
-        return _refused(out, exc.code, str(exc), **exc.more)
+        from hermes_cli.kanban_stop_recovery import refusal_context
+        try:
+            recovery, context = refusal_context(conn, tid)
+        except (ValueError, RuntimeError, sqlite3.Error):
+            recovery = {'authorization': 'not_granted', 'next_operation': 'inspect_stop'}
+            context = ' Recovery diagnostic unavailable; read current stop and restrictions. No authority granted.'
+        return _refused(out, exc.code, str(exc) + context, recovery=recovery, **exc.more)
 
 
 def _current_decision_card(conn: sqlite3.Connection, named: str, tid: str, episode: str) -> None:
