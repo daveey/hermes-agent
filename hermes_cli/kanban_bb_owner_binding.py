@@ -17,7 +17,8 @@ def binding(conn, task: str, *, owner_gateway: str, owner_profile: str, board: s
     """Freeze one read snapshot; coordinates must come from the owning runtime.
 
     Own only a read transaction when the caller has none. An application caller
-    can instead hold its existing writer reservation through this recheck.
+    must hold its writer reservation through this recheck, not an older read
+    transaction. The raw ask is digest input only, never a client command surface.
     """
     route = (owner_gateway, owner_profile, board)
     if (any(not isinstance(v, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}', v) for v in route)
@@ -60,7 +61,7 @@ def _read(conn, task, gateway, profile, board):
         # normalized copies, are what the native client must display and send.
         if not choices or len({c['value'] for c in choices}) != len(choices):
             raise ValueError('ambiguous choices')
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         raise AnswerRefused('bb_binding_ask_ineligible') from None
     marks = ','.join('?' for _ in LIFECYCLE)
     events = conn.execute(f'SELECT uid FROM task_events WHERE task_id=? AND kind IN ({marks})',
@@ -72,7 +73,7 @@ def _read(conn, task, gateway, profile, board):
         if len(set(identities)) != len(identities):
             raise ValueError('duplicate lifecycle identity')
         generation = digest({'lifecycle': sorted(identities), 'ask': ask, 'status': row[2]})
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         raise AnswerRefused('bb_binding_lifecycle_unverified') from None
     return dict(version=1, owner_gateway=gateway, owner_profile=profile, board=board, task=task,
                 tenant='babybear', generation=generation, ask=ask, choices=choices)

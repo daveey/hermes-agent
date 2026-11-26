@@ -97,10 +97,13 @@ def test_owner_row_must_be_unique(db, count):
         read(db)
 
 
-@pytest.mark.parametrize('table,column', [('kanban_sync_state','board_id'), ('tasks','created_on'),
-                                        ('task_events','uid')])
+@pytest.mark.parametrize('table,column', [(table, col) for table, cols in {
+    'kanban_sync_state': ('board_id', 'gateway_id', 'mode'),
+    'tasks': ('id', 'tenant', 'created_on', 'status', 'human_request', 'block_kind'),
+    'task_events': ('task_id', 'kind', 'uid'),
+}.items() for col in cols])
 def test_legacy_missing_schema_not_authority(db, table, column):
-    db.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
+    db.execute(f'ALTER TABLE {table} RENAME COLUMN {column} TO absent_column')
     with pytest.raises(bb.AnswerRefused, match='bb_binding_schema_unavailable'):
         read(db)
 
@@ -120,7 +123,7 @@ def test_malformed_or_nondecision_ask(db, field, value):
         read(db)
 
 
-@pytest.mark.parametrize('raw', ['null','[]','true','3','"string"','{'])
+@pytest.mark.parametrize('raw', [None, 'null','[]','true','3','"string"','{'])
 def test_unstructured_ask(db, raw):
     db.execute('UPDATE tasks SET human_request=?', (raw,))
     db.commit()
@@ -234,3 +237,103 @@ def test_snapshot_consistent_when_other_connection_changes_ask(db, tmp_path):
     finally:
         conn.close()
         other.close()
+
+
+@pytest.mark.parametrize('status', ['todo', 'done', 'archived', 'review', 'scheduled'])
+def test_other_statuses_not_answerable(db, status):
+    db.execute('UPDATE tasks SET status=?', (status,))
+    db.commit()
+    with pytest.raises(bb.AnswerRefused, match='bb_binding_ask_ineligible'):
+        read(db)
+    assert not db.in_transaction
+
+
+def test_assignment_not_a_human_ask(db):
+    db.execute("UPDATE tasks SET block_kind='assignment'")
+    db.commit()
+    with pytest.raises(bb.AnswerRefused, match='bb_binding_ask_ineligible'):
+        read(db)
+
+
+@pytest.mark.parametrize('field', ['owner_gateway', 'owner_profile', 'board'])
+@pytest.mark.parametrize('value', ['.', '..', '-rf', '_x', 'a'*65, None], ids=['dot','dotdot','dash','underscore','long','null'])
+def test_route_atoms_individually(db, field, value):
+    args = dict(owner_gateway='owner', owner_profile='native-profile', board='default')
+    args[field] = value
+    with pytest.raises(bb.AnswerRefused, match='bb_binding_route_invalid'):
+        bb.binding(db, TASK, **args)
+
+
+@pytest.mark.parametrize('task', [None, 1, '', 'synthetic', 't_', 't_bad/path', 't_'+'a'*101],
+                         ids=['null','integer','empty','no-prefix','no-suffix','slash','long'])
+def test_task_route_atoms(db, task):
+    with pytest.raises(bb.AnswerRefused, match='bb_binding_route_invalid'):
+        bb.binding(db, task, owner_gateway='owner', owner_profile='native-profile', board='default')
+
+
+def test_valid_route_boundaries_and_distinct_coordinates(db):
+    gateway, profile, board, task = 'g'*64, 'p'*64, 'b'*64, 't_'+'t'*100
+    db.execute('UPDATE tasks SET id=?,created_on=?', (task,gateway))
+    db.execute('UPDATE task_events SET task_id=?', (task,))
+    db.execute('UPDATE kanban_sync_state SET board_id=?,gateway_id=?', (board,gateway))
+    db.commit()
+    result = bb.binding(db, task, owner_gateway=gateway, owner_profile=profile, board=board)
+    assert {k: result[k] for k in ('owner_gateway','owner_profile','board','task')} == {
+        'owner_gateway':gateway, 'owner_profile':profile, 'board':board, 'task':task}
+
+
+def test_sorted_lifecycle_matches_desktop_with_multiple_events(db):
+    db.execute('UPDATE task_events SET uid=?', ('ffffffff-ffff-4fff-afff-ffffffffffff',))
+    db.execute('INSERT INTO task_events(task_id,kind,uid) VALUES (?,?,?)',
+               (TASK,'created','00000000-0000-4000-a000-000000000000'))
+    db.commit()
+    assert read(db)['generation'] == desktop.snapshot(db,TASK)['generation']
+
+
+@pytest.mark.parametrize('kind', desktop.LIFECYCLE)
+def test_every_lifecycle_change_invalidates_binding(db, kind):
+    first = read(db)['generation']
+    db.execute('INSERT INTO task_events(task_id,kind,uid) VALUES (?,?,?)', (TASK,kind,str(uuid4())))
+    db.commit()
+    assert read(db)['generation'] != first
+
+
+def test_deep_json_refuses_without_leaving_transaction(db):
+    db.execute('UPDATE tasks SET human_request=?', ('['*2000+'0'+']'*2000,))
+    db.commit()
+    with pytest.raises(bb.AnswerRefused, match='bb_binding_ask_ineligible'):
+        read(db)
+    assert not db.in_transaction
+
+
+def test_digest_recursion_error_is_fixed_refusal(db, monkeypatch):
+    def refuse(_):
+        raise RecursionError('synthetic encoder boundary')
+    monkeypatch.setattr(bb, 'digest', refuse)
+    with pytest.raises(bb.AnswerRefused, match='bb_binding_lifecycle_unverified'):
+        read(db)
+    assert not db.in_transaction
+
+
+def test_real_core_sync_schema_is_compatible(tmp_path):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_sync as sync
+    conn = sqlite3.connect(tmp_path/'real-schema.db', isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(kb.SCHEMA_SQL)
+        conn.executescript(sync.SYNC_SCHEMA_SQL)
+        for table, col, ddl in sync._SYNC_COLUMN_DDL:
+            if col not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN {ddl}')
+        conn.execute("INSERT INTO kanban_sync_state(board_id,gateway_id,hlc_last,mode) VALUES ('default','owner','','primary')")
+        conn.execute('INSERT INTO tasks(id,title,status,created_at,tenant,created_on,human_request,block_kind) '
+                     'VALUES (?,?,?,?,?,?,?,?)', (TASK,'Synthetic','blocked',1,'babybear','owner',json.dumps(ASK),'needs_input'))
+        for kind in ('created','blocked'):
+            conn.execute('INSERT INTO task_events(task_id,kind,created_at,uid) VALUES (?,?,?,?)',
+                         (TASK,kind,1,str(uuid4())))
+        assert read(conn)['generation'] == desktop.snapshot(conn,TASK)['generation']
+        conn.row_factory = None
+        assert read(conn)['choices'] == ASK['choices']
+    finally:
+        conn.close()
