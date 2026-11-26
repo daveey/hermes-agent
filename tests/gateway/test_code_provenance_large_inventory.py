@@ -1,7 +1,7 @@
 """Real large module traversal isolated from the separate 16384-unit projection."""
 import asyncio
 import threading
-from types import SimpleNamespace
+from types import ModuleType
 
 import pytest
 
@@ -17,9 +17,12 @@ pytestmark = pytest.mark.platforms('linux', 'macos')
 def test_large_real_inventory_is_not_masked_by_large_projection(runtime, monkeypatch):
     a = runtime[2]
     a._modules = {}
-    modules = [(f'fixture_{n}', SimpleNamespace(__file__=str(a.core_root / 'plugin' / 'a.py')))
-               for n in range(16384)]
-    monkeypatch.setattr(a, '_inventory_modules', ca.Attestation._inventory_modules.__get__(a))
+    modules = []
+    for n in range(ca.MAX_UNITS):
+        module = ModuleType(f'fixture_{n}')
+        module.__file__ = str(a.core_root / 'plugin' / 'a.py')
+        modules.append((module.__name__, module))
+    monkeypatch.setattr(a, '_inventory_modules_diagnostic', ca.Attestation._inventory_modules_diagnostic.__get__(a))
     monkeypatch.setattr(a, '_module_snapshot', lambda: modules)
     original = a._module_file
     entered = threading.Event()

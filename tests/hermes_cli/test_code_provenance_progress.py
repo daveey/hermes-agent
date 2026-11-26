@@ -103,7 +103,8 @@ def test_snapshot_is_nonblocking_and_never_reads_clocks_under_lock(monkeypatch):
     progress._lock.release()
     reader.join(2)
     assert not was_alive, 'snapshot waited on recorder lock'
-    assert results == [pp.unavailable()]
+    assert results == [{**pp.unavailable(), 'inventory': {'schema': 1, 'stage': 'unavailable', 'completed': 0,
+                       'sampled_elapsed_ms': 0, 'worker_cpu_ms': 0, 'cpu_is_lower_bound': True}}]
     results[0]['phase'] = 'disk'
     assert pp.unavailable()['phase'] == 'unavailable'
 

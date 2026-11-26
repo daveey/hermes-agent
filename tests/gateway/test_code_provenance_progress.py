@@ -13,6 +13,92 @@ runtime = helpers.runtime
 pytestmark = pytest.mark.platforms('linux', 'macos')
 
 
+def test_inventory_sample_is_optional_detached_terminal_and_flight_local():
+    from hermes_cli.code_provenance_progress import CaptureProgress
+    recorder = CaptureProgress()
+    assert 'inventory' not in recorder.snapshot()
+    with pytest.raises(ValueError, match='^invalid_inventory_progress$'):
+        recorder.set_inventory('module_snapshot', 0)
+    recorder.set_phase('worker_start')
+    recorder.set_inventory('module_snapshot', 0)
+    initial = recorder.snapshot()
+    assert set(initial['inventory']) == {'schema', 'stage', 'completed', 'sampled_elapsed_ms', 'worker_cpu_ms', 'cpu_is_lower_bound'}
+    assert initial['inventory']['schema'] == 1
+    assert initial['inventory']['stage'] == 'module_snapshot'
+    recorder.set_inventory('module_file', 1)
+    initial['inventory']['completed'] = 999
+    assert recorder.snapshot()['inventory']['completed'] == 1
+    with pytest.raises(ValueError, match='^invalid_inventory_progress$'):
+        recorder.set_inventory('module_metadata', 0)
+    assert recorder.snapshot()['inventory']['completed'] == 1
+    recorder.set_inventory('finished', 1)
+    with pytest.raises(ValueError, match='^invalid_inventory_progress$'):
+        recorder.set_inventory('finished', 1)
+    assert 'inventory' not in CaptureProgress().snapshot()
+
+
+@pytest.mark.parametrize('stage,completed', [('bad', 0), (['module_file'], 0), ('module_file', True),
+                                            ('module_file', -1), ('module_file', 16385), ('module_file', 1.0)])
+def test_invalid_inventory_does_not_consume_update(stage, completed, monkeypatch):
+    from hermes_cli import code_provenance_progress as pp
+    monkeypatch.setattr(pp, 'MAX_INVENTORY_UPDATES', 1)
+    recorder = pp.CaptureProgress()
+    recorder.set_phase('worker_start')
+    with pytest.raises(ValueError, match='^invalid_inventory_progress$'):
+        recorder.set_inventory(stage, completed)
+    assert 'inventory' not in recorder.snapshot()
+    recorder.set_inventory('module_snapshot', 0)
+    with pytest.raises(ValueError, match='^invalid_inventory_progress$'):
+        recorder.set_inventory('module_snapshot', 0)
+    assert recorder.snapshot()['inventory']['stage'] == 'module_snapshot'
+
+
+def test_inventory_counter_clock_origins_clamp_and_lock_free_sampling(monkeypatch):
+    from types import SimpleNamespace
+    from hermes_cli import code_provenance_progress as pp
+    clocks = SimpleNamespace(mono=1000000, cpu=9000000)
+    recorder = pp.CaptureProgress()
+    recorder._begin_ns = clocks.mono
+    def mono():
+        assert not recorder._lock.locked()
+        return clocks.mono
+    def cpu():
+        assert not recorder._lock.locked()
+        return clocks.cpu
+    monkeypatch.setattr(pp, 'time', SimpleNamespace(monotonic_ns=mono, thread_time_ns=cpu))
+    recorder.set_phase('worker_start')
+    clocks.mono += 5000000
+    clocks.cpu += 3000000
+    recorder.set_inventory('module_file', 0)
+    sample = recorder.snapshot()['inventory']
+    assert sample['sampled_elapsed_ms'] == 5 and sample['worker_cpu_ms'] == 3
+    for value, expected in [(-10**100, 0), (10**100, pp.MAX_COUNTER_MS)]:
+        clocks.mono = clocks.cpu = value
+        recorder.set_inventory('module_file', 0)
+        sample = recorder.snapshot()['inventory']
+        assert sample['sampled_elapsed_ms'] == sample['worker_cpu_ms'] == expected
+    with recorder._lock:
+        sample = recorder.snapshot()
+    assert sample == {**pp.unavailable(), 'inventory': {'schema': 1, 'stage': 'unavailable', 'completed': 0,
+                     'sampled_elapsed_ms': 0, 'worker_cpu_ms': 0, 'cpu_is_lower_bound': True}}
+
+
+def test_empty_inventory_finished_is_terminal_and_updates_independent_of_phases():
+    from hermes_cli import code_attestation as ca
+    from hermes_cli import code_provenance_progress as pp
+    assert pp.MAX_INVENTORY_UPDATES == 2 + 3 * ca.MAX_UNITS
+    recorder = pp.CaptureProgress()
+    recorder.set_phase('worker_start')
+    recorder.set_inventory('finished', 0)
+    with pytest.raises(ValueError, match='^invalid_inventory_progress$'):
+        recorder.set_inventory('module_snapshot', 0)
+    for _ in range(8):
+        recorder.set_phase('complete')
+    with pytest.raises(ValueError, match='^capture_phase_limit$'):
+        recorder.set_phase('complete')
+
+
+
 def diagnostic(result):
     helpers.capture_result(result)
     d = result['diagnostics']

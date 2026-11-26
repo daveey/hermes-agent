@@ -60,7 +60,7 @@ def test_real_boundary_timeout_old_pages_busy_join_and_recovery(runtime, monkeyp
                         return result
                     patch.setattr(projection, 'disk_identity', signal_disk)
                 elif phase == 'inventory':
-                    patch.setattr(runtime[2], '_inventory_modules', lambda **kw: gate())
+                    patch.setattr(runtime[2], '_inventory_modules_diagnostic', lambda *, deadline=None, progress=None: gate())
                 elif phase == 'registry':
                     from hermes_cli import plugin_review_records
                     runtime[2]._reviewed_plugins = {'fixture': True}
@@ -132,7 +132,9 @@ def test_recorder_lock_cannot_extend_socket_timeout(runtime, monkeypatch):
             assert await asyncio.to_thread(entered.wait, 2)
             result = (await asyncio.wait_for(pending, 4))['result']
             assert helpers.capture_result(result) == pc._error('capture_timeout')
-            assert result['diagnostics'] == pp.unavailable()
+            assert result['diagnostics'] == {**pp.unavailable(), 'inventory': {
+                'schema': 1, 'stage': 'unavailable', 'completed': 0, 'sampled_elapsed_ms': 0,
+                'worker_cpu_ms': 0, 'cpu_is_lower_bound': True}}
             assert pc._FLIGHT.locked() and not control._snapshots
         finally:
             release.set()

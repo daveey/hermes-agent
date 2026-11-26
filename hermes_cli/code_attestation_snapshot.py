@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import importlib
 import json
 import time
 from types import MappingProxyType
@@ -187,6 +188,10 @@ def snapshot(ledger, *, deadline: float, progress=None) -> DiagnosticSnapshot:
     if progress is not None:
         progress.set_phase('disk')
     disk = disk_identity(ledger.core_root, deadline)
+    # Resolve audited sibling execution before taking the ledger's locked view.
+    importlib.import_module('hermes_cli.code_attestation_inventory')
+    if time.monotonic() >= deadline:
+        raise TimeoutError('snapshot_deadline')
     if progress is not None:
         progress.set_phase('ledger_lock')
     if not ledger._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
@@ -195,7 +200,7 @@ def snapshot(ledger, *, deadline: float, progress=None) -> DiagnosticSnapshot:
         if progress is not None:
             progress.set_phase('inventory')
         ledger._settle(deadline=deadline)
-        ledger._inventory_modules(deadline=deadline)
+        ledger._inventory_modules_diagnostic(deadline=deadline, progress=progress)
         if time.monotonic() >= deadline:
             raise TimeoutError('snapshot_deadline')
         if getattr(ledger, '_reviewed_plugins', None):

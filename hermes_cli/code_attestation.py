@@ -1149,6 +1149,10 @@ class Attestation:
             elif owner is None:
                 self._extension_unknown("unrooted-module:" + name, filename)
 
+    def _inventory_modules_diagnostic(self, *, deadline=None, progress=None):
+        from hermes_cli.code_attestation_inventory import inventory_modules
+        return inventory_modules(self, deadline=deadline, progress=progress)
+
     def _inventory_modules(self, *, deadline=None):
         # Requested snapshots only, never idle scans. Recheck mutable __file__ even
         # for an unchanged module object; retaining identity avoids id recycling.

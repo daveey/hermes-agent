@@ -136,7 +136,7 @@ class CodeProvenanceControl:
             except (OSError, RuntimeError, ValueError, TypeError, AttributeError, TimeoutError) as exc:
                 # Fixed/class-only errors, never exception text containing paths/secrets.
                 box['error'] = str(exc) if type(exc) is ValueError and str(exc) in {
-                    'entry_too_large', 'snapshot_too_large'} else type(exc).__name__
+                    'entry_too_large', 'snapshot_too_large', 'module_metadata_unavailable'} else type(exc).__name__
             except Exception:  # health: allow BLE001 -- settle private worker failures without logging arbitrary secret-bearing exception text
                 # Do not expose arbitrary exception messages or custom class names.
                 # BaseException remains outside this ordinary-failure contract.

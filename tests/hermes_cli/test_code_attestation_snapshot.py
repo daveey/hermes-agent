@@ -32,7 +32,9 @@ def ledger(monkeypatch, tmp_path):
     a._seed = [{'module': 'seed', 'source_sha256': 'f' * 64, 'secret': 'SECRET_SENTINEL'}]
     a._launcher = {'kind': 'trusted_launcher_script', 'launch_handoff_env': 'SECRET_SENTINEL'}
     a.interpreter_identity = {'executable': '/python', 'version': 'test', 'secret': 'SECRET_SENTINEL'}
+    a._modules = {}
     monkeypatch.setattr(a, '_inventory_modules', lambda **kw: None)
+    monkeypatch.setattr(a, '_inventory_modules_diagnostic', lambda *, deadline=None, progress=None: None)
     monkeypatch.setattr(ca, '_installed', a)
     return a
 
@@ -88,10 +90,10 @@ def test_refusals_survive_exactly(ledger, reason):
 
 
 def test_inventory_deadline_and_errors_are_not_partial_success(ledger, monkeypatch):
-    def fail(**kwargs):
+    def fail(*, deadline=None, progress=None):
         ledger.mark_unknown('monotone-inventory-refusal')
         raise OSError('SECRET_SENTINEL')
-    monkeypatch.setattr(ledger, '_inventory_modules', fail)
+    monkeypatch.setattr(ledger, '_inventory_modules_diagnostic', fail)
     with pytest.raises(OSError):
         capture()
     assert 'monotone-inventory-refusal' in ledger._unknown

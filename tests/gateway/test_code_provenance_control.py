@@ -69,7 +69,17 @@ def capture_result(result):
     """Check the additive private scalar schema; preserve exact legacy error assertions."""
     from hermes_cli.code_provenance_progress import PHASES, MAX_COUNTER_MS
     d = result['diagnostics']
-    assert set(d) == {'schema', 'phase', 'sampled_elapsed_ms', 'worker_cpu_ms', 'cpu_is_lower_bound'}
+    assert set(d) - {'inventory'} == {'schema', 'phase', 'sampled_elapsed_ms', 'worker_cpu_ms', 'cpu_is_lower_bound'}
+    if 'inventory' in d:
+        from hermes_cli.code_attestation import MAX_UNITS
+        from hermes_cli.code_provenance_progress import INVENTORY_STAGES
+        inventory = d['inventory']
+        assert set(inventory) == {'schema', 'stage', 'completed', 'sampled_elapsed_ms', 'worker_cpu_ms', 'cpu_is_lower_bound'}
+        assert inventory['schema'] == 1 and inventory['cpu_is_lower_bound'] is True
+        assert type(inventory['stage']) is str and inventory['stage'] in INVENTORY_STAGES
+        assert type(inventory['completed']) is int and 0 <= inventory['completed'] <= MAX_UNITS
+        assert all(type(inventory[k]) is int and 0 <= inventory[k] <= MAX_COUNTER_MS
+                   for k in ('sampled_elapsed_ms', 'worker_cpu_ms'))
     assert type(d['schema']) is int and d['schema'] == 1
     assert d['phase'] in PHASES and d['cpu_is_lower_bound'] is True
     for key in ('sampled_elapsed_ms', 'worker_cpu_ms'):
@@ -163,11 +173,11 @@ def test_unexpected_inventory_failure_is_sanitized_and_recoverable(runtime, monk
         server, control, params = await start(runtime)
         try:
             summary = (await ask(runtime, params))['result']
-            original = runtime[2]._inventory_modules
+            original = runtime[2]._inventory_modules_diagnostic
             def broken(**kwargs):
                 workers.append(threading.current_thread())
                 raise failure('PRIVATE_INVENTORY_EXCEPTION_SENTINEL')
-            monkeypatch.setattr(runtime[2], '_inventory_modules', broken)
+            monkeypatch.setattr(runtime[2], '_inventory_modules_diagnostic', broken)
             raw = json.dumps({'protocol': 1, 'verb': 'code-provenance',
                               'id': 1, 'params': params}).encode() + b'\n'
             reply = json.loads(await asyncio.to_thread(private_control_query, runtime[0], raw))
@@ -183,7 +193,7 @@ def test_unexpected_inventory_failure_is_sanitized_and_recoverable(runtime, monk
             page = (await ask(runtime, page_params(summary)))['result']
             assert page['complete'] and page['snapshot_id'] == summary['snapshot_id']
             assert not pc._FLIGHT.locked()
-            monkeypatch.setattr(runtime[2], '_inventory_modules', original)
+            monkeypatch.setattr(runtime[2], '_inventory_modules_diagnostic', original)
             fresh = (await ask(runtime, params))['result']
             assert fresh['complete'] and fresh['snapshot_id'] != summary['snapshot_id']
             assert not hooks
@@ -200,13 +210,13 @@ def test_late_unexpected_failure_keeps_flight_until_worker_exit(runtime, monkeyp
         server, control, params = await start(runtime)
         try:
             summary = (await ask(runtime, params))['result']
-            original = runtime[2]._inventory_modules
+            original = runtime[2]._inventory_modules_diagnostic
             def blocked(**kwargs):
                 workers.append(threading.current_thread())
                 entered.set()
                 assert release.wait(8)
                 raise KeyError('PRIVATE_LATE_EXCEPTION_SENTINEL')
-            monkeypatch.setattr(runtime[2], '_inventory_modules', blocked)
+            monkeypatch.setattr(runtime[2], '_inventory_modules_diagnostic', blocked)
             pending = asyncio.create_task(ask(runtime, params))
             assert await asyncio.to_thread(entered.wait, 2)
             assert capture_result((await pending)['result']) == pc._error('capture_timeout')
@@ -218,7 +228,7 @@ def test_late_unexpected_failure_keeps_flight_until_worker_exit(runtime, monkeyp
             assert not workers[0].is_alive() and not hooks
             assert not pc._FLIGHT.locked()
             assert next(iter(control._snapshots.values()))['token'] == summary['snapshot_id']
-            monkeypatch.setattr(runtime[2], '_inventory_modules', original)
+            monkeypatch.setattr(runtime[2], '_inventory_modules_diagnostic', original)
             assert (await ask(runtime, params))['result']['complete']
         finally:
             release.set()
@@ -310,7 +320,7 @@ def test_blocked_inventory_default_deadline_single_flight_and_responsive_pages(r
                     assert release.wait(8)
                     ended.set()
             if stage == 'inventory':
-                monkeypatch.setattr(runtime[2], '_inventory_modules', blocked)
+                monkeypatch.setattr(runtime[2], '_inventory_modules_diagnostic', blocked)
             elif stage == 'disk':
                 from hermes_cli import code_attestation_snapshot as projection
                 def blocked_disk(*args):
@@ -340,7 +350,7 @@ def test_blocked_inventory_default_deadline_single_flight_and_responsive_pages(r
             await asyncio.to_thread(workers[0].join, 2)
             assert not workers[0].is_alive()
             assert next(iter(control._snapshots.values()))['token'] == summary['snapshot_id']
-            monkeypatch.setattr(runtime[2], '_inventory_modules', lambda **kw: None)
+            monkeypatch.setattr(runtime[2], '_inventory_modules_diagnostic', lambda **kw: None)
             fresh = (await ask(runtime, params))['result']
             assert fresh['complete'] and fresh['snapshot_id'] != summary['snapshot_id']
         finally:
@@ -431,7 +441,7 @@ def test_wire_errors_are_explicit_incomplete_no_secret(runtime, monkeypatch, mod
         def fail(**kwargs):
             runtime[2].mark_unknown('monotone-new-refusal')
             raise OSError('SECRET_SENTINEL')
-        monkeypatch.setattr(runtime[2], '_inventory_modules', fail)
+        monkeypatch.setattr(runtime[2], '_inventory_modules_diagnostic', fail)
     async def scenario():
         server, control, params = await start(runtime)
         try:
