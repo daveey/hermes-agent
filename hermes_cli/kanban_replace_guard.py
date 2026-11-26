@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from functools import lru_cache
 
 
 class ProtectedRowReplaceError(sqlite3.IntegrityError):
@@ -45,6 +46,20 @@ def _identifier(token):
 
 def reject_replace(sql):
     """Preflight the complete SQL before SQLite can write or implicitly commit."""
+    # Only immutable built-in strings: subclass equality/hash cannot certify SQL.
+    # Bound retained text as well as entries; parameters and DB results never enter.
+    if type(sql) is str and len(sql) <= 4096:
+        return _checked_syntax(sql)
+    return _parse_replace(sql)
+
+
+@lru_cache(maxsize=256)
+def _checked_syntax(sql):
+    # functools never caches exceptions: every refused statement still raises.
+    return _parse_replace(sql)
+
+
+def _parse_replace(sql):
     if not isinstance(sql, str):
         return  # preserve sqlite3's native type error
     tokens = list(_tokens(sql))
