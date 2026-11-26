@@ -6,6 +6,11 @@ manage context window usage efficiently across long conversations.
 Source files: `agent/context_engine.py` (ABC), `agent/context_compressor.py` (default engine),
 `agent/prompt_caching.py`, `gateway/run_turn_hygiene.py` (session hygiene), `agent/compression_facade.py` (search for `_compress_context`)
 
+Persisted summary text markers live in `agent/context_summary_markers.py`, a
+runtime-independent leaf shared with read-only session preview SQL. The compressor
+retains its existing marker bindings; reading stored previews does not require
+loading the compressor or its auxiliary model client.
+
 
 ## Bedrock context window cache
 
