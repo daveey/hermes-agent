@@ -166,7 +166,6 @@ def apply(conn, proof, *, delivery_uid):
     frozen at consumed_pending_apply; the APPLIED sidecar owns completion, not a
     transport-stage edit that would revoke its own immutable evidence.
     """
-    from hermes_cli import kanban_db as kb, kanban_db_promote as promote, kanban_spend_budget as budget
     body = proof['intent']
     prior = app.verified_application(conn, body['intent_uid'])
     if prior is not None:
@@ -180,27 +179,38 @@ def apply(conn, proof, *, delivery_uid):
             if prior['delivery_uid'] != delivery_uid or cert.encode(prior['consumption']) != cert.encode(proof):
                 raise ValueError('HOME concurrent historical replay differs')
             return prior
-        admission = _Admission(conn, proof, delivery_uid)
-        tid, actor = body['task_id'], body['actor']
-        before = conn.execute('SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?', (tid,)).fetchone()[0]
-        mandate = _budget(conn, body, admission.seen)
-        base = dict(version=1, owner_release_intent_uid=body['intent_uid'], consume_uid=proof['consume']['client_op_id'],
-                    actor_kind='agent', actor_gateway=actor['gateway'], actor_profile=actor['profile'],
-                    actor_session=actor['session'], authority_kind='chat', runs=body['runs'], note=body['note'])
-        for episode in [*body['capability_episodes'], body['episode']]:
-            kb._append_event(conn, tid, 'stop_released', {**base, 'episode': episode})
-        ok, why = promote._promote_in_txn(conn, tid, actor=f"{actor['gateway']}/{actor['profile']}/{actor['session']}",
-                                        reason=body['note'], expected_status='triage', admission=admission)
-        if not ok:
-            raise ValueError('HOME promotion refused: ' + str(why))
-        effects = [r[0] for r in conn.execute("SELECT uid FROM task_events WHERE task_id=? AND id>? AND kind IN "
-                   "('spend_budget_set','stop_released','promoted_manual') ORDER BY id", (tid, before))]
-        result = dict(version=1, intent_uid=body['intent_uid'], consume_uid=proof['consume']['client_op_id'],
-                      delivery_uid=delivery_uid, outcome='released', mandate=mandate, effect_uids=effects)
-        kb._append_event(conn, tid, 'owner_release_applied', result)
-        result_uid = conn.execute("SELECT uid FROM task_events WHERE task_id=? AND kind='owner_release_applied' ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0]
-        app._record(conn, consume_uid=proof['consume']['client_op_id'], delivery_uid=delivery_uid, result_uid=result_uid)
-        _private_veto(conn, tid)  # Real APPLIED readers, not a hypothetical forged release.
-        if budget.over(budget.spend(conn, tid), budget.card_limits(conn, tid, budget.limits())):
-            raise ValueError('HOME cumulative spend remains over budget')
+        _compose(conn, proof, delivery_uid)
     return app.verified_application(conn, body['intent_uid'])
+
+
+def _compose(conn, proof, delivery_uid):
+    """Actual assembly body, requiring the caller's unique application writer.
+
+    The proposal producer executes this unchanged body under a rollback savepoint;
+    it cannot retain its provisional placement, APPLIED receipt or outbox effects.
+    """
+    from hermes_cli import kanban_db as kb, kanban_db_promote as promote, kanban_spend_budget as budget
+    body = proof['intent']
+    admission = _Admission(conn, proof, delivery_uid)
+    tid, actor = body['task_id'], body['actor']
+    before = conn.execute('SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?', (tid,)).fetchone()[0]
+    mandate = _budget(conn, body, admission.seen)
+    base = dict(version=1, owner_release_intent_uid=body['intent_uid'], consume_uid=proof['consume']['client_op_id'],
+                actor_kind='agent', actor_gateway=actor['gateway'], actor_profile=actor['profile'],
+                actor_session=actor['session'], authority_kind='chat', runs=body['runs'], note=body['note'])
+    for episode in [*body['capability_episodes'], body['episode']]:
+        kb._append_event(conn, tid, 'stop_released', {**base, 'episode': episode})
+    ok, why = promote._promote_in_txn(conn, tid, actor=f"{actor['gateway']}/{actor['profile']}/{actor['session']}",
+                                    reason=body['note'], expected_status='triage', admission=admission)
+    if not ok:
+        raise ValueError('HOME promotion refused: ' + str(why))
+    effects = [r[0] for r in conn.execute("SELECT uid FROM task_events WHERE task_id=? AND id>? AND kind IN "
+               "('spend_budget_set','stop_released','promoted_manual') ORDER BY id", (tid, before))]
+    result = dict(version=1, intent_uid=body['intent_uid'], consume_uid=proof['consume']['client_op_id'],
+                  delivery_uid=delivery_uid, outcome='released', mandate=mandate, effect_uids=effects)
+    kb._append_event(conn, tid, 'owner_release_applied', result)
+    result_uid = conn.execute("SELECT uid FROM task_events WHERE task_id=? AND kind='owner_release_applied' ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0]
+    app._record(conn, consume_uid=proof['consume']['client_op_id'], delivery_uid=delivery_uid, result_uid=result_uid)
+    _private_veto(conn, tid)  # Real APPLIED readers, not a hypothetical forged release.
+    if budget.over(budget.spend(conn, tid), budget.card_limits(conn, tid, budget.limits())):
+        raise ValueError('HOME cumulative spend remains over budget')

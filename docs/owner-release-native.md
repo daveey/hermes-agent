@@ -201,3 +201,21 @@ logical field, not foreign integer IDs; Board-only version/HLC metadata are not
 present in the local schema and still need the canonical application boundary.
 No completed real CLI/DO/HOME/executor transport or live recovery proof is claimed.
 
+### Rollback-only prepared proposal (also disconnected)
+
+`kanban_release_prepared.prepare` runs that same real `_compose` body inside a
+SAVEPOINT under the application writer, captures the complete task before/after,
+actual generated events (including wake evidence), budget comment and verified
+application envelope, then rolls back **all** trial effects. Only an append-only
+proposal survives. Existing task/comment/event/outbox/APPLIED rows remain exactly
+unchanged; there is no provisional ready state or capture/sync exemption.
+
+Its immutable replay is historical custody, not current applicability or permission
+to materialize. Malformed/corrupt custody refuses rather than generating another
+proposal. A later canonical final-application operation must independently validate
+current original owner, full canonical comment inventory, task, exact current and
+selected historical episodes, holds, dependencies and independent financial limits.
+Neither this proposal nor historical consumption authorizes dispatch or increases
+an allowance. That final operation, certified materialization and executor transfer
+remain unimplemented; the production queue is still consumed-only.
+
