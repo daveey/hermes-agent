@@ -60,6 +60,40 @@ def test_blocked_sweeps_skip_transfers_without_starving_peer(board, monkeypatch,
 
 
 @pytest.mark.parametrize("phase", support.PHASES)
+def test_spend_start_reservation_rechecks_custody(board, monkeypatch, phase):
+    from hermes_cli import kanban_spend_reviewer as review
+    import types
+
+    task, neighbour = support.card(board), support.card(board)
+    support.freeze(board, task, phase)
+    monkeypatch.setattr(review, "settings", lambda: (True, 5))
+    monkeypatch.setattr(review, "queue_backlog", lambda *a, **kw: [])
+    monkeypatch.setattr(review, "_due", lambda *a: [(task, "old", 0), (neighbour, "ordinary", 0)])
+    monkeypatch.setattr(review, "_INFLIGHT", set())
+    monkeypatch.setattr(review, "_THREADS", [])
+    calls = []
+
+    class Inline:
+        def __init__(self, target, args, **kw):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(review, "threading", types.SimpleNamespace(Thread=Inline))
+    monkeypatch.setattr(review, "_run", lambda *a: calls.append(a))
+    snapshot = list(board.execute("SELECT * FROM task_events WHERE task_id=?", (task,)))
+    assert review.start_due(board, now=9999999999) == [neighbour]
+    assert [call[1] for call in calls] == [neighbour]
+    assert (review._db_path(board), task) not in review._INFLIGHT
+    assert len(review._THREADS) == 1
+    assert list(board.execute("SELECT * FROM task_events WHERE task_id=?", (task,))) == snapshot
+
+
+@pytest.mark.parametrize("phase", support.PHASES)
 def test_spend_reviewer_due_and_grant_exclude_transfer(board, monkeypatch, phase):
     from hermes_cli import kanban_spend_reviewer as review, kanban_spend_decision as decision
     task, neighbour = support.card(board), support.card(board)

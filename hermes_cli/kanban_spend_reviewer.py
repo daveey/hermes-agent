@@ -315,7 +315,6 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
     """Queue the backlog and start every due review this process has room for. Returns started task ids."""
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_spend_review_request as journal
-    from hermes_cli.kanban_home_transfer import frozen as home_frozen
     cfg = settings()
     if not cfg[0]:
         return []
@@ -351,14 +350,15 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
             if (db, task_id) in _INFLIGHT:
                 continue
             _INFLIGHT.add((db, task_id))
-        _start_reserved(conn, db, task_id, episode, attempts, now)
-        started.append(task_id)
+        if _start_reserved(conn, db, task_id, episode, attempts, now):
+            started.append(task_id)
     return started
 
 
-def _start_reserved(conn, db: str, task_id: str, episode: str, attempts: int, now: int) -> None:
+def _start_reserved(conn, db: str, task_id: str, episode: str, attempts: int, now: int) -> bool:
     """Transfer the reserved slot to the target, or cancel it even on dispatch write contention."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_home_transfer import frozen as home_frozen
     entered = cancelled = handed_off = False
     thread = None
 
@@ -373,15 +373,14 @@ def _start_reserved(conn, db: str, task_id: str, episode: str, attempts: int, no
     try:
         with kb.write_txn(conn):
             if home_frozen(conn, task_id):
-                with _LOCK:
-                    _INFLIGHT.discard((db, task_id))
-                continue
+                return False  # finally releases the unstarted reservation
             kb._append_event(conn, task_id, STARTED, {"episode": episode, "attempt": attempts + 1,
                                                       "deadline": now + LEASE_SECONDS})
         thread = threading.Thread(target=contextvars.copy_context().run, args=(target,),
                                   name=f"spend-review-{task_id}", daemon=True)
         thread.start()
         handed_off = True
+        return True
     finally:
         with _LOCK:
             if not handed_off and not entered:
