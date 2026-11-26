@@ -34,8 +34,8 @@ def test_created_emits_separate_admission_event(monkeypatch, receipt):
     from hermes_cli import kanban_consent
     monkeypatch.setattr(kanban_consent, "snapshot", lambda *_a: [])  # minimal connection has no consent rows
     with sqlite3.connect(":memory:") as conn:
-        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, priority INTEGER)")
-        conn.execute("INSERT INTO tasks VALUES (?, ?)", ("t_test", 137))
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, priority INTEGER, created_by TEXT, session_id TEXT)")
+        conn.execute("INSERT INTO tasks VALUES (?, ?, ?, ?)", ("t_test", 137, "stored-author", "stored-session"))
         creation.record_created(conn, "t_test", assignee="default", status="ready", parents=[],
                                 creator_task_id=None, tenant=None, workspace_kind="scratch",
                                 workspace_path=None, branch_name=None, project_id=None, skills=[],
@@ -44,6 +44,9 @@ def test_created_emits_separate_admission_event(monkeypatch, receipt):
                                 placement_policy="worker-first-v1",
                                 placement_audit={"hub_admission": receipt})
     assert [payload["priority"] for kind, payload in events if kind == "created"] == [137]
+    assert [payload["creator_source"] for kind, payload in events if kind == "created"] == [
+        {"author": "stored-author", "session_id": "stored-session"},
+    ]
     assert [payload for kind, payload in events if kind == "hub_admission"] == [receipt]
 
 
