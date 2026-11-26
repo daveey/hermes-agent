@@ -75,6 +75,10 @@ _FROZEN_ALIASES: dict[str, str] = {"importlib._bootstrap": "_frozen_importlib",
 MAX_DISTS = 4096
 MAX_RECORD_BYTES = 64 * 1024 * 1024
 MAX_DEP_REPORT = 4096
+# Measured Mac managed environment has 23,655 receipted Python files; its live
+# ledger filled 4096 (4009 source, 87 other). Bound unit retention separately
+# from ancillary reports so ordinary SDK imports do not exhaust a distro-sized cap.
+MAX_DEP_UNITS = 32768
 DEPENDENCY_TRUST = "installer-receipt: trusted, not audited, no coverage"
 FORWARDREF_TRUST = (
     "R5-2 interpreter trust class: exactly this annotation expression text, evaluated by the "
@@ -845,7 +849,9 @@ class Attestation:
     def _owner(self, filename):
         if not filename or filename.startswith("<"):
             return None
-        path = Path(filename).resolve()
+        return self._owner_path(Path(filename).resolve())
+
+    def _owner_path(self, path):
         for component, (root, kind, digests) in self._components.items():
             if path.is_relative_to(root):
                 return component, kind, path, path.relative_to(root).as_posix(), digests
@@ -854,7 +860,9 @@ class Attestation:
     def _trusted_stdlib(self, filename):
         if not filename or filename.startswith("<"):
             return False
-        path = Path(filename).resolve()
+        return self._trusted_stdlib_path(Path(filename).resolve())
+
+    def _trusted_stdlib_path(self, path):
         return (path.is_relative_to(self._stdlib) and
                 "site-packages" not in path.parts and "dist-packages" not in path.parts)
 
@@ -1035,9 +1043,12 @@ class Attestation:
     def _module_file(self, name, filename):
         if not filename:
             return
-        owner = self._owner(filename)
-        if owner is not None or not self._trusted_stdlib(filename):
-            if owner is None and self._dependency_module(name, filename):
+        # Resolve once per observation, not once per classifier. Never retain this
+        # view across inventories: module filenames and symlink targets can change.
+        path = None if filename.startswith("<") else Path(filename).resolve()
+        owner = self._owner_path(path) if path is not None else None
+        if owner is not None or path is None or not self._trusted_stdlib_path(path):
+            if owner is None and path is not None and self._dependency_module_path(name, path):
                 return
             if not str(filename).endswith(".py"):
                 self.mark_unknown("non-source-module:" + name)
@@ -1098,7 +1109,7 @@ class Attestation:
         key = (str(filename), kind, extra.get("generator"))
         if key in self._dep_units:
             return
-        if len(self._dep_units) >= MAX_DEP_REPORT:
+        if len(self._dep_units) >= MAX_DEP_UNITS:
             self.mark_unknown("dependency-report-limit")
             return
         self._generation += 1
@@ -1196,6 +1207,9 @@ class Attestation:
             path = Path(filename).resolve()
         except (OSError, ValueError):
             return False
+        return self._dependency_module_path(name, path)
+
+    def _dependency_module_path(self, name, path):
         if not self._deps.indexed(path) or not self._dep_ready():
             return False
         if path.suffix == ".py":
