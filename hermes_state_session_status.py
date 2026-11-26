@@ -15,7 +15,7 @@ _IDENTITY_KEYS = ("gateway", "profile", "session_id", "owner_epoch")
 _SUCCESS = frozenset({"succeeded", "done", "completed"})
 _TURN_REASONS = frozenset({"notice_tail", "turn_unsettled", "subagent_killed"})
 _OPEN = frozenset({"ready", "todo", "running", "waiting", "blocked", "scheduled", "review", "triage",
-                   "external_running", "external_unknown", "source_unknown", "pending", "queued"})
+                   "external_running", "external_unknown", "source_unknown", "pending", "queued", "producer_wait"})
 
 
 def _identity(value: Any) -> dict[str, str]:
@@ -98,6 +98,9 @@ def _verdict(snapshot: dict, coverage: dict, generation: int, failures: list[dic
     if any(item.get("state") == "source_unknown" for item in open_work):
         return {"kind": "waiting", "on": deepcopy(open_work),
                 "presentation": {"stripe": "none", "reason_codes": ["linked_status_unknown"]}}
+    if any(item.get("state") == "producer_wait" for item in open_work):
+        return {"kind": "waiting", "on": deepcopy(open_work),
+                "presentation": {"stripe": "external", "reason_codes": ["linked_card_producer_wait"]}}
     if any(item.get("state") in ("external_unknown", "external_running") for item in open_work):
         return {"kind": "waiting", "on": deepcopy(open_work),
                 "presentation": {"stripe": "external", "reason_codes": ["linked_ci_deploy_wait"]}}

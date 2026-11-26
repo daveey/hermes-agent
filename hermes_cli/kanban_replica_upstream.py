@@ -29,6 +29,8 @@ def enrich(conn: sqlite3.Connection, rows: list[dict]) -> list[dict]:
             ancestor = stamp or cards[row["id"]].get("blocked_upstream")
         if ancestor:
             row["blocked_upstream"] = ancestor
+    from hermes_cli.kanban_producer_wait import stamp
+    stamp(conn, rows)
     return rows
 
 

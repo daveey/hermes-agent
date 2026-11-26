@@ -36,7 +36,7 @@ def select(conn, alias='t'):
 def card_timer(card):
     """Current run first; blocked event first, then Board ready_since (ms), then updated_at (s)."""
     status = card.get('status')
-    if card.get('stale'):
+    if card.get('stale') or card.get('partial_source_unknown'):
         return None
     if status == 'running':
         state = 'running'
@@ -46,6 +46,9 @@ def card_timer(card):
         state = 'blocked'
         since = (_epoch(card.get('timer_block_start')) or _epoch(card.get('ready_since'), milliseconds=True)
                  or _epoch(card.get('timer_updated')))
+    elif status == 'scheduled' and isinstance(card.get('timer_producer_wait'), dict):
+        state = 'waiting'
+        since = _epoch(card['timer_producer_wait'].get('since'))
     else:
         return None
     if since is None:
@@ -67,9 +70,12 @@ def local(conn, pairs):
         fields = ', '.join(f't.{key}' if key in cols else f'NULL AS {key}' for key in (
             'id', 'title', 'status', 'started_at', 'block_kind', 'human_request', 'ready_since'))
         names = [part[0] for part in conn.execute(f'SELECT {fields}, {select(conn)} FROM tasks t LIMIT 0').description]
-        return {str(row[0]): dict(zip(names, row)) for row in conn.execute(
+        found = {str(row[0]): dict(zip(names, row)) for row in conn.execute(
             f'SELECT {fields}, {select(conn)} FROM tasks t WHERE t.id IN (SELECT value FROM json_each(?))',
             (json.dumps(ids),))}
+        from hermes_cli.kanban_producer_wait import stamp
+        stamp(conn, list(found.values()))
+        return found
     except (sqlite3.Error, TypeError, ValueError):
         return {}
 

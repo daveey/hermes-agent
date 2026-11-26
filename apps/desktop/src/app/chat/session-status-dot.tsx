@@ -101,17 +101,37 @@ export const sessionDotVariant = (
   const stripe = status.stripe
 
   const label = (r: Translations['sidebar']['row']) =>
-    status.status === 'unknown' ? r.backgroundUnknown
-      : stripe === 'done' ? r.outcomeDone
-        : stripe === 'stuck' ? r.outcomeDecision
-          : stripe === 'blocked' ? r.outcomeMuted
-            : stripe === 'attention' ? r.outcomeUnresolved(null)
-              : stripe === 'waiting' ? outcome?.status?.kind === 'running' ? r.outcomeRunning : r.outcomeWaiting
-                : r.draftSession
+    status.status === 'unknown'
+      ? r.backgroundUnknown
+      : stripe === 'done'
+        ? r.outcomeDone
+        : stripe === 'stuck'
+          ? r.outcomeDecision
+          : stripe === 'blocked'
+            ? r.outcomeMuted
+            : stripe === 'attention'
+              ? r.outcomeUnresolved(null)
+              : stripe === 'external'
+                ? r.outcomeWaiting
+                : stripe === 'waiting'
+                  ? outcome?.status?.kind === 'running'
+                    ? r.outcomeRunning
+                    : r.outcomeWaiting
+                  : r.draftSession
 
   return {
     ariaLabel: label,
-    className: cn(DOT_BASE, stripe === 'done' ? 'bg-(--ui-success)' : stripe === 'waiting' && outcome?.status?.kind === 'running' ? 'bg-(--ui-accent)' : stripe ? 'bg-(--session-status-color)' : 'border border-(--ui-text-quaternary)', sessionStatusStripeColor(stripe)),
+    className: cn(
+      DOT_BASE,
+      stripe === 'done'
+        ? 'bg-(--ui-success)'
+        : stripe === 'waiting' && outcome?.status?.kind === 'running'
+          ? 'bg-(--ui-accent)'
+          : stripe
+            ? 'bg-(--session-status-color)'
+            : 'border border-(--ui-text-quaternary)',
+      sessionStatusStripeColor(stripe)
+    ),
     role: 'status',
     title: label
   }
@@ -144,12 +164,7 @@ export interface SessionStatusDotProps {
  * already reduced to one mutually exclusive answer. Idle is hollow grey;
  * active states own the dot with their semantic colour.
  */
-export function SessionStatusDot({
-  storedSessionId,
-  session,
-  branchStem,
-  className
-}: SessionStatusDotProps) {
+export function SessionStatusDot({ storedSessionId, session, branchStem, className }: SessionStatusDotProps) {
   const { t } = useI18n()
   const r = t.sidebar.row
 

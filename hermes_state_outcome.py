@@ -397,6 +397,8 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         if (status == "scheduled" and wait_kind != "clock"
                 and wait.get("wait_state") == "external_running" and external.get("job") == "running"):
             display_state = "external_running"
+        if status == "scheduled" and wait.get("producer_wait"):
+            display_state = "producer_wait"
         item: dict[str, Any] = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid,
                                 "state": display_state}
         if explained:

@@ -27,6 +27,9 @@ def _remote_wait(card: dict[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         from hermes_cli import kanban_wait_info as kwi
-        return kwi.describe_replica(card)
+        info = kwi.describe_replica(card)
+        if info is not None and card.get('timer_producer_wait'):
+            info['producer_wait'] = card['timer_producer_wait']
+        return info
     except Exception:
         return None

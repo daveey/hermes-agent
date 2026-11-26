@@ -341,8 +341,8 @@ PROJECTIONS = {p.name: p for p in (
 SHAPES: dict[str, tuple[FieldSpec, ...]] = {
     "TimedCard": (FieldSpec("id", "string", ALWAYS, "owner-qualified card key"),
                   FieldSpec("title", "string", ALWAYS, "tasks.title or ''"),
-                  FieldSpec("state", "enum:running,blocked", ALWAYS, "kanban_session_activity_timers.card_timer"),
-                  FieldSpec("since", "number", ALWAYS, "run start or latest blocked transition, epoch seconds")),
+                  FieldSpec("state", "enum:running,blocked,waiting", ALWAYS, "kanban_session_activity_timers.card_timer"),
+                  FieldSpec("since", "number", ALWAYS, "run start, blocked transition or current producer park, epoch seconds")),
     "NeedsYouEntry": (FieldSpec("kind", "const:card", ALWAYS, "kanban_open_asks.open_human_asks"),
                       FieldSpec("ref", "string", ALWAYS, "owner-qualified card key, '' when padded"),
                       FieldSpec("question", "const:", ALWAYS, "always '' (deliberately narrowed)")),

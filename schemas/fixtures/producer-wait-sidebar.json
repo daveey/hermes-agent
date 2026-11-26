@@ -1,0 +1,5 @@
+{
+  "kind": "waiting",
+  "stripe": "external",
+  "timer": { "id": "owner", "title": "Waiting on review", "state": "waiting", "since": 100 }
+}

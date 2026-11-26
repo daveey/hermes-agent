@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { hasFreshKanbanObservation } from '@/store/kanban-observation'
 
 import { useWaitClock } from './use-wait-clock'
 
@@ -32,7 +33,17 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
 
   // Retained rows are historical, not evidence of current running work or a live ask.
   const cards = [...(session.offline_cached ? [] : (session.kanban_timed_cards ?? []))]
-    .filter(c => Number.isFinite(c.since) && c.since > 0 && (c.state === 'running' || c.state === 'blocked'))
+    .filter(
+      c =>
+        Number.isFinite(c.since) &&
+        c.since > 0 &&
+        (c.state === 'running' ||
+          c.state === 'blocked' ||
+          (c.state === 'waiting' &&
+            hasFreshKanbanObservation(session) &&
+            !session.kanban_unknown &&
+            c.since <= Date.now() / 1000))
+    )
     .sort(
       (a, b) =>
         Number(a.state === 'blocked') - Number(b.state === 'blocked') || a.since - b.since || a.id.localeCompare(b.id)
@@ -66,7 +77,10 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
   const text = (c: TimedCard) => compactElapsed(now - c.since)
 
   const label = cards
-    .map(c => `${c.title} · ${t.sidebar.row.cardColours[c.state === 'running' ? 'blue' : 'red']} · ${text(c)}`)
+    .map(
+      c =>
+        `${c.title} · ${c.state === 'waiting' ? t.sidebar.row.outcomeWaiting : t.sidebar.row.cardColours[c.state === 'running' ? 'blue' : 'red']} · ${text(c)}`
+    )
     .join('\n')
 
   let used = 12
@@ -90,7 +104,7 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
       >
         {visible.map(c => (
           <span
-            className={c.state === 'running' ? 'text-sky-400' : 'text-red-500'}
+            className={c.state === 'blocked' ? 'text-red-500' : 'text-sky-400'}
             data-card-timer={c.state}
             key={c.id}
           >

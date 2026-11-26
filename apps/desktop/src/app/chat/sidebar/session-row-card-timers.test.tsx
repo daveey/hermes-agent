@@ -10,6 +10,47 @@ import { compactElapsed } from './session-row-card-timers'
 
 const NOW = 1_800_000_000
 
+it('shows a fresh producer park elapsed without claiming a running executor', () => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+
+  const { container } = draw({
+    kanban_observed_at: NOW,
+    kanban_timed_cards: [{ id: 'owner', title: 'Review producer', state: 'waiting', since: NOW - 720 }]
+  })
+
+  expect(container.querySelector('[data-card-timer="waiting"]')?.textContent).toBe('12m')
+  expect(container.querySelector('[data-card-timer="waiting"]')?.className).toContain('text-sky-400')
+  expect(container.querySelector('[data-card-timer="running"]')).toBeNull()
+})
+
+it('refuses a future producer park clock even with a fresh observation', () => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+
+  const { container } = draw({
+    kanban_observed_at: NOW,
+    kanban_timed_cards: [{ id: 'owner', title: 'Future park', state: 'waiting', since: NOW + 1 }]
+  })
+
+  expect(container.querySelector('[data-card-timer]')).toBeNull()
+})
+
+it.each([
+  { kanban_observed_at: NOW - 181 },
+  { kanban_observed_at: undefined },
+  { kanban_observed_at: NOW + 1 },
+  { kanban_observed_at: NOW, kanban_unknown: true },
+  { kanban_observed_at: NOW, offline_cached: true }
+])('never shows an unverified producer-wait clock: %j', fields => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+
+  const { container } = draw({
+    ...fields,
+    kanban_timed_cards: [{ id: 'owner', title: 'Waiting on review', state: 'waiting', since: NOW - 720 }]
+  })
+
+  expect(container.querySelector('[data-card-timer]')).toBeNull()
+})
+
 const timer = (id: string, state: 'running' | 'blocked', age: number) => ({
   id,
   title: `Card ${id}`,

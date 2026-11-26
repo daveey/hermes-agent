@@ -29,12 +29,14 @@ import { _resetWorkSourceOwnerForTests } from '@/store/work-source-owner'
 import { canonicalOutcome } from '@/test/canonical-outcome'
 
 import executionFixture from '../../../../../../schemas/fixtures/execution-observations-v1.json'
+import producerWaitFixture from '../../../../../../schemas/fixtures/producer-wait-sidebar.json'
 
 import { ReorderableList, useSortableBindings } from './reorderable-list'
 import { SidebarSessionRow } from './session-row'
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   _resetWorkSourceOwnerForTests()
   _resetSessionOwnerHintsForTests({ storage: true })
   $unavailableWorkSources.set({})
@@ -259,6 +261,32 @@ const renderRow = (
     />
   )
 }
+
+it.each(['ordinary-review-chat', 'kanban_owner_review'])('shows teal producer wait and its park elapsed on %s', id => {
+  vi.useFakeTimers({ now: 820_000 })
+
+  const row = makeSession({
+    id,
+    title: 'Filter running versus stuck sessions',
+    outcome: canonicalOutcome(producerWaitFixture.stripe as 'external', {
+      kind: producerWaitFixture.kind as 'waiting'
+    }),
+    kanban_active: 1,
+    kanban_parked: 1,
+    kanban_timed_cards: [producerWaitFixture.timer as NonNullable<SessionInfo['kanban_timed_cards']>[number]]
+  })
+
+  const { container, unmount } = renderRow(row)
+  expect(container.querySelector('[data-session-status-dot="external"]')?.className).toContain('session-status-color')
+  expect(container.querySelector('[data-session-status-dot="external"]')?.getAttribute('aria-label')).toBe('Waiting')
+  const elapsed = container.querySelector('[data-card-timer="waiting"]')
+  expect(elapsed?.textContent).toBe('12m')
+  expect(elapsed?.className).toContain('text-sky-400')
+  expect(elapsed?.getAttribute('title')).not.toBe('Running')
+  expect(container.querySelector('[data-card-timer="running"]')).toBeNull()
+  unmount()
+  vi.useRealTimers()
+})
 
 it.each([
   ['object', { a: 1 }],

@@ -163,6 +163,30 @@ def test_unavailable_card_is_not_live_work_or_a_human_ask(db, monkeypatch, statu
     assert value["coverage"]["state"] == "complete"
 
 
+def test_scheduled_owner_wait_on_running_review_publishes_external_not_running(db, board):
+    turn(db)
+    add_card(board, 'owner', 'scheduled')
+    with sqlite3.connect(board) as conn:
+        conn.execute('ALTER TABLE tasks ADD COLUMN awaiting TEXT')
+        conn.execute('ALTER TABLE tasks ADD COLUMN created_on TEXT')
+        conn.execute('CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at REAL)')
+        conn.execute('UPDATE tasks SET awaiting=? WHERE id=?',
+                     (json.dumps({'kind': 'card', 'ref': 'review', 'gateway': 'hub'}), 'owner'))
+        conn.execute("INSERT INTO tasks (id,title,status,created_on) VALUES ('review','Independent review','running','hub')")
+        conn.execute("INSERT INTO task_events VALUES (1,'owner','scheduled','{}',?)", (time.time() - 720,))
+    status = refresh(db, 'card_change')
+    assert status['kind'] == 'waiting'
+    assert status['presentation']['stripe'] == 'external'
+    assert status['on'][0]['state'] == 'producer_wait'
+    set_card(board, 'review', 'done')
+    status = refresh(db, 'card_change')
+    assert status['kind'] == 'waiting' and status['presentation']['stripe'] == 'waiting'
+    set_card(board, 'owner', 'running')
+    assert refresh(db, 'card_change')['kind'] == 'running'
+    set_card(board, 'owner', 'done')
+    assert refresh(db, 'card_change')['kind'] == 'done'
+
+
 def test_real_running_card_wins_over_another_unavailable_card(db, monkeypatch):
     turn(db)
     cards = [{"id": "t_remote", "status": "running", "remote": True, "stale": True},
