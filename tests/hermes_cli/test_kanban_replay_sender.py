@@ -56,6 +56,11 @@ class Receiver:
             raise OSError('reply lost after commit')
         return {'protocol': 'processed_prefix1', 'results': []}
 
+    def row_evidence(self, board, table, uid):
+        version = json.loads(self.slot['last_verdict'])['version']
+        return dict(board=board, table=table, uid=uid, state='live', head=version,
+                    row=dict(uid=uid, status='todo', version=version, created_at=1))
+
     def ops(self, *args):
         pytest.fail('bound replay journal fell back to legacy transport')
 

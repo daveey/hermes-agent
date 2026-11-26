@@ -184,6 +184,10 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
         if projection is not None:
             projection.after_commit()
 
+    def _parent_projectable(uid):
+        return conn.execute('SELECT 1 FROM tasks WHERE id=?', (uid,)).fetchone() is not None and not conn.execute(
+            "SELECT 1 FROM kanban_sync_tombstones WHERE table_name='tasks' AND row_uid=?", (uid,)).fetchone()
+
     def read_current_row():
         """Read current state separately; never enrich the historical slot verdict."""
         decision = reconcile(journal.snapshot(conn), remote)
@@ -214,11 +218,13 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             return client._row_change('tasks', projection.current) if source().get('_parent') and projection.current else None
         if verdict['status'] not in ('applied', 'merged', 'deferred'):
             return None
-        if verdict['status'] != 'deferred' and verdict.get('version'):
-            return None
         row = source()
         if not row.get('_parent'):
             return None
+        if verdict['status'] != 'deferred' and verdict.get('version') and not _parent_projectable(row['row_uid']):
+            return None  # Locally deleted: the authoritative version needs no image.
+        # A versioned verdict still needs the current image: the issued feed echo
+        # was skipped to keep custody, so this read is the only projection of it.
         from hermes_cli.kanban_replay_existence import CurrentRowHold
         try:
             from hermes_cli.kanban_replay_reply import row_evidence_envelope
@@ -333,7 +339,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches, primary, before_head
             return  # Transport handoff is not authoritative row success.
         if status not in ('applied', 'merged'):
             raise ValueError('tracer final disposition requires custody integration')
-        if row.get('_parent') and not verdict.get('version'):
+        if row.get('_parent') and (not verdict.get('version') or current_row is not None):
             project_parent(row)
         if verdict.get('version') and row['table_name'] == 'tasks' and row['op'] != 'release':
             conn.execute('UPDATE tasks SET sync_version=MAX(COALESCE(sync_version,0),?) WHERE id=?',
