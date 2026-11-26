@@ -8,7 +8,9 @@ Lock files are unique, never reused, so a dead process is safely detected by the
 """
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 import sqlite3
 from pathlib import Path
 import threading
@@ -36,6 +38,33 @@ def _identity(home: Path) -> tuple[int, int]:
     return stat.st_dev, stat.st_ino
 
 
+def _lease_path_matches(path: Path, handle) -> bool:
+    try:
+        current = path.stat()
+    except FileNotFoundError:
+        return False
+    opened = os.fstat(handle.fileno())
+    return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+
+
+def _unlink_lease(path: Path, handle) -> None:
+    if not _lease_path_matches(path, handle):
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        if os.name != 'nt':
+            raise
+        # Windows disallows unlinking an open CRT file. After closing, any other
+        # open handle still prevents deletion; a pre-lock opener revalidates too.
+        handle.close()
+        try:
+            path.unlink(missing_ok=True)
+        except PermissionError:
+            return  # Still open elsewhere; the next acquisition sweeps it.
+
+
+
 class ProfileResourceLease:
     """One writer and its pooled readers; acknowledgement follows the last close."""
 
@@ -44,6 +73,7 @@ class ProfileResourceLease:
 
         self.home = home
         self._lock = threading.Lock()
+        self._finish_lock = threading.Lock()
         self._refs = 1
         self._owner_released = False
         self._retired = False
@@ -54,20 +84,26 @@ class ProfileResourceLease:
         self.identity = _identity(home)
         directory = _lease_directory(home)
         directory.mkdir(parents=True, exist_ok=True)
-        self.path = directory / uuid.uuid4().hex
-        self.handle = self.path.open('x+', encoding='utf-8')
-        try:
-            if not _try_acquire_file_lock(self.handle):
-                raise RuntimeError(f'Cannot lock resource lease for {home}')
-            # Admission after lock publication: a deleter either sees this lock or
-            # its tombstone makes us refuse before SQLite can open anything.
-            assert_named_profile_home_live(home)
-            if _identity(home) != self.identity:
-                raise FileNotFoundError(f'Profile home changed during resource admission: {home}')
-        except BaseException:
-            self.handle.close()
-            self.path.unlink(missing_ok=True)
-            raise
+        _resources_unowned(home)  # Reclaim unlocked residue, never another live owner.
+        while True:
+            self.path = directory / uuid.uuid4().hex
+            self.handle = self.path.open('x+', encoding='utf-8')
+            try:
+                if not _try_acquire_file_lock(self.handle):
+                    raise RuntimeError(f'Cannot lock resource lease for {home}')
+                # A sweeper may have locked/unlinked our file before we locked it.
+                # Do not open SQLite with an invisible lease (even if its name was replaced).
+                if not _lease_path_matches(self.path, self.handle):
+                    self.handle.close()
+                    continue
+                assert_named_profile_home_live(home)
+                if _identity(home) != self.identity:
+                    raise FileNotFoundError(f'Profile home changed during resource admission: {home}')
+            except BaseException:
+                _unlink_lease(self.path, self.handle)
+                self.handle.close()
+                raise
+            break
         with _lock:
             _leases.add(self)
         try:
@@ -75,8 +111,8 @@ class ProfileResourceLease:
         except BaseException:
             with _lock:
                 _leases.discard(self)
+            _unlink_lease(self.path, self.handle)
             self.handle.close()
-            self.path.unlink(missing_ok=True)
             raise
 
     def retired(self) -> bool:
@@ -113,6 +149,10 @@ class ProfileResourceLease:
         _tick.set()
 
     def finish_if_drained(self) -> None:
+        with self._finish_lock:
+            self._finish_if_drained()
+
+    def _finish_if_drained(self) -> None:
         self.retry_closes()
         with self._lock:
             if self._refs or self.handle.closed:
@@ -127,8 +167,8 @@ class ProfileResourceLease:
             return
         if not release_profile_pread_fds(self.home):
             return
+        _unlink_lease(self.path, self.handle)
         self.handle.close()  # the only positive acknowledgement is an actual close
-        self.path.unlink(missing_ok=True)
         with _lock:
             _leases.discard(self)
 
@@ -260,17 +300,40 @@ def _resources_unowned(home: Path) -> bool:
         paths = list(directory.iterdir())
     except FileNotFoundError:
         return True
+    unowned = True
     for path in paths:
         try:
             handle = path.open('r+', encoding='utf-8')
         except FileNotFoundError:
             continue
         with handle:
-            if not _try_acquire_file_lock(handle):
-                return False
-        # Do not unlink here: the opener may still be between creation and lock
-        # acquisition. Its post-lock tombstone check is the admission barrier.
-    return True
+            if _try_acquire_file_lock(handle):
+                # Keep the lock through unlink. A pre-lock opener must revalidate
+                # its inode after acquisition before it may open SQLite.
+                _unlink_lease(path, handle)
+            else:
+                unowned = False
+    return unowned
+
+
+def _cleanup_drained_at_exit() -> None:
+    # Daemon monitor may not get another tick after an explicit db.close().
+    # Release diagnostic-only owners, but never acknowledge unclosed SQLite.
+    with _probe_lock:
+        probes = list(_probe_owners.values())
+        _probe_owners.clear()
+    for owner in probes:
+        owner.lease.release_owner()
+    with _lock:
+        leases = list(_leases)
+    for lease in leases:
+        try:
+            lease.finish_if_drained()
+        except (OSError, RuntimeError):
+            logger.exception('Cannot clean drained profile resource lease at exit')
+
+
+atexit.register(_cleanup_drained_at_exit)
 
 
 def wait_profile_resources(home: Path, *, timeout: float = 60.0) -> bool:
