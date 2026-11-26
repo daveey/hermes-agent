@@ -14,6 +14,16 @@ from hermes_cli.execution_observations import epoch, ident
 from hermes_cli.kanban_nonrunning_reason import _unknown_reason, describe
 
 
+def _decoded_detail(payload):
+    """Restore typed producer provenance only after carrier qualification."""
+    from hermes_cli.kanban_db_sync import ClaimDeferral
+    detail, origin = payload.get('detail'), payload.get('origin')
+    if isinstance(detail, str) and isinstance(origin, str):
+        # JSON loses the producer's str-subclass attributes.
+        return ClaimDeferral(detail, origin)
+    return detail
+
+
 _UNSET = object()
 
 
@@ -163,8 +173,9 @@ def _read(conn, ids, *, board, now):
                     continue
                 reason = _unknown_reason('dispatcher_evidence_stale')
                 if all(epoch(t) for t in (at, until, now)) and at <= now < min(until, at + 180):
-                    reason = (describe(p.get('reason'), p.get('detail'))
-                              if isinstance(p.get('reason'), str) and (p.get('detail') is None or isinstance(p.get('detail'), str))
+                    detail = _decoded_detail(p)
+                    reason = (describe(p.get('reason'), detail)
+                              if isinstance(p.get('reason'), str) and (detail is None or isinstance(detail, str))
                               else _unknown_reason('dispatcher_evidence_unclassified'))
                     if reason['disposition'] == 'unknown':
                         reason = _unknown_reason('dispatcher_evidence_unclassified')

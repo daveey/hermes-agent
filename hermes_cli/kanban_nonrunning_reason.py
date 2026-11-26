@@ -184,6 +184,10 @@ def enrich(value, row, source):
         return {**value, 'non_running_reason': _unknown_reason('lifecycle_reason_unobserved')}
     local = _current_reason(row, source)
     remote = source.get('remote_non_running_reason')
+    if isinstance(remote, dict) and remote.get('unknown_reason') == 'dispatcher_evidence_conflict':
+        # Qualified contradictory observers are not simple remote absence. A
+        # separate local observation cannot turn that contradiction into fact.
+        return {**value, 'non_running_reason': remote}
     if isinstance(remote, dict) and remote.get('freshness') == 'current':
         if local.get('freshness') == 'current' and (local['code'], local['disposition']) != (remote['code'], remote['disposition']):
             local = _unknown_reason('dispatcher_evidence_conflict')
