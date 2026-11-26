@@ -48,6 +48,25 @@ def test_all_exports_are_real_objects_and_can_be_repatched(monkeypatch):
         assert main._command_export(name) is expected
 
 
+def test_from_import_resolves_first_demand_and_recovers_partial_module(monkeypatch):
+    from hermes_cli import main
+
+    name = "_model_flow_openrouter"
+    monkeypatch.delitem(vars(main), name, raising=False)
+    # An import cycle may expose an owner before its requested export is ready.
+    partial = SimpleNamespace()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(importlib, "import_module", lambda module: partial)
+        with pytest.raises(AttributeError):
+            main.__getattr__(name)
+        assert name not in vars(main)
+    from hermes_cli.main import _model_flow_openrouter
+    from hermes_cli.model_setup_flows import _model_flow_openrouter as actual
+
+    assert _model_flow_openrouter is actual
+    assert vars(main)[name] is actual
+
+
 def test_resolution_preserves_override_and_propagates_import_failure(monkeypatch):
     from hermes_cli import main
 
