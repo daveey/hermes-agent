@@ -1,6 +1,7 @@
 import { atom, computed, type ReadableAtom } from 'nanostores'
 
 import { $clarifyRequest, $clarifyRequests } from './clarify'
+import { parkedCardWaiting } from './parked-card-answers'
 import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone } from './runtime-gone'
 import { respondToServerRequest } from './server-requests'
 import { $activeSessionId } from './session'
@@ -489,6 +490,13 @@ export const hasBlockingPromptRequest = (sessionId: string | null | undefined): 
     vaultCode.$all.get()[key]
   )
 }
+
+/** True when ANY input request is still open on `sessionId`: a parked card (clarify, connection, theme pick, setup
+ *  beat) or a blocking prompt (approval / sudo / secret / vault). The one question "does this session still owe the
+ *  user an answer?", read straight from the request stores so a session's needs-input flag can be held by the
+ *  request itself rather than by whichever event happened to arrive last. Imperative read. */
+export const sessionHasOpenInputRequest = (sessionId: string | null | undefined): boolean =>
+  hasBlockingPromptRequest(sessionId) || parkedCardWaiting(keyFor(sessionId))
 
 /** Reactive twin of `hasBlockingPromptRequest`, for the composer's busy-action
  *  affordance (the primary button must advertise queue, not steer, while the

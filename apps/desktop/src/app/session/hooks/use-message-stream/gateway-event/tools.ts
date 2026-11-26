@@ -8,6 +8,7 @@ import { invalidateSlashCompletions } from '@/lib/slash-completion-cache'
 import { refreshBackgroundProcesses } from '@/store/composer-status'
 import { flashPetActivity, setPetActivity } from '@/store/pet'
 import { recordPreviewArtifact, reofferPreviewArtifact } from '@/store/preview-status'
+import { sessionHasOpenInputRequest } from '@/store/prompts'
 import { $sessionStates, storedSessionIdForRuntimeId } from '@/store/session-states'
 import { setupBeatResult } from '@/store/setup-beat'
 import { isTerminalSubagentCompletion, pruneDelegateFallbackSubagents, upsertSubagent } from '@/store/subagents'
@@ -39,6 +40,21 @@ function recordToolPreview(ctx: GatewayEventContext, sessionId: string, cwd: str
   if (status === 'success' && previewTarget && isPreviewableTarget(previewTarget)) {
     const record = pendingProduction ? reofferPreviewArtifact : recordPreviewArtifact
     record(sessionId, previewTarget, cwd, storedSessionIdForRuntimeId(sessionId) ?? sessionId)
+  }
+}
+
+/** A completed tool drops the session's "needs input" flag — but only when NO input request is still open on it.
+ *  "Some tool finished" says nothing about the request the user is looking at: an unrelated, delayed or replayed
+ *  completion (a resumed turn re-delivering earlier results, an update cancel + reissue) would otherwise turn a live
+ *  question's red into a plain row. The request's own answer / clarify.settled / request.cancel (request-correlated,
+ *  input-requests.ts) clears the parked card first, so by the time its own tool.complete lands nothing is open and the
+ *  flag drops here as before. */
+function releaseNeedsInputWhenSettled(
+  sessionId: string,
+  updateSessionState: GatewayEventContext['deps']['updateSessionState']
+) {
+  if (!sessionHasOpenInputRequest(sessionId)) {
+    updateSessionState(sessionId, state => (state.needsInput ? { ...state, needsInput: false } : state))
   }
 }
 
@@ -188,11 +204,7 @@ export function handleToolEvent(ctx: GatewayEventContext): boolean {
         }
       }
 
-      // A pending clarify blocks the turn, so the first tool.complete after
-      // one is the clarify resolving — drop the "needs input" flag here so
-      // the sidebar indicator clears as soon as it's answered, not only at
-      // message.complete.
-      updateSessionState(sessionId, state => (state.needsInput ? { ...state, needsInput: false } : state))
+      releaseNeedsInputWhenSettled(sessionId, updateSessionState)
 
       // terminal/process tool calls are the only things that spawn or reap
       // background processes — sync the composer status stack right after,
