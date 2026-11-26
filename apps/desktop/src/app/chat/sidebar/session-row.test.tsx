@@ -288,6 +288,28 @@ it.each(['ordinary-review-chat', 'kanban_owner_review'])('shows teal producer wa
   vi.useRealTimers()
 })
 
+it.each(['ordinary-ci-chat', 'kanban_owner_ci'])('projects real queued CI and unknown evidence into row %s', async id => {
+  const { execFileSync } = await import('node:child_process')
+  const { resolve } = await import('node:path')
+  const root = resolve(process.cwd(), '../..')
+
+  const rows = JSON.parse(execFileSync('scripts/hermes-python', ['tests/fixtures/ci_wait_dot_projection.py'], {
+    cwd: root, encoding: 'utf8', env: { ...process.env, PYTHONPATH: root }
+  })) as Record<string, SessionInfo>
+
+  for (const [kind, expected] of [['queued_ci', 'external'], ['unknown', 'attention'], ['empty', 'none']] as const) {
+    const row = makeSession({ ...rows[kind], id, title: 'CI owner' })
+    const { container, unmount } = renderRow(row)
+    const dot = container.querySelector(`[data-session-status-dot="${expected}"]`) as HTMLElement
+    expect(dot).not.toBeNull()
+
+    if (expected === 'external') { expect(dot.style.backgroundColor).toBe('rgb(56, 189, 248)') }
+
+    if (expected === 'attention') { expect(dot.getAttribute('aria-label')).toBe('Open work, current status unknown') }
+    unmount()
+  }
+})
+
 it.each([
   ['object', { a: 1 }],
   ['number', 7],
@@ -1195,7 +1217,7 @@ describe('SidebarSessionRow own activity stamps', () => {
     expect(container.querySelector('[aria-label="Running in background"]')).toBeNull()
   })
 
-  it('keeps the running label when this window polls a live process for the unknown-only row', async () => {
+  it('keeps unknown card evidence fail-closed despite a window-local process poll', async () => {
     const polled = (await import('@/store/composer-status')).$backgroundRunningSessionIds as unknown as {
       set: (ids: string[]) => void
     }
@@ -1215,8 +1237,8 @@ describe('SidebarSessionRow own activity stamps', () => {
         })
       )
 
-      expect(container.querySelector('[data-session-status-dot="none"]')).not.toBeNull()
-      expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
+      expect(container.querySelector('[data-session-status-dot="attention"]')).not.toBeNull()
+      expect(container.querySelector('[aria-label="Open work, current status unknown"]')).not.toBeNull()
     } finally {
       polled.set([])
     }

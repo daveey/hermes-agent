@@ -18,10 +18,13 @@ const isCount = (value: unknown): value is number =>
 const isStringList = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every(item => typeof item === 'string')
 
-const hasValidPresentation = ({ coverage, kind, presentation }: SessionStatusEnvelope): boolean => Boolean(
-  presentation && CANONICAL_STRIPES.includes(presentation.stripe) && isStringList(presentation.reason_codes) &&
-  (presentation.stripe !== 'done' || (coverage?.state === 'complete' && kind === 'done'))
-)
+const hasValidPresentation = ({ coverage, kind, presentation }: SessionStatusEnvelope): boolean =>
+  Boolean(
+    presentation &&
+    CANONICAL_STRIPES.includes(presentation.stripe) &&
+    isStringList(presentation.reason_codes) &&
+    (presentation.stripe !== 'done' || (coverage?.state === 'complete' && kind === 'done'))
+  )
 
 /** What a stored outcome's envelope says to paint. `unknown` is an explicit non-green state: the envelope is there
  *  but this app cannot read it (another `status_version`, or malformed), and it never guesses from `kind`. */
@@ -32,9 +35,7 @@ export type CanonicalOutcomeStatus =
 /** [daveey] The canonical status selector every surface (row, dot, tab, stepping) uses. Missing, malformed or unsupported data is unknown.
  *  `status_version` 1 gives `presentation.stripe` verbatim (`none` = no stripe), independent of any client refetch,
  *  work-source completeness, card count or the legacy `kind`. */
-export const canonicalOutcomeStatus = (
-  outcome: null | SessionOutcome | undefined
-): CanonicalOutcomeStatus => {
+export const canonicalOutcomeStatus = (outcome: null | SessionOutcome | undefined): CanonicalOutcomeStatus => {
   const envelope = outcome?.status
   const unknown = { revision: null, status: 'unknown', stripe: 'attention' } as const
 
@@ -58,8 +59,13 @@ export const canonicalOutcomeStatus = (
     !coverage ||
     !['complete', 'unknown'].includes(coverage.state) ||
     !isStringList(coverage.reasons) ||
-    !presentation || !hasValidPresentation(envelope)
+    !presentation ||
+    !hasValidPresentation(envelope)
   ) {
+    return unknown
+  }
+
+  if (presentation?.reason_codes.some(reason => ['source_unknown', 'linked_status_unknown'].includes(reason))) {
     return unknown
   }
 

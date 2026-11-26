@@ -133,6 +133,7 @@ export const sessionDotVariant = (
       sessionStatusStripeColor(stripe)
     ),
     role: 'status',
+    style: stripe === 'external' ? { backgroundColor: '#38bdf8' } : undefined,
     title: label
   }
 }
@@ -147,7 +148,7 @@ export interface SessionStatusDotProps {
    *  and no turn behind it, which is the draft state by definition. */
   storedSessionId: null | string
   /** The session row supplies outcome and execution evidence on every surface. */
-  session?: null | Pick<SessionInfo, 'id' | 'profile' | 'connection_id' | 'outcome' | 'archived'>
+  session?: null | Pick<SessionInfo, 'id' | 'profile' | 'connection_id' | 'outcome' | 'archived' | 'kanban_unknown'>
   /** Sidebar-only activity; other surfaces retain their agent-only presentation. */
   runningCardCount?: number
   /** TUI-style tree stem for a branched session (`└─ ` / `├─ `). */
@@ -168,8 +169,15 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   const { t } = useI18n()
   const r = t.sidebar.row
 
-  const status = canonicalOutcomeStatus(session?.outcome)
-  const variant = sessionDotVariant('idle', session?.outcome)
+  // Missing card observations may not certify passive waiting/idle/done. They do
+  // not erase an independently published own turn or a human decision.
+  const outcome =
+    session?.kanban_unknown && !['running', 'decision', 'muted'].includes(session.outcome?.status?.kind ?? '')
+      ? undefined
+      : session?.outcome
+
+  const status = canonicalOutcomeStatus(outcome)
+  const variant = sessionDotVariant('idle', outcome)
 
   useCommittedStripe(
     { connection_id: session?.connection_id, id: session?.id ?? storedSessionId ?? '', profile: session?.profile },
