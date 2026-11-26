@@ -27,6 +27,7 @@ from agent.gemini_native_adapter import (
 )
 
 from . import interactions as wire
+from .stream_phases import StreamPhases
 
 logger = logging.getLogger(__name__)
 
@@ -117,15 +118,19 @@ class GeminiClient(GeminiNativeClient):
         # a later chunk voids it, since resuming would repeat that chunk. ``sends`` bounds a stuck token.
         resume: Optional[tuple[str, str]] = None
         sends = 0
+        phases: Optional[StreamPhases] = None
         while True:
             dropped: Optional[httpx.HTTPError] = None
             try:
                 headers = {**self._headers(), "Accept": "text/event-stream"}
-                with self._http.stream("POST", url, json=body, headers=headers, timeout=timeout) as response:
+                with StreamPhases(phases) as phases, self._http.stream("POST", url, json=body, headers=headers, timeout=timeout) as response:
+                    observed = phases.response(response)
                     if response.status_code != 200:
                         raise self._http_error(response, read_streaming_error_body(response))
-                    for event in wire.iter_events(_iter_sse_events(response)):
+                    for event in wire.iter_events(_iter_sse_events(observed)):
+                        phases.event()
                         chunks = wire.translate_stream_event(event, model, state)
+                        phases.output(chunks)
                         if chunks:
                             resume = None
                         elif (token := wire.event_token(event)) and state.interaction_id:
