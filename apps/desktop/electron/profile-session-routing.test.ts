@@ -1947,20 +1947,35 @@ test('registry splice keeps same-id rows from different canonical gateways, in e
 
 test('registry splice still replaces the same owner and legacy rows without a canonical gateway', () => {
   const merged: unknown[] = [ownedRow('s1', 'gw-a'), ownedRow('s2', null)]
+
   const { added } = spliceRegistrySessionRows(
     merged,
     [ownedRow('s1', 'gw-a', { connection_id: 'alias' }), ownedRow('s2', 'gw-a'), ownedRow('s2', null, { connection_id: 'alias' })],
     {}
   )
+
   assert.equal(added, 0)
   assert.equal(merged.length, 2)
+})
+
+test('registry splice keeps one connection as one row after its envelope gateway changes', () => {
+  for (const connection of ['', 'server']) {
+    const merged: unknown[] = [ownedRow('s1', 'local', { connection_id: connection })]
+    const updated = ownedRow('s1', 'hub', { connection_id: connection })
+    const { added } = spliceRegistrySessionRows(merged, [updated], {})
+    assert.equal(added, 0)
+    assert.equal(merged.length, 1)
+    // Registry splice retains the primary row rather than replacing its snapshot.
+    assert.deepEqual((merged[0] as { outcome: unknown }).outcome, ownedRow('s1', 'local').outcome)
+  }
 })
 
 test('pinned window keeps same-id pinned rows from two gateways', () => {
   const rows = [
     ownedRow('filler', 'gw-a'),
-    ownedRow('twin', 'gw-a', { pinned: true }),
-    ownedRow('twin', 'gw-b', { pinned: true })
+    ownedRow('twin', 'gw-a', { pinned: true, connection_id: 'connection-a' }),
+    ownedRow('twin', 'gw-b', { pinned: true, connection_id: 'connection-b' })
   ]
+
   assert.equal(mergeProfileSessionWindow(rows, 0, 1).length, 3)
 })
