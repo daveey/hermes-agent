@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { type ReactNode, useContext, useEffect, useMemo, useState } from 'react'
 
+import { CardCountSquare } from '@/components/ui/card-count-squares'
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -28,18 +29,6 @@ const COLOURS = {
 } as const
 
 type CardColour = keyof typeof COLOURS
-
-const OUTLINES: Record<CardColour, string> = {
-  red: 'border-red-500',
-  pink: 'border-pink-500',
-  orange: 'border-orange-500',
-  green: 'border-emerald-500',
-  amber: 'border-amber-500',
-  blue: 'border-sky-400 dark:border-sky-500',
-  grey: 'border-zinc-400 dark:border-zinc-500',
-  violet: 'border-violet-500',
-  unknown: 'border-zinc-400 dark:border-zinc-500'
-}
 
 /** One entry per distinct card colour, in urgency order. No backend reads. */
 export function sessionCardColours(
@@ -165,13 +154,7 @@ export function CardSquares({
       >
         {colours.map(({ colour, count }) =>
           counts || colour === 'orange' ? (
-            <span
-              className={`inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-[2px] border px-[2px] text-[0.625rem] leading-none tabular-nums text-(--ui-text-secondary) ${OUTLINES[colour]}`}
-              data-card-colour={colour}
-              key={colour}
-            >
-              {count}
-            </span>
+            <CardCountSquare category={colour} count={count} key={colour} />
           ) : (
             <span
               aria-hidden="true"

@@ -1661,6 +1661,16 @@ export type { FloatingAnchor } from '@/components/pane-shell/tree/renderer/float
 export { StatusDot, type StatusTone } from '@/components/status-dot'
 export { Badge } from '@/components/ui/badge'
 export { Button } from '@/components/ui/button'
+/** Numbered card squares: the count inside an outline in a shared category colour (`red`, `pink`, `orange`,
+ *  `green`, `amber`, `blue`, `grey`, `violet`, `unknown`, `outline`, `dashed`). Use `CardCountSquares` for a
+ *  group with one tooltip, `CardCountSquare` for a single square inside your own button. */
+export {
+  CARD_COUNT_CATEGORIES,
+  type CardCountCategory,
+  type CardCountItem,
+  CardCountSquare,
+  CardCountSquares
+} from '@/components/ui/card-count-squares'
 export { Checkbox } from '@/components/ui/checkbox'
 export { Codicon } from '@/components/ui/codicon'
 /** THE color picker — swatch grid plus a clear row that means "back to the
