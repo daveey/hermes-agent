@@ -2,7 +2,7 @@
  "counts": {
   "http": {
    "keep-host-wide": 1,
-   "undecided": 354
+   "undecided": 355
   },
   "rpc": {
    "authority": 116,
@@ -146,6 +146,7 @@
   {"current_path": "hermes_cli.web_routers.ops:list_checkpoints", "decision": "undecided", "handler": "GET /api/ops/checkpoints", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.ops:list_hooks", "decision": "undecided", "handler": "GET /api/ops/hooks", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.ops:list_pairing", "decision": "undecided", "handler": "GET /api/pairing", "kind": "http", "ref": ""},
+  {"current_path": "plugins.kanban.dashboard.task_detail_flight:mount.<locals>.get_task_endpoint", "decision": "undecided", "handler": "GET /api/plugins/kanban/tasks/{task_id}", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.status:get_portal_status", "decision": "undecided", "handler": "GET /api/portal", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.profiles:list_profiles_endpoint", "decision": "undecided", "handler": "GET /api/profiles", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.profiles:get_active_profile_endpoint", "decision": "undecided", "handler": "GET /api/profiles/active", "kind": "http", "ref": ""},
