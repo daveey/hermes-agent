@@ -127,3 +127,20 @@ def test_partition_new_source_cannot_replace_missing_original(partition):
     assert not result['clean']
     assert not result['audited_retain_rejections']
 
+
+def test_partition_candidate_survives_large_verified_inventory(partition):
+    from tests.hermes_cli.test_kanban_refusal_inventory import seed_retains
+
+    live, shadow, op, hub = partition
+    for conn in (live, shadow):
+        conn.execute('ALTER TABLE task_runs ADD COLUMN ended_at INTEGER')
+    seed_retains(live, shadow)
+    for conn in (live, shadow):
+        conn.commit()
+    before = [list(c.iterdump()) for c in (live, shadow)]
+    result = audit.report(live, shadow, hub, 'default')
+    assert result['clean'] and result['rejected_ops'] == 25
+    assert op['op_id'] in result['audited_retain_rejections']
+    assert len(result['audited_retain_rejections']) == 25
+    assert [list(c.iterdump()) for c in (live, shadow)] == before
+

@@ -28,6 +28,23 @@ def _rows(conn):
         "SELECT * FROM kanban_sync_outbox WHERE state='rejected' ORDER BY op_id LIMIT ?", (MAX_OPS + 1,))]
 
 
+def _unresolved_rows(conn, shadow, started):
+    from hermes_cli.kanban_sync_retain_drift import audited_rejection
+
+    # The ordinary diff already revalidates retained custody. Bound additional
+    # unresolved work, not that independently verified historical inventory.
+    # Unknown rows still consume the budget; no saved audit IDs are consulted.
+    rows = []
+    for raw in conn.execute("SELECT * FROM kanban_sync_outbox WHERE state='rejected' ORDER BY op_id"):
+        cut._fresh(started)
+        row = dict(raw)
+        if not audited_rejection(conn, shadow, row):
+            rows.append(row)
+            if len(rows) > MAX_OPS:
+                break
+    return rows
+
+
 def _receipt(hub, board, op_id):
     path = '/v2/boards/' + urllib.parse.quote(board, safe='') + '/operation-receipt?'
     raw = transport._request(hub, 'GET', path + urllib.parse.urlencode({'op_id': op_id}), None)
@@ -64,7 +81,7 @@ def report(live, shadow, hub, board, *, started=None):
     started = time.monotonic() if started is None else started
     identity = transport.scope(hub, board)
     generations = [_generation(c) for c in (live, shadow)]
-    rows = _rows(live)
+    rows = _unresolved_rows(live, shadow, started)
     _require(len(rows) <= MAX_OPS, 'refusal_inventory_bound')
     state = sync.sync_state(shadow) or {}
     _require(state.get('board_id') == board and state.get('gateway_id') == identity[2], 'replica_identity_changed')
@@ -87,7 +104,7 @@ def report(live, shadow, hub, board, *, started=None):
         for conn in (live, shadow):
             stack.enter_context(cut._transaction(conn, reserve=True))
         cut._fresh(started)
-        _require([_generation(c) for c in (live, shadow)] == generations and _rows(live) == rows,
+        _require([_generation(c) for c in (live, shadow)] == generations and _unresolved_rows(live, shadow, started) == rows,
                  'local_cut_inputs_changed')
         result = diff(live, shadow, identity[2])
         from hermes_cli.kanban_sync_actionability_drift import audited_rejection
