@@ -110,6 +110,11 @@ def renewals(conn: sqlite3.Connection, task_id: str) -> list[dict]:
         uids = p.get("covered_restriction_uids")
         if p.get("version") != 1 or not p.get("episode") or not isinstance(uids, list):
             continue
+        from hermes_cli.kanban_release_application import native_record, verified_renewal
+        if native_record(p):
+            if applied := verified_renewal(conn, event):
+                out.append({**event, 'payload': applied['payload'], 'intent_mandate': applied['mandate']})
+            continue  # Never fall through to legacy comment authority.
         mandate = _comment(conn, task_id, str(p.get("mandate_comment_uid") or ""))
         if mandate is None or digest(mandate["body"]) != p.get("mandate_body_sha256"):
             continue
@@ -287,5 +292,12 @@ def mandate(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     if not valid or ksd.execution_restricted(conn, task_id):
         return None
     renewal = max(valid, key=_event_order)
+    if intent := renewal.get('intent_mandate'):
+        from hermes_cli.kanban_release import _newest_stop
+        stop = _newest_stop(conn, task_id)
+        if stop is None or key(stop) != renewal['payload']['episode']:
+            return None  # Historical coverage survives; successor mandate authority does not.
+        return {**renewal['payload'], 'mandate_kind': intent['kind'],
+                'intent_uid': intent['intent_uid'], 'body': intent['body']}
     comment = _comment(conn, task_id, str(renewal["payload"]["mandate_comment_uid"]))
     return {**renewal["payload"], "body": comment["body"], "mandate_comment_id": comment["id"]} if comment else None

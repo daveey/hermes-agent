@@ -21,6 +21,11 @@ _RESULT_FIELDS = {'version', 'intent_uid', 'consume_uid', 'delivery_uid', 'outco
 _PERMIT = contextvars.ContextVar('owner_release_application_writer', default=None)
 
 
+def native_record(payload):
+    """A malformed native sibling must not downgrade to legacy comment authority."""
+    return any(k.startswith('owner_release_') or k == 'consume_uid' for k in payload)
+
+
 def _sha(value):
     return hashlib.sha256(cert.encode(value).encode('ascii')).hexdigest()
 
@@ -247,4 +252,22 @@ def verified_renewal(conn, event):
                 'mandate': {'kind': 'owner_release_intent', 'intent_uid': uid,
                             'body': app['result']['mandate']}}
     except (TypeError, ValueError, KeyError, UnicodeError, RecursionError):
+        return None
+
+
+def verified_release(conn, event):
+    """An exact native release effect, not a HOME-labelled public lookalike."""
+    try:
+        p = cert.parse(event['payload'])
+        uid = p.get('owner_release_intent_uid')
+        if not cert.intent._coordinate(uid) or event.get('run_id') is not None or event.get('deleted_at') is not None:
+            return None
+        app = verified_application(conn, uid)
+        if app is None:
+            return None
+        current = _event(conn, event['uid'])
+        if cert.encode(current) != cert.encode({k: event.get(k) for k in EVENT_FIELDS}):
+            return None
+        return app if any(e['uid'] == event['uid'] and e['kind'] == 'stop_released' for e in app['effects']) else None
+    except (TypeError, ValueError, KeyError, UnicodeError, RecursionError, sqlite3.Error):
         return None

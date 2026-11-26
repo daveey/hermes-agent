@@ -238,6 +238,9 @@ def _release_event(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
     if row is None or (stop is not None and _event_order(row) <= _event_order(stop)):
         return None
     payload = _payload(row["payload"])
+    from hermes_cli.kanban_release_application import native_record, verified_release
+    if native_record(payload) and verified_release(conn, row) is None:
+        return None  # Every release consumer, including already-released replay, needs APPLIED.
     return {**payload, "_id": row["id"]} if payload.get("version") == 1 else None
 
 
@@ -251,6 +254,15 @@ def current_mandate(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
     record = _release_event(conn, tid)
     if record is None or execution_restricted(conn, tid):
         return None
+    from hermes_cli.kanban_release_application import native_record, verified_release
+    if native_record(record):
+        event = conn.execute('SELECT * FROM task_events WHERE id=? AND task_id=?', (record['_id'], tid)).fetchone()
+        app = verified_release(conn, dict(event)) if event is not None else None
+        stop = _newest_stop(conn, tid)
+        if app is None or stop is None or (stop.get('uid') or str(stop['id'])) != app['intent']['episode']:
+            return None  # Selected history never renews a successor stop.
+        return {**record, 'body': app['result']['mandate'], 'mandate_kind': 'owner_release_intent',
+                'intent_uid': app['intent']['intent_uid']}
     ref = record.get("mandate_comment_uid") or record.get("mandate_comment_id")
     comment = _comment(conn, tid, str(ref)) if ref not in (None, "") else None
     if comment is None or not (comment.get("body") or "").strip():

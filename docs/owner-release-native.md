@@ -156,16 +156,28 @@ attribute a HOME-written comment to the original author, or claim human authorit
 Consumed-only certificates have no APPLIED proof. Public result/renewal events
 cannot reconstruct a missing private sidecar.
 
-This module has **no production caller or consumer integration yet**. Its internal
-writer proves transaction custody, not caller eligibility. Budget/promotion event
-bytes are frozen, not an independent semantic budget/placement adjudicator. In
-particular, freezing a pre-existing budget/promotion event does not prove it was
-created for this intent; the assembler must emit and bind the actual effects in
-its own transaction, with exact original-agent allowance/attribution. The
-HOME assembler must still perform every live actor/current-episode/selected-history,
+Persisted readers now accept native scope coverage and release effects **only**
+through private APPLIED verification. Native-field-family hybrids cannot borrow
+legacy comment authority; genuine legacy real-comment/digest renewal stays intact.
+`scope_renewal` exposes an explicit intent-backed mandate, `release` validates native
+release records even on already-released replay, and actionability verifies native
+capability-release effects rather than trusting their HOME label. Worker context
+renders the intent reference without a fabricated comment ID. A successor stop
+hides the old mandate without removing historical coverage; restricted accounting
+floor remains cumulative. Decided-triage maintenance never reuses an application
+renewal as permission for another placement.
+
+There is still **no production HOME assembler**. The internal writer proves
+transaction custody, not caller eligibility. Budget/promotion event bytes are
+frozen, not an independent semantic budget/placement adjudicator. In particular,
+freezing a pre-existing budget/promotion event does not prove it was created for
+this intent; the assembler must emit and bind the actual effects in its own
+transaction, with exact original-agent allowance/attribution. The HOME assembler
+must still perform every live actor/current-episode/selected-history,
 complete-comment, lease, safety, containment, private/accounting/spend and dependency
 veto in that same writer, execute the actual budget/promotion bodies, and record the
-receipt last. Every postwrite refusal must raise. APPLIED-only reader/context
-integration, completed queue/result publication, certified executor transfer and
-composed CLI/DO/HOME proof remain required before capability advertisement.
+receipt last. Every postwrite refusal must raise. Its narrowly scoped transaction-
+internal promotion admission must not enable consumed-only global coverage.
+Completed queue/result publication, certified executor transfer and composed
+CLI/DO/HOME proof remain required before capability advertisement.
 

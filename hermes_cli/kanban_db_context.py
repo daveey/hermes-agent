@@ -62,8 +62,10 @@ def _ctx_release(lines: list[str], conn: sqlite3.Connection, task_id: str, now: 
         _ctx_human(lines, conn, task_id, now, released=False)
         return
     who = _RELEASED_BY.get(str(released.get("authority_kind")), "an authorized releaser")
+    reference = (f"intent {released['intent_uid']}" if released.get('mandate_kind') == 'owner_release_intent'
+                 else f"comment {released['comment_id']}")
     lines += ["## Release mandate (governs this run)",
-              f"This card was released after its last stop by {who} (comment {released['comment_id']}). The "
+              f"This card was released after its last stop by {who} ({reference}). The "
               "mandate below is this run's scope. It supersedes stop rules agents wrote in older comments or "
               "mandates; the stop reasons of earlier runs further down are history, not instructions. Safety "
               "exclusions in the card body and a human's stop instructions still hold. Findings, "
@@ -368,12 +370,16 @@ def _ctx_comments(lines: list[str], conn: sqlite3.Connection, task_id: str, now:
     from hermes_cli.kanban_scope_renewal import mandate as _scope_mandate
     renewed = _scope_mandate(conn, task_id)
     released = current_mandate(conn, task_id)
-    if released and renewed and renewed["mandate_comment_id"] == released["comment_id"]:
+    if released and renewed and (
+            renewed.get('intent_uid') == released.get('intent_uid') if renewed.get('mandate_kind') == 'owner_release_intent'
+            else renewed.get('mandate_comment_id') == released.get('comment_id')):
         renewed = None  # already rendered at the top as the release mandate (_ctx_release)
     if renewed:  # in full: this comment is the scope the run was released for, not thread history
+        reference = (f"intent {renewed['intent_uid']}" if renewed.get('mandate_kind') == 'owner_release_intent'
+                     else f"comment {renewed['mandate_comment_id']}")
         lines += ["## Scope renewal mandate",
-                  f"An earlier run stopped this card's scope. It was renewed ({renewed['authority_kind']}, comment "
-                  f"{renewed['mandate_comment_id']}) for exactly the scope below; stop again if the work needs more.",
+                  f"An earlier run stopped this card's scope. It was renewed ({renewed['authority_kind']}, "
+                  f"{reference}) for exactly the scope below; stop again if the work needs more.",
                   renewed["body"], ""]
     shown, omitted_note = _ctx_tail(_kb.list_comments(conn, task_id), _CTX_MAX_COMMENTS, "comment")
     if not shown:
