@@ -55,6 +55,7 @@ import {
 } from '../../routes'
 
 import { $gatewayGroupCollapsed } from './gateway-group-preferences'
+import { useSidebarNavItems } from './nav-items'
 
 import { ChatSidebar } from './index'
 
@@ -136,10 +137,11 @@ const renderSidebar = (pathname: string, currentView: AppView, onRetrySessions: 
 const currentButtons = () =>
   screen.queryAllByRole('button').filter(button => button.classList.contains('bg-(--ui-control-active-background)'))
 
-const expectOnlyCurrent = (label: string | null) => {
-  const button = label ? screen.getByRole('button', { name: label }) : null
+const expectNavigationAbsent = (label: string | null) => {
+  const button = label ? screen.queryByRole('button', { name: label }) : null
 
-  expect(currentButtons()).toEqual(button ? [button] : [])
+  expect(button).toBeNull()
+  expect(currentButtons()).toEqual([])
 }
 
 const expectOnlySelectedSession = (title: string | null) => {
@@ -312,20 +314,20 @@ describe('ChatSidebar search disclosure', () => {
     expect(screen.queryByText('No sessions yet')).toBeNull()
   })
 
-  it('keeps remaining routes accessible even with a legacy collapsed preference', () => {
+  it('does not revive navigation rows from a legacy collapsed preference', () => {
     localStorage.setItem('sidebar.nav.collapsed', '1')
 
     try {
       const { container } = renderSidebar('/', 'chat')
-      expect(screen.getByRole('button', { name: 'Capabilities' })).toBeTruthy()
-      expect(screen.getByRole('button', { name: 'Messaging' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Capabilities' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Messaging' })).toBeNull()
       expect(container.querySelector('[data-tour="sidebar-nav-new-session"]')).toBeNull()
     } finally {
       localStorage.removeItem('sidebar.nav.collapsed')
     }
   })
 
-  it('retains only the protected setup row and its spacing when preferences hide every nav id', () => {
+  it('removes the whole navigation group and its padding, not only preference-hideable rows', () => {
     const dispose = registry.register({
       area: SIDEBAR_NAV_PREFS_AREA,
       id: 'hide-all-chrome-test',
@@ -334,9 +336,13 @@ describe('ChatSidebar search disclosure', () => {
 
     try {
       const { container } = renderSidebar('/', 'chat')
-      const capabilities = screen.getByRole('button', { name: 'Capabilities' })
-      expect(capabilities.closest('[data-slot="sidebar-group"]')?.classList.contains('pb-2')).toBe(true)
-      expect(container.querySelectorAll('[data-slot="sidebar-menu-item"]')).toHaveLength(1)
+      expect(screen.queryByRole('button', { name: 'Capabilities' })).toBeNull()
+      expect(container.querySelectorAll('[data-slot="sidebar-menu-item"]')).toHaveLength(0)
+      const content = container.querySelector('[data-slot="sidebar-content"]')!
+      expect(content.querySelector(':scope > [data-slot="sidebar-group"]')).toBeNull()
+      expect(content.className).toContain('pt-(--titlebar-height)')
+      expect(content.className).not.toContain('0.375rem')
+      expect(content.className).not.toContain('pb-2')
       expect(screen.queryByRole('button', { name: 'Messaging' })).toBeNull()
     } finally {
       dispose()
@@ -390,6 +396,46 @@ describe('ChatSidebar navigation activity', () => {
     noteActiveTreeGroup(null)
   })
 
+  it('hides all nine requested built-in and contributed rows without unregistering pages or reserving space', () => {
+    const labels = ['Session Transfer', 'Tailscale', 'Session Lens', 'Resetwatch']
+
+    const dispose = registry.registerMany(
+      labels.flatMap((label, i) => [
+        {
+          area: ROUTES_AREA,
+          id: `extra-page-${i}`,
+          data: { path: `/extra-${i}` },
+          render: () => <div>{label} page</div>
+        },
+        { area: SIDEBAR_NAV_AREA, id: `extra-nav-${i}`, data: { label, path: `/extra-${i}` } }
+      ])
+    )
+
+    const pages = registry.getArea(ROUTES_AREA)
+    const nav = registry.getArea(SIDEBAR_NAV_AREA)
+
+    try {
+      const { container, unmount } = renderSidebar('/kanban', 'extension')
+
+      for (const label of ['Capabilities', 'Messaging', 'Artifacts', 'Scheduled jobs', 'Kanban', ...labels]) {
+        expect(screen.queryByRole('button', { name: label })).toBeNull()
+      }
+
+      expect(container.querySelector('[data-slot="sidebar-menu"]')).toBeNull()
+      expect(container.querySelector('[data-tour^="sidebar-nav-"]')).toBeNull()
+      expect(container.querySelector('[data-slot="sidebar-content"] > [data-slot="sidebar-group"]')).toBeNull()
+      expect(screen.getByText('Tile one')).toBeTruthy()
+      expect(screen.getByText('Tile two')).toBeTruthy()
+      expect(registry.getArea(ROUTES_AREA)).toEqual(pages)
+      expect(registry.getArea(SIDEBAR_NAV_AREA)).toEqual(nav)
+      unmount()
+      expect(registry.getArea(ROUTES_AREA)).toEqual(pages)
+      expect(registry.getArea(SIDEBAR_NAV_AREA)).toEqual(nav)
+    } finally {
+      dispose()
+    }
+  })
+
   it('keeps list-dependent plugin registration stable while reflecting core input changes', () => {
     resetSidebarView()
     renderSidebar('/', 'chat')
@@ -440,21 +486,21 @@ describe('ChatSidebar navigation activity', () => {
     }
   })
 
-  it('keeps navigation and session activity coherent with the focused pane', () => {
+  it('keeps session activity coherent with the focused pane without restoring hidden page rows', () => {
     renderSidebar('/kanban', 'extension')
-    expectOnlyCurrent('Kanban')
+    expectNavigationAbsent('Kanban')
     expectOnlySelectedSession(null)
 
     focus('tile-one-group')
-    expectOnlyCurrent(null)
+    expectNavigationAbsent(null)
     expectOnlySelectedSession('Tile one')
 
     focus('tile-two-group')
-    expectOnlyCurrent(null)
+    expectNavigationAbsent(null)
     expectOnlySelectedSession('Tile two')
 
     focus(null)
-    expectOnlyCurrent('Kanban')
+    expectNavigationAbsent('Kanban')
     expectOnlySelectedSession(null)
 
     focus('tile-two-group')
@@ -462,7 +508,7 @@ describe('ChatSidebar navigation activity', () => {
       $removedSessionIds.set(new Set(['tile-two']))
       $sessions.set([sessionRows[0]])
     })
-    expectOnlyCurrent(null)
+    expectNavigationAbsent(null)
     expectOnlySelectedSession(null)
 
     act(() => {
@@ -479,18 +525,18 @@ describe('ChatSidebar navigation activity', () => {
       cleanup()
       focus('workspace-group')
       renderSidebar(pathname, currentView)
-      expectOnlyCurrent(label)
+      expectNavigationAbsent(label)
       expectOnlySelectedSession(null)
 
       focus('tile-one-group')
-      expectOnlyCurrent(null)
+      expectNavigationAbsent(null)
       expectOnlySelectedSession('Tile one')
     }
 
     cleanup()
     focus('workspace-group')
     renderSidebar('/reports', 'extension')
-    expectOnlyCurrent('Reports')
+    expectNavigationAbsent('Reports')
 
     cleanup()
     disposeContributions()
@@ -498,27 +544,27 @@ describe('ChatSidebar navigation activity', () => {
     focus('workspace-group')
     renderSidebar('/kanban', 'extension')
     expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
-    expectOnlyCurrent(null)
+    expectNavigationAbsent(null)
     expectOnlySelectedSession(null)
   })
 
-  // Teardown proof: the loader disposes a plugin's contributions on disable,
-  // and that disposer alone must bring the row back — no store to clear.
-  it('hides a nav row while a sidebarNav.prefs contribution is registered and restores it on dispose', () => {
-    renderSidebar('/kanban', 'extension')
-    expect(screen.getByRole('button', { name: 'Kanban' })).toBeTruthy()
+  // Preference semantics remain available to consumers; hiding the presentation
+  // must not unregister the plugin or change its route contributions.
+  it('preserves nav preference registration and teardown independently of sidebar presentation', () => {
+    const { result } = renderHook(() => useSidebarNavItems())
+    expect(result.current.some(item => item.id === 'kanban-nav')).toBe(true)
 
     let dispose = () => {}
 
     act(() => {
       dispose = registry.register({ area: SIDEBAR_NAV_PREFS_AREA, id: 'prefs', data: { hide: ['kanban-nav'] } })
     })
-    expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
-    // A hidden row is a preference, not a removal: the sibling nav row stays.
-    expect(screen.getByRole('button', { name: 'Reports' })).toBeTruthy()
+    expect(result.current.some(item => item.id === 'kanban-nav')).toBe(false)
+    expect(result.current.some(item => item.id === 'reports-nav')).toBe(true)
+    expect(registry.getArea(ROUTES_AREA).some(c => c.id === 'kanban-page')).toBe(true)
 
     act(() => dispose())
-    expect(screen.getByRole('button', { name: 'Kanban' })).toBeTruthy()
+    expect(result.current.some(item => item.id === 'kanban-nav')).toBe(true)
   })
 
   it('keeps plugin-only empty filters visible and makes Reset call onClear', async () => {
