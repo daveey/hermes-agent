@@ -16,6 +16,37 @@ All settings are stored in the `~/.hermes/` directory for easy access.
 Run `hermes setup --portal` — one OAuth gets you a model provider and all four Tool Gateway tools without hand-editing YAML. Portal subscribers also get 10% off token-billed providers. See [Nous Portal](../integrations/nous-portal.md).
 :::
 
+## Private BB owner binding source
+
+`bb_owner_response.source` defaults to `null` (unavailable). On each canonical
+receiving profile, set the complete endpoint pair only after an operator has
+verified the existing enrolled courier and compatible installed participants:
+
+```bash
+hermes config set bb_owner_response.source '{"gateway":"verified-source","profile":"verified-profile"}'
+hermes config get bb_owner_response.source
+```
+
+The names above are placeholders, not enrollment. The mapping accepts exactly
+`gateway` and `profile`, without defaults, wildcard or caller override. Missing or
+invalid configuration leaves read-only binding requests pending. Disable new
+requests before resetting this setting or downgrading; preserve courier journals.
+
+The private `hermes_cli.kanban_bb_binding_runtime REQUEST_ID` module independently
+reads the authenticated courier. It verifies the configured sender gateway,
+`tasks/bb-owner-binding` purpose, empty args, explicit null `base_version`, receiving
+profile and canonical primary board. It returns only the versioned route, tenant,
+complete lifecycle generation and declared choice pairs; no raw ask or mutation.
+Unknown core/I/O is unavailable, not verified binding. Duplicate JSON keys,
+non-finite constants and unrecognized readback fields are refused.
+
+Board authenticates a sender **gateway**, not its profile. The configured pair is
+an endpoint binding, not cryptographic sender-profile attribution. The local BB
+source must bind its installed gateway and configured profile/account; source
+credential/store compromise within that account is outside this transport claim.
+Eligibility does not prove an enrolled native decision and enables no writes.
+Distinct durable native evidence and correlated canonical proof remain mandatory.
+
 ## Upstream conflict reporting
 
 `update.upstream_conflict_reporting` defaults to `null` (legacy per-checkout repair

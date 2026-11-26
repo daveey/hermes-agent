@@ -25,8 +25,11 @@ def fixture(binding_db, tmp_path, monkeypatch):
         binding_db.backup(target)
     monkeypatch.setattr('hermes_constants.get_default_hermes_root', lambda: home)
     monkeypatch.setattr(runtime, '_profile', lambda: ('default', home))
-    record = dict(id=REQUEST, from_gw='producer', to_gw='owner', coll='tasks',
-                  action='bb-owner-binding', key='default/default/' + helpers.TASK, args={})
+    monkeypatch.setattr('hermes_cli.config_effective.load_user_config_effective',
+                        lambda **kw: {'bb_owner_response': {'source': {'gateway': 'producer', 'profile': 'bb'}}})
+    record = dict(id=REQUEST, to_gw='owner', coll='tasks',
+                  action='bb-owner-binding', key='default/default/' + helpers.TASK, args={}, base_version=None)
+    record['from'] = 'gw:producer'
     reads = []
     class Records:
         gateway = 'owner'
@@ -229,7 +232,7 @@ def test_literal_module_dispatch_and_import_are_separate(fixture, monkeypatch, c
     from hermes_cli import kanban_card_answer_runtime as owner_runtime
     from hermes_cli import kanban_card_answer_transport as transport
     monkeypatch.setattr(owner_runtime, '_profile', runtime._profile)
-    monkeypatch.setattr(transport, 'Records', runtime.Records)
+    monkeypatch.setattr('hermes_cli.kanban_bb_binding_source.BindingRecords', runtime.Records)
     monkeypatch.setattr(sys, 'argv', ['binding-runtime', REQUEST])
     name = 'hermes_cli.kanban_bb_binding_runtime'
     # run_module must execute a new namespace, not the already imported facade.
@@ -258,7 +261,8 @@ def test_real_authenticated_read_to_projection(fixture, monkeypatch, capsys):
                              request.get_header('Authorization'), timeout))
             return BytesIO(json.dumps({'request':record}).encode())
     monkeypatch.setattr(transport.urllib.request, 'build_opener', lambda *args: Opener())
-    monkeypatch.setattr(runtime, 'Records', transport.Records)
+    from hermes_cli.kanban_bb_binding_source import BindingRecords
+    monkeypatch.setattr(runtime, 'Records', BindingRecords)
     before = path.read_bytes()
     code, out = invoke(capsys)
     assert code == 0 and out['result']['tenant'] == 'babybear'

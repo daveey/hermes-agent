@@ -1875,10 +1875,10 @@ DEFAULT_CONFIG = {
         # A job failing with the SAME error alerts once, then stays silent for this many hours
         # before one reminder ping (the run is still recorded; `hermes cron incidents` shows it).
         # A green run or a different error alerts again immediately; `hermes cron incidents ack`
-        # silences a signature for good. 0 = re-alert on every failing run. Keep in sync with
-        # cron.scheduler.DEFAULT_FAILURE_REPEAT_ALERT_HOURS.
+        # silences a signature for good. 0 = re-alert every failure. Sync: cron.scheduler.DEFAULT_FAILURE_REPEAT_ALERT_HOURS.
         "failure_repeat_alert_hours": 6,
     },
+    "bb_owner_response": {"source": None},
     "kanban": {
         # Evidence only; never changes urgency or starts capture without explicit activation.
         "fairness_capture": {"enabled": False, "capture_id": None, "directory": None, "max_bytes": 536870912},

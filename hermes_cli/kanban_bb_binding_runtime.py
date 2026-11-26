@@ -15,16 +15,19 @@ from contextlib import closing
 from hermes_cli.kanban_bb_owner_binding import binding
 from hermes_cli.kanban_card_answer import AnswerRefused
 from hermes_cli.kanban_card_answer_runtime import _board_db, _profile
-from hermes_cli.kanban_card_answer_transport import Records
+from hermes_cli.kanban_bb_binding_source import BindingRecords as Records, configured_source
 from hermes_cli.kanban_lockguard import connect
 
 
 def produce(request_id: str) -> dict:
     """Read eligibility only, never create/migrate a board or accept an envelope."""
+    source = configured_source()
     records = Records()
     profile, _ = _profile()
     record = records.read(request_id)
     if (not isinstance(record, dict) or record.get('id') != request_id
+            or record.get('from') != 'gw:' + source['gateway']
+            or 'base_version' not in record or record['base_version'] is not None
             or record.get('to_gw') != records.gateway or record.get('coll') != 'tasks'
             or record.get('action') != 'bb-owner-binding' or record.get('args') != {}
             or not isinstance(record.get('key'), str)):
