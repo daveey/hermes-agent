@@ -128,3 +128,44 @@ These bodies do not authenticate a foreign owner, certify scope coverage,
 waive an unread decision, or install the missing HOME application. Real SQLite
 composition tests prove combined commit and rollback on later refusal or actual
 event-insertion failure, not end-to-end release authority.
+
+### Private APPLICATION sidecar (assembler not yet installed)
+
+`kanban_release_application` adds an immutable host-local APPLIED receipt distinct
+from the consumed certificate. Only its own canonical `_writer` reservation may
+record it; an arbitrary existing transaction is not accepted. Receipt insert,
+UPDATE/DELETE and every replacement identity (including rowid) are guarded.
+The complete bounded envelope freezes the winning private consumption hash,
+exact captured HOME delivery/wire, canonical renewal, local result and every
+referenced release/budget/placement event. Reads revalidate both halves through
+SQL only and work with execute-only actionability adapters and read-only reopen.
+Absent/malformed optional tables fail closed. Result replay uses frozen historical
+identity, not a current task-status/clock inference. First receipt insertion also
+requires exact local primary HOME identity. Ordinary local `append_event` writes
+have a NULL Board origin until authenticated echo: a privately frozen local effect
+may advance NULL→that exact HOME without invalidating its historical receipt. No
+other fields or foreign origins are normalized, and canonical consumption/renewal
+and delivery custody retain exact original stamps. This private rule is not public
+row provenance certification; executor transfer remains a separate required gate.
+
+The release-event set must be exactly current episode plus explicitly selected
+historical capabilities, with original agent gateway/profile/session and chat
+authority; it cannot grant blanket coverage. The result carries a separate
+`owner_release_intent` mandate context. It does not invent a comment ID/digest,
+attribute a HOME-written comment to the original author, or claim human authority.
+Consumed-only certificates have no APPLIED proof. Public result/renewal events
+cannot reconstruct a missing private sidecar.
+
+This module has **no production caller or consumer integration yet**. Its internal
+writer proves transaction custody, not caller eligibility. Budget/promotion event
+bytes are frozen, not an independent semantic budget/placement adjudicator. In
+particular, freezing a pre-existing budget/promotion event does not prove it was
+created for this intent; the assembler must emit and bind the actual effects in
+its own transaction, with exact original-agent allowance/attribution. The
+HOME assembler must still perform every live actor/current-episode/selected-history,
+complete-comment, lease, safety, containment, private/accounting/spend and dependency
+veto in that same writer, execute the actual budget/promotion bodies, and record the
+receipt last. Every postwrite refusal must raise. APPLIED-only reader/context
+integration, completed queue/result publication, certified executor transfer and
+composed CLI/DO/HOME proof remain required before capability advertisement.
+
