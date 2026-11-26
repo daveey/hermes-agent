@@ -3,11 +3,7 @@ from typing import Optional
 
 from fastapi import Query
 
-from hermes_cli import kanban_db
-from hermes_cli.web_read_coalescing import coalesced_read
-
-
-def mount(router, get_task):
+def mount(router, get_task, coalesced_read, current_board):
     # Four tracked flights, not a new threadpool cap. Excess distinct resources
     # keep their original runner admission; identical tracked polls share work.
     read = coalesced_read(get_task, admission_key=lambda a: tuple(a.values()),
@@ -19,5 +15,5 @@ def mount(router, get_task):
         run_state_type: Optional[str] = Query(None, description="With run_state_name: filter runs by column 'status' or 'outcome'"),
         run_state_name: Optional[str] = Query(None, description="With run_state_type: exact value for that run column")):
         # Select before keying: a board switch must never join the old board.
-        return await read(task_id=task_id, board=board or kanban_db.get_current_board(),
+        return await read(task_id=task_id, board=board or current_board(),
                           run_state_type=run_state_type, run_state_name=run_state_name)

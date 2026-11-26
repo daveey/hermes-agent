@@ -411,7 +411,7 @@ def get_task(
     raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
 
-task_detail_flight.mount(router, get_task)
+task_detail_flight.mount(router, get_task, coalesced_read, lambda: kanban_db.get_current_board())
 
 
 def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type: Optional[str],
