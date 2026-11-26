@@ -586,8 +586,8 @@ def read_first(conn: sqlite3.Connection, tid: str, anchor: Optional[dict], write
 
 
 def _read_first(conn: sqlite3.Connection, tid: str, stop: dict, writer: tuple, seen: Optional[int],
-                board: Optional[str]) -> Optional[int]:
-    return read_first(conn, tid, stop, writer, seen, board)
+                board: Optional[str], *, rerun: str = '') -> Optional[int]:
+    return read_first(conn, tid, stop, writer, seen, board, rerun=rerun)
 
 
 def _resume(conn: sqlite3.Connection, out: dict, tid: str, by: str, recorded: dict, parents: list[str]) -> dict:
@@ -649,6 +649,9 @@ def _mandate_and_budget(conn: sqlite3.Connection, out: dict, s) -> None:
     from hermes_cli import kanban_spend_budget as ksb
     kind, session = s.writer[0], s.writer[1]
     body = mandate_text(s.runs, s.note, agent=kind != "human", budget=s.budget_text)
+    if s.capability_rows:
+        body += "\n\nMandate requests release of these explicitly selected capability episodes: " + ", ".join(
+            renewal.key(row) for row in s.capability_rows) + ". Independent scope, safety and containment holds stay."
     done = renewal.covered(conn, s.tid)
     evidence = ([e for e in renewal.scope_evidence(conn, s.tid, s.episode) if renewal.key(e) not in done]
                 if s.scope else [])
@@ -698,6 +701,7 @@ def _decide(conn: sqlite3.Connection, s) -> str:
     from hermes_cli import kanban_scope_renewal as renewal
     from hermes_cli import kanban_spend_budget as ksb
     from hermes_cli import kanban_spend_decision as ksd
+    from hermes_cli import kanban_release_capability as capability
     kind, session = s.writer[0], s.writer[1]
     row = conn.execute("SELECT * FROM task_comments WHERE id=?", (s.comment,)).fetchone()
     record = {"version": 1, "episode": s.episode, "authority_kind": s.authority, "actor_kind": kind,
@@ -714,14 +718,17 @@ def _decide(conn: sqlite3.Connection, s) -> str:
         now = c.execute("SELECT status FROM tasks WHERE id=?", (s.tid,)).fetchone()
         if now is None or now[0] != s.status or not ksd.pending(c, s.tid):
             return f"{s.tid} changed during the release"
+        if capability.selected(c, s.tid, s.capability_episodes) != s.capability_rows:
+            return f"{s.tid}'s selected capability evidence changed during the release"
         if kind != "human":
-            people, missing = _human_after(c, s.tid, s.stop, s.seen)
+            people, missing = _human_after(c, s.tid, s.read_stop, s.seen)
             if people:
                 return f"a human commented on {s.tid} during the release (comment {people[-1]})"
             if missing:
                 return (f"a human's comment on {s.tid} has not synced here ({', '.join(missing)}); wait for the "
                         f"sync and rerun, or {HUMAN_ROUTE}")
             unread.check(c, s.tid, session=session, seen=s.seen, verb="release", board=s.board)
+        capability.append(c, s.tid, s.capability_rows, s.episode, record)
         kb._append_event(c, s.tid, RELEASED, record)
         return None
 
@@ -753,7 +760,7 @@ def _decide(conn: sqlite3.Connection, s) -> str:
 
 def release(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = None, note: Optional[str] = None,
             writer: Optional[tuple] = None, author: Optional[str] = None, board: Optional[str] = None,
-            seen: Optional[int] = None,
+            seen: Optional[int] = None, capability_episodes: Sequence[str] = (),
             precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None,
             env: Optional[Mapping[str, str]] = None,
             ancestry: Optional[Sequence[Mapping[str, str]]] = None) -> dict:
@@ -766,6 +773,8 @@ def release(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = Non
     has read (``--seen``). ``precondition(conn)`` returns a refusal or None; it is asked before anything is
     written and again inside the transaction that records the decision (a click's ask fence).
     ``env``/``ancestry`` are the renewal's test seams.
+    ``capability_episodes`` explicitly names additional same-card capability stops; it never implies release
+    of historical scope or safety restrictions. Every selection is rechecked in the decision transaction.
     """
     tid = target(conn, task_id)
     out: dict = {"task_id": task_id, "target": tid}
@@ -773,7 +782,7 @@ def release(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = Non
         return _release(conn, out, SimpleNamespace(
             tid=tid, runs=default_runs() if runs is None else runs, note=note, writer=writer, author=author,
             board=board, seen=seen, precondition=precondition, env=os.environ if env is None else env,
-            ancestry=ancestry))
+            ancestry=ancestry, capability_episodes=capability_episodes))
     except _Refusal as exc:
         from hermes_cli.kanban_stop_recovery import refusal_context
         try:
@@ -795,6 +804,7 @@ def _current_decision_card(conn: sqlite3.Connection, named: str, tid: str, episo
 
 
 def _release(conn: sqlite3.Connection, out: dict, s) -> dict:
+    from hermes_cli import kanban_release_capability as capability
     from hermes_cli import kanban_scope_renewal as renewal
     from hermes_cli import kanban_spend_decision as ksd
     from hermes_cli.kanban_comment_writer import cli_comment_writer
@@ -803,6 +813,10 @@ def _release(conn: sqlite3.Connection, out: dict, s) -> dict:
     if isinstance(s.runs, bool) or not isinstance(s.runs, int) or s.runs < 1:
         raise _Refusal("invalid_runs", f"--runs must be a whole number of at least 1, not {s.runs!r}")
     s.status, recorded, resume = _eligible(conn, tid)
+    s.capability_rows = capability.selected(conn, tid, s.capability_episodes)
+    if recorded is not None and (resume or s.status in _RELEASED) and s.capability_rows:
+        capability.recorded(conn, tid, s.capability_rows, recorded)
+        out['capability_episodes'] = [renewal.key(row) for row in s.capability_rows]
     if recorded is not None and s.status in _RELEASED:
         return {**out, "ok": True, "outcome": "already_released",
                 "message": f"{tid} is {s.status}: already released, nothing written"}
@@ -815,6 +829,7 @@ def _release(conn: sqlite3.Connection, out: dict, s) -> dict:
         return _resume(conn, out, tid, s.by, recorded, s.parents)
     s.stop = ksd.pending_episode(conn, tid)
     s.episode = renewal.key(s.stop)
+    s.read_stop = capability.anchor(s.stop, s.capability_rows)
     _current_decision_card(conn, out["task_id"], tid, s.episode)
     s.scope = ksd.execution_restricted(conn, tid)
     if s.scope and (s.stop["kind"] != renewal.STOP or s.status != "triage"):
@@ -822,12 +837,15 @@ def _release(conn: sqlite3.Connection, out: dict, s) -> dict:
     if s.parents and s.status != "triage":
         raise _Refusal("scheduled_open_parent", f"{tid} is {s.status} with open parent(s) {', '.join(s.parents)}; "
                        "it cannot wait on them from there. Release it once they finish")
-    s.budget_seen = _read_first(conn, tid, s.stop, s.writer, s.seen, s.board)
+    s.budget_seen = _read_first(conn, tid, s.read_stop, s.writer, s.seen, s.board,
+                               rerun=capability.rerun(tid, s.capability_rows))
     if s.precondition and (why := s.precondition(conn)):
         raise _Refusal("ask_changed", str(why))
     s.budget_text = _budget_plan(conn, s)[3]  # also the up-front budget_limit_in_force refusal
     _mandate_and_budget(conn, out, s)
     outcome = _decide(conn, s)
+    if s.capability_rows:
+        out['capability_episodes'] = [renewal.key(row) for row in s.capability_rows]
     parents = s.parents
     out.update(ok=True, outcome=outcome, **({"parents": parents} if parents else {}),
                message=(f"{tid} -> todo: released with {s.runs} more runs, waiting on {', '.join(parents)}" if parents
@@ -855,14 +873,16 @@ def command(args: argparse.Namespace) -> int:
     from hermes_cli import kanban_db_connect as kbc
     ids = list(dict.fromkeys([args.task_id, *(getattr(args, "ids", None) or [])]))
     seen = getattr(args, "seen_comment_id", None)
-    if seen is not None and len(ids) > 1:
-        print("kanban release: --seen belongs to one card; release each such card separately", file=sys.stderr)
+    if len(ids) > 1 and (seen is not None or getattr(args, 'capability_episodes', ())):
+        option = '--seen' if seen is not None else '--capability-episode'
+        print(f"kanban release: {option} belongs to one card; release each such card separately", file=sys.stderr)
         return 2
     results = []
     with kbc.connect_closing() as conn:
         for tid in ids:
             try:
                 results.append(release(conn, tid, runs=args.runs, note=args.note, seen=seen,
+                                       capability_episodes=getattr(args, 'capability_episodes', ()),
                                        board=getattr(args, "board", None)))
             except (ValueError, RuntimeError, sqlite3.Error) as exc:  # one card's failure never hides the others
                 results.append(_refused({"task_id": tid, "target": tid}, "error", f"{type(exc).__name__}: {exc}"))

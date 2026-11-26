@@ -699,6 +699,8 @@ _SPECS = [
         _arg("--runs", type=int, default=None,
              help="More runs the card gets (default: kanban.release_runs, 10), on top of the runs already counted"),
         _arg("--note", default=None, help="Text appended to the mandate comment as its own paragraph"),
+        _arg("--capability-episode", dest="capability_episodes", action="append", default=[],
+             help="Also release this exact historical capability stop with this card's pending current decision (repeatable; UID on synced boards); never scope or safety stops"),
         _arg("--seen", dest="seen_comment_id", type=int,
              help="Newest comment id read (one card). An agent caller needs it when a human commented or a budget "
                   "decision was recorded after the stop"),
