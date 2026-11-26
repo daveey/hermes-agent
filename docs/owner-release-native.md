@@ -110,3 +110,21 @@ mandate, change budgets/status, publish an applied result, or confer coverage or
 execution permission. Private consumption remains historical only. Applied-only
 consumers, atomic HOME application, canonical result transport and full composed
 CLI/DO/HOME/deployment proof remain required before capability advertisement.
+
+### Atomicity primitives (not release authority)
+
+`kanban_spend_budget.set_override_in_txn` and
+`kanban_db_promote.promote_in_txn` let a certified HOME composer reuse the ordinary
+budget fence/comment/event and promotion checks inside one canonical
+`kanban_db.write_txn`. Public wrappers still own their transactions, and dry-run
+promotion is unchanged. The promotion body rechecks current status, execution
+restrictions and parents under the writer and retains the post-precondition CAS.
+The internal bodies never commit. A caller must **raise on every returned
+promotion refusal after any preceding write**, including a budget write, so the
+outer transaction rolls back. An open SQLite transaction alone does not prove
+writer ownership; the composer must use `write_txn`, not deferred `BEGIN`.
+
+These bodies do not authenticate a foreign owner, certify scope coverage,
+waive an unread decision, or install the missing HOME application. Real SQLite
+composition tests prove combined commit and rollback on later refusal or actual
+event-insertion failure, not end-to-end release authority.

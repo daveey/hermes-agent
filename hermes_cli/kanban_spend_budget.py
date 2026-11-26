@@ -250,7 +250,30 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
     release composition leaves it unset because it records the decision separately.
     For cards meant to run indefinitely (standing shepherds), set explicitly, never inferred from a title."""
     from hermes_cli import kanban_db as kb
+    payload = _override_payload(runs, cache_read_tokens, by, reason, writer_kind,
+                                cache_read_writer_kind, runs_writer_kind)
+    with kb.write_txn(conn):
+        return _record_override_in_txn(conn, task_id, payload, seen=seen, board=board, standalone=standalone)
 
+
+def set_override_in_txn(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = None,
+                         cache_read_tokens: Optional[int] = None, by: str, reason: str,
+                         seen: Optional[int] = None, board: Optional[str] = None,
+                         writer_kind: Optional[str] = None, cache_read_writer_kind: Optional[str] = None,
+                         runs_writer_kind: Optional[str] = None) -> dict:
+    """Same budget fences and attribution inside a caller-owned writer transaction.
+
+    Never commits. The composing caller must propagate errors (and raise on any
+    later refusal) so all earlier effects roll back. This is not a release grant.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("budget body requires an outer write transaction")
+    payload = _override_payload(runs, cache_read_tokens, by, reason, writer_kind,
+                                cache_read_writer_kind, runs_writer_kind)
+    return _record_override_in_txn(conn, task_id, payload, seen=seen, board=board)
+
+
+def _override_payload(runs, cache_read_tokens, by, reason, writer_kind, cache_read_writer_kind, runs_writer_kind):
     for name, value in (("runs", runs), ("cache_read_tokens", cache_read_tokens)):
         if value is not None and _limit_value(value) is None:
             raise ValueError(f"spend budget {name} must be a non-negative integer (0 = no limit), not {value!r}")
@@ -268,24 +291,29 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
         payload["cache_read_writer_kind"] = cache_read_writer_kind
     if runs_writer_kind in ("human", "agent", "unknown"):
         payload["runs_writer_kind"] = runs_writer_kind  # the same, for a run limit an agent restated or tightened
-    with kb.write_txn(conn):
-        if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
-            raise ValueError(f"unknown task {task_id}")
-        from hermes_cli.kanban_spend_override_fence import check, require_decision
-        if standalone:
-            require_decision(conn, task_id)
-        if episode := check(conn, task_id, seen=seen, board=board):
-            payload['episode'] = episode
-        window = limit_window(conn, task_id)
-        cid = kb.add_comment(conn, task_id, AUTHOR,
-                             f"Spend budget for this card: {_override_text(payload)}, set by {by}: {reason}. "
-                             f"{window_text(window)}.", system=True)
-        # A missing prior-home stop may be restored later; retain its read evidence even now.
-        note = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
-        payload['decision_comment'] = {'comment_id': cid, 'author': AUTHOR}
-        if 'uid' in note.keys() and note['uid']:
-            payload['decision_comment']['comment_uid'] = note['uid']
-        kb._append_event(conn, task_id, OVERRIDE_EVENT, payload)
+    return payload
+
+
+def _record_override_in_txn(conn, task_id, payload, *, seen, board, standalone=False):
+    from hermes_cli import kanban_db as kb
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+        raise ValueError(f"unknown task {task_id}")
+    from hermes_cli.kanban_spend_override_fence import check, require_decision
+    if standalone:
+        require_decision(conn, task_id)
+    if episode := check(conn, task_id, seen=seen, board=board):
+        payload['episode'] = episode
+    window = limit_window(conn, task_id)
+    cid = kb.add_comment(conn, task_id, AUTHOR,
+                         f"Spend budget for this card: {_override_text(payload)}, set by {payload['by']}: {payload['reason']}. "
+                         f"{window_text(window)}.", system=True)
+    # A missing prior-home stop may be restored later; retain its read evidence even now.
+    note = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
+    payload['decision_comment'] = {'comment_id': cid, 'author': AUTHOR}
+    if 'uid' in note.keys() and note['uid']:
+        payload['decision_comment']['comment_uid'] = note['uid']
+    kb._append_event(conn, task_id, OVERRIDE_EVENT, payload)
+
     return payload
 
 
