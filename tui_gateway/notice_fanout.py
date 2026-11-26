@@ -400,16 +400,25 @@ def _remote_boards_quiet(base: tuple, polled: dict, known: dict) -> bool:
 
 def _remote_change_pass(session_db: Callable, origin_db: Optional[Callable] = None) -> FanoutResult:
     """Observe the same remote projection as outcomes; failed reads never mean cards finished."""
+    from tui_gateway.unloaded_diagnostics import RemoteCall
+    with RemoteCall() as diagnostic:
+        return _remote_change_observed(session_db, origin_db, diagnostic)
+
+
+def _remote_change_observed(session_db, origin_db, diagnostic):
     global _remote_memo
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli import fact_links_health
     from tui_gateway import notice_links_health
+    from tui_gateway.unloaded_diagnostics import Chat, emit
     origin = activity._origin_scope()
     health_generation = fact_links_health.pending(origin)
-    out = FanoutResult()
+    out = FanoutResult(subpass='remote_card_change')
     try:
         inputs = _remote_inputs_key()
+        diagnostic.test('inputs_error', False)
     except Exception:  # health: allow BLE001 -- an unreadable input is unknown: run the pass
+        diagnostic.test('inputs_error', True)
         logger.debug("remote card-change inputs unavailable", exc_info=True)
         out.retry()
         inputs = None
@@ -421,13 +430,18 @@ def _remote_change_pass(session_db: Callable, origin_db: Optional[Callable] = No
         except Exception:  # health: allow BLE001 -- unknown is hot
             logger.debug("remote card-change boards unavailable", exc_info=True)
             polled = None
+        diagnostic.test('initial_poll_failed', polled is None)
         if polled is None:
             out.retry()
             inputs = None
     memo = _remote_memo
-    if health_generation is None and inputs is not None and memo is not None and memo[0] == inputs[0] and memo[1] == _ledger_content_key(inputs[1]) \
-            and _remote_boards_quiet(inputs[0], polled, memo[3]):
+    if not diagnostic.test('health_pending', health_generation is not None) and inputs is not None \
+            and not diagnostic.test('no_memo', memo is None) \
+            and not diagnostic.test('inputs_changed', memo[0] != inputs[0]) \
+            and not diagnostic.check('ledger_changed', lambda: memo[1] != _ledger_content_key(inputs[1])) \
+            and not diagnostic.check('boards_not_quiet', lambda: not _remote_boards_quiet(inputs[0], polled, memo[3])):
         _remote_memo = (memo[0], memo[1], {slug: polled[slug][1] for slug in polled}, memo[3])
+        diagnostic.call = 'memo_hit'
         return out
     _remote_memo = None
     from hermes_state_outcome import refresh_outcomes_quietly
@@ -447,45 +461,85 @@ def _remote_change_pass(session_db: Callable, origin_db: Optional[Callable] = No
     if previous is None:
         if not state.seed_remote(snapshot):
             out.retry()
+            diagnostic.call = 'seed_failed'
             return out
         if health_generation is None:
+            diagnostic.call = 'seed_only'
             return out
         previous = {}  # first source publication must also repair retained unknown outcomes
     acked: dict[str, Optional[frozenset[tuple[str, str]]]] = {}
     for chat in sorted(previous.keys() | snapshot.keys()):
-        if health_generation is None and previous.get(chat) == snapshot.get(chat):
-            continue
-        try:
-            with session_db(chat) as (db, tip):
-                if db is None:
-                    out.retry()
-                    continue
-                skipped = chat_skip_reason(db, chat)
-                if skipped is None and not refresh_outcomes_quietly([tip], "card_change", db=db):
-                    out.retry()
-                    continue
-        except Exception:  # health: allow BLE001 -- retain failed chat invalidations and continue other chats
-            out.retry()
-            logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
-            continue
-        # Acknowledge only a successful refresh or an intentionally skipped chat.
-        acked[chat] = snapshot.get(chat)
-        out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
-                    "status": None, "skipped": skipped, "source": "remote"})
+        with Chat() as observed:
+            if health_generation is not None:
+                emit('remote.chat.flag', 'health_pending')
+            if health_generation is None and previous.get(chat) == snapshot.get(chat):
+                observed.trigger = observed.result = 'unchanged_skip'
+                continue
+            observed.trigger = ('snapshot_diff' if previous.get(chat) != snapshot.get(chat) else 'health_forced')
+            try:
+                with session_db(chat) as (db, tip):
+                    if db is None:
+                        observed.result = 'db_none'
+                        out.retry()
+                        continue
+                    skipped = chat_skip_reason(db, chat)
+                    if skipped is None and not refresh_outcomes_quietly([tip], "card_change", db=db):
+                        observed.result = 'refresh_failed'
+                        out.retry()
+                        continue
+            except Exception:  # health: allow BLE001 -- retain failed chat invalidations and continue other chats
+                observed.result = 'exception'
+                out.retry()
+                logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
+                continue
+            # Acknowledge only a successful refresh or an intentionally skipped chat.
+            acked[chat] = snapshot.get(chat)
+            out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
+                        "status": None, "skipped": skipped, "source": "remote"})
+            observed.result = 'acked_refreshed' if skipped is None else 'acked_intentionally_skipped'
     committed = state.ack_remote(acked)
     if not committed:
         out.retry()
     recovered_all = notice_links_health.recover_into(out, origin, health_generation, set(previous.keys() | snapshot.keys()), origin_db)
+    diagnostic.cert = ('ack_failed' if not committed else 'inputs_unavailable' if inputs is None else 'not_all_acked')
     if committed and inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
-        # Only certify a projection if its cursor stayed still THROUGH fingerprint collection. A later
-        # fingerprint must not describe a write the projection never saw.
-        prints = _known_prints(inputs[0], known)
-        after = _poll_boards(inputs[0], {slug: polled[slug][1] for slug in polled})
-        if prints is not None and after is not None and all(after[slug][1] == polled[slug][1] for slug in polled):
-            _remote_memo = (inputs[0], _ledger_content_key(inputs[1]), {slug: polled[slug][1] for slug in polled}, prints)
-    fact_links_health.acknowledge(origin, health_generation,
-                                  complete=committed and recovered_all and (previous.keys() | snapshot.keys()) <= acked.keys())
+        _certify_remote(inputs, polled, known, diagnostic)
+    diagnostic.health = 'exception'
+    complete = committed and recovered_all and (previous.keys() | snapshot.keys()) <= acked.keys()
+    fact_links_health.acknowledge(origin, health_generation, complete=complete)
+    diagnostic.health = 'no_generation' if health_generation is None else ('complete_true' if complete else 'complete_false')
+    diagnostic.call = 'refreshed'
     return out
+
+
+def _certify_remote(inputs, polled, known, diagnostic):
+    """Observe the original post-fingerprint cursor certification, without an early return."""
+    global _remote_memo
+    from tui_gateway.unloaded_diagnostics import emit
+    prints = _known_prints(inputs[0], known)
+    after = _poll_boards(inputs[0], {slug: polled[slug][1] for slug in polled})
+    if prints is None:
+        emit('remote.cert.flag', 'prints_none')
+    if after is None:
+        emit('remote.cert.flag', 'after_poll_none')
+    stable = None
+    if after is not None:
+        if prints is not None:
+            stable = all(after[slug][1] == polled[slug][1] for slug in polled)
+        else:
+            # Independent flags must not introduce an exception on a path whose
+            # decisive comparison was originally short-circuited by prints=None.
+            try:
+                stable = all(after[slug][1] == polled[slug][1] for slug in polled)
+            except (KeyError, TypeError, IndexError):
+                emit('remote.cert.flag', 'unknown')
+        if stable is False:
+            emit('remote.cert.flag', 'cursor_moved')
+    diagnostic.cert = ('prints_none' if prints is None else 'after_poll_none' if after is None
+                       else 'cursor_moved' if not stable else 'unknown')
+    if prints is not None and after is not None and stable:
+        _remote_memo = (inputs[0], _ledger_content_key(inputs[1]), {slug: polled[slug][1] for slug in polled}, prints)
+        diagnostic.cert = 'certified'
 
 
 def _board_slugs(kb: Any) -> list[str]:
@@ -510,6 +564,7 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_connect as _kbc
     from tui_gateway import kanban_unloaded as ku
+    from tui_gateway.unloaded_diagnostics import local_retry
     session_db = session_db or ku.find_session_db
     if hosted is None:
         hosted = ku.chat_hosted_here if session_db is ku.find_session_db else lambda chat: None
@@ -519,7 +574,7 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
     except Exception:  # health: allow BLE001 -- roster failure is an explicit outstanding action obligation
         logger.warning("card-change board enumeration failed", exc_info=True)
         boards = []
-        done.retry()
+        local_retry(done, 'enumeration_failed')
     for slug in boards:
         try:
             ident = str(_kb.kanban_db_path(slug).resolve())
@@ -530,16 +585,16 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
                 tids, cursor = _changed_tasks(conn, ident)
                 done += _fan_out_changes(conn, _kb, session_db, slug, tids, hosted)
                 if not state.set_cursor(ident, cursor):
-                    done.retry()
+                    local_retry(done, 'set_cursor_failed')
                 top = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
                 if top > cursor:
-                    done.retry(0.0)
+                    local_retry(done, 'top_gt_cursor', 0.0)
         except Exception:
-            done.retry()
+            local_retry(done, 'board_error')
             logger.warning("card-change outcome pass failed on board %s", slug, exc_info=True)
     try:
         done.absorb(_remote_change_pass(session_db))
     except Exception:  # health: allow BLE001 -- isolate the replica source and report failed reads
-        done.retry()
+        local_retry(done, 'remote_error')
         logger.warning("remote card-change outcome pass failed", exc_info=True)
     return done

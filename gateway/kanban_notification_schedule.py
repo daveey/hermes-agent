@@ -5,6 +5,7 @@ when enumeration fails or work remains; only a complete empty pass may sleep
 until a fact wake. This object never owns a claim, cursor or delivery receipt.
 """
 from dataclasses import dataclass
+from gateway.notification_retry_provenance import earliest, origin
 
 
 class BoundActions:
@@ -27,6 +28,8 @@ class BoundActions:
         self.links_health = HealthWatch(wake)
         self.native = native
         self.native_action = None
+        self.admission_sources = ()
+        self.deadline_sources = ()
 
     @property
     def legacy(self):
@@ -53,6 +56,7 @@ class BoundActions:
         return self.native_action.due(legacy_due=legacy_due) or now >= self.retry_at
 
     def due(self, now: float, *, legacy_due: bool) -> bool:
+        self.admission_sources = ()
         bindings = self.watch.snapshot()
         owners = {owner for _home, owner in bindings}
         self.was_bound = self.was_bound or bool(owners)
@@ -82,11 +86,23 @@ class BoundActions:
         # Consume every pending bit, not just the first true action.
         changed = [action.due(legacy_due=legacy_due) for action in self.actions.values()]
         health_changed = self.links_health.due({str(home) for home, _owner in bindings})
+        self.admission_sources = tuple(source for action, due in zip(self.actions.values(), changed) if due
+                                       for source in getattr(action, 'diagnostic_sources', ('unknown',)))
+        if health_changed:
+            self.admission_sources += ('health',)
         return any(changed) or health_changed or now >= self.retry_at
 
     def settled(self, report, now: float, interval: float) -> None:
         self.retry_at = report.next_due(now, interval)
         self.retry_floor = report.pending
+        sources = []
+        if report.pending:
+            sources.append(('retry', now + interval, *(getattr(report, 'retry_origin', None) or ('unknown', 'unknown'))))
+        for category, entry in (('retry', getattr(report, 'retry_deadline', None)),
+                                ('due', getattr(report, 'due_deadline', None))):
+            if entry is not None:
+                sources.append((category, *entry))
+        self.deadline_sources = tuple(sources)
 
     def close(self) -> None:
         if self.native_action is not None:
@@ -104,12 +120,21 @@ class PassReport:
 
     pending: bool = False
     deadline: float = float("inf")
+    retry_origin: tuple | None = None
+    retry_deadline: tuple | None = None
+    due_deadline: tuple | None = None
 
-    def retry(self) -> None:
+    def retry(self, subpass='unknown', reason='unknown') -> None:
         self.pending = True
+        source = origin(subpass, reason)
+        self.retry_origin = source if self.retry_origin is None else min(self.retry_origin, source)
 
-    def due_at(self, deadline: float) -> None:
+    def due_at(self, deadline: float, subpass='unknown', reason='unknown', *, cause='due') -> None:
         self.deadline = min(self.deadline, deadline)
+        if cause == 'retry':
+            self.retry_deadline = earliest(self.retry_deadline, deadline, subpass, reason)
+        else:
+            self.due_deadline = earliest(self.due_deadline, deadline, subpass, reason)
 
     def next_due(self, now: float, interval: float) -> float:
         return min(self.deadline, now + interval if self.pending else float("inf"))

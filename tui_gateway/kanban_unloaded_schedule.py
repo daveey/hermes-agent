@@ -1,6 +1,7 @@
 """Fact admission for unloaded work, separate from the install-wide lease."""
 from gateway.kanban_notification_schedule import BoundActions, PassReport
 from tui_gateway.kanban_unloaded_gates import scheduling
+from tui_gateway.unloaded_diagnostics import Admission
 import time
 
 
@@ -17,6 +18,10 @@ class UnloadedSchedule:
         self.role = role
         # Read before due(): an empty membership resets retry_at.
         report_due = now >= self.gate.retry_at
+        deadlines = getattr(self.gate, 'deadline_sources', ())
+        if report_due and not deadlines:
+            deadlines = (('retry', self.gate.retry_at, 'unknown', 'unknown'),)
+        maintenance_due = now >= self.next_legacy
         due = self.gate.due(now, legacy_due=now >= self.next_legacy)
         if not due and report_due and not self.gate.was_bound and not self.gate.actions:
             # Never-bound work is the legacy executor; its reported deadline is
@@ -30,7 +35,7 @@ class UnloadedSchedule:
             return
         report = PassReport()
         try:
-            with scheduling(report):
+            with Admission(now, getattr(self.gate, 'admission_sources', ()), deadlines, maintenance_due), scheduling(report):
                 work(*args, **kwargs)
         except Exception:  # health: allow BLE001 -- preserve the timer before the existing loop logs the failure
             report.retry()

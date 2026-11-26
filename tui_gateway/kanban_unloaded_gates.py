@@ -17,6 +17,7 @@ from pathlib import Path
 import time
 
 from hermes_cli import loop_accounting as accounting
+from tui_gateway.unloaded_diagnostics import Fallback, due_report, emit, fallback_reason, holder_pending, retry_report
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +346,7 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
     me = gateway_names()[0]
     stamp = fingerprint(path)
     if not me or stamp is None:
+        fallback_reason('other_pending', 'identity_unknown')
         return Inputs()
     # Commit counters are deliberately excluded, but replacement, observer recovery and same-inode restore
     # signals must still retire a semantic proof. A normal checkpoint may conservatively rearm it too.
@@ -365,6 +367,7 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
     epoch = (identity, _remote_memo.get('clock_epoch', 0))
     with remote._woken_lock:
         if remote._woken:
+            fallback_reason('woken')
             return Inputs()
     ledger = remote.ledger_path()
     ledger_stamp = None
@@ -379,10 +382,11 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
             # (t_01a1dfa94f2251cd).
             for row in conn.execute('SELECT session, ref, state, holder_pid, holder_start FROM notices '
                                     'WHERE delivered=0 AND holder_pid IS NOT NULL').fetchall():
-                if remote._holder_is_me(row[3]) or not remote._holder_alive(row[3], row[4]):
+                if holder_pending(remote, row):
                     return Inputs()
                 held.add(tuple(row))
             if held and _schedule_report.get() is not None:
+                fallback_reason('held_with_report')
                 return Inputs()  # foreign holder death must retain its recovery timer
     # The key is what the pass would read, not the replica's commit counter: the hub's replica commits several
     # task-row writes a second, and almost none touches a card this host owes a notice for (t_01a1dfa94f2251cd).
@@ -391,6 +395,7 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
     # skipped. Unreadable = unknown = hot.
     token = _replica_token(path, me)
     if token is None:
+        fallback_reason('no_token')
         return Inputs()
     memo_key = (str(path), me, token, str(ledger), ledger_stamp, live, epoch, frozenset(held))
     hit = _remote_memo.get('inputs')
@@ -398,6 +403,7 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
         # An archived chat un-archiving moves no replica row, no ledger row: re-read each parked chat per probe.
         if all(_chat_inert(profile, sid) for profile, sid in hit[2]):
             return hit[1]
+        fallback_reason('other_pending', 'chat_reactivated')
         return Inputs()
     _remote_memo.pop('inputs', None)
     # The sweep's cards are a function of the replica rows the token certifies: a ledger commit (the sweep's own
@@ -416,6 +422,7 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
         after = fingerprint(path)
         if after is None or (getattr(after, 'ident', None), getattr(after, 'generation', None),
                              getattr(after, 'signature', None)) != identity or _replica_token(path, me) != token:
+            fallback_reason('other_pending', 'snapshot_changed')
             return Inputs()
         _remote_memo['cards'] = (cards_key, cards)
     watch = _replica_watch.get(str(path))
@@ -424,11 +431,13 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
     parked: set = set()
     if ledger_stamp is None:
         if cards:
+            fallback_reason('other_pending', 'no_ledger')
             return Inputs()
     else:
         with reader(ledger) as conn:
             if cards and not _cards_settled(conn, cards, live, str(Path(path).resolve()),
                                             held=frozenset((r[0], r[1], r[2]) for r in held), parked=parked):
+                fallback_reason('other_pending', 'unsettled')
                 return Inputs()
     digest = hashlib.sha256()
     digest.update(repr((token, epoch)).encode())
@@ -643,31 +652,34 @@ def probe(kind: str, *, every_store: bool = True, live: frozenset | set = frozen
         if kind in ('delegation', 'killed_notices'):
             return _session_empty(kind)
     except Exception:  # health: allow BLE001 -- admission failure must retain the recovery path
+        fallback_reason('probe_error')
         logger.debug('unloaded %s admission unavailable', kind, exc_info=True)
     return Inputs()
 
 
 def run(kind: str, work, *args, live: set[str], every_store: bool = True, **kwargs):
     """Each pass owns its key; pending/busy/slots never acquire a skip stamp."""
-    with accounting.pass_('unloaded.' + kind) as count:
+    with accounting.pass_('unloaded.' + kind) as count, Fallback() as diagnostic:
         report = _schedule_report.get()
         if report is not None and kind == 'card_change_pass':
             try:
                 result = work(*args, **kwargs)
             except Exception:  # health: allow BLE001 -- retain retry before propagating to the existing host boundary
-                report.retry()
+                retry_report(report, kind, 'exception')
                 raise
             if not getattr(result, 'quiet', False):
-                report.retry()
+                source = getattr(result, 'retry_origin', None)
+                retry_report(report, *(source[1:] if source is not None else (kind, 'unknown')))
             if getattr(result, 'next_deadline', None) is not None:
-                report.due_at(result.next_deadline)
+                source = getattr(result, 'retry_origin', None)
+                due_report(report, result.next_deadline, *(source[1:] if source is not None else (kind, 'unknown')), cause='retry')
             return result
         inputs = probe(kind, every_store=every_store, live=live) if every_store else Inputs()
         if report is not None:
             if inputs.pending:
-                report.retry()
+                retry_report(report, kind, 'pending')
             else:
-                report.due_at(time.monotonic() + max(0.0, inputs.due - time.time()))
+                due_report(report, time.monotonic() + max(0.0, inputs.due - time.time()), kind)
         key = (frozenset(live), every_store, inputs.key)
         previous = _last.get(kind)
         if (not inputs.pending and previous is not None and previous[0] == key
@@ -677,6 +689,10 @@ def run(kind: str, work, *args, live: set[str], every_store: bool = True, **kwar
         # Forget BEFORE work. A raised operation must not leave an earlier stamp.
         _last.pop(kind, None)
         count.fallback() if inputs.pending else count.change()
+        if kind == 'remote_notices' and inputs.pending:
+            emit('remote_notices.fallback', diagnostic.reason if every_store else 'admission_bypassed')
+            if every_store and diagnostic.reason == 'other_pending':
+                emit('remote_notices.pending_detail', diagnostic.detail)
         try:
             result = work(*args, **kwargs)
         except Exception:  # health: allow BLE001 -- never turn failed work into an idle scheduling certificate

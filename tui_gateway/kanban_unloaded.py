@@ -60,6 +60,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from tui_gateway import wake_slots
 from hermes_cli import loop_accounting as _la
+from tui_gateway.unloaded_diagnostics import host_accounted
 
 logger = logging.getLogger(__name__)
 
@@ -771,7 +772,7 @@ def sweep_remote_once(live_ids: set[str], *, grace_s: float = GRACE_S, **kwargs)
     return sweep_remote_notices(live_ids=live_ids, waker=_RemoteWaker(wake_turn, _spawn_thread, grace_s), **kwargs)
 
 
-@_la.accounted("unloaded.host_pass")
+@host_accounted
 def host_pass(grace: float = GRACE_S, *, every_store: bool = True) -> None:
     """Everything this loop does for the whole install; run by the ``kanban-unloaded`` lease holder only.
     ``every_store=False`` (kill switch, lease failed open: every process runs this) retries killed-subagent

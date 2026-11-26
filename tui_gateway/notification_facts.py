@@ -90,14 +90,20 @@ class ActionWake:
         self.wake = wake
         self.pending = True
         self.closed = False
+        self.pending_sources = {'unknown'}
+        self.diagnostic_sources = ()
 
     def due(self, *, legacy_due: bool) -> bool:
         with self.owner.lock:
+            self.diagnostic_sources = ()
             if self.closed:
                 return False
             if self.owner.mode == "legacy":
                 return legacy_due
             pending, self.pending = self.pending, False
+            if pending:
+                self.diagnostic_sources = tuple(sorted(self.pending_sources))
+                self.pending_sources.clear()
             return pending
 
     @property
@@ -149,6 +155,12 @@ class NotificationFacts:
             actions = tuple(self.actions)
             for action in actions:
                 action.pending = True
+                kinds = {fact.key.kind for fact in delta.upserts} | {key.kind for key in delta.deletes}
+                action.pending_sources.update(kind if kind in KINDS else 'unknown' for kind in kinds)
+                if delta.reset:
+                    action.pending_sources.add('reset')
+                if delta.health:
+                    action.pending_sources.add('health')
         from tui_gateway.notification_loaded_f import signal
         signal(self.profile_home, delta)
         for action in actions:
@@ -175,6 +187,7 @@ class NotificationFacts:
                 actions = tuple(self.actions)
                 for action in actions:
                     action.pending = True
+                    action.pending_sources.add('unknown')
             if mode == "facts":
                 self.subscription = self.v1.subscribe(
                     self.scope, KINDS, None, None, lambda delta: self._signal(token, delta))
