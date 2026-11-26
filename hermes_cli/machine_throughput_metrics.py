@@ -19,7 +19,9 @@ for :data:`PROVIDER_TTL_S` and kept off the 10 s metrics path, whose incremental
 sent to the Board (a Board that predates a field rejects the whole sample).
 
 Totals only grow while rows are kept; deleting sessions (prune) lowers them, which a consumer treats as a reset.
-Read-only URI connections with a 1 s busy timeout. The result (success or failure) is cached for :data:`CACHE_TTL_S`
+Read-only URI connections with a 1 s busy timeout. Throughput refreshes keep only their parsed schema via
+BoardWatch's restore/checkpoint-safe readers, with a new BEGIN/rollback snapshot on every read and no answer
+memo. Provider reads still open fresh connections. The result (success or failure) is cached for :data:`CACHE_TTL_S`
 because ``collect()`` runs every 10 s. Any unreadable database omits all throughput fields: a partial sum would read as
 a drop, and 0 would read as a reset.
 """
@@ -44,6 +46,16 @@ _USAGE_SQL = ("SELECT coalesce(sum(input_tokens + output_tokens), 0), "
 _SESSIONS_SQL = "SELECT count(*), count(ended_at) FROM sessions"
 
 _cache: Optional[tuple[str, float, dict]] = None  # (root key, taken at, value)
+_readers = None  # lazy restore/checkpoint-safe parsed schemas; never cached answers
+_reader_paths: tuple = ()
+
+
+def _kept_readers():
+    global _readers
+    if _readers is None:
+        from hermes_cli.kanban_sync_board_watch import BoardWatch
+        _readers = BoardWatch()
+    return _readers
 
 
 _PREFIXES = (("claude", "anthropic"), ("gpt-", "openai-codex"), ("codex", "openai-codex"), ("o1", "openai-codex"),
@@ -117,7 +129,20 @@ def _read_locked(path: Path, models=None):
     key = str(path)
     before = path.stat()
     identity = (before.st_dev, before.st_ino)
-    db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+    try:
+        got = _kept_readers().read(path, "throughput.snapshot",
+                                  lambda db: _read_snapshot(db, path, key, identity, models),
+                                  unchanged_ok=False)
+        if got is None:
+            raise sqlite3.OperationalError("throughput reader unavailable")
+        return got[1]
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        incremental.forget(key)
+        _kept_readers().reset()
+        raise
+
+
+def _read_snapshot(db, path, key, identity, models):
     try:
         db.execute("BEGIN")
         result = incremental.read(db, key, identity)
@@ -141,7 +166,7 @@ def _read_locked(path: Path, models=None):
         incremental.forget(key)
         raise
     finally:
-        db.close()
+        db.rollback()  # release every snapshot before this kept reader can be reused
 
 
 def _full_read(db):
@@ -163,10 +188,16 @@ def counters(root: Optional[Path] = None) -> dict:
 
 
 def _counters_locked(root):
+    global _reader_paths
     totals, seen = [0, 0, 0, 0], set()
     models: dict[str, list[int]] = {}
     try:
+        _kept_readers().release_gone()
         paths = state_db_paths(root)
+        reader_paths = tuple(str(path.resolve()) for path in paths)
+        if reader_paths != _reader_paths:
+            _kept_readers().reset()
+            _reader_paths = reader_paths
         incremental.prune(paths)
         for path in paths:
             stat = path.stat()
@@ -229,7 +260,10 @@ def _cached_locked(root, clock):
 
 
 def reset_cache() -> None:
-    global _cache, _provider_cache
+    global _cache, _provider_cache, _reader_paths
     with _lock:
         _cache = _provider_cache = None
+        _reader_paths = ()
+        if _readers is not None:
+            _readers.reset()
         incremental.reset()

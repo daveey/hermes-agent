@@ -1,7 +1,7 @@
 """Bounded, snapshot-local throughput contributions; unsupported data uses SQL.
 
-No connections survive a read. The caller serializes this memo and drops a path
-on any failure, including an interrupted in-place delta application.
+No read transactions survive a read; connection lifetime belongs to the caller.
+The caller serializes this memo and drops a path on any failure, including an interrupted delta application.
 """
 from __future__ import annotations
 
