@@ -151,6 +151,7 @@ import { buildGatewaySessionGroups, scopeGatewaySessionGroups, useGatewaySession
 import { SidebarLoadMoreRow } from './load-more-row'
 import { useSidebarNavItems } from './nav-items'
 import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
+import { ownerChatPolicy } from './owner-chats'
 import { filterSessionsByProfileScope } from './profile-scope'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
@@ -560,7 +561,7 @@ export function ChatSidebar({
   // anything the active filters exclude, so filtering works the same whether
   // you're looking at the flat list or the lanes.
   const isHiddenFromProjects = useCallback(
-    (session: SessionInfo) => isPinnedSession(session) || (filtersNarrow && !sessionMatchesFilters(session)),
+    (s: SessionInfo) => ownerChatPolicy.hiddenFromProjects(s, isPinnedSession, filtersNarrow, sessionMatchesFilters),
     [isPinnedSession, filtersNarrow, sessionMatchesFilters]
   )
 
@@ -571,14 +572,14 @@ export function ChatSidebar({
     [sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending]
   )
 
-  const unpinnedAgentSessions = useMemo(
-    () => sortedSessions.filter(s => !isPinnedSession(s)),
+  const agentSessions = useMemo(
+    () => sortedSessions.filter(s => !ownerChatPolicy.outsideOrdinaryLists(s, isPinnedSession)),
     [sortedSessions, isPinnedSession]
   )
 
   useEffect(() => {
     const next = resolveManualSessionOrderIds(
-      unpinnedAgentSessions.map(s => s.id),
+      agentSessions.map(s => s.id),
       agentOrderIds,
       agentOrderManual
     )
@@ -596,13 +597,13 @@ export function ChatSidebar({
     if (next.length && !sameIds(next, agentOrderIds)) {
       setSidebarSessionOrderIds(next)
     }
-  }, [agentOrderIds, agentOrderManual, unpinnedAgentSessions])
+  }, [agentOrderIds, agentOrderManual, agentSessions])
 
   // Recents render in recency order. The hand-picked order is layered on per date group inside the
   // section (orderRowsWithinGroups) rather than baked into the list here, so a drag ranks a row
   // among its own day's chats instead of flattening the whole sidebar into an undated manual mode.
-  const agentSessions = unpinnedAgentSessions
   const { owners, ownerKey, tree: gatewayProjectTree } = useGatewayProjectTree(visibleProjectTree, agentSessions)
+  const ownerSessions = ownerChatPolicy.additionalOwners(sortedSessions, pinnedSessions, ownerKey)
 
   // Recents are local-only: messaging-platform sessions are fetched as their
   // own slice ($messagingSessions) and rendered in self-managed per-platform
@@ -1467,7 +1468,7 @@ export function ChatSidebar({
                 open={pinsOpen}
                 pinned
                 rootClassName="shrink-0 p-0 pb-1"
-                sessions={pinnedSessions}
+                sessions={[...pinnedSessions, ...ownerSessions]}
                 showProfileTags={showAllProfiles}
                 sortable={pinnedSessions.length > 1}
               />
