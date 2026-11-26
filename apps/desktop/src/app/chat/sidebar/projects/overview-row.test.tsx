@@ -194,6 +194,37 @@ describe('ProjectOverviewRow', () => {
     await waitFor(() => expect(screen.getByTestId('rows').textContent).toBe('s1,s3,s4'))
   })
 
+  it('hides stale pagination while filtered and restores paging when cleared', async () => {
+    workspaceOpen.value = true
+    const all = Array.from({ length: 120 }, (_, index) => session(`s${index + 1}`, 1000 - index))
+    const busy = { ...project, sessionCount: 120 } as SidebarProjectTree
+    projectsStore.fetchProjectSessions.mockResolvedValue({
+      ...busy,
+      repos: [{ groups: [{ sessions: all }] }]
+    } as unknown as SidebarProjectTree)
+    const rows = (items: SessionInfo[]) => <div data-testid="rows">{items.map(item => item.id).join(',')}</div>
+
+    const { rerender } = render(
+      <ProjectOverviewRow previewSessions={all.slice(0, 3)} project={busy} renderRows={rows} />
+    )
+
+    fireEvent.click(screen.getByText('Show all 120 sessions'))
+    await waitFor(() => expect(screen.getByTestId('rows').textContent?.split(',')).toHaveLength(50))
+    rerender(
+      <ProjectOverviewRow
+        previewSessions={all.slice(0, 60)}
+        project={{ ...busy, filteredOverview: true }}
+        renderRows={rows}
+      />
+    )
+    expect(screen.getByTestId('rows').textContent?.split(',')).toHaveLength(60)
+    expect(screen.queryByText(/Show .* more in Test D/)).toBeNull()
+    rerender(<ProjectOverviewRow previewSessions={all.slice(0, 3)} project={busy} renderRows={rows} />)
+    expect(screen.getByTestId('rows').textContent?.split(',')).toHaveLength(50)
+    fireEvent.click(screen.getByText('Show 50 more in Test D'))
+    expect(screen.getByTestId('rows').textContent?.split(',')).toHaveLength(100)
+  })
+
   it('offers the "new session" add button on Home, which starts one with no folder', () => {
     const home = {
       id: '__no_project__',

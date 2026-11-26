@@ -348,7 +348,7 @@ export function ProjectOverviewRow({
           {offerShowAll && (
             <WorkspaceShowMoreRow disabled={expanding} label={s.projects.showAllCount(total)} onClick={showAll} />
           )}
-          {expanded && page.more > 0 && (
+          {!project.filteredOverview && expanded && page.more > 0 && (
             <WorkspaceShowMoreRow label={s.showMoreIn(page.more, project.label)} onClick={page.showMore} />
           )}
         </SidebarRowNest>
