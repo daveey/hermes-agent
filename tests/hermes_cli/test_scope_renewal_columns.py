@@ -5,6 +5,8 @@ The actionability reader asks for it on every card and parent each session-panel
 """
 import sqlite3
 
+import pytest
+
 from hermes_cli import kanban_scope_renewal as renewal
 from hermes_cli.kanban_actionability_evidence import Rows
 from tests.hermes_cli import test_kanban_failure_transport as support
@@ -63,3 +65,26 @@ def test_comment_columns_through_the_actionability_wrapper(live):
         assert renewal._columns(Rows(counted), 'no_such_table') == set()
     finally:
         counted.close()
+
+
+@pytest.mark.parametrize('name', ['main.task_comments', 'task comments', 'task_comments)', ''])
+def test_a_qualified_or_malformed_table_name_fails_loudly(live, name):
+    with pytest.raises(ValueError):
+        renewal._columns(live, name)
+
+
+def test_a_closed_connection_raises(live):
+    counted = _counted(live)
+    counted.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        renewal._columns(counted, 'task_comments')
+
+
+def test_a_schema_change_between_calls_is_seen(live):
+    before = renewal._columns(live, 'task_comments')
+    assert 'probe_extra' not in before
+    live.execute('ALTER TABLE task_comments ADD COLUMN probe_extra TEXT')
+    live.commit()
+    after = renewal._columns(live, 'task_comments')
+    assert after == before | {'probe_extra'}
+    assert after == {r[1] for r in live.execute('PRAGMA table_info(task_comments)')}

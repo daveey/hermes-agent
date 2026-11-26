@@ -72,7 +72,12 @@ def digest(body: str) -> str:
 
 def _columns(conn: sqlite3.Connection, table: str) -> frozenset:
     """Column names in one result row (kanban_table_columns), not one row per column: the actionability reader asks
-    for task_comments on every card and parent each session-panel pass (2,652 probes a hub pass, 2026-11-26). [daveey]"""
+    for task_comments on every card and parent each session-panel pass (2,652 probes a hub pass, 2026-11-26).
+
+    Only a bare table name: ``pragma_table_info`` answers a schema-qualified or malformed name with an empty set,
+    where the old ``PRAGMA table_info(<table>)`` raised, so such a name fails loudly here instead. [daveey]"""
+    if not isinstance(table, str) or not table.isidentifier():
+        raise ValueError(f"not a bare table name: {table!r}")
     from hermes_cli.kanban_table_columns import table_columns
     return table_columns(conn, table)
 
