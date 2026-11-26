@@ -89,6 +89,38 @@ def test_refusal_names_fully_qualified_recorded_owner_not_observers(board):
     assert '@session:default@released-gateway/released' not in out['message']
 
 
+def test_no_pending_stop_preserves_typed_refusal_and_reports_absence(board):
+    tid = kb.create_task(board, title='No pending decision', assignee='default')
+    before = list(board.iterdump())
+    out = release.release(board, tid, runs=0)
+    assert out['refusal'] == 'invalid_runs'
+    assert out['recovery']['stop'] is None
+    assert out['recovery']['next_operation'] == 'inspect_stop'
+    assert 'Current stop: no pending stop' in out['message']
+    assert list(board.iterdump()) == before
+
+
+@pytest.mark.parametrize('dominant,operation', [
+    ('safety', 'resolve_safety_boundary'),
+    ('quarantine', 'resolve_sync_quarantine'),
+    ('containment', 'resume-contained'),
+])
+def test_stronger_boundary_dominates_administrative_and_scope(board, monkeypatch, dominant, operation):
+    from hermes_cli.kanban_stop_ended import KIND
+    from hermes_cli.kanban_stop_recovery import describe
+    tid, _, _ = scope.stopped(board, monkeypatch)
+    kb._append_event(board, tid, KIND, {'reason': 'historical administrative stop'})
+    monkeypatch.setattr('hermes_cli.kanban_containment_guard.pending', lambda *a, **kw: True)
+    if dominant in ('safety', 'quarantine'):
+        monkeypatch.setattr('hermes_cli.kanban_sync_quarantine.refusal', lambda *a: 'quarantined fixture')
+    if dominant == 'safety':
+        kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'safety_refusal'})
+    board.commit()
+    before = list(board.iterdump())
+    assert describe(board, tid)['next_operation'] == operation
+    assert list(board.iterdump()) == before
+
+
 def test_malformed_stop_never_advises_ordinary_promote(board):
     from hermes_cli import kanban_stop_recovery as recovery
     tid = capability_stop(board)
