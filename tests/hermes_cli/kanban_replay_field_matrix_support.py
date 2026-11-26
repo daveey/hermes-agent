@@ -22,7 +22,8 @@ FIELDS = {
     'verdict': ('client_op_id', 'status', 'version', 'row', 'source_predecessor', 'reason', 'detail', 'deferred'),
     'reply': ('protocol', 'results', 'consumed', 'outcome_unknown', 'dup', 'sequence', 'h', 'payload_sha256'),
     'evidence': ('board', 'table', 'uid', 'state', 'head', 'row'),
-    'image': ('uid', 'version', 'deleted_at', 'hlc', 'origin_gateway', 'title', 'created_at'),
+    'image': ('uid', 'version', 'deleted_at', 'hlc', 'origin_gateway', 'title', 'created_at',
+              'lease_holder', 'lease_expires'),
 }
 REPLY_TRANSPORT_ONLY = {('verdict', 'row'), ('verdict', 'source_predecessor')}
 CASES = [(envelope, field) for envelope, fields in FIELDS.items() for field in fields]
@@ -76,7 +77,8 @@ def valid_control(envelope, field, value):
         return True
     if envelope == 'image':
         return ((field == 'deleted_at' and value is None) or
-                (field in ('hlc', 'origin_gateway') and (value is None or value == '3')) or
+                (field == 'lease_expires' and value is None) or
+                (field in ('hlc', 'origin_gateway', 'lease_holder') and (value is None or value == '3')) or
                 (field == 'title' and value == '3') or
                 (field == 'created_at' and type(value) is int and value == -1))
     return False

@@ -27,6 +27,11 @@ def row_image(conn, table, image):
     for key in ('hlc', 'origin_gateway'):
         if image.get(key) is not None and not isinstance(image[key], str):
             raise ValueError(f'invalid replay current-row {key}')
+    if table == 'tasks':  # LOCAL columns the lease mirror still binds from the wire
+        if image.get('lease_holder') is not None and not isinstance(image['lease_holder'], str):
+            raise ValueError('invalid replay current-row lease_holder')
+        if image.get('lease_expires') is not None:
+            integer(image['lease_expires'], 'current-row lease_expires')
     allowed = sync.SYNCED_COLUMNS[table] | sync.SERVER_COLUMNS.get(table, frozenset())
     for column in conn.execute(f'PRAGMA table_info({table})'):
         name, kind = column[1], column[2].upper()
