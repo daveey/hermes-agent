@@ -409,6 +409,13 @@ def close_all_under(directory: str | Path) -> int:
             _retired.pop(id(generation.db), None)
     closed = _teardown_swept_generations(generations, teardown_barriers, active_teardowns)
     _close_kept_readers(root)
+    # Not every owner uses acquire(): cross-profile serve readers and plugin helpers
+    # also construct SessionDB directly. Their pooled readers and writer descriptors
+    # must retire before rmtree, not linger until GC or a process restart.
+    from hermes_state_readpool import live_instances_under
+    for db in live_instances_under(root):
+        if not db._shared_registry_owned:
+            _close_quietly(db, "Error closing unshared profile SessionDB")
     _release_header_probes_under(root)
     return closed
 

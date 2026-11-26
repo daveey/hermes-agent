@@ -241,6 +241,22 @@ _read_budgets: weakref.WeakValueDictionary[str, _PathReadBudget] = (weakref.Weak
 _read_budgets_lock = threading.Lock()
 
 
+def live_instances_under(root: Path) -> list["SessionDB"]:
+    """Pin all initialized handles under a home, including unshared/read-only owners.
+
+    Snapshot under the membership locks, but never close there: close unregisters itself.
+    """
+    from hermes_state_common import path_is_under
+
+    with _read_budgets_lock:
+        budgets = [budget for path, budget in _read_budgets.items() if path_is_under(Path(path), root)]
+    instances = []
+    for budget in budgets:
+        with budget._lock:
+            instances.extend(budget._members)
+    return instances
+
+
 def _read_budget_key(db_path) -> str:
     """Canonicalise a db path so two spellings share one budget."""
     try:
