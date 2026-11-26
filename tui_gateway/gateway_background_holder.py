@@ -127,10 +127,32 @@ def gateway_background_holder(session: dict, *, foreign_owner: Callable[[dict], 
     return gateway
 
 
+def _local_desktop_holder(session: dict, *, foreign_owner: Callable[[dict], Optional[dict]]) -> bool:
+    """Presentation proof only: all holders have birth-matched Desktop leases in this install's registry."""
+    from hermes_cli.active_sessions import active_session_registry_snapshot, owner_host
+    key = str(session.get("session_key") or "")
+    if not key:
+        return False
+    try:
+        entries = active_session_registry_snapshot(session.get("profile_home"))
+        pids = holder_pids(key, foreign_owner(session), entries, os.getpid())
+        desktop_pids = {
+            _registry_pid(entry) for entry in entries
+            if str(entry.get("session_id") or "") == key
+            and entry.get("host") == owner_host() and entry.get("surface") == "desktop"
+            and entry.get("process_start_time")
+        }
+    except (OSError, RuntimeError, ValueError, TypeError):
+        logger.warning("could not verify local Desktop holder for %s", key, exc_info=True)
+        return False
+    return bool(pids) and 0 not in pids and pids <= desktop_pids
+
+
 def automatic_owner_wait(session: dict, refusal, *, foreign_owner: Callable[[dict], Optional[dict]]) -> Optional[str]:
-    """Presentation only: automatic work retries behind its ready gateway, never takes custody.
+    """Presentation only: automatic work retries behind its verified local owner, never takes custody.
 
     A durable gateway lease and a gateway queue are two representations of the same busy owner.
+    A birth-matched same-host Desktop registry lease is also a local background wait, not a user action.
     Unproved/foreign writers and typed sends retain their existing actionable refusal.
     """
     if not session.get("_synthesized_turn"):
@@ -144,6 +166,8 @@ def automatic_owner_wait(session: dict, refusal, *, foreign_owner: Callable[[dic
         return None
     if gateway_background_holder(session, foreign_owner=foreign_owner) is not None:
         return "local gateway holds the durable turn lease"
+    if _local_desktop_holder(session, foreign_owner=foreign_owner):
+        return "local Desktop backend holds the chat"
     return None
 
 
