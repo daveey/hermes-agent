@@ -26,9 +26,12 @@ def _proof(hub, body):
 
 
 def _send(conn, hub, body, *, seen=None):
-    from hermes_cli import kanban_release_delivery as delivery
+    from hermes_cli import kanban_release_delivery as delivery, kanban_release_result as result
     if delivery.existing(conn, body) is not None:
-        return delivery.send(conn, hub, body)
+        return delivery.send(conn, hub, body)  # Completed result precedes publication inside send.
+    completed = result.reconcile(conn, hub, body)
+    if completed is not None:
+        return completed
     stage = intent.stage(conn, body)  # Fresh custody, not authority from a prior read.
     if stage in {"expired", "refused", "applied"}:
         return {"ok": stage == "applied", "task_id": body["task_id"], "intent_uid": body["intent_uid"],

@@ -214,7 +214,8 @@ current original owner, full canonical comment inventory, task, exact current an
 selected historical episodes, holds, dependencies and independent financial limits.
 Neither this proposal nor historical consumption authorizes dispatch or increases
 an allowance. The Board final operation and HOME certified materialization now
-exist; original native completion and executor transfer remain incomplete.
+exist; original native completion now retains separate historical custody, while
+executor transfer and composed route proof remain incomplete.
 
 ### Frozen final wire and certified HOME materialization
 
@@ -243,6 +244,34 @@ historical completion, never a destructive transport-stage overwrite.
 Tests cover the actual Board-exported certificate, real bounded Hub HTTP, real
 SQLite remote-apply rollback/reopen and reply loss. The SQLite Board adapter is
 synthetic: these are **not** composed CLI/socket/DO/HOME/executor or deployment
-proof. Original native completed-result reconciliation and authenticated executor
-proof transfer remain required before capability advertisement or live recovery.
+proof. Authenticated executor proof transfer and full composition remain required
+before capability advertisement or live recovery.
+
+### Original native completed-result custody
+
+The captured original parent now resolves a saved completed result or, for a frozen
+delivery, the authenticated private `/application` GET before mutable carrier rows,
+comments, capability or TTL reads. Only actual HTTP404 permits pending publication;
+unknown, malformed, unauthorized and oversized replies remain holds. The complete
+certificate must validate internally and match the local original intent, delivery
+UID, frozen comment inventory and acknowledged emitted nonce/read journal. Missing
+or changed historical read custody is refused rather than repaired with current
+comments. Emission is still not proof a person/model read the content.
+
+`kanban_release_result` owns a separate append-only origin result store. ONE writer
+commits the complete private certificate, independent immutable journal digest and
+terminal applied bookkeeping together; no intermediate consumed clearance exists.
+Missing receipt/marker halves, changed bytes and inconsistent stage never remint or
+reconstruct the result. SQLite UDF guards on the shared intent journal are restricted
+to `UPDATE OF result_digest`, with a separate UDF-free completed-row UPDATE fence:
+ordinary new and pending intents can still progress on reopened connections.
+
+The result reports `release_stage=applied`, `historical=true` and
+`execution_clearance=false`. Each replay still validates live original parent,
+primary board, transport gateway and original frozen local custody. It imports no
+HOME queue, task postimage, event, budget, allowance or executor permission. A later
+scope/hold is not renewed by returning an earlier result. Actual CLI/socket tests
+exercise completion, missing replies, reopened connections and a successor's full
+read/ACK/delivery path; their rebound private Board fixture is explicitly not a
+composed real DO/HOME/executor test or deployed recovery proof.
 

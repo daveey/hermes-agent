@@ -25,9 +25,15 @@ def acknowledged(journal):
 class CarrierHub:
     def __init__(self, conn, body):
         self.conn, self.body = conn, body
+        from types import SimpleNamespace
+        self.ident = SimpleNamespace(gateway=body['actor']['gateway'])
         self.sent, self.row = [], None
         self.state = "never_existed"
         self.drop = False
+
+    def owner_release_application(self, board, uid):
+        from hermes_cli.kanban_sync_client import HubError
+        raise HubError(404, 'fixture not applied')
 
     def row_evidence(self, board, table, uid, **kw):
         assert not self.conn.in_transaction
@@ -184,9 +190,14 @@ def test_terminal_intent_never_resends_pending_carrier(turn, journal, stage):
     else:
         intent.advance(journal, body, expected="delivery_pending", stage=stage)
     hub = CarrierHub(journal, body)
+    if stage == "applied":
+        with pytest.raises(ValueError, match="result missing"):
+            native._send(journal, hub, body)
+        assert hub.sent == []
+        return
     result = native._send(journal, hub, body)
     assert hub.sent == []
-    assert result["release_stage"] == {"applied": "consumed_or_applied", "consumed": "acknowledged_pending_home"}.get(stage, stage)
+    assert result["release_stage"] == {"consumed": "acknowledged_pending_home"}.get(stage, stage)
     assert result["ok"] == (stage not in {"expired", "refused"})
 
 

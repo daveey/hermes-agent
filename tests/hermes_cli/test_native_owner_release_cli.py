@@ -69,6 +69,9 @@ def transport(monkeypatch):
         def owner_release_comments(self, board, uid):
             body = self.sent[-1]["intent"]
             return {"version": 1, "intent": body, "digest": intent.digest(body), "comments": self.comments}
+        def owner_release_application(self, board, uid):
+            from hermes_cli.kanban_sync_client import HubError
+            raise HubError(404, "fixture not applied")
         def owner_release_evidence(self, board, uid):
             body = self.sent[-1]["intent"]
             return self.evidence or {"version": 1, "state": "authorized", "intent": body, "digest": intent.digest(body),

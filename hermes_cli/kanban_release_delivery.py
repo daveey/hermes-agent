@@ -146,6 +146,10 @@ def _evidence(hub, body, wire):
 
 
 def send(conn, hub, body):
+    from hermes_cli import kanban_release_result as result
+    completed = result.reconcile(conn, hub, body)
+    if completed is not None:
+        return completed
     wire = existing(conn, body)
     if wire is None:
         raise ValueError("no frozen native release delivery")

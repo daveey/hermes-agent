@@ -6,7 +6,7 @@ from hermes_cli.kanban_origin_cli_gate import LaunchGate
 
 
 @pytest.mark.parametrize("stage", [
-    "intent_journaled_unsent", "authorized_pending_home", "read_first_pending", "consumed_or_applied",
+    "intent_journaled_unsent", "authorized_pending_home", "read_first_pending", "consumed_or_applied", "applied",
 ])
 def test_release_stage_is_preserved_without_claiming_creation(stage):
     launch = LaunchGate()

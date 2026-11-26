@@ -237,7 +237,7 @@ def prepare(conn: sqlite3.Connection, action: dict, *, gate, expired_intent=None
                 action_key TEXT PRIMARY KEY, intent_uid TEXT UNIQUE NOT NULL,
                 body TEXT NOT NULL, digest TEXT NOT NULL, stage TEXT NOT NULL
             )""")
-            conn.execute("INSERT INTO native_owner_release_intents VALUES (?,?,?,?,?)",
+            conn.execute("INSERT INTO native_owner_release_intents(action_key,intent_uid,body,digest,stage) VALUES (?,?,?,?,?)",
                          (key, body["intent_uid"], encode(body), digest(body), "intent_journaled_unsent"))
         if captured.validated() is None:
             raise ValueError("native release custody expired before journal commit")
