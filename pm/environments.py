@@ -626,6 +626,10 @@ def activate_dependencies(project_root: Path) -> None:
     sys.path[:] = [entry for entry in sys.path
                    if Path(entry).name not in ("site-packages", "dist-packages")
                    and Path(entry).resolve() != project_root.resolve()]
+    # Duplicate root-installed wheels do not supersede their managed sources.
+    # Match exact RECORD modules; unrelated source/namespace portions stay intact.
+    from pm.dependency_imports import select_wheel_sources
+    select_wheel_sources(project_root, selected)
     # uv editable members are activated by .pth files, not by sys.path alone.
     site.addsitedir(str(selected))
     sys.path[:] = [str(project_root.resolve()), str(selected),

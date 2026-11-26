@@ -57,6 +57,38 @@ def run(tmp_path, body):
     return json.loads(result.stdout.splitlines()[-1])
 
 
+def test_duplicate_wheel_selection_keeps_receipt_verification(tmp_path):
+    result = run(tmp_path, r"""
+        from pm.dependency_imports import select_wheel_sources
+        dist('ownership_probe', {'ownership_probe/__init__.py': b'VALUE = 7\n'})
+        info = SITE / 'ownership_probe-1.0.dist-info'
+        (info / 'METADATA').write_text('Name: ownership-probe\nVersion: 1.0\n')
+        residue = pathlib.Path('residue').resolve()
+        root_info = residue / 'ownership_probe-2.0.dist-info'
+        root_info.mkdir(parents=True)
+        (root_info / 'METADATA').write_text('Name: ownership-probe\nVersion: 2.0\n')
+        (root_info / 'RECORD').write_text('ownership_probe/__init__.py,,\n')
+        package = residue / 'ownership_probe'
+        package.mkdir()
+        (package / '__init__.py').write_text("raise AssertionError('stray bytes executed')\n")
+        BASE = set(a.unknowns())
+        assert a.register_dependency_environment(SITE)
+        select_wheel_sources(residue, SITE)
+        sys.path.insert(0, str(residue))
+        import ownership_probe
+        assert ownership_probe.VALUE == 7
+        clean = new()
+        sys.modules.pop('ownership_probe')
+        (SITE / 'ownership_probe/__init__.py').write_bytes(b'VALUE = 9\n')
+        import ownership_probe
+        print(json.dumps({'clean': clean, 'tampered': new(), 'deps': a.dependency_receipts()}))
+    """)
+    assert result['clean'] == []
+    assert any('ownership_probe' in reason for reason in result['tampered'])
+    assert 'ownership_probe-1.0' in result['deps']['dists']
+    assert result['deps']['trust'] == 'installer-receipt: trusted, not audited, no coverage'
+
+
 def test_receipted_dependency_is_reported_never_audited(tmp_path):
     result = run(tmp_path, r"""
         dist('goodpkg', {'goodpkg/__init__.py':
