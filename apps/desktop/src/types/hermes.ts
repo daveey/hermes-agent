@@ -666,6 +666,9 @@ export interface SessionInfo extends SessionActivityFields {
    *  rows served by the primary/local backend. Opens must route through the
    *  connection-scoped gateway (`ensureGatewayAgent`) when present. */
   connection_id?: string
+  /** Original list transport before route carry. Empty means the primary aggregate; a carried
+   *  connection_id routes opens but must not turn an untagged refresh into a different owner. */
+  _list_connection_id?: string
   /** [daveey] Row comes from the hermes-hub replica of a gateway that is not
    *  reachable right now (never from a live listing). Everything below is the
    *  owner's last-known state: `is_active` is always false, `last_active` is the

@@ -1838,6 +1838,68 @@ describe('owner-qualified session identity (same id on two gateways)', () => {
     expect(mergeSessionPage([prev], [legacy], ['kanban_owner_terminal'])).toHaveLength(1)
   })
 
+  it('prefers the same connection over a legacy candidate without gateway identity', () => {
+    const legacy = session({ id: 'kanban_owner_terminal', connection_id: 'legacy', title: 'Legacy' })
+    const sameConnection = owned('local', { connection_id: 'source', title: 'Right' })
+    const [merged] = mergeSessionPage([legacy, sameConnection], [owned('hub', { connection_id: 'source' })], [])
+    expect(merged.title).toBe('Right')
+  })
+
+  it('prefers the exact gateway alias over a same-connection candidate with a renamed gateway', () => {
+    const sameConnection = owned('local', { connection_id: 'source', title: 'Wrong' })
+    const exactGateway = owned('hub', { connection_id: 'alias', title: 'Right' })
+    const [merged] = mergeSessionPage([sameConnection, exactGateway], [owned('hub', { connection_id: 'source' })], [])
+    expect(merged.title).toBe('Right')
+  })
+
+  it('collapses aliases of the same gateway even when both connection ids are tagged', () => {
+    const prev = owned('hub', { connection_id: 'first', title: 'Kept', last_active: 100 })
+    const next = owned('hub', { connection_id: 'alias', last_active: 90 })
+    const merged = mergeSessionPage([prev], [next], ['kanban_owner_terminal'])
+    expect(merged).toHaveLength(1)
+    expect(merged[0]).toMatchObject({ connection_id: 'alias', title: 'Kept', last_active: 100 })
+    expect(carryForwardFailedProfileSessions([prev], [next], [{ profile: 'default' }])).toHaveLength(1)
+  })
+
+  it('absorbs renamed owners through their lineage root and all lineage members without absorbing twins', () => {
+    for (const carried of [false, true]) {
+      const old = owned('local', { id: 'old', _lineage_root_id: 'root', connection_id: carried ? 'local-src' : 'source', title: 'Kept', last_active: 100 })
+      const [prev] = carried ? mergeSessionPage([old], [owned('local', { id: 'old', _lineage_root_id: 'root', last_active: 90 })], []) : [old]
+      const connection_id = carried ? undefined : 'source'
+      const next = owned('hub', { id: 'new', _lineage_root_id: 'root', connection_id, last_active: 90 })
+      const merged = mergeSessionPage([prev], [next], ['root'])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]).toMatchObject({ id: 'new', title: 'Kept', last_active: 100, connection_id: carried ? 'local-src' : 'source' })
+
+      const freshRoot = owned('hub', { id: 'new', _lineage_root_id: 'fresh', _lineage_ids: ['old', 'new'], connection_id })
+      expect(mergeSessionPage([prev], [freshRoot], ['old']).map(s => s.id)).toEqual(['new'])
+      const twin = owned('remote', { id: 'old', _lineage_root_id: 'root', connection_id: 'registry' })
+      expect(mergeSessionPage([twin], [next], ['root'])).toHaveLength(2)
+      expect(mergeSessionPage([twin], [freshRoot], ['old'])).toHaveLength(2)
+    }
+  })
+
+  it('keeps a carried route distinct from list provenance across gateway renames', () => {
+    const draft = session({ connection_id: 'local-src', id: 'kanban_owner_terminal', profile: 'default', title: 'Draft', last_active: 100 })
+    const [first] = mergeSessionPage([draft], [owned('local', { last_active: 90 })], [])
+    expect(first).toMatchObject({ connection_id: 'local-src', title: 'Draft', last_active: 100 })
+
+    for (const keep of [[], ['kanban_owner_terminal']]) {
+      const refreshed = mergeSessionPage([first], [owned('hub', { last_active: 90 })], keep)
+      expect(refreshed).toHaveLength(1)
+      expect(refreshed[0]).toMatchObject({ connection_id: 'local-src', title: 'Draft', last_active: 100 })
+      expect(mergeSessionPage(refreshed, [owned('hub')], keep)).toHaveLength(1)
+    }
+
+    expect(carryForwardFailedProfileSessions([first], [owned('hub')], [{ profile: 'default' }])).toHaveLength(1)
+
+    // A real registry row, unlike a carried route, came from another list connection.
+    const remote = owned('remote', { connection_id: 'registry', title: 'Remote' })
+    expect(mergeSessionPage([remote], [owned('hub')], ['kanban_owner_terminal'])).toHaveLength(2)
+    expect(carryForwardFailedProfileSessions([remote], [owned('hub')], [{ profile: 'default' }])).toHaveLength(2)
+    expect(mergeSessionPage([owned('hub')], [remote], ['kanban_owner_terminal'])).toHaveLength(2)
+  })
+
   it('one connection whose envelope gateway name changes stays one owner (rename, enrolment, local fallback)', () => {
     for (const connection_id of [undefined, 'conn-a']) {
       const prev = owned('local', { connection_id, last_active: 50, title: 'Kept' })

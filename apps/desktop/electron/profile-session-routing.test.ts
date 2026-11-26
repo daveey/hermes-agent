@@ -1970,6 +1970,13 @@ test('registry splice keeps one connection as one row after its envelope gateway
   }
 })
 
+test('registry splice recognizes carried routes by their original list connection', () => {
+  const merged: unknown[] = [ownedRow('s1', 'local', { connection_id: 'local-src', _list_connection_id: '' })]
+  const { added } = spliceRegistrySessionRows(merged, [ownedRow('s1', 'hub')], {})
+  assert.equal(added, 0)
+  assert.equal(merged.length, 1)
+})
+
 test('pinned window keeps same-id pinned rows from two gateways', () => {
   const rows = [
     ownedRow('filler', 'gw-a'),

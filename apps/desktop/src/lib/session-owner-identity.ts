@@ -16,7 +16,9 @@ export function canonicalGatewayOf(row: unknown): string {
 }
 
 function connectionOf(row: unknown): string {
-  const id = field(row, 'connection_id')
+  // Route carry preserves the source list separately from the route used to open it.
+  const source = field(row, '_list_connection_id')
+  const id = typeof source === 'string' ? source : field(row, 'connection_id')
 
   return typeof id === 'string' ? id.trim() : ''
 }

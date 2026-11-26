@@ -625,7 +625,16 @@ export function mergeSessionPage(
 
       return last_active === session.last_active && title === session.title && connection_id === session.connection_id
         ? session
-        : { ...session, last_active, title, ...(connection_id ? { connection_id } : {}) }
+        : {
+            ...session,
+            last_active,
+            title,
+            ...(connection_id ? { connection_id } : {}),
+            // Route carry is not list provenance: the next primary refresh is still untagged.
+            ...(connection_id !== session.connection_id
+              ? { _list_connection_id: session._list_connection_id ?? session.connection_id ?? '' }
+              : {})
+          }
     })
 
   if (keep.size === 0) {

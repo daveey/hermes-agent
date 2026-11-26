@@ -25,8 +25,8 @@ export function buildSessionByAnyId(
   for (const session of [...cronSessions, ...messagingSessions, ...visibleSessions]) {
     map.set(session.id, session)
 
-    // Exact-owner key (`<canonical gateway>\0<id>`) for a pin that names its owner; bare ids stay the
-    // legacy fallback, so an owner-less pin keeps resolving exactly as before.
+    // Reserved exact-owner lookup (`<canonical gateway>\0<id>`); no current pin writer emits it.
+    // Bare ids remain the persisted format and legacy fallback.
     const owner = canonicalGatewayOf(session)
 
     if (owner) {
