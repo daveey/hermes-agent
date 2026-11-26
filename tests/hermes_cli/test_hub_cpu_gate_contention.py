@@ -135,6 +135,9 @@ def test_contended_census_fits_inside_the_hold(board, monkeypatch, review, synce
     conn, home = board
     _hub_boards(conn, home, synced=synced)
     t = task(conn, review)
+    # Setup opens ten real boards; it is not part of the measured census hold.
+    # Seed the sampler after setup so slow storage cannot age it past the 10 s prelease bound.
+    advisory(home)
     clock = _contended(monkeypatch, sys.getswitchinterval())
     monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("the locked gate reads the sampler, never samples"))
     claimed = claim(conn, t, review)
@@ -144,6 +147,19 @@ def test_contended_census_fits_inside_the_hold(board, monkeypatch, review, synce
     payload = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='claimed' "
                                       "ORDER BY id DESC", (t,)).fetchone()[0])
     assert payload["hub_admission"]["pools"] == {"regular": HUB_BOARDS, "priority": 0}
+
+
+def test_census_refreshes_sample_after_slow_setup(board, monkeypatch):
+    """Ten-board setup may outlive prelease freshness before any census handoff occurs."""
+    real_task = task
+
+    def aged_setup(*args, **kwargs):
+        result = real_task(*args, **kwargs)
+        advisory(board[1], age_ms=ka.PRELEASE_MAX_AGE_MS + 1)
+        return result
+
+    monkeypatch.setattr(sys.modules[__name__], "task", aged_setup)
+    test_contended_census_fits_inside_the_hold(board, monkeypatch, review=False, synced=False)
 
 
 @pytest.mark.parametrize("synced", [True, False])
