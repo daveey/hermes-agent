@@ -158,6 +158,18 @@ def test_direct_creation_records_source_even_without_creator_card(chat, author):
                             (task_id,)).fetchall() == [event]
 
 
+def test_direct_creation_without_bound_session_records_null_not_fabricated_provenance(chat):
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title='headless producer source', created_by='watcher')
+        task = kb.get_task(conn, task_id)
+        assert task is not None and task.session_id is None
+        event = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created'",
+                             (task_id,)).fetchone()
+        payload = json.loads(event[0])
+        assert payload['creator_source'] == {'author': 'watcher', 'session_id': None}
+        assert payload['creator_task_id'] is None
+
+
 @pytest.mark.parametrize("path", list(PATHS))
 def test_card_shows_in_the_creating_chats_task_list(chat, monkeypatch, capsys, path):
     task_id = PATHS[path](f"card via {path}", monkeypatch)
