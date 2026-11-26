@@ -295,8 +295,8 @@ def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]
             f"WHERE t.status NOT IN ({','.join('?' * len(_FINISHED_STATUSES))})", _FINISHED_STATUSES)}
     parents: dict[str, list[str]] = {}
     try:
-        for parent, child in conn.execute("SELECT parent_id, child_id FROM task_links"):
-            parents.setdefault(str(child), []).append(str(parent))
+        from hermes_cli.kanban_session_activity_parked import open_parent_edges
+        parents = open_parent_edges(conn, info)
     except sqlite3.Error:  # board predates dependencies
         pass
 
