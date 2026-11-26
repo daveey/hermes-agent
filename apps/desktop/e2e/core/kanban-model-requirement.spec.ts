@@ -198,6 +198,10 @@ test('the New task form and the drawer store a class requirement, never a concre
     })
 
     await test.step('drawer: back to the profile default clears both columns', async () => {
+      // Exercise a fresh read of the persisted card, independently of the
+      // board's live-refresh subscription (the create producer was checked above).
+      await page.reload()
+      await waitForInteractive(app, page)
       const drawer = await openDrawer(page, NEW_TITLE)
       await expect(modelSelect(drawer)).toHaveValue('class:fast')
       await modelSelect(drawer).selectOption('')
@@ -258,6 +262,15 @@ test('the New task form and the drawer store a class requirement, never a concre
       })
       .toEqual([])
   } finally {
+    await test.info().attach('sandbox-board', {
+      body: JSON.stringify(storedBoard(sandbox), null, 2),
+      contentType: 'application/json'
+    })
+    await test.info().attach('sandbox-provider-requests', {
+      body: JSON.stringify(provider.completions.map(rec => rec.body ?? null), null, 2),
+      contentType: 'application/json'
+    })
+
     if (!closed) {
       await app.close().catch(() => undefined)
     }
