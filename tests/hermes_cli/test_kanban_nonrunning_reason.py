@@ -88,6 +88,26 @@ def test_reason_registry_never_invents_board_or_human_ownership(code, dispositio
     assert value['actor'] != 'human'
 
 
+@pytest.mark.parametrize('code,origin', [('lease_held', 'board'), ('offline', 'local'),
+                                         ('gateway_draining', 'local'), ('future_code', 'local')])
+def test_typed_refusal_projects_plain_copyable_code(code, origin):
+    from copy import deepcopy
+    from hermes_cli.execution_observations import nonrunning_reason
+    detail = sync.ClaimDeferral(code, origin)
+    reason = reasons.describe('claim_deferred', detail)
+    assert type(reason['code']) is str
+    assert reason['code'] == code
+    assert deepcopy(reason) == reason
+    reason.update(freshness='current', observed_at=1000, valid_until=1180,
+                  evidence_ref='fixture', source_revision='one')
+    adapted = nonrunning_reason(reason, now=1001)
+    if reason['disposition'] != 'unknown':
+        assert adapted['code'] == code
+        assert adapted['valid_until'] == 1180
+    if code == 'offline':
+        assert reason['disposition'] == 'unknown'  # no fabricated Board provenance
+
+
 def test_new_ready_without_dispatcher_evidence_is_unknown(kanban_home):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title='unobserved', assignee='default')

@@ -71,6 +71,10 @@ def describe(reason, detail=None):
     if rule is None and reason == 'claim_deferred' and isinstance(code, str):
         rule = next((value for prefix, value in PREFIXES.items()
                      if code == prefix or code.startswith(prefix + '_') or code.startswith(prefix + ':')), None)
+    # Producer details may be provenance-bearing str subclasses. Preserve their
+    # origin for classification above, but expose only plain wire values: copying
+    # a ClaimDeferral would reconstruct it without its required origin argument.
+    code = str(code) if isinstance(code, str) else code
     if rule is None:
         return {'code': code if isinstance(code, str) and code.isidentifier() else 'unclassified_refusal',
                 'family': 'unknown', 'disposition': 'unknown', 'actor': 'unknown',
