@@ -16,6 +16,7 @@ from hermes_cli.kanban_bb_owner_binding import binding
 from hermes_cli.kanban_card_answer import AnswerRefused
 from hermes_cli.kanban_card_answer_runtime import _board_db, _profile
 from hermes_cli.kanban_card_answer_transport import Records
+from hermes_cli.kanban_lockguard import connect
 
 
 def produce(request_id: str) -> dict:
@@ -33,7 +34,7 @@ def produce(request_id: str) -> dict:
         raise AnswerRefused('bb_binding_request_invalid')
     _, board, task = route
     path = _board_db(board)
-    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
+    with closing(connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
         result = binding(conn, task, owner_gateway=records.gateway, owner_profile=profile, board=board)
     # The complete raw ask contributes to generation but is never transported.
     return {key: result[key] for key in ('version', 'owner_gateway', 'owner_profile', 'board',

@@ -2,6 +2,9 @@
 import copy
 import json
 import sqlite3
+import runpy
+import sys
+from io import BytesIO
 
 import pytest
 
@@ -212,3 +215,72 @@ def test_binding_connection_closed_on_success_and_refusal(fixture, monkeypatch, 
     for conn in observed:
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             conn.execute('SELECT 1')
+
+
+def test_default_argv_uses_process_arguments(fixture, monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['binding-runtime', REQUEST])
+    assert runtime.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out['ok'] is True and out['result']['task'] == helpers.TASK
+    assert fixture[3] == [REQUEST]
+
+
+def test_literal_module_dispatch_and_import_are_separate(fixture, monkeypatch, capsys):
+    from hermes_cli import kanban_card_answer_runtime as owner_runtime
+    from hermes_cli import kanban_card_answer_transport as transport
+    monkeypatch.setattr(owner_runtime, '_profile', runtime._profile)
+    monkeypatch.setattr(transport, 'Records', runtime.Records)
+    monkeypatch.setattr(sys, 'argv', ['binding-runtime', REQUEST])
+    name = 'hermes_cli.kanban_bb_binding_runtime'
+    # run_module must execute a new namespace, not the already imported facade.
+    monkeypatch.delitem(sys.modules, name)
+    runpy.run_module(name, run_name='inert_import')
+    assert capsys.readouterr().out == '' and fixture[3] == []
+    with pytest.raises(SystemExit) as exited:
+        runpy.run_module(name, run_name='__main__')
+    assert exited.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out['ok'] is True and out['result']['choices'] == helpers.ASK['choices']
+    assert fixture[3] == [REQUEST]
+
+
+def test_real_authenticated_read_to_projection(fixture, monkeypatch, capsys):
+    from hermes_cli import kanban_card_answer_transport as transport
+    home, path, record, _ = fixture
+    config = home / 'mail.json'
+    config.write_text(json.dumps({'gateway':'owner', 'hub_url':'https://example.com'}))
+    (home / 'gateway.key').write_text('synthetic-gateway-key')
+    monkeypatch.setenv('HERMES_MAIL_CONFIG', str(config))
+    requests = []
+    class Opener:
+        def open(self, request, timeout):
+            requests.append((request.full_url, request.get_method(),
+                             request.get_header('Authorization'), timeout))
+            return BytesIO(json.dumps({'request':record}).encode())
+    monkeypatch.setattr(transport.urllib.request, 'build_opener', lambda *args: Opener())
+    monkeypatch.setattr(runtime, 'Records', transport.Records)
+    before = path.read_bytes()
+    code, out = invoke(capsys)
+    assert code == 0 and out['result']['tenant'] == 'babybear'
+    assert requests == [('https://example.com/v2/sync/requests/' + REQUEST,
+                         'GET', 'Bearer synthetic-gateway-key', 10)]
+    assert set(out['result']) == {'version','owner_gateway','owner_profile','board',
+                                  'task','tenant','generation','choices'}
+    assert helpers.ASK['action'] not in json.dumps(out) and path.read_bytes() == before
+
+
+def test_board_open_joins_canonical_guard(fixture, monkeypatch, capsys):
+    real = runtime.connect
+    opened = []
+    def guarded(database, **kwargs):
+        conn = real(database, **kwargs)
+        opened.append((database, kwargs, conn))
+        return conn
+    monkeypatch.setattr(runtime, 'connect', guarded)
+    assert invoke(capsys)[0] == 0
+    assert len(opened) == 1
+    database, kwargs, conn = opened[0]
+    assert database == fixture[1].as_uri() + '?mode=ro' and kwargs == {'uri': True}
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        conn.execute('SELECT 1')
+
