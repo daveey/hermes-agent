@@ -17,7 +17,7 @@ from hermes_cli.execution_observations import epoch, human_request_valid, same_j
 MAX_HISTORY = 128
 _log = logging.getLogger(__name__)
 MAX_PAYLOAD = 32768
-_TASK_FIELDS = ('id', 'status', 'assignee', 'session_id', 'current_run_id', 'block_kind', 'human_request', 'created_on')
+_TASK_FIELDS = ('id', 'status', 'assignee', 'session_id', 'current_run_id', 'block_kind', 'human_request', 'created_on', 'runs_on')
 # Only landing rules traced to the corresponding writers. Ambiguous transitions
 # and unstamped release/wake events deliberately do not acquire an identity here.
 _FIXED_PHASES = {'dependency_wait': 'todo', 'review_requested': 'review', 'scheduled': 'scheduled',
@@ -70,13 +70,12 @@ def _tasks_runs(conn, chunk, schema):
         run_keys = ('id', 'task_id', 'uid', 'status', 'started_at', 'ended_at', 'last_heartbeat_at')
         run_fields = ','.join((f'r.{key}' if key in schema['task_runs'] else 'NULL') + f' AS {key}' for key in run_keys)
         current_fields = ','.join((f'cr.{key}' if key in schema['task_runs'] else 'NULL') + f' AS _current_{key}' for key in run_keys)
-        join = (f'LEFT JOIN (SELECT {run_fields}, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id) AS _n '
-                f'FROM task_runs r WHERE task_id IN ({marks})) r '
-                f'ON r.task_id=t.id AND r._n <= {MAX_HISTORY + 1}')
+        join = (f'LEFT JOIN task_runs r ON r.task_id=t.id AND r.id IN '
+                f'(SELECT id FROM task_runs WHERE task_id=t.id ORDER BY id LIMIT {MAX_HISTORY + 1})')
         current_id = 't.current_run_id' if 'current_run_id' in schema['tasks'] else 'NULL'
-        sql = (f'SELECT {fields}, r.*, {current_fields} FROM tasks t {join} '
+        sql = (f'SELECT {fields}, {run_fields}, {current_fields} FROM tasks t {join} '
                f'LEFT JOIN task_runs cr ON cr.id={current_id} AND cr.task_id=t.id WHERE t.id IN ({marks})')
-        args = (*chunk, *chunk)
+        args = chunk
     else:
         sql, args = f'SELECT {fields} FROM tasks t WHERE t.id IN ({marks})', chunk
     tasks, runs, current = {}, {}, {}
@@ -111,7 +110,7 @@ def _parents(conn, chunk, schema):
 
 
 def assemble(conn, ids, *, board, gateway, profile, observed_at):
-    """At most 3 SELECTs/500 cards, inside the caller's existing read transaction.
+    """One optional dispatch-snapshot SELECT plus at most 3 SELECTs/500 cards.
 
     Existing run rows are bounded too: a row ahead of the causal event feed is
     not an old phase observed again. Extra PRAGMAs discover supported old schemas.
@@ -120,6 +119,12 @@ def assemble(conn, ids, *, board, gateway, profile, observed_at):
     if not ids:
         return {}
     schema = _schema(conn)
+    from hermes_cli.kanban_nonrunning_reason import snapshot
+    dispatch_observation = snapshot(conn)
+    remote_reasons = {}
+    if {'uid', 'origin_gateway'} <= schema['task_events']:
+        from hermes_cli.kanban_nonrunning_transport import read
+        remote_reasons = read(conn, ids, board=board, now=observed_at)
     out = {}
     # The task/run join binds the same chunk twice. Respect the actual connection
     # limit (older SQLite builds default to 999), not only the output batch size.
@@ -133,19 +138,25 @@ def assemble(conn, ids, *, board, gateway, profile, observed_at):
             event_fields = ','.join('substr(e.payload,1,32769) AS payload' if key == 'payload' and key in schema['task_events']
                                     else f'e.{key}' if key in schema['task_events'] else f'NULL AS {key}'
                                     for key in ('id', 'task_id', 'run_id', 'kind', 'created_at', 'payload', 'uid'))
-            # All event kinds participate in the bound: an omitted unstamped
-            # release could otherwise make an older matching phase look current.
-            for row in _rows(conn, f'SELECT * FROM (SELECT {event_fields}, ROW_NUMBER() OVER '
-                                    f'(PARTITION BY task_id ORDER BY id) AS _n, '
-                                    f'MAX(created_at) OVER (PARTITION BY task_id) AS _activity_at, '
-                                    f'FIRST_VALUE(kind) OVER (PARTITION BY task_id ORDER BY created_at DESC, id) AS _activity_kind '
-                                    f'FROM task_events e '
-                                    f'WHERE task_id IN ({marks})) WHERE _n <= {MAX_HISTORY + 1}', chunk):
+            # Indexed per-task LIMITs bound SQLite work as well as returned rows.
+            # The full watermark still detects mutations beyond the retained history.
+            for row in _rows(conn, f'SELECT {event_fields}, '
+                                    f'(SELECT MAX(id) FROM task_events WHERE task_id=t.id) AS _event_watermark, '
+                                    f'(SELECT created_at FROM task_events WHERE task_id=t.id '
+                                    f'ORDER BY created_at DESC,id DESC LIMIT 1) AS _activity_at, '
+                                    f'(SELECT kind FROM task_events WHERE task_id=t.id '
+                                    f'ORDER BY created_at DESC,id DESC LIMIT 1) AS _activity_kind '
+                                    f'FROM tasks t JOIN task_events e ON e.task_id=t.id AND e.id IN '
+                                    f'(SELECT id FROM task_events WHERE task_id=t.id ORDER BY id LIMIT {MAX_HISTORY + 1}) '
+                                    f'WHERE t.id IN ({marks})', chunk):
                 events.setdefault(row['task_id'], []).append(dict(row))
         parents = _parents(conn, chunk, schema)
         for tid, task in tasks.items():
-            out[tid] = {'events': events.get(tid, []), 'runs': runs.get(tid, []), 'task': task,
+            out[tid] = {'dispatch_observation': dispatch_observation,
+                        'remote_non_running_reason': remote_reasons.get(tid),
+                        'events': events.get(tid, []), 'runs': runs.get(tid, []), 'task': task,
                         'current_run': current.get(tid),
+                        'event_watermark': events[tid][0]['_event_watermark'] if events.get(tid) else None,
                         'activity_at': events[tid][0]['_activity_at'] if events.get(tid) else None,
                         'activity_kind': events[tid][0]['_activity_kind'] if events.get(tid) else None,
                         'parents': parents.get(tid, []), 'synced': 'uid' in schema['task_events'],
@@ -289,6 +300,15 @@ def safe_raw(row, source):
 
 
 def raw(row, source):
+    """Execution phase and current non-running reason have independent source clocks."""
+    from hermes_cli.kanban_nonrunning_reason import enrich
+    value = _phase_raw(row, source)
+    if value.get('unknown_reason') == 'owner_observation_unavailable':
+        return value
+    return enrich(value, {**row, **source['task']}, source)
+
+
+def _phase_raw(row, source):
     """Strict phase identity and exact wait, distinct from observation/activity/progress."""
     row = {**row, **source['task']}
     gateway, profile, board = (source.get(k) for k in ('gateway', 'profile', 'board'))

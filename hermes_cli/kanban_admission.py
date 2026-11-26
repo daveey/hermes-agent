@@ -387,6 +387,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
     try:
         lease = drain_fence.admit("kanban.claim")
     except drain_fence.DrainRefused as exc:
+        _defer(task_id, 'worker_draining')
         logging.getLogger(__name__).warning("kanban claim deferred: %s", exc)
         yield False
         return
@@ -457,20 +458,24 @@ def _claim_transaction(conn, *, task_id=None, gate=None):
                 # through its commit. A normal defer, not a failure: no WARNING/traceback, which the
                 # coach signal detector would file as a defect.
                 logging.getLogger(__name__).info("Update admission lock busy; deferring Kanban claim to the next tick")
+                _defer(task_id, 'update_admission_busy')
                 yield False
                 return
             except Exception:  # health: allow BLE001 -- malformed account policy/inventory must fail closed
                 logging.getLogger(__name__).warning("Update admission unavailable; deferring Kanban claim", exc_info=True)
+                _defer(task_id, 'update_admission_unavailable')
                 yield False
                 return
             if held:
                 logging.getLogger(__name__).info(HOLD_MESSAGE)
+                _defer(task_id, 'update_admission_hold')
                 yield False
                 return
             if waiting:
                 # [daveey] A chat/notification/review turn is waiting out this lock: claims retry next tick, turns
                 # cannot, so the claim yields before the locked gate's census (review F1).
                 logging.getLogger(__name__).info("A turn is waiting for update admission; deferring Kanban claim")
+                _defer(task_id, 'turn_admission_waiting')
                 yield False
                 return
             # The CPU/cap gate runs HERE, with admission.lock held, and the claim commits before the lock is released,

@@ -363,6 +363,14 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
     if status == "triage":
         if park_kind in AGENT_TRIAGE_EVENTS:
             label = "an agent to triage it (worker gave up)" if park_kind == "gave_up" else "an agent to triage it"
+            if park_kind == "gave_up" and payload.get('trigger_outcome') == 'spawn_failed':
+                # The failure accountant emits this discriminator at its actual
+                # launch boundary. Never infer startup from nonspawnable lanes,
+                # exception prose, or a replica's generic gave_up outcome.
+                info = out("triage", "an agent to resolve the startup failure (worker could not be launched)", True)
+                info.update(reason_code='spawn_failed', next_actor='agent',
+                            next_action='Inspect the recorded launch failure before normal admission')
+                return info
             return out("triage", label, True)
         if park_kind == "block_loop_detected":
             return out("triage:block_loop", "a human or shared blocker (block loop)", False)

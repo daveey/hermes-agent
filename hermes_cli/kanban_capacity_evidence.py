@@ -116,7 +116,52 @@ def _provider_phase(conn, tid, reasons, now):
                               process_ref=matched["process_ref"])
 
 
-def record(conn, result, *, board, machine, now=None, update_drain=False, dry_run=False):
+def capture(conn, *, now=None):
+    """Freeze bounded diagnostic inputs BEFORE evaluating a pass, never policy replay.
+
+    A full row is deliberately conservative: any intervening policy edit makes
+    this pass unqualified. Local event IDs are used only inside this local store.
+    Diagnostic skip events cannot change policy and are excluded from the causal
+    mark so recording this pass's own refusal cannot invalidate it.
+    """
+    at = time.time() if now is None else now
+    try:
+        conn.execute('SAVEPOINT nonrunning_inputs')
+        try:
+            rows = conn.execute("SELECT * FROM tasks WHERE status NOT IN ('done','archived') "
+                                "ORDER BY CASE status WHEN 'ready' THEN 0 ELSE 1 END, id LIMIT ?",
+                                (TASK_LIMIT + 1,)).fetchall()
+            return {'observed_at': at, 'truncated': len(rows) > TASK_LIMIT,
+                    'tasks': {row['id']: _input_token(conn, dict(row)) for row in rows[:TASK_LIMIT]}}
+        finally:
+            conn.execute('RELEASE nonrunning_inputs')
+    except (sqlite3.Error, ValueError, TypeError):
+        _log.warning('non-running source capture unavailable', exc_info=True)
+        return None
+
+
+def _input_token(conn, row):
+    mark = conn.execute("SELECT max(id) FROM task_events WHERE task_id=? AND kind!='dispatch_skipped'",
+                        (row['id'],)).fetchone()[0]
+    return {'row': row, 'event': mark}
+
+
+def _qualified_reason(conn, result, tid, captured, *, update_drain=False):
+    if not isinstance(captured, dict):
+        return None
+    token = captured.get('tasks', {}).get(tid)
+    row = conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()
+    if row is None or token != _input_token(conn, dict(row)):
+        return None
+    return _nonrunning(result, tid, update_drain=update_drain)
+
+
+def _nonrunning(result, tid, *, update_drain=False):
+    from hermes_cli.kanban_nonrunning_reason import from_result
+    return from_result(result, tid, update_drain=update_drain)
+
+
+def record(conn, result, *, board, machine, now=None, update_drain=False, dry_run=False, captured=None):
     """Record only genuine dispatch observations; a failed diagnostic cannot stop dispatch.
 
     No free-slot or ready-eligibility inference from registry caps/status counts.
@@ -156,9 +201,11 @@ def record(conn, result, *, board, machine, now=None, update_drain=False, dry_ru
                     reasons = common + reasons
                 event = conn.execute("SELECT max(id) FROM task_events WHERE task_id=?", (tid,)).fetchone()[0]
                 tasks[tid] = {"lifecycle": _lifecycle(conn, tid), "reasons": reasons,
+                              "non_running_reason": _qualified_reason(conn, result, tid, captured, update_drain=update_drain),
                               "native_restrictions": _native_restrictions(result, tid, reference) if row["status"] == "ready" else [],
                               "parents": parents, "assignee": row["assignee"], "source_event": event}
             value = {"version": 1, "observed_at_ms": now * 1000, "valid_until_ms": (now + 180) * 1000,
+                     "decision_at_ms": captured.get("observed_at", now) * 1000 if captured else None,
                      "source": "kanban.dispatch", "source_revision": revision, "machine": machine,
                      "board": board, "evidence_ref": reference, "tasks": tasks,
                      "machine_reasons": common,
@@ -167,6 +214,12 @@ def record(conn, result, *, board, machine, now=None, update_drain=False, dry_ru
             conn.execute("RELEASE capacity_snapshot")
         with kb.write_txn(conn):
             conn.execute(f"CREATE TABLE IF NOT EXISTS {TABLE} (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
+            previous = conn.execute(f"SELECT payload FROM {TABLE} WHERE id=1").fetchone()
+            if previous:
+                old = json.loads(previous[0])
+                old_at = old.get("observed_at_ms") if isinstance(old, dict) else None
+                if epoch(old_at) and old_at >= now * 1000:
+                    return False  # a late completed pass cannot replace a newer observation
             conn.execute(f"INSERT INTO {TABLE} (id,payload) VALUES(1,?) "
                          "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (json.dumps(value),))
         return True
@@ -175,19 +228,21 @@ def record(conn, result, *, board, machine, now=None, update_drain=False, dry_ru
         return False
 
 
-def observe_dispatch(conn, result, *, board, dry_run=False, update_drain=False):
+def observe_dispatch(conn, result, *, board, dry_run=False, update_drain=False, captured=None):
     """Best-effort post-result seam; diagnostics never change dispatch's return."""
+    # Persist the refusal before taking its watermark. Otherwise the observation
+    # is invalidated immediately by its own dispatch_skipped event. [daveey]
+    from hermes_cli.kanban_dispatch_skip import record_tick
     try:
         import socket
         from hermes_cli import kanban_db_sync as sync
         machine = (sync.sync_state(conn) or {}).get("gateway_id") or socket.gethostname()
+        record_tick(conn, result, dry_run=dry_run, captured=captured, machine=machine)
         record(conn, result, board=_board(conn), machine=machine,
-               dry_run=dry_run, update_drain=update_drain)
+               dry_run=dry_run, update_drain=update_drain, captured=captured)
     except Exception:  # health: allow BLE001 -- optional evidence cannot control admission
         _log.warning("capacity observation unavailable", exc_info=True)
-    # One durable reason per passed-over card and ready episode (kanban-dd62aef001); never raises. [daveey]
-    from hermes_cli.kanban_dispatch_skip import record_tick
-    record_tick(conn, result, dry_run=dry_run)
+
     # Which governor stopped each idle card this tick, per board (``kanban_governors``); never raises. [daveey]
     from hermes_cli.kanban_governors import record_tick as record_governors
     record_governors(conn, result, dry_run=dry_run, update_drain=update_drain)

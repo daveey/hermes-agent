@@ -702,7 +702,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 if not observed or not known or (status in ('done', 'archived') and not released and not closed):
                     status = 'unknown'
                 from hermes_cli.kanban_completion_receipt_projection import remote_fields
+                from hermes_cli.kanban_nonrunning_owner import fields as diagnostic_fields
                 result.append({
+                    **diagnostic_fields(task, owner, current=current and not final, now=now),
                     **remote_fields(task, **owner),
                     **{k: task.get(k) for k in ('title', 'assignee', 'block_kind', 'created_at', 'started_at', 'priority')},
                     **owner, 'id': owner['task_id'],

@@ -11,7 +11,11 @@ def claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_che
         owner_home = resolve_profile_env(assignee)
     except FileNotFoundError:
         owner_home = None
-    if dispatch_paused(owner_home) or core_update_hold() is not None:  # hold may start mid-tick [daveey]
+    paused = dispatch_paused(owner_home)
+    held = core_update_hold() is not None
+    if paused or held:  # hold may start mid-tick [daveey]
+        from hermes_cli.kanban_db_sync import defer_claim, ORIGIN_LOCAL
+        defer_claim(task_id, 'gateway_draining' if paused else 'update_admission_hold', ORIGIN_LOCAL)
         return None
     claim = kb.claim_review_task if lane == 'review' else kb.claim_task  # reassigned since the gates: CAS loses (#147534)
     if admission_check is None:

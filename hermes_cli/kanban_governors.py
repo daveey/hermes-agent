@@ -359,9 +359,12 @@ _CLAIM_GATES = (("hub_cpu", "hub_cpu"), ("hub_admission", "hub_cpu"), ("hub_capa
 
 
 def _claim_charge(code: Any) -> dict[str, Any]:
-    """A ``claim_deferred`` code as a charge: this host's admission gates by name, else the Board's lease."""
+    """Name observed gates; an unknown local refusal is not a Board lease refusal."""
     text = str(code)
-    name = next((gov for prefix, gov in _CLAIM_GATES if text.startswith(prefix)), "board_lease")
+    explicit = {"usage_accounting_pending": "accounting", "decision_pending": "decision",
+                "spend_policy_unavailable": "spend_policy", "spend_budget_exhausted": "spend_budget"}
+    fallback = "board_lease" if getattr(code, "origin", None) == "board" else "unrecorded"
+    name = explicit.get(text) or next((gov for prefix, gov in _CLAIM_GATES if text.startswith(prefix)), fallback)
     return {"governor": name, "detail": {"reason": text, **({"origin": code.origin}
                                                              if getattr(code, "origin", None) else {})}}
 

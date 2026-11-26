@@ -80,6 +80,30 @@ def _unknown(out, reason, *, freshness="unknown"):
     return out
 
 
+def nonrunning_reason(value, *, now):
+    """Expire a nested diagnostic independently; NOT writer authentication.
+
+    Transport/scope and lifecycle qualification belong to the acquisition seam.
+    This read-time guard also runs when the phase lacks an execution generation.
+    """
+    raw = value if isinstance(value, dict) else {}
+    at, until = raw.get('observed_at'), raw.get('valid_until')
+    reason = raw.get('unknown_reason') or 'dispatcher_evidence_missing'
+    if at is not None and until is not None and all(epoch(v) for v in (at, until, now)) and at <= now and until >= at:
+        until = min(until, at + 180)
+        if now >= until:
+            reason = 'dispatcher_evidence_stale'
+        elif raw.get('freshness') == 'current' and raw.get('disposition') in ('blocked', 'waiting'):
+            fields = ('code', 'family', 'actor', 'summary', 'next_action', 'evidence_ref', 'source_revision')
+            if all(nonblank(raw.get(k)) for k in fields):
+                return {**deepcopy(raw), 'valid_until': until}
+    return {'code': 'unclassified_refusal', 'family': 'unknown', 'disposition': 'unknown',
+            'actor': 'unknown', 'summary': 'Execution reason is unknown',
+            'next_action': 'Inspect the latest authoritative dispatcher evidence',
+            'freshness': 'unknown', 'unknown_reason': reason,
+            'observed_at': at, 'valid_until': until}
+
+
 def adapt(value, *, now, source_class):
     """Copy a v1 observation, bounding its original validity; legacy input is unknown.
 
@@ -89,6 +113,8 @@ def adapt(value, *, now, source_class):
     """
     raw = value if isinstance(value, dict) else {}
     out = deepcopy(raw)
+    if 'non_running_reason' in raw:
+        out['non_running_reason'] = nonrunning_reason(raw['non_running_reason'], now=now)
     out.setdefault("observed_at", None)
     out.setdefault("valid_until", None)
     out.setdefault("last_activity", None)

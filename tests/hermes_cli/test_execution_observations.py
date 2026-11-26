@@ -88,6 +88,29 @@ def test_fetch_never_renews_ttl():
     assert second["last_known_state"] == "queued"
 
 
+@pytest.mark.parametrize('missing_identity', [False, True])
+def test_nested_reason_expires_independently_on_cached_read(missing_identity):
+    raw = observation()
+    if missing_identity:
+        del raw['identity']['run_id']
+    raw['non_running_reason'] = {
+        'code': 'usage_accounting_pending', 'family': 'accounting', 'actor': 'agent',
+        'disposition': 'blocked', 'summary': 'Run usage accounting is unsettled',
+        'next_action': 'Recover the original source accounting evidence, then retry normal admission',
+        'freshness': 'current', 'observed_at': 990, 'valid_until': 1010,
+        'evidence_ref': 'dispatch:original', 'source_revision': 'original',
+    }
+    before = deepcopy(raw)
+    first = adapt(raw, now=1005, source_class='sidebar')
+    assert first['non_running_reason']['freshness'] == 'current'
+    stale = adapt(first, now=1010, source_class='sidebar')['non_running_reason']
+    assert stale['freshness'] == 'unknown'
+    assert stale['disposition'] == 'unknown'
+    assert stale['observed_at'] == 990
+    assert stale['unknown_reason'] == 'dispatcher_evidence_stale'
+    assert raw == before
+
+
 def test_legacy_unknown_retains_human_request_and_delivery_receipt():
     legacy = {"state": "running", "human_request": {"action": "answer"},
               "completion_receipt": {"verified": True}}

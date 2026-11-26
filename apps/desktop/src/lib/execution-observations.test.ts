@@ -55,6 +55,24 @@ function apply(value: Record<string, unknown>, patch: Patch) {
 const caseInput = (patch: Patch) => apply(clone(fixture.base) as Record<string, unknown>, patch)
 const itemInput = (item: Item) => ('raw' in item ? clone(item.raw) : caseInput(item))
 
+it.each([false, true])('expires cached nested reason independently (missing identity %s)', missingIdentity => {
+  const raw = caseInput({})
+
+  if (missingIdentity) {delete (raw.identity as Record<string, unknown>).run_id}
+  raw.non_running_reason = {
+    code: 'usage_accounting_pending', family: 'accounting', actor: 'agent', disposition: 'blocked',
+    summary: 'Run usage accounting is unsettled', next_action: 'Recover the original source accounting evidence, then retry normal admission',
+    freshness: 'current', observed_at: 990, valid_until: 1010,
+    evidence_ref: 'dispatch:original', source_revision: 'original'
+  }
+  const before = clone(raw)
+  const first = projectExecutionObservation(raw, 1005, 'sidebar')
+  expect((first.non_running_reason as Record<string, unknown>).freshness).toBe('current')
+  const stale = projectExecutionObservation(first, 1010, 'sidebar').non_running_reason as Record<string, unknown>
+  expect(stale).toMatchObject({ freshness: 'unknown', disposition: 'unknown', observed_at: 990, unknown_reason: 'dispatcher_evidence_stale' })
+  expect(raw).toEqual(before)
+})
+
 /** Recursive subset: bool is distinct from number, missing is not null. */
 function subset(actual: unknown, expected: unknown): boolean {
   if (isObject(expected)) {

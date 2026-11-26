@@ -241,13 +241,19 @@ def _tick_skips(result: Any) -> list[tuple[str, str, Any, Optional[float], dict[
     return out
 
 
-def record_tick(conn: sqlite3.Connection, result: Any, *, dry_run: bool = False) -> int:
+def record_tick(conn: sqlite3.Connection, result: Any, *, dry_run: bool = False,
+                captured=None, machine=None) -> int:
     """Record every skip of one finished tick; returns how many events were appended. Never raises."""
     if dry_run or getattr(result, "skipped_locked", False) or getattr(result, "skipped_owned", False):
         return 0
     written = 0
     for tid, reason, detail, until, extra in _tick_skips(result):
         try:
+            if captured is not None and machine is not None:
+                from hermes_cli.kanban_nonrunning_transport import envelope
+                value = envelope(conn, result, tid, captured=captured, machine=machine)
+                if value is not None:
+                    extra = {**extra, 'non_running_v1': value}
             written += record(conn, tid, reason, detail=detail, until=until, extra=extra)
         except Exception:  # health: allow BLE001 -- the skip already happened; its evidence is advisory
             _log.debug("kanban dispatch: skip record failed for %s (%s)", tid, reason, exc_info=True)

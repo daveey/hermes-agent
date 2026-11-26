@@ -1283,6 +1283,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     # Same ordering rule as the ``tasks`` indexes above: index after column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON task_events(run_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind_task_id ON task_events(kind, task_id, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task_id ON task_events(task_id, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_causal_id ON task_events(task_id, id) WHERE kind!='dispatch_skipped'")
     conn.execute(_EVENT_PARK_HISTORY_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
     conn.execute(_EVENT_WAIT_END_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
     conn.execute(_EVENT_BLOCKER_ASSERT_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))

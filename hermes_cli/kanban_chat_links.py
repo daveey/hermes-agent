@@ -628,10 +628,13 @@ def _read_replica(path: Path, gateway: str,
     from hermes_cli.kanban_session_activity import cached_ro  # lazy: that module imports this one
     # [daveey] The link rows only change with the replica's tasks/task_chat_links content; a pull that only moves
     # ``pulled_at`` (every few seconds) re-reads the stamp, not the ~10k links. Rows are read-only to callers.
+    from hermes_cli.kanban_execution_source import transaction
+    from hermes_cli.kanban_nonrunning_transport import replica_rows as diagnostic_rows
     content = shadow_link_key(path)
-    with cached_ro(path) as conn:
+    with cached_ro(path) as conn, transaction(conn):
         conn.row_factory = sqlite3.Row
         rows = replica_link_rows(conn, path, gateway, profile, content)
+        rows = diagnostic_rows(conn, rows, now=time.time())
         # Never memoised: a pulled heartbeat is bookkeeping, so ``content`` does not move for it, while the run's
         # newest liveness event is exactly what dates the card (review t_01a1d0f7c4cc4688).
         runs = read_runs(conn, gateway, profile)
@@ -716,6 +719,12 @@ def _ledger_index(stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] 
             if wait:
                 waits[(str(c["gateway"]), str(c["profile"]), str(c["board"]), str(c["id"]))] = {
                     **wait, "_status": status}
+            elif (status == 'ready' and c.get('status') == 'ready' and not c.get('stale')
+                  and isinstance(c.get('execution_observations'), list)):
+                # Unlike historical owner labels, an admitted diagnostic's
+                # scope was checked against the current authenticated record.
+                waits[(str(c['gateway']), str(c['profile']), str(c['board']), str(c['id']))] = {
+                    '_status': status, '_diagnostic_owner': True}
     profile_cards = [c for c in cards if _is_profile_board_card(c)]
     _owners_memo = (cards, out, profile_cards, waits)
     return out, profile_cards, waits
@@ -738,7 +747,7 @@ def _ledger_wait(index: Optional[tuple], owner: Optional[str], owner_profile: st
     wait = waits.get((owner, owner_profile, board, tid))
     if not wait or wait.get("_status") != status:
         return {}
-    return {k: v for k, v in wait.items() if k != "_status"}
+    return {k: v for k, v in wait.items() if k in LEDGER_WAIT_FIELDS}
 
 
 # (cards, owners, profile-board cards, waits) of the last ``_ledger_index`` build. Callers treat them as read-only.
@@ -1004,6 +1013,10 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             out[pair].update({k: v for k, v in r.items() if k.startswith('timer_')})
             out[pair].update(_ledger_wait(index, owner, owner_profile, board, tid, status,
                                           named=named and not unknown))
+            from hermes_cli.kanban_nonrunning_transport import replica_fields as diagnostic_fields
+            diagnostic_owner = index[2].get((owner, owner_profile, board, tid), {}) if index and len(index) > 2 else {}
+            out[pair].update(diagnostic_fields(out[pair], r, qualified=named and not unknown
+                                              and diagnostic_owner.get('_diagnostic_owner') is True, now=now))
             if machine := run_machine(r):
                 out[pair]["run_machine"] = machine
             # Executor-stamped liveness of the current run (kanban_replica_execution), never the pull clock.

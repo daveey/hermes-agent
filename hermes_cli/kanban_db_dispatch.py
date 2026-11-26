@@ -1817,14 +1817,14 @@ def dispatch_once(
         from hermes_cli.kanban_candidate_receipts import dispatch_pass
         caps = dict(max_spawn=max_spawn, max_in_progress=max_in_progress, spawn_quota=spawn_quota,
                     max_in_progress_per_profile=max_in_progress_per_profile)
+        captured = _capacity_evidence.capture(conn) if not dry_run else None
         with dispatch_pass(conn, dry_run=dry_run, caps=caps):  # caps: the governor snapshot's thresholds
             result = _dispatch_once_locked(
                 conn, spawn_fn=spawn_fn, ttl_seconds=ttl_seconds, dry_run=dry_run, failure_limit=failure_limit,
                 stale_timeout_seconds=stale_timeout_seconds, board=board, default_assignee=default_assignee,
                 reconcile_orphans=reconcile_orphans, **caps)
-        from hermes_cli.kanban_capacity_evidence import observe_dispatch
-        observe_dispatch(conn, result, board=board, dry_run=dry_run,
-                         update_drain=observation_update_drain)
+        _capacity_evidence.observe_dispatch(conn, result, board=board, dry_run=dry_run,
+                         update_drain=observation_update_drain, captured=captured)
         return result
 
     from hermes_cli.kanban_dispatch_owner import run_owned_tick
@@ -2728,7 +2728,7 @@ def run_daemon(
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
 # module is fully populated before ``kanban_db`` imports from it.
-from hermes_cli import kanban_db as _kb
+from hermes_cli import kanban_db as _kb, kanban_capacity_evidence as _capacity_evidence
 from hermes_cli import kanban_db_connect as _kbc
 from hermes_cli import kanban_db_default_assignee as _kbda
 from hermes_cli import kanban_db_workspace as _kbw

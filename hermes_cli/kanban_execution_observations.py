@@ -141,10 +141,10 @@ def card(row, *, gateway=None, profile=None, now=None):
         value = replica_raw(row)
         if value is not None:
             return project(value, now=now, source_class="sidebar")
-    return project(card_raw(row, gateway=gateway, profile=profile), now=now, source_class="sidebar")
+    return project(card_raw(row, gateway=gateway, profile=profile, now=now), now=now, source_class="sidebar")
 
 
-def card_raw(row, *, gateway=None, profile=None):
+def card_raw(row, *, gateway=None, profile=None, now=None):
     """The unprojected ``kanban.card`` record ``card`` projects for a row with no execution source, receipt or
     running replica evidence. The sidebar counts store it for every remote row ``kanban_replica_execution.raw``
     returns None for (parked, todo, unknown, or running with no current-run beat; see ``kanban_replica_execution
@@ -187,6 +187,15 @@ def card_raw(row, *, gateway=None, profile=None):
         raw["human_request"] = request
     if row.get("stale"):
         raw.update(state="unknown", last_known_state=state, unknown_reason="source_unavailable")
+    elif (remote and row.get('status') == 'ready' and row.get('current_run_id') is None
+          and isinstance(row.get('execution_observations'), list)):
+        from hermes_cli.kanban_nonrunning_reason import select
+        # The acquiring reader owns authentication/lifecycle checks. Preserve
+        # only its separately clocked diagnosis, never the old execution phase.
+        reason = select(row.get('execution_observations'), {**row, 'profile': profile},
+                        now=time.time() if now is None else now)
+        if reason is not None:
+            raw['non_running_reason'] = reason
     return raw
 
 

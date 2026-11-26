@@ -269,8 +269,36 @@ function timingBoundary(raw: Record<string, unknown>, now: number, sourceClass: 
   return { boundary }
 }
 
+/** Read-time expiry only, not proof of writer identity or lifecycle binding. */
+export function nonRunningReason(value: unknown, now: number): Record<string, unknown> {
+  const raw = object(value)
+  const at = get(raw, 'observed_at')
+  let until = get(raw, 'valid_until')
+  let reason = get(raw, 'unknown_reason') || 'dispatcher_evidence_missing'
+
+  if (epoch(at) && epoch(until) && epoch(now) && at <= now && until >= at) {
+    const boundary = Math.min(until, at + 180)
+    until = boundary
+
+    if (now >= boundary) {reason = 'dispatcher_evidence_stale'}
+    else if (get(raw, 'freshness') === 'current' && ['blocked', 'waiting'].includes(get(raw, 'disposition') as string)) {
+      const fields = ['code', 'family', 'actor', 'summary', 'next_action', 'evidence_ref', 'source_revision']
+
+      if (fields.every(k => nonblank(get(raw, k)))) {return { ...copy(raw), valid_until: until }}
+    }
+  }
+
+  return {
+    code: 'unclassified_refusal', family: 'unknown', disposition: 'unknown', actor: 'unknown',
+    summary: 'Execution reason is unknown', next_action: 'Inspect the latest authoritative dispatcher evidence',
+    freshness: 'unknown', unknown_reason: reason, observed_at: at ?? null, valid_until: until ?? null
+  }
+}
+
 function freshness(source: Record<string, unknown>, now: number, sourceClass: ObservationSourceClass): ExecutionObservation {
   const raw = copy(source)
+
+  if (has(raw, 'non_running_reason')) {raw.non_running_reason = nonRunningReason(get(raw, 'non_running_reason'), now)}
   const state = get(raw, 'state')
 
   const out: ExecutionObservation = {

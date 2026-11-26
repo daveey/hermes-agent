@@ -996,6 +996,8 @@ CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_kind_task_id   ON task_events(kind, task_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_task_id        ON task_events(task_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_causal_id      ON task_events(task_id, id) WHERE kind!='dispatch_skipped';
 CREATE INDEX IF NOT EXISTS idx_events_park_history ON task_events(id) WHERE kind IN ('scheduled','continued') AND typeof(kind)='text';
 CREATE INDEX IF NOT EXISTS idx_events_wait_end ON task_events(task_id,id) WHERE kind IN ('condition_met','continuation_woken','promoted','promoted_manual','unblocked','claimed','completed','archived') AND typeof(kind)='text';
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
@@ -1003,9 +1005,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 """
-
 # --- ID generation ---
-
 def _new_task_id() -> str:
     """``t_`` + 4 hex bytes (collision ~1e-3 at 100k tasks; 2 bytes would hit 50%
     by 10k). Idempotency belongs to ``idempotency_key``, not id uniqueness."""
