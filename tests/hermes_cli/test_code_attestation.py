@@ -298,7 +298,9 @@ def test_content_cache_reuses_compile_but_revalidates_bytes(tmp_path):
         print(json.dumps({'calls': count, 'delta': delta,
             'units': len(a.executed_units()), 'unknowns': a.unknowns()}))
     ''')
-    assert result['calls'] == 1
+    # The first observation is deliberately not admitted; the second establishes
+    # reuse, and the remaining eighteen still share the content-keyed compile.
+    assert result['calls'] == 2
     assert result['delta'] == 20
     assert result['units'] == 20
     assert any('source-skew:' in r for r in result['unknowns'])

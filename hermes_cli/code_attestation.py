@@ -1262,7 +1262,7 @@ class Attestation:
             self.mark_unknown(("dependency-skew:" if path in self._deps.rows
                                else "dependency-unreceipted:") + filename)
             return
-        if not _same(code, self._compiled(source, filename)):
+        if not _same(code, self._module_compilation(source, code)):
             self.mark_unknown("executed-code-mismatch:" + filename)
             return
         component = "dependency:" + receipt[0]
@@ -1468,6 +1468,16 @@ class Attestation:
                         "native bytes are hashed before load (TOCTOU); loader-resolved "
                         "transitive libraries are not audited"]}
 
+    def _module_compilation(self, source, code):
+        # Admit only repeated module objects, not one-shot import graphs. Identity
+        # selects cache policy only: fresh source and exact equality stay mandatory.
+        if len(source) > MAX_SOURCE:
+            raise ValueError("source-limit")
+        known = self._known.get(id(code))
+        if known is not None and known[0] is code:
+            return self._compiled(source, code.co_filename)
+        return _compile(source, code.co_filename)
+
     def _compiled(self, source, filename, mode="exec"):
         # Every caller supplies freshly bounded bytes; no stat/mtime trust. Only
         # compilation is cached. Filename/mode/optimization remain in the key.
@@ -1535,7 +1545,7 @@ class Attestation:
                 (kind != "core" and digests.get(relative) != digest)):
             self.mark_unknown("source-skew:" + str(path))
             return
-        if not _same(code, self._compiled(source, code.co_filename)):
+        if not _same(code, self._module_compilation(source, code)):
             self.mark_unknown("executed-code-mismatch:" + str(path))
             return
         self._record(code, component, digest, filename=code.co_filename)
