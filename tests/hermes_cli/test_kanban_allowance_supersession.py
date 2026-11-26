@@ -72,6 +72,35 @@ def test_board_state_separates_none_held_from_unknown(primary, monkeypatch, repl
     assert observation.board_state(primary, tid) == want
 
 
+def test_board_state_is_unknown_when_no_transport_opens(primary, monkeypatch):
+    tid, _ = fixtures._released(primary)
+
+    def refuse(*args, **kwargs):
+        raise client.SyncUnavailable("no identity")
+    monkeypatch.setattr(client, "load_identity", lambda: SimpleNamespace(gateway="test-home"))
+    monkeypatch.setattr(client, "Hub", refuse)
+    assert observation.board_state(primary, tid) is None  # nothing to close; never an AttributeError
+    assert observation.read(primary, tid) is None
+
+
+@pytest.mark.parametrize("data", [None, [], "active", 7])
+def test_a_non_object_allowance_never_proves_exhaustion(primary, monkeypatch, data):
+    tid, _ = fixtures._released(primary)
+    reads._hub(monkeypatch, primary, {"board": fixtures.sync.sync_state(primary)["board_id"], "allowance": data})
+    assert observation.read(primary, tid) is None
+
+
+def test_enrich_gives_ordinary_stops_the_canonical_corpus_only_on_a_canonical_board(primary, monkeypatch):
+    tid, _ = fixtures._released(primary)
+    _stopped(primary, tid)
+    stop = decision.pending_episode(primary, tid)
+    ctx = caused.enrich(primary, tid, stop, {"comments": [], "runs": []})
+    assert ctx["_canonical"] is True and "cause" not in ctx  # ordinary: no cause is invented
+    assert ctx["target_evidence"] == ["Spend budget: allowance exhausted"] == ctx["evidence"]
+    monkeypatch.setattr(fixtures.sync, "board_mode", lambda conn: "off")
+    assert caused.enrich(primary, tid, stop, {"comments": [], "runs": []}) == {"comments": [], "runs": [], "_canonical": False}
+
+
 @pytest.mark.parametrize("changes", [{"runs_basis": "unknown"}, {"task": "other"}, {"state": "superseded"},
                                      {"state": None}, {"review_uid": ""}, {"review_uid": 7}, {"budget_event_uid": ""}])
 def test_board_state_malformed_allowance_is_unknown(primary, monkeypatch, changes):

@@ -133,9 +133,10 @@ def board_state(conn, task_id, *, deadline: float | None = None):
 
 def stuck(conn, task_id, *, deadline: float | None = None) -> Held | None:
     """A decided-but-stuck card: a generic budget is newest locally (cumulative accounting, so the claim states
-    no allowance) while the Board still holds one and refuses every such grant. Unknown reads are not stuck."""
+    no allowance) while the Board still holds one and refuses every such grant. Unknown reads are not stuck
+    (``board_state`` reads nothing inside a transaction)."""
     from hermes_cli import kanban_db_sync as sync
-    if conn.in_transaction or allowance.state(conn, task_id) is not None or not allowance.history(conn, task_id):
+    if allowance.state(conn, task_id) is not None or not allowance.history(conn, task_id):
         return None
     now = time.monotonic()
     deadline = min(now + READ_SECONDS, deadline) if deadline is not None else now + READ_SECONDS
