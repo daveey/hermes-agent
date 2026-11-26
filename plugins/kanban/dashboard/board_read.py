@@ -178,7 +178,10 @@ def _done_state(conn, filters: dict, done_limit) -> tuple[str, list, int, frozen
     the payload, so they are ranked on a narrow read and never fetched whole (4.2k of the hub's 4.4k
     rows: parsing them was half of every board read). Same order as the done column below:
     completed_at DESC NULLS LAST, id DESC, on the values Task.from_row parses."""
-    done = kanban_db.list_task_rows(conn, status="done", columns="rowid AS _rowid, id, completed_at", **filters)
+    # This prepass re-ranks by normalized completion below; dispatcher priority
+    # order only adds recursive dependency walks over the entire done history.
+    done = kanban_db.list_task_rows(conn, status="done", columns="rowid AS _rowid, id, completed_at",
+                                   order_by="completed-desc", **filters)
     done_cap = int(done_limit or 0)
     done_ids = frozenset(kanban_db._lossy_text(r["id"]) for r in done)
     if not 0 < done_cap < len(done):
