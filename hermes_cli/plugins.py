@@ -283,6 +283,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self.scope_key = hermes_home_key(scope_key)
         self.home_path = Path(self.scope_key)
         self._discovery_lock = threading.RLock()
+        self._profile_resource_lock = threading.Lock()
         self._discovered: bool = False
         self._nowait_last: dict[str, frozenset[str]] = {}  # [daveey] last live *_nowait answers (_nowait_plugin_set)
         # [daveey] Inputs the last completed sweep read (``plugins_snapshot.fingerprint`` / ``precheck``,

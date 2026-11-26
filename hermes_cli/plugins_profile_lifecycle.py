@@ -7,7 +7,8 @@ from hermes_profile_resources import lease_for_path
 
 
 def protect_profile_manager(manager, home: Path) -> None:
-    with manager._discovery_lock:
+    # A host callback can ask for its manager while discovery waits on that host.
+    with manager._profile_resource_lock:
         if getattr(manager, '_profile_resource_lease', None) is not None:
             manager._profile_resource_lease.assert_reopen_allowed()
             return
