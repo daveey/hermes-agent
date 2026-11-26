@@ -44,17 +44,20 @@ def describe(conn, task_id: str) -> dict:
             'recheck the existing spend window before changing any budget.')
     else:
         operation, instruction = 'inspect_stop', 'Read the exact current stop and restrictions before choosing recovery.'
+    from hermes_cli.kanban_hold_audience import describe as authority
     return {'version': 1, 'stop': evidence, 'next_operation': operation, 'instruction': instruction,
+            'recorded_authority': authority(conn, task_id),
             'expected_actor': ['owning_chat', 'authorized_operator'], 'authorization': 'not_granted'}
 
 
 def refusal_context(conn, task_id: str) -> tuple[dict, str]:
     """Structured and rendered advice for a refused release; no writes, grants or identity assertions."""
+    from hermes_cli.kanban_hold_audience import guidance
     recovery = describe(conn, task_id)
     stop = recovery['stop']
     cause = str(stop['cause']) if stop else 'no pending stop'
     text = (f" Current stop: {cause}; next guarded candidate: {recovery['next_operation']}. "
-            + recovery['instruction']
+            + recovery['instruction'] + ' ' + guidance(recovery['recorded_authority'])
             + ' Expected actor: the owning chat or an authorized operator, subject to that operation\'s guards. '
             'run_in_user_terminal remains agent-origin; opening a terminal or confirming its command is not '
             'human authentication. Use the original owning chat on its authenticated gateway, not an SSH '

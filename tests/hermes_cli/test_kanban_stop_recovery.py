@@ -76,6 +76,19 @@ def test_renewed_scope_does_not_hide_ordinary_recovery(board, monkeypatch):
     assert recovery.describe(board, tid)['next_operation'] == 'promote'
 
 
+def test_refusal_names_fully_qualified_recorded_owner_not_observers(board):
+    tid = capability_stop(board)
+    scope.link(board, tid, gateway='owner-gateway', profile='default')
+    scope.link(board, tid, gateway='other-gateway', session='observer', kind='shepherd')
+    scope.link(board, tid, gateway='released-gateway', session='released', released=1)
+    out = refused(board, tid)
+    assert out['recovery']['recorded_authority']['chats'] == [
+        {'gateway': 'owner-gateway', 'profile': 'default', 'session': scope.CHAT}]
+    assert f'@session:default@owner-gateway/{scope.CHAT}' in out['message']
+    assert '@session:default@other-gateway/observer' not in out['message']
+    assert '@session:default@released-gateway/released' not in out['message']
+
+
 def test_malformed_stop_never_advises_ordinary_promote(board):
     from hermes_cli import kanban_stop_recovery as recovery
     tid = capability_stop(board)
