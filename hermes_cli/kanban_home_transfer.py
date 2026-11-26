@@ -159,6 +159,10 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
     Refusals roll back this helper even when caught by a caller which commits.
     Outbox drainage is conservative across the entire board, including rejected
     custody and synthetic parents. This does not attest remote receipt/drainage.
+    Persistent schema and custody writers use native outer write_txn: its lazy
+    schema boundary registers later tables atomically or rejects their prepared
+    rows before COMMIT. See kanban_home_schema for the cooperative DDL contract;
+    this helper does not sandbox arbitrary SQLite schema-changing clients.
     """
     if not conn.in_transaction:
         raise ValueError("home preparation requires a write transaction")

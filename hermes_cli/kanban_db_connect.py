@@ -1903,6 +1903,7 @@ def _write_txn_body(conn, allow_nested, boundary):
 
     from hermes_cli import kanban_annotation_mutation as annotation_mutation
     from hermes_cli import kanban_sync_status_origin as status_origin
+    from hermes_cli import kanban_home_schema as home_schema
 
     # [daveey] Dispatch cancellation is a BaseException: a contended COMMIT must still roll back.
     from hermes_cli.kanban_dispatch_storage import DispatchWriteContended as _DispatchWriteContended
@@ -1910,6 +1911,7 @@ def _write_txn_body(conn, allow_nested, boundary):
     boundary.execute("BEGIN IMMEDIATE")
     opt_in = bool(boundary.no_retry or boundary.done is not None)
     try:
+        home_schema_before = home_schema.begin(conn)
         annotation_scope = annotation_mutation.arm(conn)
         _local_status_wake.arm(conn)  # [daveey] record this txn's status changes for the awaited-card wake
         origin_armed = status_origin.arm(conn)
@@ -1928,6 +1930,7 @@ def _write_txn_body(conn, allow_nested, boundary):
     else:
         try:
             status_origin.bind(conn, origin_armed)
+            home_schema_after = home_schema.finish(conn, home_schema_before)
             boundary.execute("COMMIT")
         except (Exception, _DispatchWriteContended):
             # COMMIT exhausted retries with the txn still open; roll back so the
@@ -1946,6 +1949,7 @@ def _write_txn_body(conn, allow_nested, boundary):
             # queue locally; the Board lease falls back to server expiry.
             _run_end_lease.flush(conn, committed=False)
             boundary.raise_pending()
+        home_schema.committed(conn, home_schema_after)
         annotation_mutation.flush(conn, annotation_scope)
         from hermes_cli.fact_source_signal import publish_commit
         publish_commit(_main_db_file(conn))
