@@ -198,12 +198,22 @@ test('the New task form and the drawer store a class requirement, never a concre
     })
 
     await test.step('drawer: back to the profile default clears both columns', async () => {
-      // Exercise a fresh read of the persisted card, independently of the
-      // board's live-refresh subscription (the create producer was checked above).
-      await page.reload()
-      // Reload preserves #/kanban, which has no chat composer. openDrawer waits
-      // for the persisted board card and then the real drawer's model selector.
-      const drawer = await openDrawer(page, NEW_TITLE)
+      // Open through the shipped cross-plugin navigation entry, not the board
+      // list's asynchronous facts projection. This tests the real drawer's
+      // submission, not how soon a newly created card appears in that list.
+      const newId = storedBoard(sandbox)!.cards.find(card => card.title === NEW_TITLE)!.id
+
+      const opened = await page.evaluate(id => {
+        const open = (window as unknown as Record<string, unknown>).__hermesKanbanOpenTask as
+          | ((taskId: string) => boolean)
+          | undefined
+
+        return open?.(id)
+      }, newId)
+
+      expect(opened, 'the installed Kanban navigation hook accepted the persisted card').toBe(true)
+      const drawer = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: NEW_TITLE }) })
+      await expect(drawer, 'the actual drawer opened through the cross-plugin entry').toBeVisible()
       await expect(modelSelect(drawer)).toHaveValue('class:fast')
       await modelSelect(drawer).selectOption('')
 
