@@ -18,6 +18,12 @@ def wait_profile_unowned(profile_dir: Path, *, timeout: float | None = None) -> 
     through ``exclusive_maintenance``); False when it is still held after ``timeout`` seconds."""
     from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
     deadline = time.monotonic() + (OWNER_RELEASE_WAIT_SECONDS if timeout is None else timeout)
+    from hermes_constants import named_profile_is_deleted
+    from hermes_profile_resources import wait_profile_resources
+    if named_profile_is_deleted(profile_dir) and not wait_profile_resources(
+        profile_dir, timeout=max(0, deadline - time.monotonic())
+    ):
+        return False
     while True:
         try:
             with exclusive_maintenance([profile_dir]):

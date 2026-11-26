@@ -231,8 +231,9 @@ class GatewayProfileReconcileMixin:
             from gateway.run_runtime import unpark_profile
             for name in [n for n in self._parked_profile_names() if n not in listed]:
                 unpark_profile(self, name)
-            parked = self._parked_profile_names()
-            # The watcher never re-parks the same profile every cycle; a creator's explicit signal does.
+            parked = self._profiles_still_parked(reason)
+            # Store refusals can clear without config changing (e.g. the last old
+            # WAL owner drains). Retry on the bounded watcher tick, not just restart.
             retry_parked = reason == "control-socket"
             added = [n for n in live if n not in known and n != active and (retry_parked or n not in parked)]
             removed = [n for n in known if n not in live and n != active]
@@ -352,6 +353,15 @@ class GatewayProfileReconcileMixin:
         ``initialize_gateway_runtime`` parks into the same published ``name -> reason`` map."""
         from gateway.run_runtime import parked_profile_map
         return list(parked_profile_map(self))
+
+    def _profiles_still_parked(self, reason: str) -> set[str]:
+        from gateway.run_runtime import parked_profile_map
+        parked = parked_profile_map(self)
+        if reason != 'watcher':
+            return set(parked)
+        # Explicit gateway.parked intent is filtered by profiles_to_serve. Fatal
+        # adapter/config verdicts in this map still require an explicit rescan.
+        return {name for name, why in parked.items() if not why.startswith('session store unusable:')}
 
     async def _multiplex_for_added_profile(self) -> bool:
         """Start multiplexing in place when this gateway booted standalone ONLY because the host had

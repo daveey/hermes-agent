@@ -614,10 +614,13 @@ class SessionDB(
                         data["_branched_from"] = value.strip()
         return data
 
-    @staticmethod
-    def _close_connection_quietly(conn: Optional[sqlite3.Connection]) -> None:
+    def _close_connection_quietly(self, conn: Optional[sqlite3.Connection]) -> None:
         """Close a partially initialized connection without masking its error."""
         if conn is None:
+            return
+        lease = self.__dict__.get('_profile_lease')
+        if lease is not None:
+            lease.close_connection(conn)
             return
         try:
             conn.close()
@@ -697,6 +700,8 @@ class SessionDB(
         # close() releases a refcount; the registry controls physical teardown.
         self._shared_registry_release: Callable[[SessionDB], bool]
         self._shared_registry_owned = False
+        from hermes_profile_resources import lease_for_path
+        self._profile_lease = lease_for_path(self.db_path)
         initialization_complete = False
         try:
             if read_only:
@@ -719,6 +724,8 @@ class SessionDB(
             if not initialization_complete:
                 conn, self._conn = self._conn, None
                 self._close_connection_quietly(conn)
+                if self._profile_lease is not None:
+                    self._profile_lease.release_owner()
             else:
                 # Only a successfully opened handle owns a writer connection. Failed
                 # construction must not leave a diagnostic member behind.
@@ -726,6 +733,8 @@ class SessionDB(
                 # Test-isolation runs only (gated inside the helper): register
                 # for the suite-level leak sweep in tests/conftest.py.
                 _register_test_instance(self)
+                if self._profile_lease is not None:
+                    self._profile_lease.set_owner(self)
 
     def _open_writer(self) -> None:
         """Writable open: preflight, zero-byte quarantine, connect + schema (one in-place repair of a
@@ -929,6 +938,10 @@ class SessionDB(
         if not self._read_budget.acquire(self):
             note_read_pool_exhausted(self.db_path)
             return None
+        lease = self._profile_lease
+        if lease is not None and not lease.retain_reader():
+            self._read_budget.release()
+            return None
         conn = None  # bound before the try so the handlers can close a half-open one
         try:
             conn = self._connect_read_only(timeout=_READ_BUSY_TIMEOUT_S)
@@ -938,7 +951,12 @@ class SessionDB(
             # the leak shape this pool exists to fix; a stranded permit would shrink the read
             # path by one slot forever. (Not _close_read_conn: callers release their own permit.)
             if conn is not None:
-                self._close_conn_logged(conn, "partially-opened read conn")
+                if lease is not None:
+                    lease.close_connection(conn, reader=True)
+                else:
+                    self._close_conn_logged(conn, "partially-opened read conn")
+            elif lease is not None:
+                lease.release_reader()
             self._read_budget.release()
             if not isinstance(exc, sqlite3.Error):
                 raise
@@ -961,7 +979,10 @@ class SessionDB(
         """Close a pooled read connection and release its permit even when the close fails (withholding
         it would narrow the read path forever). Over-releasing the BoundedSemaphore raises ValueError."""
         try:
-            self._close_conn_logged(conn, "read-conn")
+            if self._profile_lease is not None:
+                self._profile_lease.close_connection(conn, reader=True)
+            else:
+                self._close_conn_logged(conn, "read-conn")
         finally:
             self._read_budget.release()
 
@@ -1033,6 +1054,8 @@ class SessionDB(
         set ``_conn = None`` while a worker still had a transcript flush to land).
         Loud (WARNING) and bounded (only after an explicit close()). Caller holds
         ``self._lock``. No _init_schema: no DDL races with siblings during teardown."""
+        if self._profile_lease is not None and self._profile_lease.retired():
+            raise FileNotFoundError(f'Profile resource owner is retired: {self.db_path}')
         if self.read_only:
             raise sqlite3.ProgrammingError(
                 f"SessionDB for {self.db_path} was closed (read-only handle); "
@@ -1051,9 +1074,15 @@ class SessionDB(
             "state.db connection for %s was closed while a %s was still in "
             "flight — reopening (teardown/worker race, #94736)", self.db_path, context,
         )
+        if self._profile_lease is not None:
+            from hermes_profile_resources import lease_for_path
+            self._profile_lease = lease_for_path(self.db_path)
+            self._profile_lease.set_owner(self)
         try:
             self._conn = self._open_writer_conn()
         except Exception as exc:
+            if self._profile_lease is not None:
+                self._profile_lease.release_owner()
             raise sqlite3.OperationalError(
                 f"state.db connection was closed while a {context} was still "
                 f"in flight (a session-teardown path called close() before "
@@ -1771,6 +1800,9 @@ class SessionDB(
                     # Only a clean close ends the generation; retain the recorded
                     # identity when retiring an unsafe handle.
                     self._db_sidecar_identity = {}
+            lease = self.__dict__.get('_profile_lease')
+            if lease is not None and not self._connection_pinned:
+                lease.release_owner()
         self._read_budget.unregister(self)  # idempotent: a never-registered (failed-init) handle is a no-op
 
     def __del__(self) -> None:

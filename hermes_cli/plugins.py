@@ -408,6 +408,8 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         """Scan all plugin sources and load each plugin found; ``force`` unloads first so config
         changes / new bundled backends become visible in long-lived sessions."""
         from agent.safe_worker_policy import safe_worker_enabled
+        from hermes_cli.plugins_profile_lifecycle import assert_manager_live
+        assert_manager_live(self)
 
         if safe_worker_enabled() or plugin_discovery_suppressed():
             # Safe workers never discover; a config-only read of a profile this process must not
@@ -863,6 +865,9 @@ def get_plugin_manager() -> PluginManager:
     profile switch gets its own manager and plugin submodules)."""
     global _plugin_manager
     current_home = _plugin_home_key()
+    from hermes_constants import assert_named_profile_home_live
+    from hermes_cli.plugins_profile_lifecycle import protect_profile_manager
+    assert_named_profile_home_live(current_home)
     with _plugin_managers_lock:
         # Tests/embedders monkeypatch ``_plugin_manager`` directly: adopt a single-slot manager the
         # keyed cache doesn't know about at all.
@@ -875,6 +880,7 @@ def get_plugin_manager() -> PluginManager:
                 manager = PluginManager(scope_key=hermes_home_key(current_home))
                 _plugin_managers_by_home[current_home] = manager
             _plugin_manager = manager
+        protect_profile_manager(manager, current_home)
     _attach_published_gateway_host(manager)
     _attach_published_tui_host(manager)
     return manager
@@ -893,6 +899,9 @@ def _reset_plugin_managers_for_tests() -> None:
                 manager.unload()
             except Exception:
                 logger.debug("test plugin-manager unload failed", exc_info=True)
+            lease = getattr(manager, '_profile_resource_lease', None)
+            if lease is not None:
+                lease.release_owner()
         _plugin_managers_by_home.clear()
         _plugin_manager = None
     with _published_gateway_host_lock:

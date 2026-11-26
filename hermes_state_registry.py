@@ -420,6 +420,27 @@ def close_all_under(directory: str | Path) -> int:
     return closed
 
 
+def retire_resource_owner(db: SessionDB) -> None:
+    """Retire one exact profile generation without closing a same-name replacement.
+
+    Constructor completion precedes shared-registry binding. Wait for that binding
+    before removing the generation; otherwise acquire could publish a closed handle.
+    """
+    path = Path(db.db_path).resolve()
+    with _lock:
+        opening = _opening.get(path)
+    if opening is not None:
+        opening.wait()
+    with _lock:
+        generation = _generations.get(path)
+        if generation is not None and generation.db is db:
+            del _generations[path]
+            generation.retired = True
+        _retired.pop(id(db), None)
+        barrier = _admit_teardown_locked(path)
+    _teardown_generation(path, db, barrier=barrier)
+
+
 def _release_header_probes_under(root: Path) -> None:
     """Without this, a probe fd stays open until exit: one per profile a multiplexed gateway ever
     served. Invariant: a probe is never closed while another descriptor in this process holds its
@@ -431,15 +452,17 @@ def _release_header_probes_under(root: Path) -> None:
     the scan and the close is not covered."""
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
     from hermes_state_dbfile import (
-        close_header_probe_if_unchanged, header_probes_under, inodes_with_other_descriptors,
+        close_header_probe_if_unchanged, all_header_probes_under, inodes_with_other_descriptors,
     )
 
-    candidates: dict[str, tuple[Path, tuple[int, int, int]]] = {}
-    for key, entry in header_probes_under(root).items():
+    candidates: dict[tuple[str, int], tuple[Path, tuple[int, int, int]]] = {}
+    for key, entry in all_header_probes_under(root):
+        if entry[1] < 0 or entry[2] < 0:
+            continue  # identity could not be read: closing cannot be proved lock-safe
         try:
-            candidates[key] = (Path(key).resolve(), entry)
+            candidates[(key, entry[0])] = (Path(key).resolve(), entry)
         except OSError:
-            candidates[key] = (Path(key), entry)
+            candidates[(key, entry[0])] = (Path(key), entry)
     if not candidates:
         return
     with _lock:
@@ -450,7 +473,7 @@ def _release_header_probes_under(root: Path) -> None:
         held_elsewhere = inodes_with_other_descriptors({entry[1:] for _path, entry in candidates.values()})
         if held_elsewhere is None:
             return  # descriptor table unreadable: unknown is unsafe
-        for key, (path, entry) in candidates.items():
+        for (key, _fd), (path, entry) in candidates.items():
             if entry[1:] in held_elsewhere:
                 continue
             try:

@@ -706,6 +706,9 @@ class PluginLoaderMixin:
         """This manager's plugin host (one process per profile home), created on first use. Creation
         is atomic, so concurrent first callers share one host (which starts its process once); a
         failed creation stores nothing, and the next caller tries again."""
+        from hermes_cli.plugins_profile_lifecycle import protect_profile_manager, assert_manager_live
+        protect_profile_manager(self, self.home_path)
+        assert_manager_live(self)
         host = getattr(self, "_plugin_host_instance", None)
         if host is None:
             from hermes_cli.plugin_host import PluginHost

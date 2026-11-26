@@ -79,7 +79,7 @@ _HEADER_PROBE_LOCK = threading.Lock()
 # cycle in the rare contend-with-GC case; this path is unserve / delete / restore, never a hot path.
 _HEADER_PROBE_LOCK_TIMEOUT = 0.1
 _HEADER_PROBE_FDS: dict[str, tuple[int, int, int]] = {}  # key -> (fd, dev, ino)
-_RETIRED_HEADER_PROBE_FDS: list[int] = []  # intentionally never closed
+_RETIRED_HEADER_PROBE_FDS: dict[int, tuple[str, int, int]] = {}  # fd -> (path, dev, ino)
 _FTS_TABLE_NAMES = ("messages_fts", "messages_fts_trigram")
 
 
@@ -102,17 +102,20 @@ def _pread_db_range(db_path: Path, offset: int, length: int) -> Optional[bytes]:
         cached = _HEADER_PROBE_FDS.get(key)
         if cached is not None and (cached[1], cached[2]) != (st.st_dev, st.st_ino):
             # Path re-pointed at a new file. Retire (never close) the old fd.
-            _RETIRED_HEADER_PROBE_FDS.append(_HEADER_PROBE_FDS.pop(key)[0])
+            old = _HEADER_PROBE_FDS.pop(key)
+            _RETIRED_HEADER_PROBE_FDS[old[0]] = (key, old[1], old[2])
             cached = None
         if cached is None:
             try:
+                from hermes_profile_resources import protect_profile_probes
+                protect_profile_probes(Path(key))
                 fd = os.open(db_path, os.O_RDONLY)
             except OSError:
                 return None
             try:
                 fst = os.fstat(fd)
             except OSError:
-                _RETIRED_HEADER_PROBE_FDS.append(fd)
+                _RETIRED_HEADER_PROBE_FDS[fd] = (key, -1, -1)  # unknown identity: never acknowledge it closed
                 return None
             cached = _HEADER_PROBE_FDS[key] = (fd, fst.st_dev, fst.st_ino)
         with contextlib.suppress(OSError):
@@ -125,6 +128,14 @@ def header_probes_under(root: Path) -> dict[str, tuple[int, int, int]]:
     with _HEADER_PROBE_LOCK:
         entries = dict(_HEADER_PROBE_FDS)
     return {key: entry for key, entry in entries.items() if path_is_under(Path(key), root)}
+
+
+def all_header_probes_under(root: Path) -> list[tuple[str, tuple[int, int, int]]]:
+    """Include retired inodes: a pathname replacement must not hide an old descriptor."""
+    with _HEADER_PROBE_LOCK:
+        entries = list(_HEADER_PROBE_FDS.items())
+        entries.extend((key, (fd, dev, ino)) for fd, (key, dev, ino) in _RETIRED_HEADER_PROBE_FDS.items())
+    return [(key, entry) for key, entry in entries if path_is_under(Path(key), root)]
 
 
 def inodes_with_other_descriptors(identities: set[tuple[int, int]]) -> Optional[set[tuple[int, int]]]:
@@ -155,6 +166,22 @@ def inodes_with_other_descriptors(identities: set[tuple[int, int]]) -> Optional[
     return {ident for fd, ident in descriptors if fd not in probe_fds and ident in identities}
 
 
+def close_probe_descriptor(fd: int, identity: tuple[int, int]) -> None:
+    """A previous failed close may already have released/recycled its fd number.
+
+    Retry only while the concrete inode still matches; never close a different
+    resource that inherited that number. A still-open failed close keeps custody.
+    """
+    try:
+        stat = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            return
+        raise
+    if (stat.st_dev, stat.st_ino) == identity:
+        os.close(fd)
+
+
 def close_header_probe_if_unchanged(key: str, expected: tuple[int, int, int]) -> bool:
     """False, and the fd stays, when the entry changed since the caller checked it, or when the
     probe lock cannot be taken within ``_HEADER_PROBE_LOCK_TIMEOUT`` seconds.
@@ -169,11 +196,15 @@ def close_header_probe_if_unchanged(key: str, expected: tuple[int, int, int]) ->
             key, _HEADER_PROBE_LOCK_TIMEOUT)
         return False
     try:
-        if _HEADER_PROBE_FDS.get(key) != expected:
+        current = _HEADER_PROBE_FDS.get(key) == expected
+        retired = _RETIRED_HEADER_PROBE_FDS.get(expected[0]) == (key, expected[1], expected[2])
+        if not current and not retired:
             return False
-        del _HEADER_PROBE_FDS[key]
-        with contextlib.suppress(OSError):
-            os.close(expected[0])
+        close_probe_descriptor(expected[0], expected[1:])
+        if current:
+            del _HEADER_PROBE_FDS[key]
+        else:
+            del _RETIRED_HEADER_PROBE_FDS[expected[0]]
     finally:
         _HEADER_PROBE_LOCK.release()
     return True

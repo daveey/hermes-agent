@@ -428,9 +428,10 @@ def offline_file_access(path: Path | str, *, what: str = "read"):
 # life of the process and never closed (opening cannot cancel locks; closing can), so they are
 # safe whatever connections exist.
 # ---------------------------------------------------------------------------------------------
-_PREAD_LOCK = threading.Lock()
+_PREAD_LOCK = threading.RLock()
 _PREAD_FDS: dict[str, tuple[int, int, int]] = {}  # path -> (fd, st_dev, st_ino)
 _RETIRED_PREAD_FDS: list[int] = []  # superseded inodes: closed only once unlinked (see sweep)
+_RETIRED_PREAD_PATHS: dict[int, tuple[str, int, int]] = {}
 # Header-heavy session captures must not fstat the entire process inventory on
 # every read. Reclaim main-file fds on the next read after this monotonic
 # deadline; sidecar/retired fds and explicit release/inventory calls stay eager.
@@ -465,6 +466,7 @@ def _release_unlinked_locked(*, sidecars_only: bool = False) -> None:
     keep: list[int] = []
     for fd in _RETIRED_PREAD_FDS:
         if _fd_is_unlinked(fd):
+            _RETIRED_PREAD_PATHS.pop(fd, None)
             try:
                 os.close(fd)
             except OSError:
@@ -488,6 +490,41 @@ def lock_safe_fds() -> frozenset[int]:
         return frozenset([entry[0] for entry in _PREAD_FDS.values()] + _RETIRED_PREAD_FDS)
 
 
+def release_profile_pread_fds(home: Path) -> bool:
+    """Drain raw probes before a tombstoned profile is removed, without cancelling SQLite locks."""
+    from hermes_state_common import path_is_under
+    from hermes_state_dbfile import inodes_with_other_descriptors
+
+    # Never wait under the global lifecycle mutex for an unrelated large hash.
+    with _live_lock:
+        if not _PREAD_LOCK.acquire(blocking=False):
+            return False
+        try:
+            return _release_profile_pread_fds_locked(home, path_is_under, inodes_with_other_descriptors)
+        finally:
+            _PREAD_LOCK.release()
+
+
+def _release_profile_pread_fds_locked(home, path_is_under, inodes_with_other_descriptors):
+    from hermes_state_dbfile import close_probe_descriptor
+    entries = {key: entry for key, entry in _PREAD_FDS.items() if path_is_under(Path(key), home)}
+    retired = {fd: _RETIRED_PREAD_PATHS[fd] for fd in _RETIRED_PREAD_FDS
+               if fd in _RETIRED_PREAD_PATHS and path_is_under(Path(_RETIRED_PREAD_PATHS[fd][0]), home)}
+    identities = {entry[1:] for entry in entries.values()}
+    identities.update(entry[1:] for entry in retired.values())
+    held = inodes_with_other_descriptors(identities)
+    if held is None or held:
+        return False
+    for key, entry in entries.items():
+        close_probe_descriptor(entry[0], entry[1:])
+        del _PREAD_FDS[key]
+    for fd, entry in retired.items():
+        close_probe_descriptor(fd, entry[1:])
+        _RETIRED_PREAD_FDS.remove(fd)
+        _RETIRED_PREAD_PATHS.pop(fd, None)
+    return True
+
+
 def _pread_fd(path: Path | str) -> Optional[tuple[int, os.stat_result]]:
     global _PREAD_NEXT_SWEEP
     key = str(path)
@@ -496,6 +533,10 @@ def _pread_fd(path: Path | str) -> Optional[tuple[int, os.stat_result]]:
     except OSError:
         return None
     with _PREAD_LOCK:
+        from hermes_constants import named_profile_home, named_profile_is_deleted
+        home = named_profile_home(path)
+        if home is not None and named_profile_is_deleted(home):
+            return None  # retired raw probes must not be re-opened by a background poll
         now = _pread_sweep_now()
         if now >= _PREAD_NEXT_SWEEP:
             _release_unlinked_locked()
@@ -507,10 +548,13 @@ def _pread_fd(path: Path | str) -> Optional[tuple[int, os.stat_result]]:
             _release_unlinked_locked(sidecars_only=True)
         cached = _PREAD_FDS.get(key)
         if cached is not None and (cached[1], cached[2]) != (st.st_dev, st.st_ino):
+            _RETIRED_PREAD_PATHS[cached[0]] = (key, cached[1], cached[2])
             _RETIRED_PREAD_FDS.append(_PREAD_FDS.pop(key)[0])  # closed by the sweep once unlinked
             cached = None
         if cached is None:
             try:
+                from hermes_profile_resources import protect_profile_probes
+                protect_profile_probes(Path(key))
                 fd = os.open(key, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
                 fst = os.fstat(fd)
             except OSError:
@@ -528,13 +572,14 @@ def pread_lock_safe(path: Path | str, offset: int, length: int) -> Optional[byte
 def pread_lock_safe_stat(path: Path | str, offset: int, length: int) -> Optional[tuple[bytes, os.stat_result]]:
     """:func:`pread_lock_safe` plus the ``fstat`` of the descriptor the bytes came from, so the
     two always describe the same file even when the path is replaced during the call."""
-    entry = _pread_fd(path)
-    if entry is None:
-        return None
-    try:
-        return os.pread(entry[0], length, offset), os.fstat(entry[0])
-    except OSError:
-        return None
+    with _PREAD_LOCK:
+        entry = _pread_fd(path)
+        if entry is None:
+            return None
+        try:
+            return os.pread(entry[0], length, offset), os.fstat(entry[0])
+        except OSError:
+            return None
 
 
 def read_header_lock_safe(path: Path | str, length: int = 100) -> Optional[bytes]:
@@ -544,21 +589,22 @@ def read_header_lock_safe(path: Path | str, length: int = 100) -> Optional[bytes
 
 def sha256_lock_safe(path: Path | str, chunk: int = 1024 * 1024) -> Optional[str]:
     """sha256 of *path* via lock-safe preads, or ``None`` when unreadable."""
-    entry = _pread_fd(path)
-    if entry is None:
-        return None
-    digest = hashlib.sha256()
-    offset = 0
-    try:
-        while True:
-            data = os.pread(entry[0], chunk, offset)
-            if not data:
-                break
-            digest.update(data)
-            offset += len(data)
-    except OSError:
-        return None
-    return digest.hexdigest()
+    with _PREAD_LOCK:
+        entry = _pread_fd(path)
+        if entry is None:
+            return None
+        digest = hashlib.sha256()
+        offset = 0
+        try:
+            while True:
+                data = os.pread(entry[0], chunk, offset)
+                if not data:
+                    break
+                digest.update(data)
+                offset += len(data)
+        except OSError:
+            return None
+        return digest.hexdigest()
 
 
 def copy_file_out_of_process(src: Path | str, dst: Path | str, timeout: float = 120.0) -> bool:

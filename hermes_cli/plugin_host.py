@@ -142,6 +142,8 @@ class PluginHost:
 
     def ensure_started(self) -> Channel:
         with self._lock:
+            from hermes_cli.plugins_profile_lifecycle import assert_manager_live
+            assert_manager_live(self._manager)
             if self.alive:
                 return self._channel  # type: ignore[return-value]
             self._stopping = False
