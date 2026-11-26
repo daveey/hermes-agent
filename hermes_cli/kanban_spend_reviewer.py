@@ -310,7 +310,6 @@ def _due(conn: sqlite3.Connection, now: int, skip) -> list[tuple[str, str, int]]
 
 def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
     """Queue the backlog and start every due review this process has room for. Returns started task ids."""
-    from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_spend_review_request as journal
     cfg = settings()
@@ -348,15 +347,41 @@ def start_due(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[st
             if (db, task_id) in _INFLIGHT:
                 continue
             _INFLIGHT.add((db, task_id))
+        _start_reserved(conn, db, task_id, episode, attempts, now)
+        started.append(task_id)
+    return started
+
+
+def _start_reserved(conn, db: str, task_id: str, episode: str, attempts: int, now: int) -> None:
+    """Transfer the reserved slot to the target, or cancel it even on dispatch write contention."""
+    from hermes_cli import kanban_db as kb
+    entered = cancelled = handed_off = False
+    thread = None
+
+    def target():
+        nonlocal entered
+        with _LOCK:
+            if cancelled:
+                return  # start may raise while a native thread is still waiting to enter
+            entered = True
+        _run(db, task_id, episode)
+
+    try:
         with kb.write_txn(conn):
             kb._append_event(conn, task_id, STARTED, {"episode": episode, "attempt": attempts + 1,
                                                       "deadline": now + LEASE_SECONDS})
-        thread = threading.Thread(target=contextvars.copy_context().run, args=(_run, db, task_id, episode),
+        thread = threading.Thread(target=contextvars.copy_context().run, args=(target,),
                                   name=f"spend-review-{task_id}", daemon=True)
         thread.start()
-        _THREADS.append(thread)
-        started.append(task_id)
-    return started
+        handed_off = True
+    finally:
+        with _LOCK:
+            if not handed_off and not entered:
+                cancelled = True
+                _INFLIGHT.discard((db, task_id))
+            elif thread is not None:
+                # An interrupted start does not revoke a target already doing work.
+                _THREADS.append(thread)
 
 
 def wait_for_reviews(timeout: float = TIMEOUT + 30) -> None:
