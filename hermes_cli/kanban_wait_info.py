@@ -221,6 +221,47 @@ def producer_from_wake_check(cmd: Any) -> Optional[tuple[str, str]]:
     return "probe", "shell check"
 
 
+PREREQUISITE_MAX = 500
+WATCHED_MAX = 8
+
+
+def watched_cards(cmd: Any) -> list[str]:
+    """Every card id a wake check reads, in order, at most WATCHED_MAX: the producers an event watch waits on."""
+    if not isinstance(cmd, str):
+        return []
+    return list(dict.fromkeys(_TASK_ID.findall(cmd)))[:WATCHED_MAX]
+
+
+def park_semantics(awaited: Optional[dict], wake_check: Any, wake_at: Any) -> dict[str, Any]:
+    """What a scheduled park waits FOR, apart from when it is next checked. Only recorded facts, and only the
+    keys that have one: ``prerequisite`` (the parker's own ``awaiting.why``; never core's inferred guess),
+    ``watching`` (card ids the wake check reads), ``next_actor`` (who or what ends the wait) and ``backstop_at``
+    (the wake time, when a watched producer or probe is expected to end the wait first)."""
+    out: dict[str, Any] = {}
+    why = " ".join(str((awaited or {}).get("why") or "").split()) if awaited and not awaited.get("inferred") else ""
+    if why:
+        out["prerequisite"] = why[:PREREQUISITE_MAX]
+    cards = watched_cards(wake_check)
+    found = producer_from_wake_check(wake_check)
+    kind = (awaited or {}).get("kind")
+    wake = epoch_s(wake_at)
+    if kind in ("card", "ci", "deploy", "external", "resource") and (awaited or {}).get("ref"):
+        out["next_actor"] = _awaiting_label(awaited)  # type: ignore[arg-type]
+    elif kind == "chat":
+        out["next_actor"] = "the owning chat"
+    elif cards:
+        out["watching"] = cards
+        out["next_actor"] = ("card " if len(cards) == 1 else "cards ") + ", ".join(cards) + " (event watch)"
+    elif found:
+        out["next_actor"] = f"{found[0]} {found[1]} (condition check)"
+    elif kind == "clock" or wake is not None:
+        out["next_actor"] = "the clock (timed check)"
+        wake = None  # the clock is the producer here, not a backstop behind one
+    if wake is not None and out.get("next_actor") and kind in (None, "clock"):
+        out["backstop_at"] = wake
+    return out
+
+
 def _norm(text: Any) -> str:
     """Reason text without volatile parts (uuids, hex ids, numbers, whitespace), for the premise hash."""
     s = str(text or "").lower()
@@ -353,6 +394,8 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
         if eta:  # only a ci / deploy / clock park carries the ETA fields
             target = wait_target(eta, (awaited or {}).get("ref"))
             info.update(eta_fields(eta, since_s, wake_at=wake_at, target=target), wait_target=target)
+        if state_kind in ("scheduled", "scheduled:probe"):
+            info.update(park_semantics(awaited, payload.get("wake_check"), wake_at))
         return info
 
     attention = _human_attention(status, human, payload, since_s)
@@ -397,7 +440,7 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
         if awaited["kind"] == "clock":
             # A declared window (a soak, a cooldown, a release slot): the clock produces it.
             label = _clock_label(wake_at) if wake_at else "a declared window"
-            return out("scheduled", label + (f" ({awaited['why'][:200]})" if awaited["why"] else ""), False,
+            return out("scheduled", label + (f" ({awaited['why'][:80]})" if awaited["why"] else ""), False,
                        eta="clock")
         return out("scheduled:no_producer", f"{awaited['kind'] or 'something'} with no named producer", True)
     found = producer_from_wake_check(payload.get("wake_check"))

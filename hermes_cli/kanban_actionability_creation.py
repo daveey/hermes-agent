@@ -70,7 +70,7 @@ def intent_for(task, kind, payload, *, now):
         reason = 'trigger_missing'
     row = project({'task': task, 'source_at': now, 'wake_at': wake,
                    'deadline_at': deadline, 'human_step': human, 'dependencies': dependencies,
-                   'awaiting': payload.get('awaiting'), 'probe': _text(payload.get('wake_check'))}, now=now)
+                   'awaiting': payload.get('awaiting'), 'probe': _text(payload.get('wake_check'))}, now=now, frozen=True)
     return {'version': 1, 'policy': 'scheduled-wake-grace-v1' if timed else 'blocked-admin-review-v1',
             'status': status, 'source_kind': kind, 'owner': row['owner'],
             'action': row['action'], 'instruction': row['instruction'], 'blocker': row['blocker'],

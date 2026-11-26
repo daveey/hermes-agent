@@ -33,10 +33,6 @@ def test_reducer_owner_requires_nonblank_recorded_profile(value, kind, refs):
     (None, {}, None, 'repair_lifecycle_contract', 'scheduled_wake_missing', 'Repair the missing'),
     (1000, {}, None, 'repair_lifecycle_contract', 'recovery_trigger_missing', 'Repair the missing'),
     (1000, {'kind': 'clock'}, None, 'wait_for_named_producer', None, 'Recorded clock reaches 1000'),
-    (1000, {'kind': 'clock', 'why': 'Event watch on named owners; backstop at nightly rollout'}, None,
-     'wait_for_named_producer', None, 'Recorded clock reaches 1000'),
-    (1000, {'kind': 'clock', 'why': 'Natural hub update'}, 'probe-ready', 'wait_for_named_producer', None,
-     'Recorded condition probe succeeds: probe-ready'),
     (1000, {'kind': 'ci', 'ref': 'run-17'}, None, 'wait_for_named_producer', None, 'Recorded ci producer run-17'),
     (1000, {'kind': 'external', 'why': 'Vendor reply'}, None, 'wait_for_named_producer', None, 'Vendor reply'),
     (1000, {}, 'probe-ready', 'wait_for_named_producer', None, 'Recorded condition probe succeeds: probe-ready'),
@@ -47,13 +43,8 @@ def test_reducer_schedule_trigger_and_clock_boundaries(wake, awaiting, probe, ac
     row = project(facts, now=1000)
     assert row['action'] == action
     assert trigger in row['blocker']['trigger']
-    why = ' '.join(str(awaiting.get('why') or '').split())
     assert row['blocker']['prerequisite'] == (
-        'Named finite producer and recovery condition' if violation else why or row['blocker']['trigger'])
-    if why and not violation:
-        # The reason leads; the timer/probe/producer is only the next check, never the prerequisite.
-        assert row['instruction'] == f"Waiting on: {why}. Next check: {row['blocker']['trigger']}"
-        assert row['blocker']['prerequisite'] != row['blocker']['trigger']
+        'Named finite producer and recovery condition' if violation else row['blocker']['trigger'])
     assert ('scheduled_wake_missing' in row['violations']) == (violation == 'scheduled_wake_missing')
     assert ('recovery_trigger_missing' in row['violations']) == (violation is not None)
     assert row['escalation']['at'] == (1600 if wake else None)

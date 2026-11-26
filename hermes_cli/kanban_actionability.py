@@ -174,16 +174,36 @@ def _schedule(row: dict, facts: dict, now: int) -> None:
     _block(row, trigger or 'Named finite producer and recovery condition',
            trigger or 'Repair the missing wake/producer through existing scheduling APIs',
            action='repair_lifecycle_contract' if row['violations'] else 'wait_for_named_producer')
-    # The producer's own words say what the park waits FOR; the clock/probe/producer trigger is only the next
-    # check. Keep them apart so a timer never stands in for the prerequisite.
+
+
+def _name_reason(row: dict, facts: dict) -> None:
+    """A park's recorded `awaiting.why` is what it waits FOR; the clock/probe/producer trigger is only the next
+    check, so a timer never stands in for the prerequisite. Read-time only: a frozen creation intent keeps the
+    trigger-only wording, or every stored intent would stop matching its recomputation."""
+    blocker = row.get('blocker')
+    if row['status'] != 'scheduled' or not blocker or row['action'] not in (
+            'wait_for_named_producer', 'satisfy_dependency', 'repair_lifecycle_contract'):
+        return
+    awaiting = facts.get('awaiting')
+    if not isinstance(awaiting, dict) or not valid_awaiting(awaiting):
+        return
     why = ' '.join(str(awaiting.get('why') or '').split())
-    if why and trigger:
-        row['blocker']['prerequisite'] = why
-        row['instruction'] = f'Waiting on: {why}. Next check: {trigger}'
+    trigger = blocker['trigger']
+    if not why or why in trigger or trigger.startswith('Repair the missing'):
+        return  # nothing recorded, no trigger to pair it with, or the trigger already is the reason (a chat question)
+    wake = positive_time(facts.get('wake_at'))
+    backstop = (f'; backstop: recorded clock reaches {wake}'
+                if wake and awaiting.get('kind') == 'clock' and 'clock reaches' not in trigger else '')
+    if row['action'] == 'satisfy_dependency':
+        blocker['prerequisite'] = f"{why}; parents: {blocker['prerequisite']}"
+    else:
+        blocker['prerequisite'] = why
+    row['instruction'] = f'Waiting on: {why}. Next check: {trigger}{backstop}'
 
 
-def project(facts: dict, *, now: int) -> dict:
-    """Project only supplied facts. `now` affects overdue display, never identity/deadline."""
+def project(facts: dict, *, now: int, frozen: bool = False) -> dict:
+    """Project only supplied facts. `now` affects overdue display, never identity/deadline. `frozen` is the
+    byte-stable form a creation intent stores (no recorded-reason wording)."""
     task = facts['task']
     identity = {key: facts.get(key) for key in ('source_uid', 'stop_episode', 'containment',
                                               'administrative_owner')}
@@ -211,6 +231,8 @@ def project(facts: dict, *, now: int) -> dict:
            'dependencies': facts.get('dependencies', []), 'first_observed': first,
            'materialization': 'source_derived'}
     _status(row, facts, now)
+    if not frozen:
+        _name_reason(row, facts)
     if task['status'] not in NONTERMINAL:
         row['violations'] = []
         row['escalation'].update(at=None, state='not_applicable')
