@@ -65,7 +65,7 @@ def test_interactive_session_with_same_shape_keeps_obligation(env):
 
 def test_placeholder_session_obligation_is_not_added(env, monkeypatch):
     from hermes_cli import kanban_placement
-    monkeypatch.setattr(kanban_placement, "is_placeholder_session", lambda s: s == "placeholder")
+    monkeypatch.setattr(kanban_placement, "is_placeholder_session", lambda s, **kwargs: s == "placeholder")
     parity.replica(env, [], [])
     env["ledger"].append(obligation(session="placeholder"))
     parity.assert_parity("placeholder", expect=0)
@@ -168,3 +168,30 @@ def test_compressed_alias_deduplicates_qualified_origin_and_replica(env):
                    [("t_adopted", "root", "created", 0)], board="build")
     env["ledger"].append(obligation(session="tip", origin_session="root"))
     parity.assert_parity("root", "tip", expect=1)
+
+
+def test_obligation_placeholder_policy_loaded_once_per_call(env, monkeypatch):
+    from hermes_cli import config, kanban_origin_obligations as obligations
+
+    loads = []
+    placeholder = ['hidden']
+
+    def read_policy():
+        loads.append(1)
+        return {'kanban': {'placement': {'creator_session': placeholder[0]}}}
+
+    monkeypatch.setattr(config, 'load_config_readonly', read_policy)
+    rows = [obligation(id=f't_{i}', session='hidden' if i == 0 else 'chat') for i in range(100)]
+
+    def read(inventory):
+        return obligations.preserve_origin_obligations([], iter(inventory), gateway='macbook',
+            profile='default', ids=None, statuses=('running',))
+
+    result = read(rows)
+    assert len(result) == 99
+    assert len(loads) == 1, 'one placement policy snapshot, not one full config load per obligation'
+    placeholder[0] = 'chat'
+    assert len(read(rows)) == 1, 'a subsequent call observes changed placeholder policy'
+    assert len(loads) == 2
+    assert read([obligation(released=True), obligation(origin_gateway='elsewhere')]) == []
+    assert len(loads) == 2, 'filtered-only inventory must not load placement policy'

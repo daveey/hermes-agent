@@ -31,8 +31,9 @@ def preserve_origin_obligations(selected: list[dict[str, Any]], ledger: Iterable
                                 gateway: str, profile: str, ids: list[str] | None,
                                 statuses: tuple[str, ...]) -> list[dict[str, Any]]:
     from hermes_cli.kanban_db_notify import is_machine_session
-    from hermes_cli.kanban_placement import is_placeholder_session
+    from hermes_cli.kanban_placement import config, is_placeholder_session
 
+    placement_config = None
     out = list(selected)
     seen = {(c.get("session"), c.get("gateway"), c.get("profile"), c.get("board"), c.get("id")) for c in out}
     fields = ("session", "gateway", "profile", "board", "id")
@@ -54,7 +55,10 @@ def preserve_origin_obligations(selected: list[dict[str, Any]], ledger: Iterable
             continue
         # Same rule as ``kanban_chat_links._ledger_links``: no chat custody for placeholder or machine
         # (worker/cron/one-shot/subagent) transcripts, so their ledger rows are not chat obligations.
-        if is_placeholder_session(card["session"]) or is_machine_session(
+        # Snapshot lazily after eligibility filtering, not once per obligation.
+        if placement_config is None:
+            placement_config = config()
+        if is_placeholder_session(card["session"], placement_config=placement_config) or is_machine_session(
                 gateway, card["session"], local_gateway=gateway, profile=card.get("origin_profile")):
             continue
         seen.add(identity)
