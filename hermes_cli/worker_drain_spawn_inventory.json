@@ -920,6 +920,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/update_bytecode.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/update_cmd_maint.py": {
    "direct": 1,
    "routed": 0,

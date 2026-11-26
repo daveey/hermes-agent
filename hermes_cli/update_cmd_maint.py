@@ -819,6 +819,13 @@ def _sweep_bytecode_after_update(branch: str) -> None:
         _m()._record_bytecode_fingerprint()
     except Exception as exc:  # health: allow BLE001 -- owed to the next launch's fingerprint sweep
         record_followup("bytecode_sweep", str(exc) or type(exc).__name__)
+    else:
+        # Warming is optional, distinct from successful stale-bytecode invalidation.
+        try:
+            from hermes_cli.update_bytecode import precompile_checkout
+            precompile_checkout(root)
+        except Exception as exc:  # health: allow BLE001 -- optional optimization must never fail a committed update
+            print(f"  ⚠ Bytecode warming skipped: {type(exc).__name__}")
     try:
         _m()._refresh_bootstrap_cache_scripts(branch)
     except Exception as exc:  # health: allow BLE001 -- refreshed again by the next update
