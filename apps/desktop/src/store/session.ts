@@ -2,6 +2,7 @@ import type { ConnectionState } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import { setApiRequestLocalMode } from '@/api/client'
+import { rememberRowTimers } from '@/app/chat/sidebar/session-row-timer-memory'
 import { lastVisibleMessageIsUser } from '@/app/chat/thread-loading'
 import type { ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
@@ -1528,6 +1529,11 @@ export const setConnection = (next: Updater<HermesConnection | null>) => {
   }
 
   rescopeComposerSelection(composerScopeForConnection($connection.get()))
+}
+
+// Timer retention must see known-empty reads even while the row is unmounted (virtualized list).
+for (const list of [$sessions, $cronSessions, $messagingSessions]) {
+  list.listen(rows => rows.forEach(rememberRowTimers))
 }
 
 export const setGatewayState = (next: Updater<ConnectionState>) => updateAtom($gatewayState, next)

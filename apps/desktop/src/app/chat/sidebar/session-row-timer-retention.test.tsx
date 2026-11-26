@@ -3,7 +3,9 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
 import { I18nProvider } from '@/i18n'
+import { setSessions } from '@/store/session'
 
+import { flatRowCardMarks } from './session-row-card-squares'
 import { SessionRowCardTimers } from './session-row-card-timers'
 
 const NOW = 1_800_000_000
@@ -80,4 +82,28 @@ it('does not extend last confirmation on local authoritative-row ticks', () => {
   expect(ui.container.querySelectorAll('[data-card-timer]')).toHaveLength(2)
   act(() => vi.advanceTimersByTime(10_000))
   expect(ui.container.querySelector('[data-card-timer]')).toBeNull()
+})
+
+it('shows retained timers through the flat row marks of a single-connection unknown row', () => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+  const first = render(view(row({ kanban_observed_at: NOW, kanban_timed_cards: cards })))
+  first.unmount()
+
+  const flat = render(
+    <I18nProvider configClient={null} initialLocale="en">
+      {flatRowCardMarks(row({ kanban_unknown: true }), 0, null)}
+    </I18nProvider>
+  )
+
+  expect(flat.container.querySelectorAll('[data-card-timer]')).toHaveLength(2)
+})
+
+it('a known-empty list read clears retention while the row is unmounted', () => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+  const first = render(view(row({ kanban_observed_at: NOW, kanban_timed_cards: cards })))
+  first.unmount()
+  act(() => setSessions([row({ kanban_observed_at: NOW + 1 })]))
+  const next = render(view(row({ kanban_unknown: true })))
+  expect(next.container.querySelector('[data-card-timer]')).toBeNull()
+  act(() => setSessions([]))
 })

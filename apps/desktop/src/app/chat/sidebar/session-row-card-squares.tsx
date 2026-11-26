@@ -14,6 +14,7 @@ import { sidebarCardWork } from '@/store/sidebar-card-work'
 
 import { CardCountsContext } from './card-counts-context'
 import { SessionRowCardTimers } from './session-row-card-timers'
+import { rowTimers } from './session-row-timer-memory'
 import { useWaitClock } from './use-wait-clock'
 
 const COLOURS = {
@@ -190,7 +191,7 @@ export function flatRowCardMarks(
   const readouts = !counts && statusStripe === 'external' ? sessionWaitEtas(session, Date.now() / 1000) : []
   const colours = counts ? backgroundCardColours(session) : trailingColours(session, executionUnknown)
 
-  if (!gatewayIcon && !readouts.length && !colours.length && !session.kanban_timed_cards?.length) {
+  if (!gatewayIcon && !readouts.length && !colours.length && !rowTimers(session).cards.length) {
     return null
   }
 
