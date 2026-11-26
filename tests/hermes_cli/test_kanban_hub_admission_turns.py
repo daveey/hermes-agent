@@ -97,7 +97,9 @@ def test_a_waiting_turn_makes_the_next_claim_defer_without_sampling(board, monke
         assert kb.claim_task(conn, t) is None
         assert kb.get_task(conn, t).status == "ready"
         assert conn.execute("SELECT count(*) FROM task_runs").fetchone()[0] == 0
-        assert sync.pop_claim_deferral(t) is None  # an ordinary busy-lock defer, not a gate refusal
+        # Publish the actual waiting-turn cause without changing admission or opening a run.
+        assert sync.pop_claim_deferral(t) == 'turn_admission_waiting'
+        assert sync.pop_claim_deferral(t) is None  # one-shot diagnostic, not a retained hold
     assert not af.turns_waiting(home / "core-update")
     locked(monkeypatch, slow_sample(threading.Event(), hold_s=0))
     assert kb.claim_task(conn, t) is not None

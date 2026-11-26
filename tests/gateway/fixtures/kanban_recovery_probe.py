@@ -27,9 +27,11 @@ def dispatch_started(conn, tid):
         return result
     # Only the typed admission-lock refusal is repeatable, never a failed/guarded
     # spawn or a lost attempt. The reservation publisher can still own the flock.
+    assert result.claim_deferred in (
+        [(tid, 'update_admission_busy')], [(tid, 'turn_admission_waiting')]), result
     assert result == dispatch.DispatchResult(
         scheduling_admitted=True, lane_candidates=1,
-        claim_deferred=[(tid, 'claim_not_acquired')]), result
+        claim_deferred=result.claim_deferred), result
     task = kb.get_task(conn, tid)
     assert task is not None and task.status == 'ready' and task.current_run_id is None, task
     return None
