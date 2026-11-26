@@ -1791,3 +1791,50 @@ describe('knownSessionOwner', () => {
     expect(knownSessionOwner([], 'hidden-session')).toEqual(owner)
   })
 })
+
+describe('owner-qualified session identity (same id on two gateways)', () => {
+  const owned = (gateway: string, over: Partial<SessionInfo> = {}) =>
+    session({
+      id: 'kanban_owner_terminal',
+      outcome: { kind: 'done', status: { identity: { gateway, owner_epoch: 'e', profile: 'default', session_id: 'kanban_owner_terminal' } } },
+      profile: 'default',
+      ...over
+    })
+
+  it('keeps both rows and never stitches one owner’s title onto the other, in both orders', () => {
+    const a = owned('gw-a', { connection_id: 'conn-a', last_active: 50, title: 'A work' })
+    const b = owned('gw-b', { connection_id: 'conn-b', last_active: 10 })
+
+    for (const [previous, incoming] of [
+      [[a], [b, a]],
+      [[b], [a, b]]
+    ]) {
+      const merged = mergeSessionPage(previous, incoming, [])
+      expect(merged.map(s => s.connection_id).sort()).toEqual(['conn-a', 'conn-b'])
+      expect(merged.find(s => s.connection_id === 'conn-b')?.title ?? null).toBeNull()
+    }
+  })
+
+  it('a kept (live) row survives a refresh page that only carries the other owner’s twin', () => {
+    const a = owned('gw-a', { connection_id: 'conn-a' })
+    const b = owned('gw-b', { connection_id: 'conn-b' })
+
+    expect(mergeSessionPage([a, b], [b], ['kanban_owner_terminal']).map(s => s.connection_id).sort()).toEqual([
+      'conn-a',
+      'conn-b'
+    ])
+    expect(carryForwardFailedProfileSessions([a, b], [b], [{ profile: 'default' }]).map(s => s.connection_id).sort()).toEqual([
+      'conn-a',
+      'conn-b'
+    ])
+  })
+
+  it('same owner still replaces (carry title/activity) and a legacy row without a gateway still collapses', () => {
+    const prev = owned('gw-a', { last_active: 50, title: 'Kept' })
+    const [updated] = mergeSessionPage([prev], [owned('gw-a', { last_active: 10 })], [])
+    expect(updated).toMatchObject({ last_active: 50, title: 'Kept' })
+
+    const legacy = session({ id: 'kanban_owner_terminal', profile: 'default' })
+    expect(mergeSessionPage([prev], [legacy], ['kanban_owner_terminal'])).toHaveLength(1)
+  })
+})

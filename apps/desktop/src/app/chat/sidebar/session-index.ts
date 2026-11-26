@@ -1,3 +1,4 @@
+import { canonicalGatewayOf, SessionOwnerSet } from '@/lib/session-owner-identity'
 import type { SessionInfo } from '@/types/hermes'
 
 /**
@@ -23,6 +24,14 @@ export function buildSessionByAnyId(
 
   for (const session of [...cronSessions, ...messagingSessions, ...visibleSessions]) {
     map.set(session.id, session)
+
+    // Exact-owner key (`<canonical gateway>\0<id>`) for a pin that names its owner; bare ids stay the
+    // legacy fallback, so an owner-less pin keeps resolving exactly as before.
+    const owner = canonicalGatewayOf(session)
+
+    if (owner) {
+      map.set(`${owner}\0${session.id}`, session)
+    }
 
     if (session._lineage_root_id && !map.has(session._lineage_root_id)) {
       map.set(session._lineage_root_id, session)
@@ -63,20 +72,21 @@ export function resolvePinnedSessions(
   allSessions: readonly SessionInfo[],
   unconfirmedPinWrites: ReadonlySet<string>
 ): SessionInfo[] {
-  const seen = new Set<string>()
+  // Owner-aware: the same stored id served by two canonical gateways is two pinned rows.
+  const seen = new SessionOwnerSet()
   const out: SessionInfo[] = []
 
   for (const pinId of pinnedSessionIds) {
     const session = sessionByAnyId.get(pinId)
 
-    if (session && !seen.has(session.id)) {
-      seen.add(session.id)
+    if (session && !seen.has('', session.id, session)) {
+      seen.add('', session.id, session)
       out.push(session)
     }
   }
 
   for (const session of allSessions) {
-    if (session.pinned !== true || seen.has(session.id)) {
+    if (session.pinned !== true || seen.has('', session.id, session)) {
       continue
     }
 
@@ -89,7 +99,7 @@ export function resolvePinnedSessions(
       continue
     }
 
-    seen.add(session.id)
+    seen.add('', session.id, session)
     out.push(session)
   }
 

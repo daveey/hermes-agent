@@ -1926,3 +1926,41 @@ test('the automated filter reaches every backend the unified list reads', async 
     assert.equal(new URL(path, 'http://x').searchParams.get('automated'), 'exclude', path)
   }
 })
+
+// Owner-qualified identity: the same profile + stored id on two canonical gateways is two sessions.
+const ownedRow = (id: string, gateway: string | null, extra: Record<string, unknown> = {}) => ({
+  id,
+  profile: 'default',
+  ...(gateway ? { outcome: { kind: 'done', status: { identity: { gateway, profile: 'default', session_id: id, owner_epoch: 'e' } } } } : {}),
+  ...extra
+})
+
+test('registry splice keeps same-id rows from different canonical gateways, in either order', () => {
+  for (const order of [['gw-a', 'gw-b'], ['gw-b', 'gw-a']]) {
+    const merged: unknown[] = [ownedRow('kanban_owner_terminal', order[0], { connection_id: order[0] })]
+    const totals: Record<string, number> = {}
+    const { added } = spliceRegistrySessionRows(merged, [ownedRow('kanban_owner_terminal', order[1], { connection_id: order[1] })], totals)
+    assert.equal(added, 1)
+    assert.deepEqual(merged.map((row: any) => row.outcome.status.identity.gateway), order)
+  }
+})
+
+test('registry splice still replaces the same owner and legacy rows without a canonical gateway', () => {
+  const merged: unknown[] = [ownedRow('s1', 'gw-a'), ownedRow('s2', null)]
+  const { added } = spliceRegistrySessionRows(
+    merged,
+    [ownedRow('s1', 'gw-a', { connection_id: 'alias' }), ownedRow('s2', 'gw-a'), ownedRow('s2', null, { connection_id: 'alias' })],
+    {}
+  )
+  assert.equal(added, 0)
+  assert.equal(merged.length, 2)
+})
+
+test('pinned window keeps same-id pinned rows from two gateways', () => {
+  const rows = [
+    ownedRow('filler', 'gw-a'),
+    ownedRow('twin', 'gw-a', { pinned: true }),
+    ownedRow('twin', 'gw-b', { pinned: true })
+  ]
+  assert.equal(mergeProfileSessionWindow(rows, 0, 1).length, 3)
+})

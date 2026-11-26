@@ -155,3 +155,32 @@ describe('resolvePinnedSessions', () => {
     expect(resolvePinnedSessions([], index, sessions, settled)).toEqual([])
   })
 })
+
+describe('owner-qualified pins', () => {
+  const owned = (gateway: string, extra: Partial<SessionInfo> = {}) =>
+    row('kanban_owner_terminal', {
+      outcome: { kind: 'done', status: { identity: { gateway, owner_epoch: 'e', profile: 'default', session_id: 'kanban_owner_terminal' } } },
+      ...extra
+    } as Partial<SessionInfo>)
+
+  it('shows both server-pinned twins from different gateways and still dedupes the same owner', () => {
+    const a = owned('gw-a', { pinned: true })
+    const b = owned('gw-b', { pinned: true })
+    const index = buildSessionByAnyId([a, b], [], [])
+
+    // bare legacy pin resolves the index winner; the other owner's pinned twin comes via the row flag
+    expect(resolvePinnedSessions(['kanban_owner_terminal'], index, [a, b], settled)).toHaveLength(2)
+    expect(resolvePinnedSessions([], index, [a, owned('gw-a', { pinned: true })], settled)).toHaveLength(1)
+  })
+
+  it('resolves an owner-qualified pin exactly, bare pins stay a legacy fallback', () => {
+    const a = owned('gw-a')
+    const b = owned('gw-b')
+    const index = buildSessionByAnyId([a, b], [], [])
+
+    expect(index.get('gw-a\0kanban_owner_terminal')).toBe(a)
+    expect(index.get('gw-b\0kanban_owner_terminal')).toBe(b)
+    expect(resolvePinnedSessions(['gw-a\0kanban_owner_terminal'], index, [], settled)).toEqual([a])
+    expect(resolvePinnedSessions(['kanban_owner_terminal'], index, [], settled)).toHaveLength(1)
+  })
+})

@@ -13,6 +13,7 @@ import {
   rescopeConnectionScopedStores
 } from '@/lib/connection-scoped'
 import { hostHas } from '@/lib/host-capabilities'
+import { sameOwnerRow, SessionOwnerSet } from '@/lib/session-owner-identity'
 import { isMessagingSource } from '@/lib/session-source'
 import type { TileSessionFocusStamp } from '@/lib/session-timer-since'
 import {
@@ -584,15 +585,30 @@ export function mergeSessionPage(
   // flashing its raw message preview in the gap between persist and the async
   // auto-titler. A real clear sets the local title null first, so this never
   // masks one.
-  const prevById = new Map(previous.map(session => [identity(session), session]))
+  // Owner-qualified: the same (profile, id) on two canonical gateways is two sessions, so each key
+  // holds every candidate and `sameOwnerRow` picks the matching owner (legacy rows fall back).
+  const groupBy = (key: (session: SessionInfo) => string) => {
+    const groups = new Map<string, SessionInfo[]>()
+
+    for (const session of previous) {
+      groups.set(key(session), [...(groups.get(key(session)) ?? []), session])
+    }
+
+    return groups
+  }
+
+  const prevById = groupBy(identity)
   // Tip rotation changes the live id — carry activity/title across the lineage
   // root so a mid-turn refresh can't drop a touchSessionActivity bump.
-  const prevByLineage = new Map(previous.map(session => [lineageIdentity(session), session]))
+  const prevByLineage = groupBy(lineageIdentity)
 
   const merged = incoming
     .filter(session => !session.is_internal_child)
     .map(session => {
-      const prev = prevById.get(identity(session)) ?? prevByLineage.get(lineageIdentity(session))
+      const prev =
+        sameOwnerRow(prevById.get(identity(session)), session) ??
+        sameOwnerRow(prevByLineage.get(lineageIdentity(session)), session)
+
       // User-send stamps last_active before the DB flushes the user row
       // (last_active = MAX(messages.timestamp)). Keep the fresher of the two.
       const last_active = Math.max(prev?.last_active ?? 0, session.last_active ?? 0)
@@ -616,7 +632,18 @@ export function mergeSessionPage(
     return merged
   }
 
-  const incomingIds = new Set(merged.map(identity))
+  const incomingIds = new SessionOwnerSet()
+  const incomingLineageKeys = new SessionOwnerSet()
+  const incomingLineageIdMembers = new SessionOwnerSet()
+
+  for (const row of merged) {
+    incomingIds.add(profileKeyOf(row), row.id, row)
+    incomingLineageKeys.add(profileKeyOf(row), row._lineage_root_id ?? row.id, row)
+
+    for (const id of row._lineage_ids ?? []) {
+      incomingLineageIdMembers.add(profileKeyOf(row), id, row)
+    }
+  }
 
   // Deduplicate by compression lineage: when auto-compression rotates the tip
   // id (old #4 → new #5), the incoming page carries the new tip but the
@@ -624,7 +651,6 @@ export function mergeSessionPage(
   // rows survive as separate sidebar entries (fixes #43483). Lineage keys are
   // profile-qualified for the same reason as identity above — a twin id in
   // another profile is a DIFFERENT session and must survive the dedupe.
-  const incomingLineageKeys = new Set(merged.map(lineageIdentity))
 
   // Absorption filter: a survivor whose id appears ANYWHERE inside an
   // incoming row's compression lineage is not a separate session anymore —
@@ -643,9 +669,6 @@ export function mergeSessionPage(
   // above, members are qualified by the owning row's profile — stored ids
   // are only unique per-profile (#92454), so a bare-id match would evict a
   // kept twin in another profile whose id merely coincides with a lineage.
-  const incomingLineageIdMembers = new Set(
-    merged.flatMap(session => (session._lineage_ids ?? []).map(id => `${profileKeyOf(session)}::${id}`))
-  )
 
   // The tombstone set is re-read here, not at the caller: optimistic removal
   // can land between `previous` being captured and this merge committing (a
@@ -672,9 +695,9 @@ export function mergeSessionPage(
       // open tab must not resurrect it into the sidebar (#113273).
       !session.hidden &&
       !tombstoned(session) &&
-      !incomingIds.has(identity(session)) &&
-      !incomingLineageKeys.has(lineageIdentity(session)) &&
-      !incomingLineageIdMembers.has(identity(session)) &&
+      !incomingIds.has(profileKeyOf(session), session.id, session) &&
+      !incomingLineageKeys.has(profileKeyOf(session), session._lineage_root_id ?? session.id, session) &&
+      !incomingLineageIdMembers.has(profileKeyOf(session), session.id, session) &&
       (keep.has(session.id) || (session._lineage_root_id != null && keep.has(session._lineage_root_id)))
   )
 
@@ -723,10 +746,6 @@ function sidebarProfileKey(session: Pick<SessionInfo, 'profile'>): string {
   return (session.profile ?? '').trim() || 'default'
 }
 
-function sessionListIdentity(session: Pick<SessionInfo, 'id' | 'profile'>): string {
-  return `${sidebarProfileKey(session)}::${session.id}`
-}
-
 /**
  * Re-attach previous rows for profiles whose sidebar slice failed this refresh.
  *
@@ -747,8 +766,12 @@ export function carryForwardFailedProfileSessions(
   }
 
   const failed = new Set(errors.map(error => (error.profile ?? '').trim() || 'default'))
-  const incomingIds = new Set(incoming.map(sessionListIdentity))
+  const incomingIds = new SessionOwnerSet()
   const carried: SessionInfo[] = []
+
+  for (const session of incoming) {
+    incomingIds.add(sidebarProfileKey(session), session.id, session)
+  }
 
   for (const session of previous) {
     // A hidden row (canonical Bot Chat) is LISTED-NEVER by design: the
@@ -756,7 +779,7 @@ export function carryForwardFailedProfileSessions(
     if (
       session.hidden ||
       !(failed.has(ALL_PROFILES_SCAN) || failed.has(sidebarProfileKey(session))) ||
-      incomingIds.has(sessionListIdentity(session))
+      incomingIds.has(sidebarProfileKey(session), session.id, session)
     ) {
       continue
     }

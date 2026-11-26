@@ -1,3 +1,5 @@
+import { SessionOwnerSet } from './session-owner-identity'
+
 interface SessionListResponse {
   sessions: unknown[]
   total: number
@@ -180,10 +182,44 @@ function profileSessionId(row: unknown): string | null {
   return `${profile}\0${id}`
 }
 
+/** Owner-qualified twin of {@link profileSessionId}: same profile + id on two canonical gateways are
+ *  two sessions. Set-shaped so legacy rows without a canonical gateway still collapse. */
+class RowIdentitySet {
+  private readonly owners = new SessionOwnerSet()
+
+  private split(row: unknown): [string, string] | null {
+    const key = profileSessionId(row)
+
+    if (!key) {
+      return null
+    }
+
+    const at = key.indexOf('\0')
+
+    return [key.slice(0, at), key.slice(at + 1)]
+  }
+
+  /** Rows without an id never match (callers handle them separately). */
+  has(row: unknown): boolean {
+    const parts = this.split(row)
+
+    return parts ? this.owners.has(parts[0], parts[1], row) : false
+  }
+
+  add(row: unknown): void {
+    const parts = this.split(row)
+
+    if (parts) {
+      this.owners.add(parts[0], parts[1], row)
+    }
+  }
+}
+
 export function mergeProfileSessionWindow(rows: unknown[], offset: number, limit: number): unknown[] {
   const window = rows.slice(offset, offset + limit)
   const seenRows = new Set(window)
-  const seenIds = new Set(window.map(profileSessionId).filter((id): id is string => id !== null))
+  const seenIds = new RowIdentitySet()
+  window.forEach(row => seenIds.add(row))
 
   for (const row of rows.slice(offset + limit)) {
     if (!isPinned(row)) {
@@ -192,12 +228,12 @@ export function mergeProfileSessionWindow(rows: unknown[], offset: number, limit
 
     const id = profileSessionId(row)
 
-    if ((id && seenIds.has(id)) || (!id && seenRows.has(row))) {
+    if ((id && seenIds.has(row)) || (!id && seenRows.has(row))) {
       continue
     }
 
     if (id) {
-      seenIds.add(id)
+      seenIds.add(row)
     } else {
       seenRows.add(row)
     }
@@ -793,7 +829,7 @@ export async function fetchRegistrySessionRows(
 }
 
 /** Splice registry-gateway rows into an already-merged unified list: dedupe by
- *  profile + session id (a v1 remote-override splice may already carry a row), keep the
+ *  profile + session id (+ canonical gateway when both rows name one; a v1 remote-override splice may already carry a row), keep the
  *  recency sort, and extend the per-profile totals so truncation flags stay
  *  honest. Mutates and returns `merged`/`profileTotals` the way the v1 splice
  *  does. */
@@ -802,18 +838,19 @@ export function spliceRegistrySessionRows(
   registryRows: unknown[],
   profileTotals: Record<string, number>
 ): { added: number } {
-  const seen = new Set(merged.map(profileSessionId).filter((id): id is string => id !== null))
+  const seen = new RowIdentitySet()
+  merged.forEach(row => seen.add(row))
   let added = 0
 
   for (const row of registryRows) {
     const id = profileSessionId(row)
 
-    if (id && seen.has(id)) {
+    if (id && seen.has(row)) {
       continue
     }
 
     if (id) {
-      seen.add(id)
+      seen.add(row)
     }
 
     merged.push(row)
@@ -1308,14 +1345,15 @@ export function applyRemoteProfileSessionOutcomes(
 
 function archivedOnlyWindow(merged: unknown[], offset: number, limit: number): unknown[] {
   const window = mergeProfileSessionWindow(merged.filter(isArchived), offset, limit)
-  const ids = new Set(window.map(profileSessionId).filter((id): id is string => id !== null))
+  const ids = new RowIdentitySet()
+  window.forEach(row => ids.add(row))
 
   for (const row of merged) {
     const id = profileSessionId(row)
 
-    if (!isArchived(row) && isPinned(row) && !(id && ids.has(id))) {
+    if (!isArchived(row) && isPinned(row) && !(id && ids.has(row))) {
       if (id) {
-        ids.add(id)
+        ids.add(row)
       }
 
       window.push(row)
