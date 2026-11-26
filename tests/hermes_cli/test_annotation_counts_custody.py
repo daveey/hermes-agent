@@ -17,9 +17,11 @@ from tests.hermes_cli import test_kanban_annotation_parts as holders
 world = holders.world
 
 
-@pytest.fixture
-def clock(world, monkeypatch):
-    wall, mono = time.time(), time.monotonic()
+@pytest.fixture(params=[169.792316345, 1000.0], ids=['fractional-origin', 'integral-origin'])
+def clock(world, monkeypatch, request):
+    # Include the fractional monotonic origin observed on CI; elapsed float
+    # subtraction need not be bit-exact even when the offset is an integer.
+    wall, mono = time.time(), request.param
     state = {'offset': 0.0}
     fake = SimpleNamespace(time=lambda: wall + state['offset'], monotonic=lambda: mono + state['offset'])
     monkeypatch.setattr(ksa, 'time', fake)
@@ -95,7 +97,9 @@ def test_requests_cannot_extend_own_source_renewal(world, clock, monkeypatch):
         assert world.counts == old_reads + 1
         assert saved[-1][0] == pytest.approx(fake.time())
         assert ksa._bounded.read_at(holders._published()) == pytest.approx(source.wall)
-    assert counts._entries[holders.SCOPE].mono - first.mono == 93.0
+    # Compare absolute clock values: subtracting two inexact floats can lose
+    # precision even though the injected 93-second renewal was preserved exactly.
+    assert counts._entries[holders.SCOPE].mono == first.mono + 93.0
 
 
 def test_reuse_never_restamps_exact_restart_or_local_source(world, clock, monkeypatch):
