@@ -1837,4 +1837,16 @@ describe('owner-qualified session identity (same id on two gateways)', () => {
     const legacy = session({ id: 'kanban_owner_terminal', profile: 'default' })
     expect(mergeSessionPage([prev], [legacy], ['kanban_owner_terminal'])).toHaveLength(1)
   })
+
+  it('one connection whose envelope gateway name changes stays one owner (rename, enrolment, local fallback)', () => {
+    for (const connection_id of [undefined, 'conn-a']) {
+      const prev = owned('local', { connection_id, last_active: 50, title: 'Kept' })
+      const next = owned('hub', { connection_id, last_active: 10 })
+
+      const merged = mergeSessionPage([prev], [next], ['kanban_owner_terminal'])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]).toMatchObject({ last_active: 50, title: 'Kept' })
+      expect(carryForwardFailedProfileSessions([prev], [next], [{ profile: 'default' }])).toHaveLength(1)
+    }
+  })
 })
