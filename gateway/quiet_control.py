@@ -23,7 +23,10 @@ import os
 import secrets
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any
+
+from gateway.quiet_check_diagnostics import CheckDiagnostics
 
 from gateway.control_dispatch import QUIET_BOOKKEEPING_VERBS
 from agent.claim_quiet_records import MAX_LEASE_S
@@ -532,13 +535,16 @@ class QuietControl:
         result["observer_token"] = token
         return result
 
-    def _state_gates(self, registry):
+    def _state_gates(self, registry, *, diagnostics=None):
         """Start's lease-independent gates after coverage, in start's order (one list each)."""
-        view, _ = self._registry_view(registry, inventory=True)
+        with diagnostics.phase("registry_inventory") if diagnostics is not None else nullcontext():
+            view, _ = self._registry_view(registry, inventory=True)
         yield [f"unknown:{u}" for u in view["unknowns"]]
-        update, update_reasons = self._update_status()
+        with diagnostics.phase("update") if diagnostics is not None else nullcontext():
+            update, update_reasons = self._update_status()
         yield [f"update:{r}" for r in update_reasons]
-        stale = update["window_age_s"] is None or update["window_age_s"] > UPDATE_WINDOW_MAX_AGE_S
+        with diagnostics.phase("window") if diagnostics is not None else nullcontext():
+            stale = update["window_age_s"] is None or update["window_age_s"] > UPDATE_WINDOW_MAX_AGE_S
         yield ["update_window_stale"] if stale else []
 
     def check(self, params, peer):
@@ -547,20 +553,25 @@ class QuietControl:
         taking a lease, or reserving work (a bookkeeping verb: the registry epoch does not move)."""
         if not isinstance(params, dict) or set(params) != {"schema"} or params["schema"] != SCHEMA:
             raise ValueError(f"params fields must be exactly: schema (= {SCHEMA})")
-        registry = self._registry()
-        reasons = self._pending(registry)
+        diagnostics = CheckDiagnostics()
+        with diagnostics.phase("coverage"):
+            registry = self._registry()
+            reasons = self._pending(registry)
         unknowns: list[str] = []
         if registry is not None:
-            for gate in self._state_gates(registry):
+            for gate in self._state_gates(registry, diagnostics=diagnostics):
                 reasons += gate
             unknowns = [r[len("unknown:"):] for r in reasons if r.startswith("unknown:")]
-        ledger = getattr(self._runner, "_quiet_code", None)
-        try:
-            route = ledger.route_report().get("route") if ledger is not None else None
-        except Exception:  # health: allow BLE001 -- an unreadable route is reported as none, never invented
-            route = None
-        _, unattested = self._code_unknowns(inventory=False)
-        predicates, predicate_reasons = self._predicates()
+        with diagnostics.phase("route"):
+            ledger = getattr(self._runner, "_quiet_code", None)
+            try:
+                route = ledger.route_report().get("route") if ledger is not None else None
+            except Exception:  # health: allow BLE001 -- an unreadable route is reported as none, never invented
+                route = None
+        with diagnostics.phase("extension_report"):
+            _, unattested = self._code_unknowns(inventory=False)
+        with diagnostics.phase("predicates"):
+            predicates, predicate_reasons = self._predicates()
         return {"schema": SCHEMA, "phase": "check", "admitted": not reasons, "reasons": reasons,
                 "unattested_code": unattested, "predicates": predicates,
                 "predicate_diagnostics": predicate_reasons,
