@@ -26,7 +26,9 @@ def select(conn, alias='t'):
     start = ('(SELECT r.started_at FROM task_runs r WHERE r.id = '
              f'{alias}.current_run_id AND r.task_id = {alias}.id)'
              if 'current_run_id' in columns and {'id', 'task_id', 'started_at'} <= runs else 'NULL')
-    blocked = (f"(SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = {alias}.id AND e.kind = 'blocked')"
+    # Unary + preserves values but disables SQLite's MAX timestamp-index walk:
+    # prefer the selective (kind, task_id) lookup over unrelated newer history.
+    blocked = (f"(SELECT MAX(+e.created_at) FROM task_events e WHERE e.task_id = {alias}.id AND e.kind = 'blocked')"
                if {'task_id', 'kind', 'created_at'} <= events else 'NULL')
     return ', '.join(f'{expression} AS {key}' for key, expression in (
         ('timer_run_start', start), ('timer_block_start', blocked),

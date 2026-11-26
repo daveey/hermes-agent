@@ -136,6 +136,32 @@ def test_count_transaction_carries_timers_into_the_real_row_annotator(tmp_path, 
     activity._reset_cache_for_tests()
 
 
+@pytest.mark.parametrize('indexed', [True, False])
+def test_block_clock_avoids_unrelated_history_and_preserves_max(db, indexed):
+    for tid in ('a', 'b', 'c'):
+        add(db, tid, 'blocked')
+    db.execute('CREATE INDEX idx_events_task ON task_events(task_id, created_at)')
+    if indexed:
+        db.execute('CREATE INDEX idx_events_kind_task_id ON task_events(kind, task_id, id)')
+    # ID order is not timestamp order; NULL and another task cannot win.
+    db.executemany('INSERT INTO task_events(task_id, kind, created_at) VALUES (?, ?, ?)',
+                   [('a', 'blocked', 190), ('a', 'blocked', 170), ('a', 'blocked', None),
+                    ('b', 'blocked', 210)])
+    db.executemany('INSERT INTO task_events(task_id, kind, created_at) VALUES (?, ?, ?)',
+                   [(tid, 'heartbeat', 1000 + i) for tid in ('a', 'b', 'c') for i in range(3000)])
+    steps = []
+    db.set_progress_handler(lambda: steps.append(1) or 0, 100)
+    try:
+        found = timers.local(db, {('s', tid) for tid in ('a', 'b', 'c')})
+    finally:
+        db.set_progress_handler(None, 0)
+    assert {tid: value['timer_block_start'] for tid, value in found.items()} == {
+        'a': 190, 'b': 210, 'c': None}
+    if indexed:
+        # Count VM work, not flaky wall time or just execute() invocations.
+        assert len(steps) < 50
+
+
 def test_read_failure_and_legacy_columns_never_raise():
     conn = sqlite3.connect(':memory:')
     assert timers.local(conn, {('s', 'a')}) == {}
