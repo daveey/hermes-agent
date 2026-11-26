@@ -158,6 +158,43 @@ def _replace_expired(conn, row, action, actor, expired_intent):
     return False
 
 
+def acknowledged_successor(conn: sqlite3.Connection, body: dict, expired_intent: str) -> bool:
+    """An explicit ACK replay may resume only its already-recorded successor."""
+    row, _ = _current(conn, body)
+    return not _replace_expired(conn, row, {k: body[k] for k in _ACTION}, body["actor"], expired_intent)
+
+
+def existing(conn: sqlite3.Connection, action: dict) -> dict | None:
+    """Resolve this invocation's frozen journal before mutable canonical preflight.
+
+    HOME is intentionally absent from the invocation: a rename or new task episode
+    must not prevent reconciling the exact old request. Never select a child-named
+    UID or use the current task row to decide historical identity.
+    """
+    fields = sorted(_ACTION - {"home"})
+    action = _action({**action, "home": "pending-canonical-home"})
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='native_owner_release_intents'").fetchone():
+        return None
+    clauses = " AND ".join(f"json_extract(body,'$.{key}')=?" for key in fields)
+    values = [encode(action[key]) if key == "capability_episodes" else action[key] for key in fields]
+    try:
+        rows = conn.execute("SELECT action_key,intent_uid,body,digest,stage FROM native_owner_release_intents "
+                            f"WHERE length(action_key)=64 AND {clauses} LIMIT 2", values).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("native release invocation journal is unavailable or corrupt") from exc
+    if len(rows) > 1:
+        raise ValueError("ambiguous native release invocation journal")
+    if not rows:
+        return None
+    row = rows[0]
+    body = validate(json.loads(row[2]))
+    full_action = {k: body[k] for k in _ACTION}
+    if row[0] != digest(full_action):
+        raise ValueError("release invocation journal key changed")
+    _current(conn, body)  # exact live actor/primary board and immutable bytes
+    return body
+
+
 def prepare(conn: sqlite3.Connection, action: dict, *, gate, expired_intent=None) -> dict:
     """Journal or resume under fresh parent custody; admit before the first write.
 

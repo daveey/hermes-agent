@@ -83,6 +83,12 @@ def dispatch(args: dict, *, gate) -> dict:
         scope.callback(hub.close)
         if hub.ident.gateway != qualified["gateway"]:
             raise ValueError("native release gateway differs from authenticated transport")
+        recorded = intent.existing(conn, args)
+        if recorded is not None and (expired_intent is None or intent.acknowledged_successor(conn, recorded, expired_intent)):
+            # Reconcile the immutable request before capability/current HOME reads.
+            # prepare still reauthenticates and admits this exact actor/action.
+            body = intent.prepare(conn, {**args, "home": recorded["home"]}, gate=gate, expired_intent=expired_intent)
+            return _send(conn, hub, body)
         capability = hub.decision_retain_capability(args["board"])
         if not isinstance(capability, dict) or type(capability.get("owner_release")) is not int or capability["owner_release"] != 1:
             return {"ok": False, "reason": "board_unsupported", "error": "Board owner-release v1 is not available; nothing sent"}

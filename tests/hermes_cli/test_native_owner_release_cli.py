@@ -172,8 +172,56 @@ def test_actual_cli_explicit_expiry_ack_replaces_only_that_one_intent(turn, tran
         assert fresh["intent_uid"] != old
         assert cli(native, "--fresh-after-expiry", old).stdout == fresh_result.stdout
         assert len(transport.sent) == 2
+        transport.calls.clear()
+        transport.support = 0
+        def unavailable(*a, **kw):
+            pytest.fail("recorded expiry-ACK successor must not re-resolve HOME")
+        monkeypatch.setattr(transport, "row_evidence", unavailable)
+        assert cli(native, "--fresh-after-expiry", old).stdout == fresh_result.stdout
+        assert transport.calls == []
+        assert len(transport.sent) == 2
         before, after = (op["intent"] for op in transport.sent)
         assert {k: v for k, v in before.items() if k != "intent_uid"} == {k: v for k, v in after.items() if k != "intent_uid"}
+    finally:
+        close(native)
+
+
+def test_actual_cli_historical_journal_replay_precedes_mutable_preflight(turn, transport, monkeypatch):
+    native = launch(monkeypatch)
+    try:
+        transport.proof_changes = {"state": "expired"}
+        first = cli(native)
+        assert first.returncode == 2
+        before = json.loads(first.stdout)
+        transport.calls.clear()
+        transport.support = 0
+        def unavailable(*a, **kw):
+            pytest.fail("historical journal replay must not re-resolve mutable HOME")
+        monkeypatch.setattr(transport, "row_evidence", unavailable)
+        again = cli(native)
+        assert again.returncode == 2
+        assert json.loads(again.stdout) == before
+        assert transport.calls == []
+        assert len(transport.sent) == 1
+    finally:
+        close(native)
+
+
+def test_actual_cli_pending_journal_reconcile_precedes_mutable_preflight(turn, transport, monkeypatch):
+    native = launch(monkeypatch)
+    try:
+        first = cli(native)
+        assert first.returncode == 0
+        transport.calls.clear()
+        transport.support = 0
+        def unavailable(*a, **kw):
+            pytest.fail("pending journal reconciliation must not re-resolve mutable HOME")
+        monkeypatch.setattr(transport, "row_evidence", unavailable)
+        again = cli(native)
+        assert again.returncode == 0, (again.stdout, again.stderr)
+        assert json.loads(again.stdout) == json.loads(first.stdout)
+        assert transport.calls == []
+        assert len(transport.sent) == 1
     finally:
         close(native)
 
