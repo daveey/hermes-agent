@@ -549,6 +549,8 @@ def import_cards(conn: sqlite3.Connection, replica: sqlite3.Connection, ids: Ite
             containment.adopt_receipts(conn, replica, card_changes)
             from hermes_cli import kanban_owner_reassessment_replica as reassessment
             reassessment.adopt_receipts(conn, replica, card_changes)
+            from hermes_cli import kanban_release_executor as executor
+            executor.adopt_receipts(conn, replica, card_changes)
         except (ContainmentRefused, KeyError, ValueError, TypeError) as exc:  # malformed evidence refuses too
             why = f"containment receipts not certified for task_events: {exc}"
             _log.warning("kanban worker node: not importing %s (table task_events): %s", tid, why)

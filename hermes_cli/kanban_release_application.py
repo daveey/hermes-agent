@@ -241,6 +241,12 @@ def _read_application(conn, intent_uid):
         return None
 
 
+def consumer_application(conn, intent_uid):
+    """HOME proof stays private; foreign readers use a separate certified cache."""
+    from hermes_cli import kanban_release_executor as executor
+    return verified_application(conn, intent_uid) or executor.verified_application(conn, intent_uid)
+
+
 def verified_renewal(conn, event):
     """Explicit intent-backed context, never pretend the intent is a comment."""
     try:
@@ -248,10 +254,16 @@ def verified_renewal(conn, event):
         uid = p.get('owner_release_intent_uid')
         if not cert.intent._coordinate(uid):
             return None
-        app = verified_application(conn, uid)
-        if app is None or not cert.event_matches(event, app['consumption']):
+        app = consumer_application(conn, uid)
+        if app is None:
             return None
-        return {'payload': cert.parse(app['consumption']['renewal']['payload']),
+        renewal = app.get('renewal') or app.get('consumption', {}).get('renewal')
+        from hermes_cli import kanban_release_public as public
+        matched = (cert.event_matches(event, app['consumption']) if 'consumption' in app
+                   else renewal is not None and public.matches(event, renewal))
+        if not matched:
+            return None
+        return {'payload': cert.parse(renewal['payload']),
                 'mandate': {'kind': 'owner_release_intent', 'intent_uid': uid,
                             'body': app['result']['mandate']}}
     except (TypeError, ValueError, KeyError, UnicodeError, RecursionError):
@@ -265,7 +277,7 @@ def verified_release(conn, event):
         uid = p.get('owner_release_intent_uid')
         if not cert.intent._coordinate(uid) or event.get('run_id') is not None or event.get('deleted_at') is not None:
             return None
-        app = verified_application(conn, uid)
+        app = consumer_application(conn, uid)
         if app is None:
             return None
         current = _event(conn, event['uid'])

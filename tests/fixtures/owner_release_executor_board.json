@@ -1,0 +1,122 @@
+{
+  "board": "release-mwy330w9-3",
+  "table": "task_events",
+  "uid": "01a2192b-527d-7fc7-aa20-d80e4275d227",
+  "state": "live",
+  "row": {
+    "uid": "01a2192b-527d-7fc7-aa20-d80e4275d227",
+    "ord": 15,
+    "task_id": "t_mwy330w9-4",
+    "run_uid": null,
+    "kind": "owner_release_applied",
+    "payload": "{\"version\":1,\"intent_uid\":\"intent-mwy332d4-16\",\"consume_uid\":\"consume-mwy332j0-17\",\"delivery_uid\":\"delivery-mwy332w3-18\",\"outcome\":\"released\",\"mandate\":\"Released to finish this card's acceptance. Budget: 2 more runs. Narrower run counts, dollar caps and stop-on-finding conditions written by agents earlier are superseded. Stop conditions in a note below do not add to the stop list that follows. The card's budget after this release: 2 runs (2 more than the 0 counted), no cache-read limit. Stop only on: a provider safety refusal; a step that needs David physically; the same error three times; the run budget. Findings, design changes, review CHANGES, CI waits and sandbox refusals of -c scripts are work inside the round. Safety exclusions in the card body stay. If it stops, say what was built, what is left and the one next step.\\n\\nFinish the original acceptance within existing independent limits.\",\"effect_uids\":[\"01a2192b-5278-7de7-9cc2-24ed1fe12ef1\",\"01a2192b-5278-7e58-bc7c-96ba3b230aee\",\"01a2192b-5278-726e-8b25-6127aa4705c0\",\"01a2192b-527b-75ca-a180-d9634470ff3d\"]}",
+    "created_at": 1795718599,
+    "seq": 27,
+    "version": 1,
+    "updated_at": 1795729678744,
+    "hlc": "1795729678744-0000-server",
+    "origin_gateway": "sw-home",
+    "deleted_at": null
+  },
+  "tombstone": null,
+  "floor": 0,
+  "feed_floor": 0,
+  "head": 28,
+  "owner_release_applied_v1": {
+    "version": 1,
+    "board": "release-mwy330w9-3",
+    "reader_gateway": "other-mwy330mp-2",
+    "intent": {
+      "actor": {
+        "gateway": "origin-mwy330mp-1",
+        "profile": "default",
+        "session": "chat-mwy330w9-6"
+      },
+      "board": "release-mwy330w9-3",
+      "capability_episodes": [
+        "capability-mwy331c1-9"
+      ],
+      "episode": "01a219d4-57cb-777e-894e-c50c284d0c59",
+      "home": "sw-home",
+      "intent_uid": "intent-mwy332d4-16",
+      "note": "Finish the original acceptance within existing independent limits.",
+      "runs": 2,
+      "task_id": "t_mwy330w9-4",
+      "version": 1
+    },
+    "renewal": {
+      "uid": "consume-mwy332j0-17",
+      "task_id": "t_mwy330w9-4",
+      "kind": "scope_renewed",
+      "payload": "{\"version\":1,\"episode\":\"01a219d4-57cb-777e-894e-c50c284d0c59\",\"covered_restriction_uids\":[\"01a219d4-57cb-777e-894e-c50c284d0c59\",\"receipt-mwy331v3-14\"],\"request_uid\":\"consume-mwy332j0-17\",\"owner_release_intent_uid\":\"intent-mwy332d4-16\",\"owner_release_digest\":\"b631cc14c33795de1c8b6ac9b9d6658e34b3c3e0290dc33136435b5d266b5030\",\"actor_kind\":\"agent\",\"actor_gateway\":\"origin-mwy330mp-1\",\"actor_profile\":\"default\",\"actor_session\":\"chat-mwy330w9-6\",\"authority_kind\":\"chat\",\"authority_ref\":null,\"reason\":\"Finish the original acceptance within existing independent limits.\"}",
+      "created_at": 1795729677,
+      "origin_gateway": "sw-home"
+    },
+    "delivery": {
+      "uid": "delivery-mwy332w3-18",
+      "task_id": "t_mwy330w9-4",
+      "kind": "operator_call_requested",
+      "payload": "{\"version\":1,\"carrier\":\"owner_release\",\"action\":\"owner_release\",\"request_uid\":\"delivery-mwy332w3-18\",\"board\":\"release-mwy330w9-3\",\"target_task_id\":\"t_mwy330w9-4\",\"home\":\"sw-home\",\"intent\":{\"version\":1,\"intent_uid\":\"intent-mwy332d4-16\",\"board\":\"release-mwy330w9-3\",\"task_id\":\"t_mwy330w9-4\",\"home\":\"sw-home\",\"episode\":\"01a219d4-57cb-777e-894e-c50c284d0c59\",\"capability_episodes\":[\"capability-mwy331c1-9\"],\"runs\":2,\"note\":\"Finish the original acceptance within existing independent limits.\",\"actor\":{\"gateway\":\"origin-mwy330mp-1\",\"profile\":\"default\",\"session\":\"chat-mwy330w9-6\"}},\"digest\":\"b631cc14c33795de1c8b6ac9b9d6658e34b3c3e0290dc33136435b5d266b5030\",\"seen_comments\":[],\"nonce\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1002,
+      "origin_gateway": "origin-mwy330mp-1"
+    },
+    "events": [
+      {
+        "uid": "01a2192b-5276-7643-a6b3-e61eb980f9c8",
+        "task_id": "t_mwy330w9-4",
+        "kind": "wake_episode_evidence",
+        "payload": "{\"_wake_episode_v1\":null,\"_wake_episode_barriers\":{\"0d286199-7337-4473-a684-97935f46a25a\":1}}",
+        "created_at": 1795718599,
+        "origin_gateway": "sw-home"
+      },
+      {
+        "uid": "01a2192b-5276-7b68-a1e8-faa6d71129dd",
+        "task_id": "t_mwy330w9-4",
+        "kind": "commented",
+        "payload": "{\"author\":\"kanban-spend-budget\",\"len\":264,\"comment_id\":1,\"comment_uid\":\"01a2192b-5273-7d5b-8ffd-038636934508\"}",
+        "created_at": 1795718599,
+        "origin_gateway": "sw-home"
+      },
+      {
+        "uid": "01a2192b-5278-7de7-9cc2-24ed1fe12ef1",
+        "task_id": "t_mwy330w9-4",
+        "kind": "spend_budget_set",
+        "payload": "{\"runs\":2,\"cache_read_tokens\":0,\"by\":\"origin-mwy330mp-1/default/chat-mwy330w9-6\",\"reason\":\"hermes kanban release: authenticated original-owner intent intent-mwy332d4-16\",\"writer_kind\":\"agent\",\"cache_read_writer_kind\":\"agent\",\"episode\":\"01a219d4-57cb-777e-894e-c50c284d0c59\",\"decision_comment\":{\"comment_id\":1,\"author\":\"kanban-spend-budget\",\"comment_uid\":\"01a2192b-5273-7d5b-8ffd-038636934508\"}}",
+        "created_at": 1795718599,
+        "origin_gateway": "sw-home"
+      },
+      {
+        "uid": "01a2192b-5278-7e58-bc7c-96ba3b230aee",
+        "task_id": "t_mwy330w9-4",
+        "kind": "stop_released",
+        "payload": "{\"version\":1,\"owner_release_intent_uid\":\"intent-mwy332d4-16\",\"consume_uid\":\"consume-mwy332j0-17\",\"actor_kind\":\"agent\",\"actor_gateway\":\"origin-mwy330mp-1\",\"actor_profile\":\"default\",\"actor_session\":\"chat-mwy330w9-6\",\"authority_kind\":\"chat\",\"runs\":2,\"note\":\"Finish the original acceptance within existing independent limits.\",\"episode\":\"capability-mwy331c1-9\"}",
+        "created_at": 1795718599,
+        "origin_gateway": "sw-home"
+      },
+      {
+        "uid": "01a2192b-5278-726e-8b25-6127aa4705c0",
+        "task_id": "t_mwy330w9-4",
+        "kind": "stop_released",
+        "payload": "{\"version\":1,\"owner_release_intent_uid\":\"intent-mwy332d4-16\",\"consume_uid\":\"consume-mwy332j0-17\",\"actor_kind\":\"agent\",\"actor_gateway\":\"origin-mwy330mp-1\",\"actor_profile\":\"default\",\"actor_session\":\"chat-mwy330w9-6\",\"authority_kind\":\"chat\",\"runs\":2,\"note\":\"Finish the original acceptance within existing independent limits.\",\"episode\":\"01a219d4-57cb-777e-894e-c50c284d0c59\"}",
+        "created_at": 1795718599,
+        "origin_gateway": "sw-home"
+      },
+      {
+        "uid": "01a2192b-527b-75ca-a180-d9634470ff3d",
+        "task_id": "t_mwy330w9-4",
+        "kind": "promoted_manual",
+        "payload": "{\"actor\":\"origin-mwy330mp-1/default/chat-mwy330w9-6\",\"reason\":\"Finish the original acceptance within existing independent limits.\",\"from_status\":\"triage\",\"_recovery_history_v1\":{\"identity\":\"b6bc8fbe-8b94-4f69-a58d-bbcf9ff2b172\",\"predecessors\":[]}}",
+        "created_at": 1795718599,
+        "origin_gateway": "sw-home"
+      },
+      {
+        "uid": "01a2192b-527d-7fc7-aa20-d80e4275d227",
+        "task_id": "t_mwy330w9-4",
+        "kind": "owner_release_applied",
+        "payload": "{\"version\":1,\"intent_uid\":\"intent-mwy332d4-16\",\"consume_uid\":\"consume-mwy332j0-17\",\"delivery_uid\":\"delivery-mwy332w3-18\",\"outcome\":\"released\",\"mandate\":\"Released to finish this card's acceptance. Budget: 2 more runs. Narrower run counts, dollar caps and stop-on-finding conditions written by agents earlier are superseded. Stop conditions in a note below do not add to the stop list that follows. The card's budget after this release: 2 runs (2 more than the 0 counted), no cache-read limit. Stop only on: a provider safety refusal; a step that needs David physically; the same error three times; the run budget. Findings, design changes, review CHANGES, CI waits and sandbox refusals of -c scripts are work inside the round. Safety exclusions in the card body stay. If it stops, say what was built, what is left and the one next step.\\n\\nFinish the original acceptance within existing independent limits.\",\"effect_uids\":[\"01a2192b-5278-7de7-9cc2-24ed1fe12ef1\",\"01a2192b-5278-7e58-bc7c-96ba3b230aee\",\"01a2192b-5278-726e-8b25-6127aa4705c0\",\"01a2192b-527b-75ca-a180-d9634470ff3d\"]}",
+        "created_at": 1795718599,
+        "origin_gateway": "sw-home"
+      }
+    ]
+  }
+}

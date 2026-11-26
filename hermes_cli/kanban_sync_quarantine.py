@@ -177,7 +177,7 @@ def release_command(board: str, receipt: str) -> str:
 
 REASSESSMENT_OVERSIZE = "reassessment_evidence_oversize"
 # A generic operator release refuses these (no canonical containment attestation) and stores no receipt.
-NO_GENERIC_RELEASE = ("reassessment_conflict", REASSESSMENT_OVERSIZE)
+NO_GENERIC_RELEASE = ("reassessment_conflict", REASSESSMENT_OVERSIZE, "owner_release_conflict", "owner_release_oversize")
 
 
 def clear_instruction(kind: str, board: str, receipt: str) -> str:
@@ -254,8 +254,15 @@ def certified_page(conn, hub, board: str, changes) -> list:
     """
     from hermes_cli import kanban_containment_replica as replica
     from hermes_cli import kanban_owner_reassessment_replica as reassessment
+    from hermes_cli import kanban_release_executor as executor
     from hermes_cli.kanban_containment_lifecycle import ContainmentConflict
     for change in changes:
+        try:
+            executor.certify_page(conn, hub, board, [change])
+        except (executor.ReplicaConflict, executor.ReplicaOversize) as exc:
+            kind = 'owner_release_conflict' if isinstance(exc, executor.ReplicaConflict) else 'owner_release_oversize'
+            quarantine_change(conn, board, change, ContainmentConflict(str(exc), kind=kind, uid=change.uid))
+            continue
         try:  # one card's contradicted reassessment receipt holds that card; siblings keep syncing
             reassessment.certify_page(conn, hub, board, [change])
         except (reassessment.ReassessmentConflict, reassessment.ReassessmentEvidenceOversize) as exc:
@@ -285,6 +292,12 @@ def quarantine_change(conn, board: str, change, exc, *, at: int | None = None) -
         if _exists(conn, reassessment.TABLE):
             prior = conn.execute(f"SELECT task_id FROM {reassessment.TABLE} WHERE event_uid=?",
                                  (change.uid,)).fetchone()
+            if prior:
+                held_tasks.add(prior[0])
+    if exc.kind in ('owner_release_conflict', 'owner_release_oversize'):
+        from hermes_cli import kanban_release_executor as executor
+        if _exists(conn, executor.TABLE):
+            prior = conn.execute(f'SELECT task_id FROM {executor.TABLE} WHERE result_uid=?', (change.uid,)).fetchone()
             if prior:
                 held_tasks.add(prior[0])
     if not held_tasks:
