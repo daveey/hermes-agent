@@ -31,6 +31,7 @@ def test_actual_delta_sources_are_bounded(scheduler, monkeypatch, reset, health,
     owner._signal(owner.token, delta)
     schedule.run('host', unloaded.host_pass)
     assert metric('host.fact') == {expected: metric('host.fact')[expected]}
+    assert next(iter(schedule.gate.actions.values())).diagnostic_sources == (expected,)
     assert metric('host.fact')[expected]['runs'] == 1
 
 
