@@ -169,6 +169,31 @@ def test_the_home_board_wakes_a_relayed_park_whose_probe_host_went_silent(gws, t
     assert any(WORKER in c.body and _probe(flag) in c.body for c in kb.list_comments(home.conn, tid))
 
 
+def test_silent_remote_probe_is_not_reused_by_no_progress_repark(gws, tmp_path):
+    from hermes_cli import kanban_no_progress as no_progress
+
+    home, worker = gws
+    flag = tmp_path / "recovered-flag"
+    tid = _relayed_park(home, worker, flag)
+    home.round()
+    home.enter()
+    previous = _events(home.conn, tid, "scheduled")[-1].payload
+    now = int(time.time()) + kwc.ALIVE_EVERY + 2 * 300 + kwc.SILENT_GRACE + 5
+    assert kwc.restore_missing_checks(home.conn, now=now)["woken"] == [tid]
+    assert _events(home.conn, tid, LOST)[-1].payload["probe_host"] == WORKER
+    assert no_progress.hold(home.conn, tid, now=now, budget=1) == "parked"
+    park = _events(home.conn, tid, "scheduled")[-1].payload
+    assert park["probe_host"] == HUB, "no-progress re-armed the same silent remote probe host"
+    assert park["wake_check"] == _probe(flag)
+    assert park["awaiting"] == previous["awaiting"]
+    assert kwc.get_state(home.conn, tid)["cmd"] == _probe(flag)
+    # Home actually executes the replacement; a label-only reassignment is not recovery.
+    flag.write_text("build recovered on home\n")
+    kwc.run_due_wake_checks(home.conn, now=now + 1, wait=True)
+    assert _status(home.conn, tid) == "ready"
+    assert "build recovered on home" in _events(home.conn, tid, "condition_met")[-1].payload["output"]
+
+
 # --- the lost-probe sweep on one board --------------------------------------------------------------------------
 
 @pytest.fixture

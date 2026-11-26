@@ -210,6 +210,16 @@ def _repark(conn, task_id: str, park: dict, runs: int, marker: int, now: int) ->
     every = kwc.normalize_every(park.get("check_every"))
     host = park.get("probe_host") if isinstance(park.get("probe_host"), str) else None
     own = kwc.own_gateway(conn)
+    # A lost remote executor is not a broken condition. Keep the condition, but move
+    # its custody home instead of stamping a fresh park that resets the silence clock.
+    lost = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND id > "
+        "(SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ('scheduled', 'continued')) "
+        "ORDER BY id DESC LIMIT 1", (task_id, kwc.LOST_EVENT, task_id)).fetchone()
+    recovery = kb._json_dict(lost[0]) if lost else {}
+    if (host and recovery.get("reason") == "remote_probe_silent"
+            and recovery.get("probe_host") == host and recovery.get("wake_check") == wake_check):
+        host = own  # hold() only runs on the card's home; unset on an unsynced board means local.
     reason = (f"{_note(runs, marker)}. Parked behind its own wake condition; only the condition or real "
               f"progress brings the next run (clock fallback in {REPARK_SECONDS // 3600} h).")
     # Runs inside hold()'s write transaction.

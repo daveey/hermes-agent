@@ -112,6 +112,31 @@ def test_card_wait_loop_parks_behind_its_own_condition(kanban_home):
         assert tid in spawns.ids
 
 
+@pytest.mark.parametrize("change", ["none", "reason", "host", "command", "new_park"])
+def test_repark_keeps_remote_custody_without_loss_of_this_park(kanban_home, monkeypatch, change):
+    monkeypatch.setattr(kwc, "own_gateway", lambda conn: "home")
+    with kbc.connect_closing() as conn:
+        tid = _card(conn)
+        park = {**COND, "probe_host": "worker-x"}
+        for _ in range(knp.DEFAULT_LIMIT):
+            _run(conn, tid, "scheduled", park)
+        loss = {"reason": "remote_probe_silent", "probe_host": "worker-x", "wake_check": COND["wake_check"]}
+        if change == "reason":
+            loss["reason"] = "lost_again"
+        elif change == "host":
+            loss["probe_host"] = "other-worker"
+        elif change == "command":
+            loss["wake_check"] = "test -f /other-condition"
+        with kb.write_txn(conn):
+            if change != "none":
+                kb._append_event(conn, tid, kwc.LOST_EVENT, loss)
+            if change == "new_park":
+                kb._append_event(conn, tid, "scheduled", park)
+        assert knp.hold(conn, tid) == "parked"
+        assert _events(conn, tid, "scheduled")[-1].payload["probe_host"] == "worker-x"
+        assert kwc.get_state(conn, tid) is None, "healthy remote custody must not spawn a duplicate home probe"
+
+
 def test_below_budget_still_spawns(kanban_home):
     with kbc.connect_closing() as conn:
         tid, _ = _shepherd(conn, knp.DEFAULT_LIMIT - 1)
