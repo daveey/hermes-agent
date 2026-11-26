@@ -342,7 +342,8 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None,
             pr = card["pr"].get("url")
         cards.append({"id": card["id"], "title": card["title"] or "",
                       "lane": pol.lane_of(card["tenant"]), "step": step, "reason": reason,
-                      "source": source, "age_h": card["age_h"], "pr": pr})
+                      "source": source, "age_h": card["age_h"], "pr": pr,
+                      "wait": (card["awaiting"] or {}).get("kind") if isinstance(card.get("awaiting"), dict) else None})
         if reason == "you":
             from hermes_cli.kanban_wait_info import describe
 

@@ -952,6 +952,9 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str, max_pages: Optional[int] 
             replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
             pulled = Pulled(resync(replica, hub, slug, observers=False), status_changed=acw.rebuilt(before, replica))
+        if not diagnostic and not pulled.more:
+            from hermes_cli.kanban_sync_replica_unfreeze import unfreeze
+            unfreeze(replica, hub, slug, path)
         if not diagnostic:
             from hermes_cli.kanban_sync_closure_backfill import backfill
             pulled.status_changed.update(backfill(replica, hub, slug))

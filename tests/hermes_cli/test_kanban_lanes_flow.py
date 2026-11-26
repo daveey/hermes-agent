@@ -141,7 +141,8 @@ def test_flow_json_shape_and_window(conn, configured, capsys):
     assert data["window"] == "6h"
     assert set(data) >= {"window", "cards", "lanes"}
     card = next(c for c in data["cards"] if c["id"] == tid)
-    assert set(card) == {"id", "title", "lane", "step", "reason", "source", "age_h", "pr"}
+    assert set(card) == {"id", "title", "lane", "step", "reason", "source", "age_h", "pr", "wait"}
+    assert card["wait"] is None
     assert card["lane"] == "babybear" and card["step"] == "ready" and card["reason"] == "slot"
     assert card["pr"] is None and isinstance(card["age_h"], (int, float))
     assert set(card["source"]) == {"kind", "id", "project"}
@@ -238,3 +239,22 @@ def test_evidence_projection_equals_plain_projection_with_pr_urls(conn, configur
     assert by_id[published] == "https://github.com/example/repo/pull/7"
     assert by_id[waiting] == "https://github.com/example/repo/pull/8"
     assert by_id == {c["id"]: (c["pr"] or {}).get("url") for c in plain_cards}
+
+
+@pytest.mark.parametrize("awaiting,wait", [
+    ({"kind": "card", "ref": "t_other"}, "card"),
+    ({"kind": "ci", "ref": "https://github.com/example/repo/pull/9"}, "ci"),
+    ({"kind": "clock", "why": "soak"}, "clock"),
+    (None, None),
+])
+def test_scheduled_card_emits_its_awaiting_kind_as_wait(conn, configured, awaiting, wait):
+    configured()
+    tid = base._ready_in(conn, "babybear", "parked")
+    conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+    payload = {"awaiting": awaiting} if awaiting else {}
+    conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'scheduled', ?, ?)",
+                 (tid, json.dumps(payload), int(time.time())))
+    conn.commit()
+    reader = type("R", (), {"prefetch": lambda self, urls: None, "get": lambda self, url: {}})()
+    snap = flow.snapshot(conn, window="6h", pol=lanes.policy(), reader=reader)
+    assert next(c for c in snap["cards"] if c["id"] == tid)["wait"] == wait

@@ -116,3 +116,49 @@ def test_a_round_heals_a_card_stopped_with_a_leftover_worker_start(shadow):
     assert after['task'] == protected['task'] and after['runs'] == protected['runs'] and after['links'] == protected['links']
     assert shadow.execute('SELECT worker_started_at FROM tasks WHERE id=?', (source,)).fetchone()[0]
     assert guards.clear_stale_worker_start(shadow) == 0
+
+
+def _replica_after_stop(shadow, service, hub):
+    """The live file stops the card; the replica (sync-shadow/<board>.db) pulls the Board feed up to the stop."""
+    _source, target, _child = fixtures.ended_card(shadow)
+    _stop(shadow, target)
+    ksc.push(shadow, hub, BOARD, ME, primary=False)
+    replica = ksc.open_shadow(BOARD, ME)
+    ksc.pull(replica, hub, BOARD, observers=False)
+    return target, replica
+
+
+def test_replica_applies_the_archive_of_a_stopped_card_but_live_stays_frozen(shadow):
+    """t_01a21a1955976537: the replica froze paintbot-tools M5 at its pre-archive status for 40 h."""
+    service = FakeService()
+    hub = service.hub(ME)
+    target, replica = _replica_after_stop(shadow, service, hub)
+    try:
+        assert sync.SHADOW_DIR in str(ksc.shadow_path(BOARD))
+        board = service.board(BOARD)
+        service._put(board, 'tasks', target, {'status': 'archived', 'title': 'M5'}, ME, None, '9999999999999-0000-hub')
+        ksc.pull(replica, hub, BOARD, observers=False)
+        assert kb.get_task(replica, target).status == 'archived'
+        ksc.pull(shadow, hub, BOARD, observers=False)  # the live file keeps its stop fence
+        assert kb.get_task(shadow, target).status == 'triage'
+    finally:
+        replica.close()
+
+
+def test_replica_frozen_before_the_fix_is_resynced_once(shadow, monkeypatch):
+    from hermes_cli import kanban_sync_replica_unfreeze as unfreeze
+    service = FakeService()
+    hub = service.hub(ME)
+    target, replica = _replica_after_stop(shadow, service, hub)
+    try:
+        board = service.board(BOARD)
+        service._put(board, 'tasks', target, {'status': 'archived', 'title': 'M5'}, ME, None, '9999999999999-0000-hub')
+        path = ksc.shadow_path(BOARD)
+        assert unfreeze.needed(replica, path)
+        assert unfreeze.unfreeze(replica, hub, BOARD, path) > 0
+        assert kb.get_task(replica, target).status == 'archived'
+        assert not unfreeze.needed(replica, path)
+        assert unfreeze.unfreeze(replica, hub, BOARD, path) == 0
+    finally:
+        replica.close()
+        ksc.shadow_path(BOARD).with_name(ksc.shadow_path(BOARD).name + unfreeze.SUFFIX).unlink(missing_ok=True)
