@@ -306,6 +306,15 @@ def test_deep_json_refuses_without_leaving_transaction(db):
     assert not db.in_transaction
 
 
+def test_decoder_recursion_error_is_fixed_refusal(db, monkeypatch):
+    def refuse(_):
+        raise RecursionError('synthetic decoder boundary')
+    monkeypatch.setattr(bb.json, 'loads', refuse)
+    with pytest.raises(bb.AnswerRefused, match='bb_binding_ask_ineligible'):
+        read(db)
+    assert not db.in_transaction
+
+
 def test_digest_recursion_error_is_fixed_refusal(db, monkeypatch):
     def refuse(_):
         raise RecursionError('synthetic encoder boundary')
