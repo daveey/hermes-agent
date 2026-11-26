@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 import time
 
+from tests.gateway.fixtures.hosted_failure_evidence import assert_follower_deadline
 from tests.gateway.fixtures.local_recovery_probe import child_env, daemon, rpc, websocket
 
 
@@ -322,7 +323,7 @@ def test_room_unknown_discard_releases_only_its_followers(tmp_path):
                 snapshot = await state(ws)
                 if snapshot['counts'].get('settled', 0) >= 2:
                     break
-                assert time.monotonic() < deadline, f'the follower never settled after discard: {snapshot}'
+                assert_follower_deadline(time.monotonic() < deadline, home, target, snapshot, len(model.requests))
                 await asyncio.sleep(.1)
             assert snapshot['counts'].get('cancelled') == 1, snapshot
             assert len(model.requests) == 3, model.requests
