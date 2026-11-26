@@ -32,6 +32,12 @@ _GLOBAL = frozenset({
 })
 
 
+def offered(args):
+    """Dispatch only opted-in native requests before child board initialization."""
+    handler = {"create": offered_create, "release": offered_release}.get(getattr(args, "kanban_action", None))
+    return handler(args) if handler is not None else None
+
+
 def offered_create(args):
     """Return None only when no bridge was offered, otherwise a final exit code."""
     if ENV_KEY not in os.environ:
@@ -76,4 +82,36 @@ def offered_create(args):
         print(result["task_id"])
     else:
         cli._err("kanban: native CLI bridge refused or outcome unknown; do not retry automatically", 2)
+    return 0 if result.get("ok") else 2
+
+
+def offered_release(args):
+    """An explicit episode opts into foreign native release; legacy local stays unchanged."""
+    if getattr(args, "episode", None) is None:
+        if getattr(args, "fresh_after_expiry", None) is not None:
+            from hermes_cli import kanban as cli
+            return cli._err("kanban: --fresh-after-expiry requires the exact --episode native route", 2)
+        return None
+    from hermes_cli import kanban as cli
+    from tools.origin_cli_bridge import request
+
+    values = vars(args)
+    allowed = _GLOBAL | {"command", "kanban_action", "_kanban_parser", "json", "board", "task_id", "ids",
+                         "runs", "note", "episode", "capability_episodes", "seen_comment_id", "skills", "fresh_after_expiry"}
+    if set(values) - allowed:
+        return cli._err("kanban: native release has unsupported options: " + ", ".join(sorted(set(values) - allowed)), 2)
+    if values.get("ids") or values.get("seen_comment_id") is not None:
+        return cli._err("kanban: native release is exact single-card; foreign comments need HOME's read challenge", 2)
+    if ENV_KEY not in os.environ:
+        return cli._err("kanban: --episode requires the live owning-chat native terminal bridge; no standalone fallback", 2)
+    payload = {k: values.get(k) for k in ("board", "task_id", "episode", "capability_episodes", "runs", "note")}
+    if values.get("fresh_after_expiry") is not None:
+        payload["fresh_after_expiry"] = values["fresh_after_expiry"]
+    result = request(os.environ[ENV_KEY], payload, operation="release")
+    if values.get("json"):
+        print(json.dumps(result, ensure_ascii=False))
+    elif result.get("ok"):
+        print(f"{result['task_id']}: {result.get('release_stage', 'outcome_unknown')}")
+    else:
+        cli._err("kanban: native release refused or outcome unknown; do not retry automatically", 2)
     return 0 if result.get("ok") else 2

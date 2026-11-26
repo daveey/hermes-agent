@@ -26,6 +26,25 @@ class _Policy:
                 result[key] = list(result[key])
         return result
 
+    def release(self, args, gate):
+        """Release is the captured terminal operation, not a new public tool grant.
+
+        Native custody and canonical ownership are checked separately downstream.
+        A terminal locator or a tool_call grant cannot manufacture terminal access.
+        """
+        from agent.delegation_context import is_delegated_child_context
+        from model_tools import _select_tool_names
+        from hermes_cli.kanban_release_native import dispatch
+
+        if is_delegated_child_context():
+            return {"ok": False, "error": "delegated children cannot use native CLI custody"}
+        kwargs = self.kwargs()
+        if kwargs["enabled_tools"] is None or "terminal" not in kwargs["enabled_tools"]:
+            return {"ok": False, "error": "terminal is not granted to this launch"}
+        if "terminal" not in _select_tool_names(kwargs["enabled_toolsets"], kwargs["disabled_toolsets"], quiet_mode=True):
+            return {"ok": False, "error": "terminal is not in this session's toolsets"}
+        return dispatch(args, gate=gate)
+
     def create(self, args):
         from agent.delegation_context import is_delegated_child_context
         from model_tools import suppress_post_tool_call_hook

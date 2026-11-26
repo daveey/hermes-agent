@@ -101,12 +101,20 @@ class Launch:
         # Server owns its fd until its loop exits; never close underneath recvmsg.
 
     def _invoke(self, args, gate):
+        return self._with_callbacks(args, gate, operation="create")
+
+    def _invoke_release(self, args, gate):
+        return self._with_callbacks(args, gate, operation="release")
+
+    def _with_callbacks(self, args, gate, *, operation):
         if self._policy is None:
             return {"ok": False, "error": "CLI launch has no parent dispatch policy"}
         previous = [(setter, getter()) for (getter, setter), _ in self._callbacks]
         try:
             for (_, setter), value in self._callbacks:
                 setter(value)
+            if operation == "release":
+                return self._policy.release(args, gate)
             with strict_local_creation(gate=gate):
                 return self._policy.create(args)
         finally:
@@ -127,7 +135,11 @@ class Launch:
                     return
                 value = json.loads(data)
                 if (not isinstance(value, dict) or value.get("nonce") != self._nonce
-                        or not isinstance(value.get("args"), dict)):
+                        or not isinstance(value.get("args"), dict)
+                        or set(value) not in ({"nonce", "args"}, {"nonce", "args", "operation"})):
+                    return
+                operation = value.get("operation", "create")
+                if operation not in ("create", "release"):
                     return
                 poller = select.poll()
                 poller.register(reply, select.POLLHUP | select.POLLERR)
@@ -136,8 +148,9 @@ class Launch:
                 if self._requests >= MAX_REQUESTS:
                     raise ValueError("CLI launch request limit exceeded")
                 self._requests += 1
-                gate = self._gate.dispatch()
-                result = self._ctx.copy().run(self._invoke, value["args"], gate)
+                gate = self._gate.dispatch(operation=operation)
+                invoke = self._invoke if operation == "create" else self._invoke_release
+                result = self._ctx.copy().run(invoke, value["args"], gate)
             except Exception:  # health: allow BLE001 -- tool dispatch boundary; preserve gate outcome without leaking tool exceptions
                 result = {"ok": False, "error": "CLI bridge dispatch refused"}
             finally:
@@ -172,14 +185,19 @@ class Launch:
             self._server.close()
 
 
-def request(locator, args, *, timeout=30):
+def request(locator, args, *, timeout=30, operation="create"):
     """One attempt only. Offered-but-broken channels MUST NOT fall back to create."""
     try:
         value = json.loads(locator)
         fd = value["fd"]
         if type(fd) is not int or fd < 0 or not isinstance(value["nonce"], str):
             return _unknown()
-        data = _encode({"nonce": value["nonce"], "args": args})
+        if operation not in ("create", "release"):
+            return _unknown()
+        packet = {"nonce": value["nonce"], "args": args}
+        if operation != "create":  # Preserve the existing create wire bytes.
+            packet["operation"] = operation
+        data = _encode(packet)
         # Duplicate rather than steal the inherited launch socket from sibling calls.
         duplicate = os.dup(fd)
         try:

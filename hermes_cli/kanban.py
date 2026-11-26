@@ -177,11 +177,10 @@ def kanban_command(args: argparse.Namespace) -> int:
 
     # Native requests execute only in the owning parent, before any child-side
     # board initialization or publication scope can write local state.
-    if action == "create":
-        from hermes_cli.kanban_cli_native import offered_create
-        bridged = offered_create(args)
-        if bridged is not None:
-            return bridged
+    from hermes_cli.kanban_cli_native import offered
+    bridged = offered(args)
+    if bridged is not None:
+        return bridged
 
     # Origin obligations are profile-local, not current-board state; do not
     # auto-initialize a board or route by a worker's inherited board override.

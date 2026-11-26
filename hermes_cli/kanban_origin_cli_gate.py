@@ -8,6 +8,7 @@ from threading import Lock
 
 from hermes_cli.kanban_origin_admission import AdmissionRefused
 
+_RELEASE_FAILURES = ("expired", "refused")
 _RELEASE_STAGES = (
     "intent_journaled_unsent", "authorized_pending_home", "read_first_pending", "consumed_or_applied",
 )
@@ -64,13 +65,16 @@ class RequestGate:
                 raise AdmissionRefused("CLI request already finished")
             self._finished = True
             if (self._admitted is not None and isinstance(result, dict)
-                    and result.get("ok") is True and result.get("task_id") == self._admitted):
-                self._verified = True
+                    and result.get("task_id") == self._admitted):
                 if self._operation == "release":
+                    stage = result.get("release_stage")
                     self._verified = (result.get("intent_uid") == self._intent_uid
-                                      and result.get("release_stage") in _RELEASE_STAGES)
+                                      and ((result.get("ok") is True and stage in _RELEASE_STAGES)
+                                           or (result.get("ok") is False and stage in _RELEASE_FAILURES)))
                     if self._verified:
-                        self._release_stage = result["release_stage"]
+                        self._release_stage = stage
+                else:
+                    self._verified = result.get("ok") is True
             return self._report()
 
     def _report(self):
