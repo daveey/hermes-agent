@@ -299,6 +299,7 @@ HERMES_STATE_IMPORTS = (
     "agent/__init__.py",
     "agent/compaction_display.py",
     "agent/context_compressor.py",
+    "agent/context_summary_markers.py",
     "agent/conversation_compression_archive.py",
     "agent/memory_context.py",
     "agent/message_metadata.py",
