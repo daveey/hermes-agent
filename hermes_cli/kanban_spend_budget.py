@@ -73,6 +73,9 @@ class Spend(NamedTuple):
     reported: int  # how many of ``runs`` carried a usage receipt
     cost_usd: float
     excluded: int = 0  # closed runs left out because the owner refused them and no turn ran
+    # ``kanban_spend_allowance.state`` of the card's override: None (cumulative runs), ``board`` (the Board's
+    # lease allowance enforces the run limit on every grant) or ``unproven`` (the run limit holds).
+    allowance: Optional[str] = None
 
 
 def _int(raw: Any, default: int) -> int:
@@ -388,12 +391,15 @@ def spend(conn: sqlite3.Connection, task_id: str, *, as_of: Optional[int] = None
         value = item.get("cost_usd")
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             cost += float(value)
-    return Spend(len(run_ids), since, tokens, len(usage), round(cost, 2), excluded)
+    from hermes_cli.kanban_spend_allowance import state
+    return Spend(len(run_ids), since, tokens, len(usage), round(cost, 2), excluded, state(conn, task_id))
 
 
 def over(spent: Spend, lim: Limits) -> Optional[str]:
     """Which limit ``spent`` reached (``runs`` / ``cache_read_tokens``), or None."""
-    if lim.runs and spent.runs >= lim.runs:
+    if spent.allowance == "unproven":  # a recognized-looking basis without provable Board enforcement
+        return "runs"
+    if spent.allowance is None and lim.runs and spent.runs >= lim.runs:  # ``board``: the lease grant counts
         return "runs"
     if lim.cache_read_tokens and spent.tokens["cache_read_tokens"] >= lim.cache_read_tokens:
         return "cache_read_tokens"

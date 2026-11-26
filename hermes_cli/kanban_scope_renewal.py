@@ -214,8 +214,12 @@ def _mandate_comment(conn: sqlite3.Connection, task_id: str, ref: str | int) -> 
 
 
 def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: str | int, reason: str,
-            actor: Actor) -> dict:
-    """The ``scope_renewed`` payload, or :class:`RenewalRefused`. Call inside the write transaction that appends it."""
+            actor: Actor, allowance_only: bool = False) -> dict:
+    """The ``scope_renewed`` payload, or :class:`RenewalRefused`. Call inside the write transaction that appends it.
+
+    ``allowance_only``: the caller read an active Board reviewer allowance for this card. A human operator's
+    renewal is then accepted for a stop with no scope restriction (it covers nothing; the Board retires the
+    allowance and revalidates all of this). No other authority gets that path."""
     from hermes_cli import kanban_spend_decision as ksd
     from hermes_cli.kanban_refusal_receipt import restricted as safety_restricted
     from hermes_cli.kanban_sync_divergence import _event_order
@@ -236,7 +240,8 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id:
                              "reread the card")
     done = covered(conn, task_id)
     evidence = [e for e in scope_evidence(conn, task_id, episode) if key(e) not in done]
-    if not evidence:
+    supersedes = allowance_only and not evidence and actor.authority == "human" and actor.kind == "human"
+    if not evidence and not supersedes:
         raise RenewalRefused("not_scope_stopped", f"stop {episode} on {task_id} carries no unrenewed scope restriction")
     comment = _mandate_comment(conn, task_id, comment_id)
     body = (comment["body"] or "").strip() if comment is not None else ""
@@ -252,7 +257,7 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id:
                              "write a fresh mandate comment")
     if why := _writer_refusal(conn, actor, written):
         raise RenewalRefused("mandate_authority", why)
-    if any(_event_order(e) >= _event_order(written) for e in evidence):
+    if any(_event_order(e) >= _event_order(written) for e in (evidence or [stop])):
         raise RenewalRefused("mandate_stale", f"comment {comment_id} predates the scope stop it would renew; "
                              "write the mandate after the stop")
     return {"version": 1, "episode": episode, "mandate_comment_uid": comment_ref(comment),

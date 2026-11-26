@@ -602,6 +602,38 @@ def _resume(conn: sqlite3.Connection, out: dict, tid: str, by: str, recorded: di
             "message": f"{tid} -> {'todo' if parents else 'ready'}: finished the release already recorded"}
 
 
+def _board_allowance(conn: sqlite3.Connection, s) -> None:
+    """What this release does about a reviewer allowance the Board may still hold for the card (authenticated
+    read, outside any transaction; never authority by itself). Sets ``s.supersede`` (a human operator: the
+    canonical renewal below retires it, then the ordinary budget applies) or ``s.keep_allowance`` (an agent
+    authority: the Board's remaining fresh leases stay the budget; nothing local replaces them)."""
+    from hermes_cli import kanban_allowance_observation as observation
+    from hermes_cli import kanban_spend_allowance as allowance
+    s.supersede = s.keep_allowance = False
+    if not allowance.history(conn, s.tid):
+        return
+    seen = observation.board_state(conn, s.tid)
+    if seen is None:
+        raise _Refusal("allowance_unreadable", f"the Board's reviewer allowance for {s.tid} could not be read; "
+                       "nothing was changed. Rerun when the Board is reachable")
+    if not seen:
+        return
+    if seen["state"] != "active":
+        raise _Refusal("allowance_invalidated", f"the Board invalidated {s.tid}'s reviewer allowance (the card "
+                       "was re-homed or deleted) and holds it; a release cannot replace it. Nothing was changed")
+    if s.writer[0] == "human" and s.authority == "human":
+        s.supersede = True
+        return
+    route = f"a human operator runs `hermes kanban release {s.tid}`"
+    if allowance.state(conn, s.tid) != allowance.BOARD:
+        raise _Refusal("allowance_in_force", f"the Board still holds {s.tid}'s reviewer allowance and a newer "
+                       f"budget does not replace it; {route}")
+    if seen.get("remaining") == 0:
+        raise _Refusal("allowance_exhausted", f"{s.tid}'s ten fresh-lease reviewer allowance is exhausted and an "
+                       f"agent release does not replace it; {route}")
+    s.keep_allowance = True
+
+
 def _budget_plan(conn: sqlite3.Connection, s) -> tuple[Optional[int], Optional[int], int, str]:
     """``(runs limit, cache-read limit, runs spent, text)`` this release leaves on the card; a None run limit
     leaves the override untouched.
@@ -629,6 +661,8 @@ def _budget_plan(conn: sqlite3.Connection, s) -> tuple[Optional[int], Optional[i
         raise _Refusal("budget_limit_in_force", f"{s.tid} has reached its cache-read limit ({used} of {limit}) and an "
                        "agent does not raise a limit a person may have set; a human runs "
                        f"`hermes kanban release {s.tid}` or `hermes kanban spend-budget {s.tid}`")
+    if getattr(s, "keep_allowance", False):
+        return None, None, spent.runs, "unchanged (the Board's reviewer allowance stays in force)"
     unlimited = ksb._limit_value(prior.get("runs")) == 0
     if unlimited and not reached:
         return None, None, spent.runs, "unchanged (no run limit on this card)"
@@ -664,13 +698,17 @@ def _mandate_and_budget(conn: sqlite3.Connection, out: dict, s) -> None:
     s.comment = comment
     s.reason = f"hermes kanban release: {s.runs} more runs (mandate comment {comment})"
     s.kept = f"; mandate comment {comment} is on the card and a rerun reuses it"
-    if s.scope:
+    if s.scope or s.supersede:
         try:
+            # ``supersede``: the same validated human renewal also retires the Board's reviewer allowance, and is
+            # the only thing that does. It grants nothing; the budget below is the release's own.
             renewal_cli.renew(conn, s.tid, episode=s.episode, comment_id=comment, reason=s.reason, board=s.board,
-                              writer=s.writer, env=s.env, ancestry=s.ancestry)
+                              writer=s.writer, env=s.env, ancestry=s.ancestry, allowance_only=s.supersede)
         except renewal.RenewalRefused as exc:
             raise _Refusal(exc.code, str(exc) + s.kept)
-        out["scope_renewed"] = True
+        out["scope_renewed"] = bool(s.scope)
+        if s.supersede:
+            out["allowance_superseded"] = True
     runs, cache, spent, _ = _budget_plan(conn, s)  # again: a human's mandate comment may have opened a new window
     if runs is None:
         s.budget = 0  # an exempt card (or one with no run limit) stays that way: a release never makes it finite
@@ -841,6 +879,7 @@ def _release(conn: sqlite3.Connection, out: dict, s) -> dict:
                                rerun=capability.rerun(tid, s.capability_rows))
     if s.precondition and (why := s.precondition(conn)):
         raise _Refusal("ask_changed", str(why))
+    _board_allowance(conn, s)
     s.budget_text = _budget_plan(conn, s)[3]  # also the up-front budget_limit_in_force refusal
     _mandate_and_budget(conn, out, s)
     outcome = _decide(conn, s)

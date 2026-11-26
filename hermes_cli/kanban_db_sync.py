@@ -829,11 +829,14 @@ class Lease:
     version: Optional[int] = None
     # workspace_source v1: the grant response row's manifest/custody (``None``: an old Board sent no snapshot keys).
     source_snapshot: Optional[Any] = None
+    # board_lease_allowance_v1: the grant's charge evidence (``kanban_spend_allowance.evidence_ok``), or None.
+    spend_allowance: Optional[dict] = None
 
 
 class LeaseClient(Protocol):
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
-                lane: str = "ready", source_protocol: Optional[int] = None) -> Lease: ...
+                lane: str = "ready", source_protocol: Optional[int] = None,
+                expected_reviewer_allowance: Optional[dict] = None) -> Lease: ...
 
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> Lease: ...
 
@@ -962,9 +965,13 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     try:
         from hermes_cli.kanban_source_board import grant_protocol
         protocol = grant_protocol()  # workspace_source: only the dispatcher's claim, only when enabled (R3-a)
+        from hermes_cli.kanban_spend_allowance import expected
+        allowance = expected(conn, task_id)
+        identity = ({k: allowance[k] for k in ("review_uid", "budget_event_uid")} if allowance else None)
         lease = _client().acquire(board_id=ids[0], task_uid=task_id, run_uid=run_uid, gateway_id=ids[1],
                                   ttl_s=max(expires - int(time.time()), 1), lane=lane,
-                                  **({"source_protocol": protocol} if protocol else {}))
+                                  **({"source_protocol": protocol} if protocol else {}),
+                                  **({"expected_reviewer_allowance": identity} if identity else {}))
     except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
         _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
         defer_claim(task_id, "offline", ORIGIN_BOARD)

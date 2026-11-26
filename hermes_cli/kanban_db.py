@@ -38,7 +38,7 @@ from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import 
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_dup_detector as _dup_detector, kanban_placement_forward as _placement_fwd  # no cycle
 from hermes_cli import kanban_run_end_lease as _run_end_lease  # stdlib-only at import: no cycle
-from hermes_cli import kanban_containment_connections as _containment, kanban_spend_claim as _spend_claim
+from hermes_cli import kanban_containment_connections as _containment, kanban_spend_claim as _spend_claim, kanban_spend_allowance as _spend_allowance
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
 from hermes_cli.kanban_terminal_guard import unblock_refusal  # stdlib-only at import: no cycle; re-exported for plugins
@@ -2000,7 +2000,7 @@ def claim_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
+        if not admitted or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()) or _spend_allowance.claim_refused(conn, task_id, gate):  # [daveey] same txn as the CAS
             return None
         # Never ready -> running with an undone parent; recompute_ready re-promotes when parents finish.
         if not _parents_satisfied(conn, task_id):
@@ -2040,7 +2040,7 @@ def claim_review_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
+        if not admitted or _containment.held(conn, task_id) or spend_check() or (admission_check is not None and admission_check()) or _spend_allowance.claim_refused(conn, task_id, gate):  # [daveey] same txn as the CAS
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(

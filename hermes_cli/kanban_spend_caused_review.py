@@ -62,22 +62,44 @@ def fenced(conn, task_id):
             or row[3] is not None or pending(conn, task_id) or stopped_at(conn, task_id) is not None)
 
 
+def _human_reset(conn, task_id):
+    """The newest human scope renewal's order on a canonical primary board, else None. The Board's privately
+    marked renewal is the authority for the cap (spend_review.ts humanReset); this only decides whether Core
+    asks. A forged synced row makes Core ask and the Board refuse ``grant_cap``; it never grants."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_sync_divergence import _event_order
+    if sync.board_mode(conn) != "primary" or not sync.sync_state(conn):
+        return None
+    rows = [dict(r) for r in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='scope_renewed'", (task_id,))]
+    human = [r for r in rows if record(r["payload"]).get("version") == 1
+             and record(r["payload"]).get("authority_kind") == "human" and record(r["payload"]).get("actor_kind") == "human"]
+    return max(map(_event_order, human), default=None)
+
+
 def grant_count(conn, task_id):
-    """Conservative count: agent budget edits never reset caused-stop grants."""
+    """Conservative count: agent budget edits never reset caused-stop grants; a canonical human renewal does."""
+    from hermes_cli.kanban_sync_divergence import _event_order
+    reset = _human_reset(conn, task_id)
     episodes = set()
-    for kind, raw, uid in conn.execute("SELECT kind,payload,id FROM task_events WHERE task_id=? AND kind IN "
-                                       "('spend_review','spend_review_granted','spend_review_settled')", (task_id,)):
-        p = record(raw)
-        if kind == "spend_review_granted" or p.get("verdict") == "release":
-            episodes.add(p.get("episode") or str(uid))
+    for row in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind IN "
+                            "('spend_review','spend_review_granted','spend_review_settled')", (task_id,)):
+        row = dict(row)
+        p = record(row["payload"])
+        if reset is not None and _event_order(row) <= reset:
+            continue
+        if row["kind"] == "spend_review_granted" or p.get("verdict") == "release":
+            episodes.add(p.get("episode") or str(row["id"]))
     return len(episodes)
 
 
 def enrich(conn, task_id, stop, ctx):
     cause = effective_cause(conn, task_id, stop)
-    if cause is None:
+    from hermes_cli import kanban_db_sync as sync
+    ctx["_canonical"] = sync.board_mode(conn) == "primary" and bool(sync.sync_state(conn))
+    if cause is None and not ctx["_canonical"]:
         return ctx
-    ctx["cause"] = cause
+    if cause is not None:
+        ctx["cause"] = cause
     # Board is the definitive window validator. This bounded advisory corpus must
     # never confer authority; an overinclusive old quote is refused there.
     texts = [record(stop.get("payload")).get("reason") or ""]
@@ -98,8 +120,8 @@ def validate(verdict, ctx):
     """Return only bounded v1 wire fields, never model-supplied identity."""
     choice = verdict.get("decision")
     reason = verdict.get("reason")
-    if choice not in {"release", "wait_on", "archive", "escalate"}:
-        raise ValueError("invalid caused-stop decision")
+    if choice not in {"release", "wait_on", "archive", "escalate"} or "runs" in verdict:
+        raise ValueError("invalid canonical decision or custom run budget")
     if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 2000:
         raise ValueError("missing or oversized reason")
     fields = {"verdict": choice, "reason": reason.strip()}
@@ -212,10 +234,12 @@ def review(conn, task_id, episode, verdict, ctx):
     try:
         stop = decision.strict_episode(conn, task_id)
         enabled, cap = reviewer.settings()
+        cause = effective_cause(conn, task_id, stop) if stop else None
+        ordinary = stop is not None and cause is None and reviewer._refusal(conn, task_id, episode) is None
         allowed = (stop is not None and reviewer.episode_of(stop) == episode and not fenced(conn, task_id)
                    and not foreign_copy(conn, task_id) and not reviewer._disposed(conn, task_id, episode)
                    and not reviewer._human_after_stop(conn, task_id, stop) and enabled
-                   and effective_cause(conn, task_id, stop) in CAUSES
+                   and (cause in CAUSES or ordinary)
                    and grant_count(conn, task_id) < min(cap, 2))
         if reviewer.state(conn, task_id, episode) != reviewer.STARTED:
             return "moot"

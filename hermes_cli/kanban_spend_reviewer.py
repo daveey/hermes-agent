@@ -486,7 +486,7 @@ def judge(ctx: dict) -> Optional[dict]:
     from agent.model_routing_managed import managed_config, verify_selected_route
     from hermes_cli.kanban_hub_admission import _bounded, _owner_scope
     from hermes_cli.kanban_spend_caused_review import PROMPT as CAUSED_PROMPT
-    prompt = CAUSED_PROMPT if ctx.get("cause") else PROMPT
+    prompt = CAUSED_PROMPT if ctx.get("cause") or ctx.get("_canonical") else PROMPT
     user = {k: v for k, v in ctx.items() if not k.startswith("_")}
     route: dict = {}
     managed: dict = {}
@@ -562,7 +562,7 @@ def review(conn: sqlite3.Connection, task_id: str, episode: str) -> str:
         verdict = None
     if verdict is None:
         return escalate(conn, task_id, episode, "the reviewer model was unavailable")
-    if ctx.get("cause"):
+    if ctx.get("cause") or ctx.get("_canonical"):
         from hermes_cli.kanban_spend_caused_review import review as caused_review
         return caused_review(conn, task_id, episode, verdict, ctx)
     if verdict["decision"] == "grant":
@@ -642,6 +642,9 @@ def grant(conn: sqlite3.Connection, task_id: str, episode: str, runs: int, reaso
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_spend_budget as ksb
     from hermes_cli.kanban_spend_promote import WINDOW_KEY
+    from hermes_cli import kanban_db_sync as sync
+    if sync.sync_state(conn):
+        return "synced reviewer grants require the canonical fixed-ten Board operation"
     with kb.write_txn(conn):
         if why := _refusal(conn, task_id, episode):
             return why

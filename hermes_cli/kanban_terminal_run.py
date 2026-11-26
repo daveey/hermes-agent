@@ -37,6 +37,8 @@ def reserve(conn, task_id: str, kind: str) -> bool:
         return False
     limits = budget.card_limits(conn, task_id, budget.limits())
     spent = budget.spend(conn, task_id)
+    if spent.allowance is not None:  # the Board's lease allowance has no local count to reserve a last run from
+        return False
     if not limits.runs or limits.runs - spent.runs != 1 or budget.over(spent, limits):
         return False
     from hermes_cli import kanban_db as kb

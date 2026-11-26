@@ -206,7 +206,7 @@ def _evidence_connection(conn: sqlite3.Connection, scope: ExitStack, task_id: st
     return conn
 
 
-def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: int, reason: str,
+def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: int, reason: str, allowance_only: bool = False,
           board: Optional[str] = None, writer: Optional[tuple] = None,
           env: Optional[Mapping[str, str]] = None,
           ancestry: Optional[Sequence[Mapping[str, str]]] = None) -> dict:
@@ -231,17 +231,18 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
                                   conn, board, task_id, gateway, profile, session),
                               delegate=lambda session: delegates.live_grant(
                                   conn, board, gateway=gateway, profile=profile, session=session))
-        return _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor)
+        return _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor, allowance_only)
 
 
-def _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor):
+def _renew(conn, evidence, task_id, episode, comment_id, reason, board, actor, allowance_only=False):
     from hermes_cli import kanban_db_sync as sync
     mode = sync.board_mode(conn)
     if mode == "off" and not sync.sync_state(conn):
         return renewal.renew_local(conn, task_id, episode=episode, comment_id=comment_id, reason=reason, actor=actor)
     if mode == "off":
         raise RenewalRefused("board_unavailable", "this board is synced but sync is not active in this process")
-    payload = renewal.prepare(evidence, task_id, episode=episode, comment_id=comment_id, reason=reason, actor=actor)
+    payload = renewal.prepare(evidence, task_id, episode=episode, comment_id=comment_id, reason=reason, actor=actor,
+                              allowance_only=allowance_only)
     return _canonical(conn, board or sync.sync_state(conn)["board_id"], task_id, payload, mode, evidence=evidence)
 
 

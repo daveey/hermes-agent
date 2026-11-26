@@ -51,7 +51,9 @@ def _start_spend_reviews(conn):
     """Spend-stop reviews run outside the worker queue, so a full host never delays a budget decision."""
     import logging
     from hermes_cli.kanban_spend_reviewer import start_due
+    from hermes_cli import kanban_allowance_maintenance
     try:
+        kanban_allowance_maintenance.sweep(conn)
         start_due(conn)
     except DispatchWriteContended:
         raise

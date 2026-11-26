@@ -224,6 +224,45 @@ def test_capability_unknown_and_fabricated_quote_escalate():
         caused.validate({"decision": "wait_on", "reason": "wait", "target": "t_other"}, ctx)
 
 
+@pytest.mark.parametrize("runs", [None, 0, 1, 10, True, "10"])
+def test_canonical_verdict_cannot_silently_replace_custom_budget(runs):
+    with pytest.raises(ValueError, match="custom run budget"):
+        caused.validate({"decision": "release", "reason": "Finish acceptance", "remaining_quote": QUOTE,
+                         "runs": runs}, {"task_id": "t_source", "evidence": [QUOTE]})
+
+
+@pytest.mark.parametrize("choice", ["release", "grant"])
+def test_primary_ordinary_uses_fixed_canonical_contract(kanban_home, spend_reviewer, board, monkeypatch, choice):
+    _hub, calls = board
+    with kbc.connect_closing() as conn:
+        tid, ep = stop(conn, None)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='spend_budget_triaged'",
+                         (json.dumps({"reason": QUOTE, "runs": 20, "since": 0}), tid))
+            kb._append_event(conn, tid, reviewer.STARTED, {"episode": ep})
+        ctx = reviewer.context(conn, tid, ep)
+        assert ctx["_canonical"] is True
+        assert QUOTE in ctx["evidence"]
+        monkeypatch.setattr(reviewer, "judge", lambda ctx: {
+            "decision": choice, **({"runs": 1} if choice == "grant" else {}), "reason": "Finish acceptance",
+            "remaining_quote": QUOTE, "progress_quote": QUOTE})
+        monkeypatch.setattr(decision, "safe_ensure_producer", lambda *a: None)
+        assert reviewer.review(conn, tid, ep) == ("settled" if choice == "release" else "escalated")
+        assert len(calls) == (1 if choice == "release" else 0)
+        assert kb.get_task(conn, tid).status == "triage"
+        assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind IN "
+                                "('scope_renewed','spend_budget_set','promoted_manual')", (tid,)).fetchone()
+
+
+def test_primary_direct_grant_never_writes_local_budget(kanban_home, spend_reviewer, board):
+    with kbc.connect_closing() as conn:
+        tid, ep = stop(conn, None)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, reviewer.STARTED, {"episode": ep})
+        assert reviewer.grant(conn, tid, ep, 10, "wrong route", QUOTE) is not None
+        assert kb.get_task(conn, tid).status == "triage"
+
+
 def test_review_calls_canonical_without_local_renewal(kanban_home, spend_reviewer, board, monkeypatch):
     with kbc.connect_closing() as conn:
         tid, ep = stop(conn)

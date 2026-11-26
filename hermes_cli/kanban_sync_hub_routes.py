@@ -40,6 +40,12 @@ class HubRoutesMixin:
             "GET", f"/v2/boards/{quote(board, safe='')}/containment/capability"
         )
 
+    def reviewer_allowance(self, board: str, task: str) -> dict:
+        """SELECT-only diagnostic, with a small hard response bound; never a lease grant."""
+        from urllib.parse import quote, urlencode
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/reviewer-allowance?"
+                          + urlencode({"task": task}), max_response_bytes=8192)
+
     def leases(self, board: str, body: dict) -> dict:
         return self._call("POST", f"/v2/boards/{board}/leases", body)
 

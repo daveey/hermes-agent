@@ -1969,7 +1969,7 @@ class HubLeaseClient:
     def __init__(self, hub: Hub) -> None:
         self.hub = hub
 
-    def _lease(self, board_id: str, body: dict, run_uid: str) -> sync.Lease:
+    def _lease(self, board_id: str, body: dict, run_uid: str, gateway_id: str) -> sync.Lease:
         try:
             res = self.hub.leases(board_id, {**body, "client_op_id": sync.uuid7()})
         except (HubError, OSError) as exc:
@@ -1980,18 +1980,23 @@ class HubLeaseClient:
         return sync.Lease(granted=granted, run_uid=run_uid, expires_ms=lease.get("expires"),
                           holder=lease.get("holder"), reason=None if granted else res.get("reason"),
                           version=res.get("version"), source_snapshot=snapshot_from_row(res.get("row"), grant={
-                              k: res.get(k) for k in ("status", "lease", "source_predecessor")}))
+                              k: res.get(k) for k in ("status", "lease", "source_predecessor")}),
+                          spend_allowance=res.get("spend_allowance") if granted and
+                          lease.get("task_id") == body.get("task") and lease.get("holder") == gateway_id and isinstance(
+                              res.get("spend_allowance"), dict) else None)
 
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
-                lane: str = "ready", source_protocol: Optional[int] = None) -> sync.Lease:
+                lane: str = "ready", source_protocol: Optional[int] = None,
+                expected_reviewer_allowance: Optional[dict] = None) -> sync.Lease:
         return self._lease(board_id, {"action": "grant", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s, "lane": lane,
-                                      **({"source_protocol": source_protocol} if source_protocol else {})}, run_uid)
+                                      **({"source_protocol": source_protocol} if source_protocol else {}),
+                                      "expected_reviewer_allowance": expected_reviewer_allowance}, run_uid, gateway_id)
 
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> sync.Lease:
-        return self._lease(board_id, {"action": "renew", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s}, run_uid)
+        return self._lease(board_id, {"action": "renew", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s}, run_uid, gateway_id)
 
     def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str,
                 unused_grant: bool = False) -> None:
         # ``unused_grant``: released before anything started locally (the Board does not count it as a start).
         self._lease(board_id, {"action": "release", "task": task_uid, "run_uid": run_uid,
-                               **({"unused_grant": True} if unused_grant else {})}, run_uid)
+                               **({"unused_grant": True} if unused_grant else {})}, run_uid, gateway_id)
