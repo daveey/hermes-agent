@@ -51,7 +51,8 @@ def test_supported_effective_config_reader(tmp_path, monkeypatch):
     b'{"request":{"id":"binding-request","args":{"x":1,"x":2}}}',
     b'{"request":{"id":"binding-request"},"override":true}',
     b'{"request":{"id":"binding-request","override":true}}',
-    b'[]', b'{"request":null}', b'{"request":{"id":"foreign"}}', b'\xff'])
+    b'[]', b'{"request":null}', b'1', b'null',
+    b'{"request":{"id":"foreign"}}', b'\xff'])
 def test_strict_authenticated_json(monkeypatch, raw):
     records = object.__new__(source.BindingRecords)
     monkeypatch.setattr(records, 'raw', lambda rid: raw)
