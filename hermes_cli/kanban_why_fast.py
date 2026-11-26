@@ -89,7 +89,8 @@ def answer(recorded: dict, *, started: float) -> dict:
     first["verdict"] = "stop"
     return {"task_id": recorded["task_id"], "board": recorded.get("board"), "source": "snapshot",
             "age_s": recorded.get("age_s"), "freshness_bound_s": recorded.get("freshness_bound_s"),
-            "status": recorded.get("status"), "first_stop": first, "overlaps": recorded.get("overlaps"),
+            "status": recorded.get("status"), "phase": recorded.get("phase"),
+            "first_stop": first, "overlaps": recorded.get("overlaps"),
             "overlaps_unknown": recorded.get("overlaps_unknown"), "globals": recorded.get("globals"),
             "chain": [first], "recorded": recorded, "elapsed_s": round(time.monotonic() - started, 3)}
 

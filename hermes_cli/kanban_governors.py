@@ -74,6 +74,8 @@ class Governor:
 # Dispatcher order: ``_dispatch_once_locked`` top to bottom, then ``_dispatch_lane_task``, then the claim
 # transaction. A card's first stop is the earliest entry here that refused it.
 _REGISTRY: tuple[Governor, ...] = (
+    Governor("storage_admission", "Storage admission", "board", "hermes_cli/kanban_dispatch_storage.py:run",
+             "dispatch preclaim write-wait budget"),
     Governor("gateway_drain", "Gateway drain", "host", "hermes_cli/kanban_gateway_drain.py:dispatch_paused",
              "gateway_state.json gateway_state=draining / restart_requested"),
     Governor("core_update_drain", "Core-update drain", "host", "hermes_cli/kanban_gateway_drain.py:core_update_hold",

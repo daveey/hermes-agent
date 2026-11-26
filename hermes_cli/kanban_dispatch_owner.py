@@ -146,6 +146,8 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
         result = run(conn, lambda: _tick_work(conn, tick, dry_run), board=board)
         result.dispatch_owner = owner
         if result.storage_skip_reason:
+            from hermes_cli.kanban_governor_storage import record
+            record(conn, board=board, dry_run=dry_run)
             return result  # observers/checkpoints must not re-enter the contended writer
         kbc._maybe_checkpoint_wal(conn, db_path)
     # Denied ticks deliberately don't invoke observers, which may mutate state.
