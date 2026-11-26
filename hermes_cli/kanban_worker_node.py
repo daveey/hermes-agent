@@ -648,6 +648,8 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         if reason is None:
             reason = _paced(conn, replica, card)
         if reason is None:
+            reason = _usage_pending(replica, card)
+        if reason is None:
             from hermes_cli.kanban_class_walls import pickup_refusal
             reason = pickup_refusal(replica, card)
         hold = kph.board_hold(replica, card) if reason is None else None
@@ -701,6 +703,24 @@ def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.
     from hermes_cli.kanban_start_gate import hold as start_gate_hold  # a plugin holds this machine's card starts
     gated = start_gate_hold(task_id=card["id"], lane=card["status"], assignee=card["assignee"], board=None)
     return None if gated is None else ("other", f"{gated} (local dispatch would hold it)")
+
+
+def _usage_pending(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+    """[daveey] ``("other", detail)`` when the local claim would defer ``card`` on ``usage_accounting_pending``
+    (``kanban_spend_claim``): a closed run of it still lacks its usage receipt. Judged on the replica (a copy
+    carries exactly those runs/events) before the copy, so such a card takes no pickup budget. Copied, it was
+    deferred, evicted and copied again each tick: 16 such cards filled every worker's window and hid the review
+    of the accounting fix itself (t_01a2159cd5eccf77, 2026-11-26). Any failure copies as before: the claim
+    check still decides after the copy."""
+    try:
+        from hermes_cli.kanban_usage_accounting import pending
+        runs = pending(replica, card["id"])
+    except Exception:  # health: allow BLE001 -- pickup evidence must never stop a pickup
+        _log.warning("kanban worker node: usage accounting check failed for %s; copying", card["id"], exc_info=True)
+        return None
+    if not runs:
+        return None
+    return "other", f"usage_accounting_pending: runs {sorted(runs)} (local claim would defer it)"
 
 
 def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
