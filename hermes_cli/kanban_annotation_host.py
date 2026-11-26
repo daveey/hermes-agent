@@ -728,45 +728,42 @@ def _event_refresh(events) -> float | None:
                 # A deadline dropped here may have come due unseen: the part keys vouch for nothing after it.
                 _parts.failed(scope)
                 return None
+            from hermes_cli import kanban_annotation_counts as counts
+
             if not _ksa._annotate_refresh_lock.acquire(blocking=False):
                 return _scope_retry(scope)
-            # Native scheduling uses part keys, never the legacy narrow-key gate. Do not build its expensive
-            # inventory in prepare or claim its extended display lifetime: publish the ordinary exact copy.
-            # Inner caches can return without emitting their clock boundaries.
-            # Preserve those until consumed; replacing the list needs per-cache
-            # deadline ownership, not just a successful outer projection.
-            confirmations = _settle_deadlines.get(scope, ())
-            started = time.time()
-            pending = [t for t in _clock_deadlines.get(scope, ()) if t not in confirmations]
-            _holder_ctx.deadlines = [t for t in pending if t > started]
-            # [daveey] Force only the parts whose own inputs moved (kanban_annotation_parts). A provider deadline
-            # that came due is a wall-time transition no key sees: it forces them all. A settle confirmation is
-            # not one: it re-takes the keys, which is what shows a commit the first read was too early for. The
-            # counts are also read once their last read is ``STRICT_REFRESH_AGE_S`` old, so the published
-            # ``read_at`` is renewed before exact adopters drop the copy at ``_COUNTS_MAX_AGE_S``.
-            # The age is this scope's own: the active count slot belongs to whichever scope was read last.
-            from hermes_cli import kanban_annotation_counts as counts
-            read_at = counts.read_at(scope)
-            if read_at is None:
-                with _ksa._cache_lock:
-                    read_at = _ksa._count_scopes.read_at_locked(scope)
-            if lost:
-                _parts.failed(scope)
-            clock = len(_holder_ctx.deadlines) != len(pending)
-            renew = read_at is None or time.monotonic() - read_at >= STRICT_REFRESH_AGE_S
-            forced, part_keys = _parts.plan(scope, clock=clock, renew=renew)
-            _ksa._revalidate.force_read.scope = scope
-            _ksa._revalidate.force_read.parts = forced
-            _ksa._revalidate.force_read.content_only_boards = not (lost or clock or renew)
             try:
-                try:
-                    # No part needs a read: avoid prepare/freeze/publication and ordinary inner TTLs.
-                    # Keep the deadline/settle path below: this hint can precede COMMIT visibility.
-                    if forced:
-                        _ksa._refresh_annotation_locked(scope)
-                except BaseException:
+                # Native scheduling uses part keys, never the legacy narrow-key gate. Do not build its expensive
+                # inventory in prepare or claim its extended display lifetime: publish the ordinary exact copy.
+                # Inner caches can return without emitting their clock boundaries.
+                # Preserve those until consumed; replacing the list needs per-cache
+                # deadline ownership, not just a successful outer projection.
+                confirmations = _settle_deadlines.get(scope, ())
+                started = time.time()
+                pending = [t for t in _clock_deadlines.get(scope, ()) if t not in confirmations]
+                _holder_ctx.deadlines = [t for t in pending if t > started]
+                # [daveey] Force only the parts whose own inputs moved (kanban_annotation_parts). A provider deadline
+                # that came due is a wall-time transition no key sees: it forces them all. A settle confirmation is
+                # not one: it re-takes the keys, which is what shows a commit the first read was too early for. The
+                # counts are also read once their last read is ``STRICT_REFRESH_AGE_S`` old, so the published
+                # ``read_at`` is renewed before exact adopters drop the copy at ``_COUNTS_MAX_AGE_S``.
+                # The age is this scope's own: the active count slot belongs to whichever scope was read last.
+                read_at = counts.read_at(scope)
+                if read_at is None:
+                    with _ksa._cache_lock:
+                        read_at = _ksa._count_scopes.read_at_locked(scope)
+                if lost:
                     _parts.failed(scope)
-                    raise
+                clock = len(_holder_ctx.deadlines) != len(pending)
+                renew = read_at is None or time.monotonic() - read_at >= STRICT_REFRESH_AGE_S
+                forced, part_keys = _parts.plan(scope, clock=clock, renew=renew)
+                _ksa._revalidate.force_read.scope = scope
+                _ksa._revalidate.force_read.parts = forced
+                _ksa._revalidate.force_read.content_only_boards = not (lost or clock or renew)
+                # No part needs a read: avoid prepare/freeze/publication and ordinary inner TTLs.
+                # Keep the deadline/settle path below: this hint can precede COMMIT visibility.
+                if forced:
+                    _ksa._refresh_annotation_locked(scope)
                 _parts.done(scope, part_keys)
                 _, due = waiting_events(time.time())
                 note_deadline(due)
@@ -781,6 +778,9 @@ def _event_refresh(events) -> float | None:
                 _clock_deadlines[scope] = sorted({*_holder_ctx.deadlines, *confirmations})
                 _event_ready.add(scope)
                 return min(_clock_deadlines[scope], default=None)
+            except BaseException:
+                _parts.failed(scope)
+                raise
             finally:
                 counts.clear_use()
                 _holder_ctx.deadlines = None
