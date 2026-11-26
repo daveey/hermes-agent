@@ -536,6 +536,12 @@ def _reset_foreground_exit_fence():
 
 
 @pytest.fixture(autouse=True)
+def _usage_accounting_gate_enforced(monkeypatch):
+    """Tests assert enforced accounting refusals; production defaults to observe (gate_policy)."""
+    monkeypatch.setattr("hermes_cli.kanban_usage_accounting.DEFAULT_MODE", "enforce")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_kanban_live_worker_procs():
     """Give every test an empty ``kanban_db_dispatch._live_worker_procs`` and drop what it parked.
 

@@ -725,8 +725,8 @@ def _usage_pending(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[t
     evicted and copied again each tick: 16 such cards filled every worker's window and hid the review of the accounting fix itself (t_01a2159cd5eccf77, 2026-11-26). Any
     failure copies as before: the claim check still decides after the copy."""
     try:
-        from hermes_cli.kanban_usage_accounting import pending
-        runs = pending(replica, card["id"])
+        from hermes_cli.kanban_usage_accounting import enforced
+        runs = enforced(replica, card["id"])
     except Exception:  # health: allow BLE001 -- pickup evidence must never stop a pickup
         _log.warning("kanban worker node: usage accounting check failed for %s; copying", card["id"], exc_info=True)
         return None

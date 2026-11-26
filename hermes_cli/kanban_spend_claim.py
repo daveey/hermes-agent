@@ -26,6 +26,9 @@ def claim_check(conn, task_id):
     except ConfigBackendUnavailable:
         # A missing policy cannot authorize spending; do not crash the dispatcher either.
         return lambda: refuse("spend_policy_unavailable")
+    from hermes_cli.kanban_usage_accounting import gate_policy
+    mode, after = gate_policy()
+    accounting_cfg = {"kanban": {"usage_accounting": {"mode": mode, "enforce_after": after}}}
     pr = None
     if not decision.pending(conn, task_id):
         lim = budget.card_limits(conn, task_id, board)
@@ -35,8 +38,8 @@ def claim_check(conn, task_id):
     def refused():
         if decision.pending(conn, task_id):
             return refuse("decision_pending")
-        from hermes_cli.kanban_usage_accounting import pending
-        if pending(conn, task_id):
+        from hermes_cli.kanban_usage_accounting import enforced
+        if enforced(conn, task_id, accounting_cfg):
             return refuse("usage_accounting_pending")
         lim = budget.card_limits(conn, task_id, board)
         if budget.over(budget.spend(conn, task_id), lim) is None:

@@ -118,6 +118,51 @@ def settled(conn, task_id, run_ids, usages):
     return good
 
 
+MODES = ('observe', 'enforce')
+DEFAULT_MODE = 'observe'
+
+
+def gate_policy(cfg=None):
+    """``(mode, enforce_after)`` from ``kanban.usage_accounting``; unreadable config fails closed.
+
+    ``observe`` (default until exits publish finals): debt stays visible through :func:`pending`
+    and spend reports but admission does not refuse on it. On 2026-11-26 the gate held 37/37
+    ready cards (286 runs) because continue/block/schedule/retain/reclaim exits never produce a
+    final receipt and nothing can settle them, so the pool ran 2 cards with 28 free slots.
+    ``enforce`` refuses on debt from runs closed at or after ``enforce_after`` (epoch seconds;
+    unset = every run). Budget and decision holds are independent and never relaxed here.
+    """
+    if cfg is None:
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+        except Exception:  # health: allow BLE001 -- unreadable policy fails closed
+            return 'enforce', None
+    section = ((cfg or {}).get('kanban') or {}).get('usage_accounting') or {}
+    mode = section.get('mode', DEFAULT_MODE) if isinstance(section, dict) else DEFAULT_MODE
+    if mode not in MODES:
+        mode = 'enforce'
+    after = section.get('enforce_after') if isinstance(section, dict) else None
+    if isinstance(after, bool) or not isinstance(after, (int, float)) or not math.isfinite(after):
+        after = None
+    return mode, after
+
+
+def enforced(conn, task_id, cfg=None):
+    """The :func:`pending` runs admission refuses on under :func:`gate_policy`."""
+    mode, after = gate_policy(cfg)
+    if mode != 'enforce':
+        return []
+    runs = pending(conn, task_id)
+    if not runs or after is None:
+        return runs
+    marks = ','.join('?' for _ in runs)
+    ended = dict(conn.execute(
+        f"SELECT id,ended_at FROM task_runs WHERE task_id=? AND id IN ({marks})", (task_id, *runs)))
+    # An unclosed row has no end time yet: it is new by definition.
+    return [rid for rid in runs if ended.get(rid) is None or ended[rid] >= after]
+
+
 def pending(conn, task_id):
     """Closed admitted/bound turns and ambiguous releases without cache accounting.
 
