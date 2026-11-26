@@ -1,9 +1,8 @@
-"""Authenticated HOME consume queue. Consumption is NOT local application.
+"""Authenticated HOME consume and final canonical application queue.
 
-The atomic assembler is separately exercised, but is not connected here until
-canonical current-application/result custody exists. A historical consumption
-GET does not attest the latest canonical owner/holds/comments. Never advertise
-capability or invoke the assembler from this queue on that historical proof alone.
+Consumed-only proof never grants coverage. Final application uses immutable
+PREPARED wire, authenticated private canonical certification and atomic remote
+materialization; executor transfer and capability rollout remain separate gates.
 """
 from __future__ import annotations
 
@@ -88,6 +87,9 @@ def _reconcile(conn, hub, row, body, op, own, board):
 
 
 def _process(conn, hub, row, own, board):
+    if row['stage'] == 'consumed_pending_apply':
+        from hermes_cli import kanban_release_final_home
+        return kanban_release_final_home.process(conn, hub, row, own, board)
     _identity(conn, hub, row, own, board)
     p = cert.parse(row["payload"])
     body = intent.validate(p["intent"])
@@ -127,8 +129,14 @@ def tick(conn, rep, own, board):
     queue.intake(conn, rep, board, own)
     if not queue.exists(conn):
         return
-    rows = conn.execute(f"SELECT * FROM {queue.TABLE} WHERE board=? AND stage IN ('observed','prepared','consume_pending') "
-                        "ORDER BY checked,rowid LIMIT 2", (board,)).fetchall()
+    completed = ''
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_release_applied_receipts'").fetchone():
+        # Presence suppresses repeat work, never confers clearance. Corrupt
+        # private receipts remain held by the APPLIED verifier, not retried into
+        # replacement certification or another final operation.
+        completed = ' AND NOT EXISTS(SELECT 1 FROM owner_release_applied_receipts a WHERE a.intent_uid=q.intent_uid)'
+    rows = conn.execute(f"SELECT * FROM {queue.TABLE} q WHERE board=? AND stage IN ('observed','prepared','consume_pending','consumed_pending_apply') "
+                        f"{completed} ORDER BY checked,rowid LIMIT 2", (board,)).fetchall()
     if not rows:
         return
     import sqlite3

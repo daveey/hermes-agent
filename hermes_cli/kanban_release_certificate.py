@@ -48,9 +48,9 @@ def _constant(_value):
     raise ValueError("nonfinite certificate JSON value")
 
 
-def parse(raw: object) -> dict:
+def parse(raw: object, *, max_bytes: int = MAX_BYTES) -> dict:
     """Bound before decode and reject duplicate keys; no writes or authority."""
-    if not isinstance(raw, str) or len(raw) > MAX_BYTES or len(raw.encode("utf-8")) > MAX_BYTES:
+    if not isinstance(raw, str) or len(raw) > max_bytes or len(raw.encode("utf-8")) > max_bytes:
         raise ValueError("invalid or oversized owner-release certificate")
     try:
         value = json.loads(raw, object_pairs_hook=_object, parse_constant=_constant)

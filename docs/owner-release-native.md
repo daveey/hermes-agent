@@ -190,18 +190,15 @@ provider safety and administrative stops stay restrictive, and the cumulative
 accounting floor never changes. Reusing the object in another writer, connection,
 or task is refused.
 
-**The production queue remains consumed-only.** A historical private consumption
-GET does not certify the current canonical owner, holds, task or comments after
-consumption. Local live checks cannot repair that distributed freshness gap. The
-trial queue hook was removed rather than treating a cached consumed certificate as
-canonical permission. Canonical current-application/result custody, APPLIED-result
-publication/read and certified executor transfer must be composed before connecting
-this assembler or advertising capability. Local comments compare every available
-logical field, not foreign integer IDs; Board-only version/HLC metadata are not
-present in the local schema and still need the canonical application boundary.
-No completed real CLI/DO/HOME/executor transport or live recovery proof is claimed.
+The local assembler is not directly connected to consumption. A historical private
+consumption GET does not certify current canonical owner, holds, task or comments.
+Instead the production queue now uses rollback-only PREPARED, the independently
+validated Board final application and certified materialization described below.
+Local comments compare logical fields; Board-only version/HLC metadata remain at
+that canonical boundary. No completed real CLI/DO/HOME/executor transport or live
+recovery proof is claimed, and capability advertisement remains absent.
 
-### Rollback-only prepared proposal (also disconnected)
+### Rollback-only prepared proposal
 
 `kanban_release_prepared.prepare` runs that same real `_compose` body inside a
 SAVEPOINT under the application writer, captures the complete task before/after,
@@ -216,6 +213,36 @@ proposal. A later canonical final-application operation must independently valid
 current original owner, full canonical comment inventory, task, exact current and
 selected historical episodes, holds, dependencies and independent financial limits.
 Neither this proposal nor historical consumption authorizes dispatch or increases
-an allowance. That final operation, certified materialization and executor transfer
-remain unimplemented; the production queue is still consumed-only.
+an allowance. The Board final operation and HOME certified materialization now
+exist; original native completion and executor transfer remain incomplete.
+
+### Frozen final wire and certified HOME materialization
+
+`kanban_release_final` freezes the complete distinct `apply_owner_release` operation
+and UUID against the exact verified PREPARED proposal before HTTP. An independent
+once-set queue digest detects missing/corrupt wire custody and prevents reminting.
+Historical saved-wire/private-result reconciliation precedes mutable owner/comment/
+TTL checks. Fresh enrolled HOME/board/card identity still gates every network stage.
+The bounded private `/application` GET is separate from source parsing: complete
+responses allow 8 MiB while proposals retain their existing 2 MiB cap. Strict
+validation binds the exact operation, winning private consumption, ordered event/
+comment UID and payload inventory, canonical stamps, original actor and protected
+finite allowance observation. Public result rows cannot substitute for this GET.
+
+`kanban_release_materialize` imports only canonical comments and events through the
+real `apply_remote_changes` writer. It never imports the certificate's historical
+task image. Its final in-transaction callback verifies every actual materialized
+row, preserves the current task image, refuses unanswered row transport and cursor
+races, and inserts immutable private certificate plus APPLIED last. Any refusal
+rolls back the complete page; comment integer IDs resolve from portable UIDs.
+Post-COMMIT uncertainty reopens the exact receipt without replaying effects.
+Completed receipts suppress queue work, not independent holds or execution gates.
+The immutable queue stage stays `consumed_pending_apply`; APPLIED determines
+historical completion, never a destructive transport-stage overwrite.
+
+Tests cover the actual Board-exported certificate, real bounded Hub HTTP, real
+SQLite remote-apply rollback/reopen and reply loss. The SQLite Board adapter is
+synthetic: these are **not** composed CLI/socket/DO/HOME/executor or deployment
+proof. Original native completed-result reconciliation and authenticated executor
+proof transfer remain required before capability advertisement or live recovery.
 

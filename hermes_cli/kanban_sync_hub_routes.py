@@ -46,6 +46,13 @@ class HubRoutesMixin:
         return self._call("GET", f"/v2/boards/{quote(board, safe='')}/owner-release/" + quote(intent_uid, safe='') + "/consumption",
                           max_response_bytes=MAX_BYTES)
 
+    def owner_release_application(self, board: str, intent_uid: str) -> dict:
+        """Historical final private certificate, never a current task postimage."""
+        from urllib.parse import quote
+        from hermes_cli.kanban_release_final import MAX_BYTES
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/owner-release/" + quote(intent_uid, safe='') + "/application",
+                          max_response_bytes=MAX_BYTES)
+
     def scope_delegates(self, board: str) -> dict:
         """Delegated scope-renewal grants (``kanban_scope_delegate``); ask only after ``scope_delegate: 1``."""
         from urllib.parse import quote
