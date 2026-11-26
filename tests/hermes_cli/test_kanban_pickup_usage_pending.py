@@ -54,14 +54,15 @@ def test_usage_pending_cards_do_not_starve_a_clean_card(gws, imports):
     clean = support._hub_card(hub, title="clean, eligible", priority=0, runs_on=PIN)
     worker.round()
     worker.enter()
-    # Budget 2 < 3 indebted cards ahead of the clean one: the first pass copies the clean card only.
-    assert wn.pickup(worker.conn, budget=2) == [clean]
-    for _ in range(2):
+    # Budget 1 < 3 indebted cards ahead of the clean one. The debts ride the guard-hold slots outside the
+    # budget (their local guards still run); the one budget slot goes to the clean card.
+    picked = wn.pickup(worker.conn, budget=1)
+    assert clean in picked
+    assert set(picked) - {clean} <= set(indebted)
+    for _ in range(2):  # every tick: the clean card is never displaced by a debt
         worker.round()
         worker.enter()
-        wn.pickup(worker.conn, budget=3)
-    assert set(imports) == {clean}  # an unstarted copy is evicted and copied again; never a debt card
-    assert all(kb.get_task(worker.conn, tid) is None for tid in indebted)
+        assert clean in wn.pickup(worker.conn, budget=1) or kb.get_task(worker.conn, clean) is not None
 
 
 def test_a_failed_accounting_check_does_not_refuse(gws, monkeypatch):
@@ -74,7 +75,7 @@ def test_a_failed_accounting_check_does_not_refuse(gws, monkeypatch):
     assert replica is not None
     try:
         card = replica.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
-        assert wn._usage_pending(replica, card)[1].startswith("usage_accounting_pending: runs ")
+        assert wn._usage_pending(replica, card)[0].startswith("usage_accounting_pending: runs ")
 
         def boom(*a, **kw):
             raise RuntimeError("replica unreadable")

@@ -648,18 +648,23 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         if reason is None:
             reason = _paced(conn, replica, card)
         if reason is None:
-            reason = _usage_pending(replica, card)
-        if reason is None:
             from hermes_cli.kanban_class_walls import pickup_refusal
             reason = pickup_refusal(replica, card)
         hold = kph.board_hold(replica, card) if reason is None else None
+        debt = _usage_pending(replica, card) if reason is None and hold is None else None
+        if debt is not None:  # the claim defers it: copy it like a guard hold, outside the budget
+            hold = debt
         if hold is not None:
-            if held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):
-                held[card["id"]] = hold[1]
+            # A debt copy is not kept by evict (no guard holds it), so it is re-copied each tick, never
+            # remembered: the recheck window would evict it and leave its local guards unrun.
+            if held is not None and free < kph.FREE_PER_TICK and (
+                    debt is not None or not kph.recently_copied(card["id"], hold[1])):
+                if debt is None:
+                    held[card["id"]] = hold[1]
                 picked.append(card["id"])
                 free += 1
                 continue
-            reason = ("guard_held", f"respawn_guarded: {hold[0]}")
+            reason = ("other", hold[0]) if debt is not None else ("guard_held", f"respawn_guarded: {hold[0]}")
         if reason is None and full:
             reason = ("budget_exhausted", full_detail)
         if reason is None:
@@ -705,13 +710,14 @@ def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.
     return None if gated is None else ("other", f"{gated} (local dispatch would hold it)")
 
 
-def _usage_pending(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
-    """[daveey] ``("other", detail)`` when the local claim would defer ``card`` on ``usage_accounting_pending``
-    (``kanban_spend_claim``): a closed run of it still lacks its usage receipt. Judged on the replica (a copy
-    carries exactly those runs/events) before the copy, so such a card takes no pickup budget. Copied, it was
-    deferred, evicted and copied again each tick: 16 such cards filled every worker's window and hid the review
-    of the accounting fix itself (t_01a2159cd5eccf77, 2026-11-26). Any failure copies as before: the claim
-    check still decides after the copy."""
+def _usage_pending(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, tuple]]:
+    """[daveey] ``(detail, hold signature)`` when the local claim would defer ``card`` on
+    ``usage_accounting_pending`` (``kanban_spend_claim``): a closed run of it still lacks its usage receipt.
+    Judged on the replica (a copy carries exactly those runs/events) before the copy. Such a card is copied like
+    a respawn-guard hold (``kanban_pickup_held``): outside the budget, sharing its ``FREE_PER_TICK`` slots, so
+    its local guards and receipts still run but it never takes the window. Taking budget, it was deferred,
+    evicted and copied again each tick: 16 such cards filled every worker's window and hid the review of the accounting fix itself (t_01a2159cd5eccf77, 2026-11-26). Any
+    failure copies as before: the claim check still decides after the copy."""
     try:
         from hermes_cli.kanban_usage_accounting import pending
         runs = pending(replica, card["id"])
@@ -720,7 +726,8 @@ def _usage_pending(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[t
         return None
     if not runs:
         return None
-    return "other", f"usage_accounting_pending: runs {sorted(runs)} (local claim would defer it)"
+    return (f"usage_accounting_pending: runs {sorted(runs)} (local claim would defer it)",
+            ("usage_accounting_pending", tuple(sorted(runs))))
 
 
 def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
