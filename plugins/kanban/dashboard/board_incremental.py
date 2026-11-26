@@ -220,13 +220,13 @@ def _parse_cards(by_id, order, memo):
     return cards, parsed, raws
 
 
-def _diagnostics(conn, cards, by_id, prev, affected, diagnostic_inputs, br):
+def _diagnostics(conn, cards, by_id, prev, affected, changed, diagnostic_inputs, br):
     """Use the freshly read task rows even for unmarked ready/done bookkeeping."""
     diag_rows = [by_id[tid] for tid, (task, _fields) in cards.items() if task.status != "archived"]
     if not diag_rows:
         return None, {}
-    # All displayed marks/runs and graph contexts are bounded by open rows plus
-    # the done cap. Event histories alone are selectively re-read.
+    # Neighbour changes refresh graph context, not the neighbour's own histories.
+    # Keep the original P2 set for exact event/run mutation checks.
     old_graph = prev["diag_inputs"][3] if prev["diag_inputs"] else {}
     ids = [r["id"] for r in diag_rows]
     refresh = [tid for tid in ids if tid in affected or tid not in old_graph]
@@ -234,7 +234,7 @@ def _diagnostics(conn, cards, by_id, prev, affected, diagnostic_inputs, br):
     if refresh:
         graphs.update(kanban_db.task_graph_contexts(conn, refresh))
     return br._incremental_diag_inputs(conn, diag_rows, prev["_memo"]["diag"], diagnostic_inputs,
-                                       graphs=graphs, event_changed=affected)
+                                       graphs=graphs, event_changed=changed)
 
 
 def _pickers(conn, prev, changed):
@@ -283,7 +283,7 @@ def delta(conn, filters: dict, done_limit, diagnostic_inputs: Callable, prev: di
     cards, parsed, raws = parsed_cards
     affected = _affected(conn, cards, pcards, changed)
     extras = _extras(conn, cards, pcards, affected, br)
-    diag_inputs, memo_diag = _diagnostics(conn, cards, by_id, prev, affected, diagnostic_inputs, br)
+    diag_inputs, memo_diag = _diagnostics(conn, cards, by_id, prev, affected, changed, diagnostic_inputs, br)
     latest = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
     tenants, assignees = _pickers(conn, prev, changed)
     return {
