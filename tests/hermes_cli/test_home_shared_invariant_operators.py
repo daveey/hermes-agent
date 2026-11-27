@@ -1,5 +1,6 @@
 """Shared home invariant: operators partition; run all partitions before review."""
 from tests.hermes_cli import test_home_release_auxiliary as auxiliary_cases
+from tests.hermes_cli import test_home_promote_composition as promotion_cases
 from tests.hermes_cli import test_home_shared_consumer_custody as consumer_cases
 from tests.hermes_cli import test_home_review_contracts as contracts
 from tests.hermes_cli import test_review_daily_transfer as daily
@@ -15,6 +16,10 @@ live = contracts.live
 conn = daily.conn
 configured = daily.configured
 person = daily.person
+
+test_frozen_promotion_refuses_before_effects = promotion_cases.test_frozen_promotion_refuses_before_effects
+test_public_promotion_rechecks_custody_at_writer_entry = promotion_cases.test_public_promotion_rechecks_custody_at_writer_entry
+test_ordinary_promotion_still_progresses = promotion_cases.test_ordinary_promotion_still_progresses
 
 test_release_landing_retry_preserves_decision = release_landing.test_release_landing_retry_preserves_decision
 test_daily_release_skips_prepared = daily.test_daily_release_skips_prepared
