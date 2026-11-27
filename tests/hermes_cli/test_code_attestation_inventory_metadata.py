@@ -126,6 +126,22 @@ def test_inventory_refuses_nonexact_name_before_file_or_retention(name):
     assert not calls and ledger._modules == {} and ledger._generation == 7
 
 
+def test_inventory_accepts_module_subclass_with_concrete_metadata():
+    from hermes_cli import code_attestation_inventory as inv
+    class LexerModule(ModuleType):
+        pass
+    module = LexerModule('benign_lexers')
+    module.__file__ = 'lexers.py'
+    calls = []
+    ledger = SimpleNamespace(_modules={}, _generation=0,
+        _module_snapshot=lambda: (('benign_lexers', module),),
+        _module_file=lambda *args: calls.append(args))
+    inv.inventory_modules(ledger)
+    assert calls == [('benign_lexers', 'lexers.py')]
+    assert ledger._modules[('benign_lexers', id(module))] == (module, 'lexers.py')
+    assert ledger._generation == 1
+
+
 def test_dynamic_absent_file_refuses_without_invoking_getter():
     inventory = importlib.import_module('hermes_cli.code_attestation_inventory')
     module = ModuleType('lazy')
@@ -180,7 +196,7 @@ def _colliding_module(key_name='__file__'):
     return module
 
 
-@pytest.mark.parametrize('factory', [lambda: HostileModule('subclass'), HostileFile,
+@pytest.mark.parametrize('factory', [HostileFile,
     lambda: _metadata_module('__file__', HostileFile()),
     lambda: _metadata_module('__file__', HostileString('source.py')),
     _colliding_module, lambda: _colliding_module('__getattr__'), lambda: _metadata_module(123, None)])
@@ -189,6 +205,24 @@ def test_opaque_metadata_refuses_without_callbacks(factory):
     module = factory()
     with pytest.raises(ValueError, match='^module_metadata_unavailable$'):
         inventory._module_filename(module, deadline=None, budget=[0])
+
+
+@pytest.mark.parametrize('filename', [None, 'source.py'])
+def test_module_subclass_metadata_bypasses_attribute_and_dict_overrides(filename):
+    from hermes_cli import code_attestation_inventory as inv
+    class OpaqueModule(HostileModule):
+        @property
+        def __dict__(self):
+            pytest.fail('subclass dict descriptor invoked')
+    module = OpaqueModule('hostile')
+    namespace = ModuleType.__dict__['__dict__'].__get__(module)
+    namespace['__file__'] = filename
+    namespace['__getattr__'] = lambda name: pytest.fail('dynamic getter invoked')
+    if filename is None:
+        with pytest.raises(ValueError, match='^module_metadata_unavailable$'):
+            inv._module_filename(module, deadline=None, budget=[0])
+    else:
+        assert inv._module_filename(module, deadline=None, budget=[0]) == filename
 
 
 @pytest.mark.parametrize('filename', [None, '', 'source.py'])

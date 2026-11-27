@@ -69,7 +69,9 @@ def _module_filename(module, *, deadline, budget):
     ca._check_inventory_deadline(deadline)
     if module is None:
         return None
-    if type(module) is not ModuleType:
+    # Test the real type, not module.__class__ (which can execute callbacks).
+    # The base descriptor below bypasses subclass attribute/property overrides.
+    if not issubclass(type(module), ModuleType):
         raise ValueError('module_metadata_unavailable')
     try:
         namespace = _MODULE_DICT.__get__(module)
