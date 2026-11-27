@@ -110,6 +110,16 @@ def test_old_grant_bookkeeping_is_fresh_and_changes_visible_diagnostics(source, 
         assert br._raw(got[2]['t']) == br._raw(fresh_runs['t'])
 
 
+def test_vanished_candidate_reloads_exactly(source):
+    """[daveey] A missing candidate fails exact even with an incomplete trusted delta."""
+    old = memo(source)
+    _, old = refresh(source, old)
+    source.execute('DELETE FROM task_runs WHERE id = 7')
+    got, _ = refresh(source, old)
+    _, _, fresh = inputs(source)
+    assert br._raw(got[2]['t']) == br._raw(fresh['t']) == ()
+
+
 def test_untrusted_run_path_reloads(source, monkeypatch):
     old = memo(source)
     loaded = []
