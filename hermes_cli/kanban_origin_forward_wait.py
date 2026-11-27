@@ -14,30 +14,57 @@ from __future__ import annotations
 
 from contextlib import closing
 import json
+import re
 import shlex
 import sqlite3
+import string
 from typing import Optional
 
 CODE = "origin_forward_rejected_wait"
 _REFUSED = "origin_forward_binding_missing"
 
 
-def wait_keys(wake_check: Optional[str]) -> list[str]:
-    """Every product key a ``hermes kanban wait-check key <KEY> ...`` probe waits on, in order.
+_REDIRECT = re.compile(r"^[<>&]*[<>][<>&]*$")  # changes no exit status: ``> f``, ``2>&1``, ``&> f``
+_SEQUENCE = {";", ";;", "\n"}  # the probe fires on the exit status of its last command
+_WORD_CHARS = "".join(c for c in string.printable if not c.isspace() and c not in "();<>|&'\"\\")
 
-    A probe that offers an alternative (``||``, ``;``, ``|``) can fire without the lost key, so
-    it is "cannot tell" and yields no keys; only a conjunction (or a lone probe) is judged.
+
+def _words(wake_check: str) -> list[str]:
+    """Shell words of ``wake_check`` with every operator its own word, however it is spaced."""
+    lexer = shlex.shlex(wake_check, posix=True, punctuation_chars=True)
+    lexer.whitespace = " \t\r"  # a newline separates commands: keep it as a word
+    lexer.wordchars = _WORD_CHARS  # keys like ``bb-land:817:ab`` stay one word
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def wait_keys(wake_check: Optional[str]) -> list[str]:
+    """Every product key the probe's exit status depends on, from ``hermes kanban wait-check key <KEY>``.
+
+    ``a && b`` fires only when both do, so every key of the final command sequence is judged
+    (``;`` and newline: only the last command decides).  Anything that lets the probe fire without
+    one of its keys (``||``, ``|``, ``&``, subshells) is "cannot tell" and yields no keys.
+    Operators are recognised with or without surrounding spaces.
     """
     try:
-        words = shlex.split(wake_check or "")
+        words = _words(wake_check or "")
     except ValueError:
         return []
-    if any(w in ("||", ";", "|", "&") for w in words):
-        return []
+    commands: list[list[str]] = [[]]
+    for word in words:
+        if word in _SEQUENCE:
+            commands.append([])
+        elif word == "&&" or _REDIRECT.match(word):
+            commands[-1].append(word)
+        elif word and set(word) <= set("();<>|&"):
+            return []  # ``||``, ``|``, ``&``, ``(``, ``)``: the probe can fire without the key
+        else:
+            commands[-1].append(word)
+    last = next((c for c in reversed(commands) if c), [])  # a trailing ``;`` or blank line decides nothing
     keys = []
-    for i in range(len(words) - 4):
-        if words[i:i + 3] == ["hermes", "kanban", "wait-check"] and words[i + 3] == "key":
-            key = words[i + 4]
+    for i in range(len(last) - 4):
+        if last[i:i + 3] == ["hermes", "kanban", "wait-check"] and last[i + 3] == "key":
+            key = last[i + 4]
             if key and not key.startswith("-"):
                 keys.append(key)
     return keys

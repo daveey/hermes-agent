@@ -14,6 +14,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
 from hermes_cli import kanban_continuation as continuation
+from hermes_cli.kanban_origin_forward_wait import wait_keys
 from tests.hermes_cli.test_origin_forward_run_end import pending as pending  # noqa: PLC0414 -- pytest fixture reexport
 from tests.hermes_cli.test_kanban_continuation import home as home  # noqa: PLC0414 -- pytest fixture reexport
 
@@ -211,12 +212,71 @@ def test_lost_key_in_a_conjunction_is_refused_wherever_it_sits(refused, how, ord
         assert_still_running(conn, task, run)
 
 
-@pytest.mark.parametrize('joiner', ['||', ';', '|'])
-def test_a_probe_with_an_alternative_can_fire_without_the_lost_key_so_it_still_parks(refused, joiner):
+SPACING = [('{a} {op} {b}'), ('{a}{op} {b}'), ('{a} {op}{b}'), ('{a}{op}{b}')]
+
+
+@pytest.mark.parametrize('order', ['lost-first', 'lost-last'])
+@pytest.mark.parametrize('spacing', SPACING, ids=['both', 'left', 'right', 'none'])
+@pytest.mark.parametrize('joiner', ['||', '|', '&'])
+def test_a_probe_with_an_alternative_can_fire_without_the_lost_key_so_it_still_parks(refused, joiner, spacing, order):
+    """``||``, ``|`` and ``&`` can fire without the lost key, whichever side it is on and however spaced."""
+    task, run, _ = refused
+    first, second = (KEY, OTHER_KEY) if order == 'lost-first' else (OTHER_KEY, KEY)
+    probe = spacing.format(a=wake(first), op=joiner, b=wake(second))
+    assert wait_keys(probe) == [], probe
+    with kbc.connect_closing() as conn:
+        assert refusal('schedule', conn, task, run, wake_check=probe) is None, probe
+        assert kb.get_task(conn, task).status == 'scheduled'
+
+
+@pytest.mark.parametrize('spacing', SPACING, ids=['both', 'left', 'right', 'none'])
+def test_a_conjunction_is_judged_on_every_key_however_it_is_spaced(spacing):
+    probe = spacing.format(a=wake(OTHER_KEY), op='&&', b=wake())
+    assert wait_keys(probe) == [OTHER_KEY, KEY], probe
+    assert wait_keys(spacing.format(a=wake(), op='&&', b=wake(OTHER_KEY))) == [KEY, OTHER_KEY]
+
+
+@pytest.mark.parametrize('probe, keys', [
+    (f'{wake(OTHER_KEY)}; {wake()}', [KEY]),                      # the exit status is the last command's
+    (f'{wake(OTHER_KEY)};{wake()}', [KEY]),
+    (f'{wake(OTHER_KEY)}\n{wake()}', [KEY]),
+    (f'{wake()}; {wake(OTHER_KEY)}', [OTHER_KEY]),
+    (f'{wake()};{wake(OTHER_KEY)}', [OTHER_KEY]),
+    (f'{wake()}\n{wake(OTHER_KEY)}', [OTHER_KEY]),
+    (f'{wake()}; true', []),
+    (f'{wake()};', [KEY]),                                        # a trailing separator decides nothing
+    (f'{wake()}\n', [KEY]),
+    (f'{wake()} && {wake(OTHER_KEY)}; {wake(OTHER_KEY)} && {wake()}', [OTHER_KEY, KEY]),
+    (f'{wake()} > /dev/null 2>&1', [KEY]),                        # redirects change no exit status
+    (f'{wake()} &> /dev/null', [KEY]),
+    (f'{wake()}||true', []),
+    (f'({wake()})', []),
+    (f"{wake()} || true", []),
+    (f'{wake()} && true', [KEY]),
+])
+def test_wait_keys_reads_the_keys_the_exit_status_depends_on(probe, keys):
+    assert wait_keys(probe) == keys, probe
+
+
+def test_a_quoted_operator_in_a_key_is_one_word():
+    assert wait_keys("hermes kanban wait-check key 'a;b' --gateway hub") == ['a;b']
+    assert wait_keys('hermes kanban wait-check key a#b --gateway hub') == ['a#b']
+
+
+@pytest.mark.parametrize('joiner', ['; ', '\n', ';'])
+def test_the_lost_key_before_a_separator_does_not_refuse_but_after_it_does(refused, joiner):
     task, run, _ = refused
     with kbc.connect_closing() as conn:
-        assert refusal('schedule', conn, task, run, wake_check=f'{wake(OTHER_KEY)} {joiner} {wake()}') is None
+        assert refusal('schedule', conn, task, run, wake_check=f'{wake()}{joiner}{wake(OTHER_KEY)}') is None
         assert kb.get_task(conn, task).status == 'scheduled'
+
+
+@pytest.mark.parametrize('joiner', ['; ', '\n', ';', ' &&', '&& ', '&&'])
+def test_the_lost_key_after_a_separator_or_conjunction_refuses(refused, joiner):
+    task, run, _ = refused
+    with kbc.connect_closing() as conn:
+        why = refusal('schedule', conn, task, run, wake_check=f'{wake(OTHER_KEY)}{joiner}{wake()}')
+        assert 'origin_forward_rejected_wait' in (why or ''), why
 
 
 def test_another_creators_completed_request_for_the_key_lifts_the_refusal(refused):
