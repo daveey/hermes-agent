@@ -65,6 +65,98 @@ def test_terminal_receipt_latches_once_then_healthy_crossing_rearms(tmp_path, mo
     assert json.loads(path.read_text()) == next_state
 
 
+@pytest.mark.parametrize('outcome', ['rejected', 'failed', 'expired'])
+def test_restart_healthy_sample_rearms_persisted_terminal(tmp_path, monkeypatch, outcome):
+    """Exercise the actual checker/reporter/transport, losing all process caches."""
+    from unittest.mock import Mock
+    from hermes_cli import resource_limits as limits
+    import hermes_state_guard
+    monkeypatch.setattr(hermes_state_guard, '_in_test_context', lambda: False)
+    monkeypatch.setattr(incidents, 'get_hermes_home', lambda: tmp_path)
+    monkeypatch.setattr(sync, 'load_identity', lambda: None)
+    calls = []
+    terminal = True
+    def wire(identity, method, route, body, budget):
+        calls.append((method, route, copy.deepcopy(body)))
+        if method == 'POST':
+            return {}
+        if terminal:
+            return {'request': {'state': outcome, 'result': {'error': 'refused'}}}
+        raise sync.HubError(404, '{"error":"no such request"}')
+    monkeypatch.setattr(sync, '_bounded_call', wire)
+    resource = Mock(RLIMIT_NOFILE=7, RLIM_INFINITY=-1)
+    resource.getrlimit.return_value = (1000, 10000)
+    monkeypatch.setattr(limits, '_resource', resource)
+    monkeypatch.setattr(limits, '_fd_core_head', lambda: 'a' * 40)
+    monkeypatch.setattr(limits, '_fd_incident', {})
+    monkeypatch.setattr(limits, '_fd_last_check', None)
+    monkeypatch.setattr(limits, '_fd_pid', limits.os.getpid())
+    monkeypatch.setattr(limits, '_fd_status', {})
+    from collections import deque
+    monkeypatch.setattr(limits, '_fd_samples', deque())
+    monkeypatch.setattr(limits, '_fd_interval', 300)
+    count = 600
+    monkeypatch.setattr(limits, '_fd_snapshot', lambda soft: (count, {'classes': {'other': count}}))
+    def check(now):
+        return limits.check_fd_headroom({}, role='gateway', now=now, wall_now=10000 + now)
+    first = check(0)
+    path = incidents._path(first, False)
+    rejected = json.loads(path.read_text())
+    assert rejected['terminal']['state'] == outcome and len(calls) == 1
+    # A real restart loses every in-memory hint, not the incident file.
+    limits._fd_incident = {}
+    limits._fd_status.clear()
+    limits._fd_samples.clear()
+    limits._fd_last_check = None
+    count = 100
+    check(300)
+    assert json.loads(path.read_text()).get('terminal_rearmed') is True
+    assert len(calls) == 1, 'healthy rearm must not touch identity or transport'
+    terminal = False
+    count = 600
+    check(600)
+    posts = [body for method, _, body in calls if method == 'POST']
+    assert len(posts) == 1
+    current = json.loads(path.read_text())
+    assert current['envelope']['id'] != rejected['envelope']['id']
+    assert current['last_terminal'] == {'envelope': rejected['envelope'], 'receipt': rejected['terminal']}
+    resource.setrlimit.assert_not_called()
+
+
+def test_terminal_error_log_bounds_receipt_result(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(sync, 'load_identity', lambda: None)
+    result = {'error': 'x' * 5000, 'tail': 'not-in-log'}
+    monkeypatch.setattr(sync, '_bounded_call', lambda *args: {
+        'request': {'state': 'rejected', 'result': result}})
+    with caplog.at_level(logging.ERROR):
+        state = incidents.report(sample(), state_path=tmp_path / 'incident.json', client=Client())
+    assert state['terminal']['result'] == result, 'retain full receipt in private audit'
+    assert 'not-in-log' not in caplog.text
+    assert max(len(r.message) for r in caplog.records if r.levelno == logging.ERROR) < 1400
+
+
+@pytest.mark.parametrize('broken', ['missing_envelope', 'missing_census'])
+def test_rearm_failure_is_recorded_without_escape(tmp_path, monkeypatch, broken):
+    path = tmp_path / 'incident.json'
+    state = {}
+    incidents._new_envelope(sample(), state, 10000, False, 'default')
+    state.update(terminal={'state': 'rejected', 'result': {'error': 'refused'}}, terminal_rearmed=True)
+    warning = sample()
+    if broken == 'missing_envelope':
+        state.pop('envelope')
+    else:
+        warning.pop('census')
+    incidents._save(path, state)
+    from unittest.mock import Mock
+    client = Mock()
+    result = incidents.report(warning, state_path=path, client=client, now=10300)
+    assert result['error_class'] == 'KeyError'
+    assert result['terminal'] == state['terminal']
+    assert json.loads(path.read_text()) == result
+    client.create.assert_not_called()
+    client.close.assert_called_once()
+
+
 @pytest.mark.parametrize('outcome', ['pending', 'queued', 'done'])
 def test_uncertain_receipt_keeps_frozen_legacy_probe_envelope(tmp_path, monkeypatch, outcome):
     monkeypatch.setattr(sync, 'load_identity', lambda: None)

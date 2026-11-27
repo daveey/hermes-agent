@@ -346,8 +346,9 @@ def _check_fd_headroom(config, role, now, wall, probe, probe_board):
                   state='warn' if warn else 'ok', triggered=bool(warn), error_class=None)
     if count >= soft * settings['raise_ratio']:
         _raise_fd_soft(sample, settings['max_soft'])  # Before any card I/O; warn uses original sample.
+    from hermes_cli.fd_headroom_incident import has_incident
     if (warn or _fd_incident.get('envelope') or _fd_status.get('last_card_id')
-            or _fd_status.get('create_state') == 'failing'):
+            or _fd_status.get('create_state') == 'failing' or has_incident(sample, probe=probe)):
         try:
             kwargs = {'probe': probe}
             if probe_board is not None:

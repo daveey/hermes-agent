@@ -26,6 +26,11 @@ def _path(sample, probe):
     return get_hermes_home() / 'state' / 'fd_headroom' / f'{"probe-" if probe else ""}{tag}.json'
 
 
+def has_incident(sample: dict, *, probe=False) -> bool:
+    """Discover shared persisted state even before this process has warned."""
+    return _path(sample, probe).is_file()
+
+
 def _load(path, *, recover=True) -> dict:
     try:
         value = json.loads(path.read_text(encoding='utf-8-sig'))
@@ -113,17 +118,17 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
         wall = time.time() if now is None else now
         if sample.get('raised'):
             state['raises'] = (state.get('raises', []) + [sample['raised']])[-8:]
-        if state.get('terminal'):
-            if not sample.get('triggered'):
-                state['terminal_rearmed'] = True
-            if not sample.get('triggered') or not state.get('terminal_rearmed'):
-                _save(path, state)
-                return state  # No identity/transport I/O after a definitive receipt.
-            state['last_terminal'] = {'envelope': state['envelope'], 'receipt': state['terminal']}
-            _new_envelope(sample, state, wall, probe, board)
         from hermes_cli.fd_headroom_transport import TerminalRequest
         transport = client
         try:
+            if state.get('terminal'):
+                if not sample.get('triggered'):
+                    state['terminal_rearmed'] = True
+                if not sample.get('triggered') or not state.get('terminal_rearmed'):
+                    _save(path, state)
+                    return state  # No identity/transport I/O after a definitive receipt.
+                state['last_terminal'] = {'envelope': state['envelope'], 'receipt': state['terminal']}
+                _new_envelope(sample, state, wall, probe, board)
             if transport is None:
                 from hermes_cli.fd_headroom_transport import Client
                 transport = Client()
@@ -137,7 +142,7 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
             state.update(error=str(exc)[:1000], error_class='TerminalRequest')
             _save(path, state)  # Retain the exact envelope and receipt before logging once.
             logger.error('fd-headroom: terminal card create state=%s result=%s incident=%s',
-                         exc.state, exc.result, state['envelope']['id'])
+                         exc.state, str(exc.result)[:1000], state['envelope']['id'])
         except Exception as exc:  # health: allow BLE001 -- diagnostic delivery cannot kill a service tick
             state.setdefault('failing_since', wall)
             state.update(error=str(exc)[:1000], error_class=type(exc).__name__)
