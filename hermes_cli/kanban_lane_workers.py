@@ -39,4 +39,6 @@ def drop_full(conn, rows):
     names, _alarms = lanes._candidate_lanes(conn, pol, [row["id"] for row in rows])
     full = {name for name, spec in pol.lanes.items()
             if spec.max_workers is not None and counts[name] >= spec.max_workers}
+    from hermes_cli.kanban_lane_samples import rejected
+    rejected([row["id"] for row in rows if names.get(row["id"], pol.default) in full], names, pol.default)
     return [row for row in rows if names.get(row["id"], pol.default) not in full]

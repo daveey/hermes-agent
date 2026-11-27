@@ -209,7 +209,8 @@ def dispatch_pass(conn, *, dry_run=False, caps=None):
     from hermes_cli.kanban_governors import tick as governor_tick
     state = sync_state(conn)
     worker = str(state['gateway_id']) if state else socket.gethostname()
-    with collect(worker=worker) as capture, governor_tick(conn, caps):
+    from hermes_cli.kanban_lane_samples import observe as observe_lanes
+    with collect(worker=worker) as capture, governor_tick(conn, caps), observe_lanes(conn, dry_run=dry_run):
         yield
     if not dry_run:
         try:
