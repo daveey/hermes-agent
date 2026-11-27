@@ -15,6 +15,7 @@ from hermes_cli import update_precommit as precommit
 from tests.hermes_cli import test_update_up_to as helpers
 
 fork = helpers.fork
+_prepare_git_command = helpers.update_cmd._prepare_git_command
 pytestmark = pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="POSIX deadline custody protocol")
 
 
@@ -55,6 +56,35 @@ def test_ordinary_invocation_does_not_spawn(monkeypatch, tmp_path):
     assert precommit.run_if_requested(argparse.Namespace(), tmp_path) is False
 
 
+@pytest.mark.parametrize("preparing", [False, True])
+def test_churn_normalization_phase_preserves_ordinary_mode(fork, monkeypatch, preparing):
+    from hermes_cli import update_cmd as cmd
+    calls = []
+    monkeypatch.setattr(precommit, "preparing", lambda: preparing)
+    monkeypatch.setattr(cmd, "_discard_lockfile_churn", lambda *a, **k: calls.append("lockfile"))
+    monkeypatch.setattr(cmd, "_normalize_managed_eol", lambda *a, **k: calls.append("eol"))
+    _prepare_git_command()
+    assert calls == ([] if preparing else ["lockfile", "eol"])
+    calls.clear()
+    precommit.deferred_normalization(["git"], fork.root, None)
+    assert calls == (["lockfile", "eol"] if preparing else [])
+
+
+@pytest.mark.parametrize("preparing", [False, True])
+@pytest.mark.parametrize("force", [False, True])
+def test_pause_arm_defers_only_protocol_restart_debt(monkeypatch, preparing, force):
+    from hermes_cli import update_cmd_posix_pause as pause
+    monkeypatch.setattr(pause, "_RUN", None)
+    monkeypatch.setattr(precommit, "preparing", lambda: preparing)
+    adopted = []
+    monkeypatch.setattr(pause, "_adopt_pause", lambda token: adopted.append(token))
+    token = pause.arm_pause(no_gateway_restart=False, force=force)
+    assert isinstance(token, dict)
+    assert token.get("force", False) is force
+    assert token.get("precommit_adoption_pending", False) is preparing
+    assert adopted == ([] if preparing else [token])
+
+
 def test_late_expiry_blocks_first_checkout_write(fork, monkeypatch):
     from hermes_cli import update_cmd, update_cmd_posix_pause as pause
     monkeypatch.setattr(precommit, "_child_deadline", precommit.clock() + 60)
@@ -69,6 +99,47 @@ def test_late_expiry_blocks_first_checkout_write(fork, monkeypatch):
     assert exc.value.code == precommit.REFUSED_EXIT
     assert helpers.head(fork) == before
     assert not (fork.root / "c.txt").exists()
+
+
+def test_late_pause_expiry_restores_real_recorded_restart_debt(fork, monkeypatch):
+    from hermes_cli import update_cmd_posix_pause as pause, update_pause_record as record
+    from hermes_cli import update_cmd_windows as windows
+    processes = [subprocess.Popen([sys.executable, "-c", "import threading; threading.Event().wait(60)"])]
+    home = fork.root.parent / "home"
+    entry = {"pid": processes[0].pid, "home": str(home), "argv": [sys.executable, "-c", "pass"]}
+    monkeypatch.setattr(precommit, "_child_deadline", precommit.clock() + 60)
+    monkeypatch.setattr(precommit, "_committed", True)
+    monkeypatch.setattr(pause, "_left_running", lambda units, jobs: (units, jobs, []))
+    monkeypatch.setattr(pause, "_discover_bare", lambda *_: ([entry], []))
+    def stop(token, entries, deadline, **kwargs):
+        record.mark_stop_sent(token, entry["pid"])
+        processes[0].terminate()
+        processes[0].wait(timeout=5)
+        precommit._child_deadline = precommit.clock() - 1
+    def replay(entry):
+        processes.append(subprocess.Popen([sys.executable, "-c", "import threading; threading.Event().wait(60)"]))
+        return processes[-1].pid
+    monkeypatch.setattr(pause, "_stop_gateways", stop)
+    monkeypatch.setattr(pause, "_relaunch_bare", replay)
+    before = helpers.head(fork)
+    token = pause.arm_pause(no_gateway_restart=False)
+    assert isinstance(token, dict)
+    try:
+        assert pause.pause_at_commit_point() is None
+        assert token["resume_needed"] and token["pause_id"]
+        with pytest.raises(SystemExit) as exc:
+            precommit.before_checkout_write()
+        assert exc.value.code == precommit.REFUSED_EXIT
+        windows._resume_windows_gateways_after_update(token)
+        assert not token["resume_needed"]
+        assert len(processes) == 2 and processes[-1].poll() is None
+        assert helpers.head(fork) == before
+        assert not precommit._wrote
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait(timeout=5)
 
 
 def test_expiry_after_first_write_does_not_abandon_install(fork, monkeypatch):
