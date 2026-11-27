@@ -11,10 +11,11 @@ from hermes_cli import kanban_aggregate_scope as scope
 from tools import process_registry as pr
 
 
+pytestmark = pytest.mark.platforms('linux')
+
+
 @pytest.fixture
 def bus_setup(tmp_path, monkeypatch):
-    if sys.platform != 'linux':
-        pytest.skip('Linux user bus')
     # AF_UNIX paths are bounded; pytest's nested tmp_path can exceed sun_path.
     import tempfile
     with tempfile.TemporaryDirectory(prefix='kb-bus-') as directory:
@@ -70,16 +71,32 @@ def test_pool_child_gets_verified_bus_and_unchanged_caps(bus_setup, tmp_path, mo
     assert dict(os.environ) == before
 
 
-@pytest.mark.parametrize('invalid', ['missing', 'file', 'symlink', 'writable', 'foreign'])
+@pytest.mark.parametrize('invalid', ['missing', 'file', 'symlink', 'writable', 'foreign', 'foreign-bus'])
 def test_unverified_bus_never_returns_unbounded_command(bus_setup, tmp_path, monkeypatch, invalid):
     runtime = bus_setup
-    (runtime / 'bus').unlink()
+    if invalid in {'missing', 'file', 'symlink'}:
+        (runtime / 'bus').unlink()
+
+    def foreign_owner(target):
+        real_lstat = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            metadata = real_lstat(path, *args, **kwargs)
+            if path == target:
+                fields = list(metadata)
+                fields[4] = metadata.st_uid + 1
+                return os.stat_result(fields)
+            return metadata
+
+        monkeypatch.setattr(Path, 'lstat', lstat)
+
     actions = {
         'missing': lambda: None,
         'file': lambda: (runtime / 'bus').touch(),
         'symlink': lambda: (runtime / 'bus').symlink_to(tmp_path / 'absent'),
         'writable': lambda: runtime.chmod(0o777),
-        'foreign': lambda: monkeypatch.setattr(pr.os, 'getuid', lambda: runtime.stat().st_uid + 1),
+        'foreign': lambda: foreign_owner(runtime),
+        'foreign-bus': lambda: foreign_owner(runtime / 'bus'),
     }
     actions[invalid]()
     report = fake_systemctl(tmp_path, monkeypatch, runtime)
@@ -89,3 +106,37 @@ def test_unverified_bus_never_returns_unbounded_command(bus_setup, tmp_path, mon
     _, env = json.loads(report.read_text())
     assert env == {'XDG_RUNTIME_DIR': None, 'DBUS_SESSION_BUS_ADDRESS': None}
     assert scope.configure_pool.cache_info().currsize == 0
+
+
+def test_pool_rediscovers_bus_appearing_between_attempts(bus_setup, tmp_path, monkeypatch):
+    runtime = bus_setup
+    (runtime / 'bus').unlink()
+    report = fake_systemctl(tmp_path, monkeypatch, runtime)
+    before = dict(os.environ)
+    calls = []
+    run = scope.subprocess.run
+
+    def record(*args, **kwargs):
+        calls.append(kwargs['env'])
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(scope.subprocess, 'run', record)
+    with socket.socket(socket.AF_UNIX) as bus:
+        delays = []
+
+        def appear(delay):
+            if not delays:
+                bus.bind(str(runtime / 'bus'))
+            delays.append(delay)
+
+        monkeypatch.setattr(scope.time, 'sleep', appear)
+        scope.configure_pool()
+    assert delays == [1]
+    assert len(calls) == 2
+    assert 'XDG_RUNTIME_DIR' not in calls[0]
+    assert 'DBUS_SESSION_BUS_ADDRESS' not in calls[0]
+    assert calls[1]['XDG_RUNTIME_DIR'] == str(runtime)
+    assert calls[1]['DBUS_SESSION_BUS_ADDRESS'] == f'unix:path={runtime}/bus'
+    assert json.loads(report.read_text())[1]['XDG_RUNTIME_DIR'] == str(runtime)
+    assert scope.configure_pool.cache_info().currsize == 1
+    assert dict(os.environ) == before
