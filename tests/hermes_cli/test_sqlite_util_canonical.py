@@ -7,7 +7,9 @@ These tests pin the contract: one opener, one closer, and every store routed thr
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import threading
 
 import pytest
 
@@ -58,6 +60,92 @@ def test_open_db_closes_the_half_open_connection_when_initialize_raises(monkeypa
     assert len(opened) == 1
     with pytest.raises(sqlite3.ProgrammingError):
         opened[0].execute("SELECT 1")
+
+
+@pytest.mark.parametrize('retirement', ['rename', 'delete'])
+@pytest.mark.parametrize('nested', [False, True])
+def test_late_project_capture_does_not_recreate_a_retired_profile(tmp_path, retirement, nested):
+    from hermes_cli import projects_db
+
+    root = tmp_path / 'state'
+    home = root / 'profiles' / 'gamma'
+    home.mkdir(parents=True)
+    (root / 'config.yaml').write_text('{}')
+    path = home / ('cache/projects.db' if nested else 'projects.db')
+    entered, release = threading.Event(), threading.Event()
+    errors = []
+
+    def capture():
+        entered.set()
+        assert release.wait(5)
+        try:
+            conn = projects_db.connect(path)
+        except (FileNotFoundError, sqlite3.OperationalError) as exc:
+            errors.append(exc)
+        else:
+            conn.close()
+
+    worker = threading.Thread(target=capture)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        if retirement == 'rename':
+            home.rename(home.with_name('delta'))
+        else:
+            shutil.rmtree(home)
+        release.set()
+        worker.join(5)
+        assert not worker.is_alive()
+        assert not home.exists(), 'late capture reconstructed the retired named home'
+        assert len(errors) == 1
+    finally:
+        release.set()
+        worker.join(5)
+
+
+@pytest.mark.parametrize('nested', [False, True])
+def test_sqlite_open_does_not_recreate_a_profile_removed_after_liveness_check(monkeypatch, tmp_path, nested):
+    import hermes_constants
+
+    root = tmp_path / 'state'
+    home = root / 'profiles' / 'gamma'
+    home.mkdir(parents=True)
+    (root / 'config.yaml').write_text('{}')
+    path = home / ('cache/projects.db' if nested else 'projects.db')
+    real_check = hermes_constants.assert_named_profile_home_live
+    reached = []
+
+    def retire_after_check(target):
+        real_check(target)
+        reached.append(target)
+        home.rename(home.with_name('delta'))
+
+    monkeypatch.setattr(hermes_constants, 'assert_named_profile_home_live', retire_after_check)
+    with pytest.raises((FileNotFoundError, sqlite3.OperationalError)):
+        sqlite_util.open_db(path, db_label='projects.db', wal=False)
+    assert reached == [path.parent]
+    assert not home.exists()
+
+
+@pytest.mark.parametrize('layout', ['default', 'named', 'unrelated'])
+def test_sqlite_open_still_creates_live_store_parents(tmp_path, layout):
+    root = tmp_path / 'state'
+    root.mkdir()
+    (root / 'config.yaml').write_text('{}')
+    if layout == 'named':
+        parent = root / 'profiles' / 'gamma'
+        parent.mkdir(parents=True)
+    elif layout == 'unrelated':
+        parent = tmp_path / 'ordinary' / 'profiles' / 'gamma'
+    else:
+        parent = root
+    path = parent / 'new' / 'nested' / 'store.db'
+    conn = sqlite_util.open_db(path, db_label='store.db', wal=False)
+    try:
+        assert conn.execute('SELECT 1').fetchone()[0] == 1
+        assert path.is_file()
+    finally:
+        conn.close()
 
 
 # Every store that opens its own SQLite file (path -> module attribute holding the opener).
