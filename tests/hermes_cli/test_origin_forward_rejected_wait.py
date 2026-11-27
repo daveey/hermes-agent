@@ -262,9 +262,98 @@ def test_a_conjunction_is_judged_on_every_key_however_it_is_spaced(spacing):
     (f'{wake()} \\\n', [KEY]),
     ('hermes kanban wait-check key ' + KEY + ' \\\n --gateway hub', [KEY]),
     (f'{wake(OTHER_KEY)} &&\n{wake()}\n', [OTHER_KEY, KEY]),
+    # bash: backslash-CR is an escaped CR, not a continuation, so the LF still ends the command
+    (f'{wake(OTHER_KEY)} && \\\r\n{wake()}', [KEY]),
+    (f'{wake()} && \\\r\n{wake(OTHER_KEY)}', [OTHER_KEY]),
+    # bash: an escaped backslash is a literal argument, so the newline after it still ends the command
+    (f'{wake()} \\\\\n{wake(OTHER_KEY)}', [OTHER_KEY]),
+    (f'{wake(OTHER_KEY)} \\\\\n{wake()}', [KEY]),
+    (f'{wake(OTHER_KEY)} && {wake()} \\\\\n', [OTHER_KEY, KEY]),
+    ('hermes kanban wait-check key ' + KEY + ' \\\\\\\n --gateway hub', [KEY]),  # escaped backslash, then a continuation
+    ('hermes kanban wait-check key ' + KEY + ' \\\\\\\\\n', [KEY]),           # four backslashes: two literals, a real newline
+    # a redirect that overrides noclobber changes no exit status either
+    (f'{wake()} >| /dev/null', [KEY]),
+    (f'{wake()} >|/dev/null', [KEY]),
+    (f'{wake()} 2>| /dev/null', [KEY]),
+    (f'{wake(OTHER_KEY)} && {wake()} >| /dev/null', [OTHER_KEY, KEY]),
+    (f'{wake()} >| /dev/null || true', []),
+    (f'{wake()} >|| true', []),                                    # ``>|`` needs a file: still a syntax error
+    # an unquoted non-ASCII key is one word, not split at its first non-ASCII character
+    ('hermes kanban wait-check key café-1 --gateway hub', ['café-1']),
+    ('hermes kanban wait-check key ключ --gateway hub', ['ключ']),
+    ('hermes kanban wait-check key 键-1 --gateway hub', ['键-1']),
+    ('hermes kanban wait-check key k-\U0001f600 --gateway hub', ['k-\U0001f600']),
+    (f'{wake(OTHER_KEY)} && hermes kanban wait-check key café-1', [OTHER_KEY, 'café-1']),
+    (f'{wake(OTHER_KEY)}; hermes kanban wait-check key café-1 > /dev/null', ['café-1']),
+    ('hermes kanban wait-check key café-1 || true', []),
+    ('hermes kanban wait-check key café; true', []),               # an operator still ends the word, then ``true`` decides
+    ('hermes kanban wait-check key café;', ['café']),
+    (wake('café-1'), ['café-1']),                                   # the quoted handle kanban_create returns
+    (wake('键 1'), ['键 1']),
 ])
 def test_wait_keys_reads_the_keys_the_exit_status_depends_on(probe, keys):
     assert wait_keys(probe) == keys, probe
+
+
+@pytest.mark.parametrize('key', ['café-1', 'bb-land:817:ключ', 'k-\U0001f600', 'a b\tc', "it's", 'x;y&z'])
+def test_the_handle_kanban_create_returns_reads_back_whole(key):
+    """The shlex.join handle always quotes what a bare word could not carry."""
+    assert wait_keys(wake(key)) == [key]
+    assert wait_keys(wake(OTHER_KEY) + ' && ' + wake(key)) == [OTHER_KEY, key]
+
+
+NONASCII_KEY = 'bb-land:817:café'
+
+
+@pytest.fixture
+def refused_nonascii(refused):
+    task, run, path = refused
+    journal(path, 'placement:worker:refused-nonascii', task=task, key=NONASCII_KEY)
+    return task, run, path
+
+
+@pytest.mark.parametrize('probe', [
+    'hermes kanban wait-check key bb-land:817:café --gateway hub',
+    f'{wake(OTHER_KEY)} && hermes kanban wait-check key bb-land:817:café --gateway hub',
+])
+def test_an_unquoted_non_ascii_lost_key_is_refused_whole(refused_nonascii, probe):
+    task, run, _ = refused_nonascii
+    with kbc.connect_closing() as conn:
+        why = refusal('schedule', conn, task, run, wake_check=probe)
+        assert 'origin_forward_rejected_wait' in (why or ''), why
+        assert NONASCII_KEY in (why or '')
+        assert_still_running(conn, task, run)
+
+
+def test_a_non_ascii_key_that_only_shares_an_ascii_prefix_is_not_refused(refused_nonascii):
+    task, run, _ = refused_nonascii
+    with kbc.connect_closing() as conn:
+        assert refusal('schedule', conn, task, run, wake_check='hermes kanban wait-check key bb-land:817:caf --gateway hub') is None
+
+
+@pytest.mark.parametrize('probe', [f'{wake()} >| /dev/null', f'{wake(OTHER_KEY)} && {wake()} >|/dev/null'])
+def test_a_lost_key_with_a_noclobber_override_redirect_is_refused(refused, probe):
+    task, run, _ = refused
+    with kbc.connect_closing() as conn:
+        why = refusal('schedule', conn, task, run, wake_check=probe)
+        assert 'origin_forward_rejected_wait' in (why or ''), why
+
+
+@pytest.mark.parametrize('probe, refused_key', [
+    (lambda: f'{wake(OTHER_KEY)} \\\\\n{wake()}', True),            # LOST is the last command: bash exits 1 on it
+    (lambda: f'{wake()} \\\\\n{wake(OTHER_KEY)}', False),           # OTHER is the last command: bash exits 0 on it
+    (lambda: f'{wake(OTHER_KEY)} && \\\r\n{wake()}', True),
+    (lambda: f'{wake()} && \\\r\n{wake(OTHER_KEY)}', False),
+])
+def test_an_escaped_backslash_or_cr_before_a_newline_is_not_a_continuation(refused, probe, refused_key):
+    task, run, _ = refused
+    with kbc.connect_closing() as conn:
+        why = refusal('schedule', conn, task, run, wake_check=probe())
+        if refused_key:
+            assert 'origin_forward_rejected_wait' in (why or ''), why
+        else:
+            assert why is None, why
+            assert kb.get_task(conn, task).status == 'scheduled'
 
 
 @pytest.mark.parametrize('joiner', [' &&\n', ' && \\\n', ' &&\n\n'])

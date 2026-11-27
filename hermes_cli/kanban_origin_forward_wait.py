@@ -24,17 +24,31 @@ CODE = "origin_forward_rejected_wait"
 _REFUSED = "origin_forward_binding_missing"
 
 
-_REDIRECT = re.compile(r"^[<>&]*[<>][<>&]*$")  # changes no exit status: ``> f``, ``2>&1``, ``&> f``
+_REDIRECT = re.compile(r"^(?:[<>&]*[<>][<>&]*|>\|)$")  # changes no exit status: ``> f``, ``2>&1``, ``&> f``, ``>| f``
 _SEQUENCE = {";", ";;", "\n"}  # the probe fires on the exit status of its last command
-_WORD_CHARS = "".join(c for c in string.printable if not c.isspace() and c not in "();<>|&'\"\\")
+_SYNTAX = "();<>|&'\"\\"
+# An escaped backslash pairs off first, so only a backslash that is itself unescaped continues the line.
+# (bash: backslash-CR is an escaped CR, not a continuation.)
+_CONTINUATION = re.compile(r"(\\\\)|\\\n")
+
+
+class _WordChars(str):
+    """Every character that is neither whitespace nor shell syntax, whatever its script.
+
+    shlex only asks ``char in wordchars``; a printable-ASCII table would end an unquoted word
+    (``café-1``) at its first non-ASCII character.
+    """
+
+    def __contains__(self, char) -> bool:  # type: ignore[override]
+        return isinstance(char, str) and len(char) == 1 and char not in string.whitespace and char not in _SYNTAX
 
 
 def _words(wake_check: str) -> list[str]:
     """Shell words of ``wake_check`` with every operator its own word, however it is spaced."""
-    wake_check = wake_check.replace("\\\r\n", " ").replace("\\\n", " ")  # a continuation is a space
+    wake_check = _CONTINUATION.sub(lambda m: m.group(1) or " ", wake_check)  # a continuation is a space
     lexer = shlex.shlex(wake_check, posix=True, punctuation_chars=True)
     lexer.whitespace = " \t\r"  # a newline separates commands: keep it as a word
-    lexer.wordchars = _WORD_CHARS  # keys like ``bb-land:817:ab`` stay one word
+    lexer.wordchars = _WordChars()  # keys like ``bb-land:817:ab`` and ``café-1`` stay one word
     lexer.commenters = ""
     return list(lexer)
 
