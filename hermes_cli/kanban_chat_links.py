@@ -484,10 +484,16 @@ def _plan(conn: sqlite3.Connection, board: str, gateway: str,
         stale = _stale_uids(board, gateway, cards)
         profile_board = la.timed("sync.links.profile_board", _profile_board_ids, board, gateway, cards)
         want.update(la.timed("sync.links.ledger", _ledger_links, board, gateway, cards, profile_board))
-    want.update(la.timed("sync.links.owner_releases", _owner_written_releases, board, gateway, want))
     with la.pass_("sync.links.existing"):
         rows = conn.execute("SELECT uid, released, chat_session, kind, task_id, chat_profile FROM task_chat_links "
                             "WHERE chat_gateway = ?", (gateway,)).fetchall()
+    existing = {r[0] for r in rows}
+    # Finished origins authorize closure of an existing link, not a backfill of
+    # historical links this gateway never held. Owner-written receipts below
+    # retain their separate release protocol.
+    want = {uid: link for uid, link in want.items()
+            if not (link["kind"] == "created" and link["released"] and uid not in existing)}
+    want.update(la.timed("sync.links.owner_releases", _owner_written_releases, board, gateway, want))
     return want, rows, profile_board, stale
 
 
