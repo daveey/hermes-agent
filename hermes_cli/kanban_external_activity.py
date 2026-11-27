@@ -13,7 +13,8 @@ import logging
 import sqlite3
 import threading
 import time
-from typing import Any, Iterable, Optional
+from contextlib import contextmanager
+from typing import Any, Iterable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +189,41 @@ def _board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict
         return _read_board_external(path, open_ro, parked_pairs, signature, wall)
 
 
+# [daveey] Set by ``one_board_read``: ``path -> contribution`` of the boards this block already read. Boards are
+# root-pinned (``kanban_db.kanban_home``), so every profile's annotation in one response reads the same files; the
+# projects tree annotates 13 profiles and the batched sidebar three slices, and on the hub (a commit every 1-2 s)
+# each call re-read the boards' external/ETA history (t_01a21ab4eb964866). One read per board per response, like
+# ``one_annotation_snapshot``'s counts. A failed read (``None``) is not shared: the next call in the block retries.
+_block = threading.local()
+
+
+@contextmanager
+def one_board_read() -> Iterator[None]:
+    """Every ``stamp_boards`` call in this block (this thread) stamps from one read of each board."""
+    if getattr(_block, "reads", None) is not None:
+        yield
+        return
+    _block.reads = {}
+    try:
+        yield
+    finally:
+        _block.reads = None
+
+
 def _read_board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict[str, dict[str, Any]]:
     """One board's stored contribution while unchanged, otherwise one short-lived read."""
+    key = str(path)
+    shared = getattr(_block, "reads", None)
+    if shared is not None and key in shared:
+        return shared[key]
+    found = _read_board_external_once(path, open_ro, parked_pairs, signature, wall)
+    if shared is not None and found is not None:
+        shared[key] = found
+    return {} if found is None else found
+
+
+def _read_board_external_once(path, open_ro, parked_pairs, signature, wall: float):
+    """``_read_board_external`` outside a block; None = the read failed."""
     key = str(path)
     sig = signature(path) if signature is not None else None
     if sig is not None:
@@ -200,7 +234,7 @@ def _read_board_external(path, open_ro, parked_pairs, signature, wall: float) ->
     try:
         conn = open_ro(path)
     except sqlite3.Error:
-        return {}
+        return None
     try:
         pairs = parked_pairs(conn)
         # With a signature the stored contribution is the only memo: ``session_external``'s own ``_TTL_S`` memo
@@ -209,7 +243,7 @@ def _read_board_external(path, open_ro, parked_pairs, signature, wall: float) ->
         clocked = bool(pairs) and _clocked(conn, pairs)
     except sqlite3.Error:
         logger.debug("kanban external read failed for %s", path, exc_info=True)
-        return {}
+        return None
     finally:
         conn.close()
     if sig is not None:  # taken before the read: a commit racing it moves the next request's signature

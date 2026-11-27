@@ -808,8 +808,13 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
     scoped_session_ids: list[str] = []
     errors: list[dict[str, str]] = []
 
-    for name, tree in profile_project_trees(
-            preview_limit, session_limit, errors, log_label="GET /api/profiles/projects/tree", profile=profile):
+    from hermes_cli.kanban_external_activity import one_board_read
+
+    # One read of each (root-pinned) board's external state for every profile's annotation in this response.
+    with one_board_read():
+        trees = profile_project_trees(
+            preview_limit, session_limit, errors, log_label="GET /api/profiles/projects/tree", profile=profile)
+    for name, tree in trees:
         if tree is not None:
             _merge_profile_tree(merged, tree["projects"], name, preview_limit)
             scoped_session_ids.extend(tree["scoped_session_ids"])

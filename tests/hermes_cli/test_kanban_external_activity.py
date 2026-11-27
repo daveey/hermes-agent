@@ -12,9 +12,11 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_external_activity as kea
 from hermes_cli import kanban_session_activity as ksa
 from tests.hermes_cli import test_kanban_external_watch as helpers
+from tests.hermes_cli import test_profiles_sidebar_scope as sidebar
 
 kanban_home, gh, clock = helpers.kanban_home, helpers.gh, helpers.clock
 park, tick = helpers.park, helpers.tick
+profiles_on_disk = sidebar.profiles_on_disk
 
 
 @pytest.fixture(autouse=True)
@@ -235,3 +237,103 @@ def test_an_unknown_signature_reads_the_board_every_time(kanban_home, monkeypatc
             kea.stamp_boards([{"id": "s1"}], lambda: [path], open_ro, ksa._parked_pairs, ksa._identity.row_ids,
                              signature=lambda p: None)
         assert len(opens) == 3 and not kea._boards
+
+
+# --- one response reads each board once (t_01a21ab4eb964866) --------------------------------------------------------
+
+def test_every_stamp_in_one_block_shares_one_board_read_even_across_a_commit(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        _session_card(conn, "s1")
+        stamp, opens = _counting(monkeypatch, conn)
+        with kea.one_board_read():
+            first = stamp([{"id": "s1"}])
+            _session_card(conn, "s1")  # a board commit mid-response (the hub commits every 1-2 s)
+            for _ in range(12):  # the projects tree's per-profile annotations, the sidebar's slices
+                assert stamp([{"id": "s1"}]) == first
+        assert len(opens) == 1, "one response must read a board once, however many annotations it stamps"
+
+
+def test_a_commit_during_a_block_is_seen_by_the_next_response(kanban_home, gh, clock, monkeypatch):
+    with kbc.connect_closing() as conn:
+        a = park(conn, 8001)
+        tick(conn, gh, clock, 0)
+        pairs = {("s1", a)}
+        monkeypatch.setattr(ksa, "_parked_pairs", lambda c: set(pairs))
+        stamp, _opens = _counting(monkeypatch, conn)
+        with kea.one_board_read():
+            assert stamp([{"id": "s1"}])[0]["kanban_external"] == 1
+            b = park(conn, 8002)
+            tick(conn, gh, clock, 1)
+            pairs.add(("s1", b))
+        row = stamp([{"id": "s1"}])[0]  # notification loss would leave this at 1 until some later commit
+        assert row["kanban_external"] == 2
+        assert row == _fresh_stamp(conn, [{"id": "s1"}])[0]
+
+
+def test_a_failed_read_in_a_block_is_not_shared(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        _session_card(conn, "s1")
+        path = Path(str(kbc._main_db_file(conn)))
+        calls = []
+
+        def flaky(p):
+            calls.append(p)
+            if len(calls) == 1:
+                raise ksa.sqlite3.OperationalError("database is locked")
+            return ksa._open_ro(p)
+
+        with kea.one_board_read():
+            kea.stamp_boards([{"id": "s1"}], lambda: [path], flaky, ksa._parked_pairs, ksa._identity.row_ids)
+            got = kea.stamp_boards([{"id": "s1"}], lambda: [path], flaky, ksa._parked_pairs, ksa._identity.row_ids)
+        assert len(calls) == 2, "the next stamp in the block retries a failed read"
+        assert got == _fresh_stamp(conn, [{"id": "s1"}])
+
+
+def test_blocks_nest_and_another_thread_reads_on_its_own(kanban_home, monkeypatch):
+    import threading
+
+    with kbc.connect_closing() as conn:
+        _session_card(conn, "s1")
+        stamp, opens = _counting(monkeypatch, conn)
+        with kea.one_board_read():
+            stamp([{"id": "s1"}])
+            with kea.one_board_read():
+                stamp([{"id": "s1"}])
+            stamp([{"id": "s1"}])  # the inner block's end does not drop the outer one's read
+            assert len(opens) == 1
+            _session_card(conn, "s1")
+            worker = threading.Thread(target=lambda: stamp([{"id": "s1"}]))
+            worker.start()
+            worker.join()
+            assert len(opens) == 2, "a block is this thread's response only"
+
+
+def test_annotation_snapshot_opens_one_board_read():
+    with ksa.one_annotation_snapshot():
+        assert kea._block.reads == {}
+        with ksa.one_annotation_snapshot():
+            assert kea._block.reads == {}
+    assert getattr(kea._block, "reads", None) is None
+
+
+def test_projects_tree_reads_each_board_once_for_all_profiles(profiles_on_disk, monkeypatch, tmp_path):
+    from hermes_cli.web_routers import profiles
+
+    for name, home in profiles_on_disk.items():
+        sidebar._seed_session(home, name + "-chat", source="cli", cwd="/fixture/repo")
+    board = tmp_path / "board" / "kanban.db"
+    reads = []
+
+    def once(path, *_a):
+        reads.append(path)
+        return {}
+
+    def annotate(rows, **_kw):  # the real annotation's board stamp, without the counts machinery
+        return kea.stamp_boards(rows, lambda: [board], ksa._open_ro, ksa._parked_pairs, ksa._identity.row_ids)
+
+    monkeypatch.setattr(profiles, "_SIDEBAR_CACHE_TTL_SECONDS", 0)
+    monkeypatch.setattr(ksa, "annotate_kanban_activity", annotate)
+    monkeypatch.setattr(kea, "_read_board_external_once", once)
+    profiles.get_profiles_projects_tree()
+    assert len(profiles_on_disk) > 1
+    assert reads == [board], "every profile's annotation in one tree response shares one read of the board"

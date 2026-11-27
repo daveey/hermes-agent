@@ -104,6 +104,12 @@ _TUI_PAUSE_REASON = "core_update_pause"
 def _update_paused_gateway_turns(conn: sqlite3.Connection, now: float) -> set[str]:
     """Sessions whose started gateway admission is parked on an update checkpoint
     (``hermes_state_update_pause.checkpoint_session_input``), dated by the checkpointed last message."""
+    return {sid for sid, stamp in _paused_gateway_checkpoints(conn) if now - stamp <= _GATEWAY_PAUSE_FRESH_S}
+
+
+def _paused_gateway_checkpoints(conn: sqlite3.Connection) -> list[tuple[str, float]]:
+    """``(session id, checkpointed last message time)`` of every started gateway admission parked on an update
+    checkpoint; clock-free, so a retained read stays exact (the caller applies the freshness window)."""
     # Driven from the checkpoint keys (state_meta's primary-key range, usually empty), then the admission by
     # its unique id: CROSS JOIN pins that order. Starting from session_admissions scans the whole table (no
     # index leads with status), 87 ms of CPU per poll on one 4.8k-admission profile store.
@@ -113,17 +119,18 @@ def _update_paused_gateway_turns(conn: sqlite3.Connection, now: float) -> set[st
             " ON a.admission_id = substr(m.key, ?) WHERE m.key >= ? AND m.key < ? AND a.status = 'started'",
             (len(_GATEWAY_CHECKPOINT_PREFIX) + 1, _GATEWAY_CHECKPOINT_PREFIX, _GATEWAY_CHECKPOINT_END)).fetchall()
     except sqlite3.Error:  # no admissions table (older store) or a busy one
-        return set()
-    out: set[str] = set()
+        return []
+    out: list[tuple[str, float]] = []
     for sid, value in rows:
         try:
             receipt = json.loads(value)
             stamp = conn.execute("SELECT timestamp FROM messages WHERE id = ?",
                                  (int(receipt["max_message_id"]),)).fetchone()
+            when = float(stamp[0]) if stamp and stamp[0] is not None else None
         except (ValueError, TypeError, KeyError, sqlite3.Error):
             continue
-        if sid and stamp and stamp[0] is not None and now - float(stamp[0]) <= _GATEWAY_PAUSE_FRESH_S:
-            out.add(str(sid))
+        if sid and when is not None:
+            out.append((str(sid), when))
     return out
 
 
@@ -172,29 +179,86 @@ def _auto_continue_bounds(home: Path) -> tuple[bool, float, int]:
     return auto_continue_bounds(cfg)
 
 
+_store_lock = threading.Lock()
+# [daveey] Per state.db: (commit stamp, lease rows, paused-checkpoint (session, message time) pairs) of its last read.
+# Only clock-free facts are kept: expiry, pause freshness and holder liveness are judged again on every collect, so
+# a retained read answers exactly what a fresh one would until the store commits (which moves the stamp). Opening
+# every profile's store for each collect (schema load + close of 13 WAL stores) was most of this annotation's cost
+# on the hub, where most stores are idle between sidebar polls (t_01a21ab4eb964866).
+_store_reads: dict[Path, tuple[tuple, tuple, tuple]] = {}
+
+
+def _db_stamp(path: Path) -> tuple | None:
+    """The store's committed generation (``goal_session_activity._db_stamp``); None = unknown, never retained."""
+    from hermes_cli.goal_session_activity import _db_stamp as stamp
+
+    return stamp(path)
+
+
+def _read_store(path: Path, now: float) -> tuple[tuple, tuple]:
+    """``(lease rows unexpired at ``now``, paused gateway (session id, message time) pairs)`` of one store."""
+    conn = _open_ro(path)
+    try:
+        try:
+            rows = tuple(conn.execute(
+                "SELECT conversation_id, holder, acquired_at, expires_at FROM session_turn_leases"
+                " WHERE expires_at > ?", (now,)
+            ).fetchall())
+        except sqlite3.Error:  # no lease table yet (nothing ever ran a turn there) or a busy/odd store
+            rows = ()
+        paused = tuple(_paused_gateway_checkpoints(conn))
+    finally:
+        conn.close()
+    return rows, paused
+
+
+def _store(path: Path, now: float) -> tuple[tuple, tuple]:
+    """``_read_store``, reused while the store's commit stamp is unchanged. A lease unexpired at the retained
+    read's time may expire since (the caller filters by its own clock); one expired then cannot revive without a
+    write, so the retained rows are a superset of a fresh read's."""
+    before = _db_stamp(path)
+    with _store_lock:
+        prior = _store_reads.get(path)
+    if before is not None and prior is not None and prior[0] == before:
+        return prior[1], prior[2]
+    rows, paused = _read_store(path, now)
+    with _store_lock:
+        if before is not None and before == _db_stamp(path):
+            _store_reads[path] = (before, rows, paused)
+        else:
+            _store_reads.pop(path, None)
+    return rows, paused
+
+
+def _unexpired(expires_at: Any, now: float) -> bool:
+    """``expires_at > now`` for a retained row; a row SQL returned with a non-numeric expiry stays counted, as the
+    read that returned it counted it (SQLite orders text above every number)."""
+    if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
+        return expires_at > now
+    return expires_at is not None
+
+
 def _collect(now: float) -> frozenset[str]:
     global _leases
     live: set[str] = set()
     leases: dict[str, list[dict[str, Any]]] = {}
-    for path in _state_db_paths():
+    paths = _state_db_paths()
+    with _store_lock:
+        for gone in _store_reads.keys() - set(paths):
+            del _store_reads[gone]
+    for path in paths:
         try:
-            conn = _open_ro(path)
+            rows, paused = _store(path, now)
         except (sqlite3.Error, OSError):
             _log.debug("turn leases unreadable in %s", path, exc_info=True)
+            with _store_lock:
+                _store_reads.pop(path, None)
             continue
-        try:
-            try:
-                rows = conn.execute(
-                    "SELECT conversation_id, holder, acquired_at, expires_at FROM session_turn_leases"
-                    " WHERE expires_at > ?", (now,)
-                ).fetchall()
-            except sqlite3.Error:  # no lease table yet (nothing ever ran a turn there) or a busy/odd store
-                rows = []
-            live.update(_update_paused_gateway_turns(conn, now))
-        finally:
-            conn.close()
+        live.update(sid for sid, stamp in paused if now - stamp <= _GATEWAY_PAUSE_FRESH_S)
         live.update(_update_paused_tui_turns(path.parent, now))
         for cid, holder, acquired_at, expires_at in rows:
+            if not _unexpired(expires_at, now):
+                continue
             if cid and not _holder_dead(str(holder or "")):
                 live.add(cid)
                 leases.setdefault(cid, []).append({"conversation_id": cid, "holder": holder, "acquired_at": acquired_at,
@@ -266,6 +330,8 @@ def _invalidate_cache() -> None:
     global _cache
     with _cache_lock:
         _cache = None
+    with _store_lock:
+        _store_reads.clear()
 
 
 _reset_cache_for_tests = _invalidate_cache

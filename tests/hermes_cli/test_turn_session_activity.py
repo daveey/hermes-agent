@@ -365,3 +365,122 @@ def test_unreadable_home_config_falls_open_to_default_bounds(home, monkeypatch):
     _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=0,
             started_at=_PINNED_NOW - 7200, paused_at=_PINNED_NOW - 60)
     assert tsa._update_paused_tui_turns(home, _PINNED_NOW) == {"tui_chat"}
+
+
+# [daveey] t_01a21ab4eb964866: an idle store is read once per commit, not once per collect; every clock-dependent
+# judgement (lease expiry, holder liveness, pause freshness) is still made per collect, and a commit is never lost.
+
+@pytest.fixture
+def wal_store(home):
+    path = home / "state.db"
+    _leases(path, [])
+    keeper = sqlite3.connect(path)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("SELECT * FROM session_turn_leases").fetchall()  # initialize the WAL index
+    yield path, keeper
+    keeper.close()
+
+
+def _count_opens(monkeypatch):
+    opened = []
+    original = tsa._open_ro
+
+    def counting(path):
+        opened.append(path)
+        return original(path)
+
+    monkeypatch.setattr(tsa, "_open_ro", counting)
+    return opened
+
+
+def _lease(keeper, sid, holder_pid, acquired_at, expires_at):
+    keeper.execute("INSERT INTO session_turn_leases VALUES (?, ?, ?, ?)",
+                   (sid, _holder(holder_pid, sid), acquired_at, expires_at))
+    keeper.commit()
+
+
+def test_unchanged_store_is_not_reopened_on_every_collect(wal_store, monkeypatch):
+    path, keeper = wal_store
+    now = time.time()
+    _lease(keeper, "a", os.getpid(), now - 5, now + 600)
+    opened = _count_opens(monkeypatch)
+    assert tsa._collect(now) == {"a"}
+    assert tsa._collect(now + 1) == {"a"}
+    assert tsa._collect(now + 2) == {"a"}
+    assert opened == [path]  # one read for one commit; the 2 s answer TTL is not what saved it
+
+
+def test_commit_after_a_retained_read_is_seen_by_the_next_collect(wal_store):
+    _path, keeper = wal_store
+    now = time.time()
+    assert tsa._collect(now) == frozenset()
+    _lease(keeper, "late", os.getpid(), now, now + 600)
+    assert tsa._collect(now + 0.001) == {"late"}  # no TTL: the commit moves the stamp
+    keeper.execute("DELETE FROM session_turn_leases WHERE conversation_id = 'late'")
+    keeper.commit()
+    assert tsa._collect(now + 0.002) == frozenset()
+
+
+def test_retained_lease_expires_by_the_collect_clock_without_a_write(wal_store, monkeypatch):
+    _path, keeper = wal_store
+    now = time.time()
+    _lease(keeper, "a", os.getpid(), now - 5, now + 10)
+    assert tsa._collect(now) == {"a"}
+    opened = _count_opens(monkeypatch)
+    assert tsa._collect(now + 11) == frozenset()
+    assert opened == []  # judged on the retained rows
+
+
+def test_retained_lease_of_a_holder_that_died_stops_counting(wal_store):
+    _path, keeper = wal_store
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        now = time.time()
+        _lease(keeper, "a", proc.pid, now - 5, now + 600)
+        assert tsa._collect(now) == {"a"}
+    finally:
+        proc.kill()
+        proc.wait()
+    assert tsa._collect(now + 1) == frozenset()
+
+
+def test_retained_gateway_pause_leaves_the_freshness_window_by_the_collect_clock(wal_store):
+    _path, keeper = wal_store
+    now = time.time()
+    keeper.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+    keeper.execute("CREATE TABLE session_admissions (admission_id TEXT PRIMARY KEY, target_session_id TEXT, "
+                   "status TEXT)")
+    keeper.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, timestamp REAL)")
+    keeper.execute("INSERT INTO messages VALUES (7, ?)", (now - 10,))
+    keeper.execute("INSERT INTO session_admissions VALUES ('adm', 'paused_chat', 'started')")
+    keeper.execute("INSERT INTO state_meta VALUES (?, ?)",
+                   (tsa._GATEWAY_CHECKPOINT_PREFIX + "adm", json.dumps({"max_message_id": 7})))
+    keeper.commit()
+    assert tsa._collect(now) == {"paused_chat"}
+    assert tsa._collect(now + tsa._GATEWAY_PAUSE_FRESH_S) == frozenset()
+
+
+def test_failed_store_read_is_not_retained(wal_store, monkeypatch):
+    _path, keeper = wal_store
+    now = time.time()
+    _lease(keeper, "a", os.getpid(), now - 5, now + 600)
+    original = tsa._open_ro
+
+    def failed(_path):
+        raise sqlite3.OperationalError("busy")
+
+    monkeypatch.setattr(tsa, "_open_ro", failed)
+    assert tsa._collect(now) == frozenset()
+    monkeypatch.setattr(tsa, "_open_ro", original)
+    assert tsa._collect(now) == {"a"}
+
+
+def test_removed_profile_store_drops_its_retained_read(home, wal_store):
+    now = time.time()
+    work = home / "profiles" / "work" / "state.db"
+    _leases(work, [("p", _holder(os.getpid(), "p"), now - 5, now + 600)])
+    assert "p" in tsa._collect(now)
+    for suffix in ("", "-wal", "-shm"):
+        (work.parent / f"state.db{suffix}").unlink(missing_ok=True)
+    assert "p" not in tsa._collect(now + 1)
+    assert work not in tsa._store_reads

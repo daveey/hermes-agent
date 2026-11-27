@@ -1859,7 +1859,8 @@ def one_annotation_snapshot() -> Iterator[None]:
         return
     _annotation_scope.reads, _annotation_scope.attention, _annotation_scope.links = [], None, None
     try:
-        yield
+        with _external_activity.one_board_read():
+            yield
     finally:
         _annotation_scope.reads = _annotation_scope.attention = _annotation_scope.links = None
 
