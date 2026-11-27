@@ -3,7 +3,7 @@ import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
 import type * as React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
 import type { SessionInfo } from '@/hermes'
@@ -288,26 +288,33 @@ it.each(['ordinary-review-chat', 'kanban_owner_review'])('shows teal producer wa
   vi.useRealTimers()
 })
 
-it.each(['ordinary-ci-chat', 'kanban_owner_ci'])('projects real queued CI and unknown evidence into row %s', async id => {
-  const { execFileSync } = await import('node:child_process')
-  const { resolve } = await import('node:path')
-  const root = resolve(process.cwd(), '../..')
+describe('production CI projection', () => {
+  let rows: Record<string, SessionInfo>
 
-  const rows = JSON.parse(execFileSync('scripts/hermes-python', ['tests/fixtures/ci_wait_dot_projection.py'], {
-    cwd: root, encoding: 'utf8', env: { ...process.env, PYTHONPATH: root }
-  })) as Record<string, SessionInfo>
+  beforeAll(async () => {
+    const { execFileSync } = await import('node:child_process')
+    const { resolve } = await import('node:path')
+    const root = resolve(process.cwd(), '../..')
 
-  for (const [kind, expected] of [['queued_ci', 'external'], ['unknown', 'attention'], ['empty', 'none']] as const) {
-    const row = makeSession({ ...rows[kind], id, title: 'CI owner' })
-    const { container, unmount } = renderRow(row)
-    const dot = container.querySelector(`[data-session-status-dot="${expected}"]`) as HTMLElement
-    expect(dot).not.toBeNull()
+    // A cold checkout may provision Python; do that once, outside row assertion deadlines.
+    rows = JSON.parse(execFileSync('scripts/hermes-python', ['tests/fixtures/ci_wait_dot_projection.py'], {
+      cwd: root, encoding: 'utf8', env: { ...process.env, PYTHONPATH: root }, timeout: 90_000
+    })) as Record<string, SessionInfo>
+  }, 120_000)
 
-    if (expected === 'external') { expect(dot.style.backgroundColor).toBe('rgb(56, 189, 248)') }
+  it.each(['ordinary-ci-chat', 'kanban_owner_ci'])('projects real queued CI and unknown evidence into row %s', id => {
+    for (const [kind, expected] of [['queued_ci', 'external'], ['unknown', 'attention'], ['empty', 'none']] as const) {
+      const row = makeSession({ ...rows[kind], id, title: 'CI owner' })
+      const { container, unmount } = renderRow(row)
+      const dot = container.querySelector(`[data-session-status-dot="${expected}"]`) as HTMLElement
+      expect(dot).not.toBeNull()
 
-    if (expected === 'attention') { expect(dot.getAttribute('aria-label')).toBe('Open work, current status unknown') }
-    unmount()
-  }
+      if (expected === 'external') { expect(dot.style.backgroundColor).toBe('rgb(56, 189, 248)') }
+
+      if (expected === 'attention') { expect(dot.getAttribute('aria-label')).toBe('Open work, current status unknown') }
+      unmount()
+    }
+  })
 })
 
 it.each([

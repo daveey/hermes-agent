@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 
 import { cleanup, render } from '@testing-library/react'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, beforeAll, expect, it } from 'vitest'
 
 import { canonicalOutcome } from '@/test/canonical-outcome'
 import type { SessionInfo } from '@/types/hermes'
@@ -10,13 +10,18 @@ import type { SessionInfo } from '@/types/hermes'
 import { SessionStatusDot } from './session-status-dot'
 
 // Run the production card adapter, canonical reducer and list-row serializer, not hand-authored outcomes.
-const rows = JSON.parse(
-  execFileSync('scripts/hermes-python', ['tests/fixtures/ci_wait_dot_projection.py'], {
-    cwd: resolve(process.cwd(), '../..'),
-    encoding: 'utf8',
-    env: { ...process.env, PYTHONPATH: resolve(process.cwd(), '../..') }
-  })
-) as Record<string, SessionInfo>
+let rows: Record<string, SessionInfo>
+
+beforeAll(() => {
+  rows = JSON.parse(
+    execFileSync('scripts/hermes-python', ['tests/fixtures/ci_wait_dot_projection.py'], {
+      cwd: resolve(process.cwd(), '../..'),
+      encoding: 'utf8',
+      env: { ...process.env, PYTHONPATH: resolve(process.cwd(), '../..') },
+      timeout: 90_000
+    })
+  ) as Record<string, SessionInfo>
+}, 120_000)
 
 afterEach(cleanup)
 
