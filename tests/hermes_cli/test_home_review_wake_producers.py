@@ -35,7 +35,7 @@ def _parked(conn, title, *, awaiting=None, probe=None):
     return t
 
 
-# P4: the CI-progress producer (no frozen check anywhere on its path) on a frozen CI-waiting card.
+# P4: frozen CI waits are excluded before I/O; a late direct result is independently inert.
 @pytest.mark.parametrize('phase', ['prepared', 'pending', None])
 def test_p4_ci_progress_apply(board, phase):
     from hermes_cli import kanban_ci_progress as ci
@@ -43,7 +43,8 @@ def test_p4_ci_progress_apply(board, phase):
     task = _parked(board, 'ci waiter', awaiting={'kind': 'ci', 'ref': ref, 'why': 'checks'}, probe='true')
     assert [w[0] for w in ci._ci_waits(board)] == [task]
     sup.freeze(board, task, phase)
-    assert [w[0] for w in ci._ci_waits(board)] == [task], 'frozen card is still a CI-sweep candidate'
+    expected = [] if phase else [task]
+    assert [w[0] for w in ci._ci_waits(board)] == expected, 'frozen CI waits must be excluded before I/O'
     snap = _snap(board, task)
     p = ci.Progress(state=ci.NOT_STARTING, repo='o/r', pr=1, per_pr=True, detail='conflict', remedy='rebase')
     exc, out = None, None
