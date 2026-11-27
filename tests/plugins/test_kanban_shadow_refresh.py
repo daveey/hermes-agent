@@ -163,9 +163,15 @@ def test_bookkeeping_and_exact_history_updates_stay_fresh(shadow_board, monkeypa
     _write(env, "UPDATE task_events SET payload='{\"new\":true}' WHERE task_id=? AND kind='test'", (tid,))
     _read(env)
     assert inputs[-1][1][tid][-1]['payload'] == '{"new":true}'
+    # [daveey] Retained runs are response-exact, not row-exact (board_run_history): a running run is
+    # no unused-grant candidate, so its heartbeat is unread by diagnostics and not re-fetched.
+    runs_before = inputs[-1][2][tid]
+    diag_before = original(inputs[-1])
     _write(env, 'UPDATE task_runs SET last_heartbeat_at=23456 WHERE task_id=?', (tid,))
     _read(env)
-    assert inputs[-1][2][tid][-1]['last_heartbeat_at'] == 23456
+    assert tuple(inputs[-1][2][tid]) == tuple(runs_before)
+    assert inputs[-1][2][tid][-1]['last_heartbeat_at'] is None  # not re-fetched
+    assert original(inputs[-1]) == diag_before
     _write(env, "INSERT INTO task_events(task_id,kind,payload,created_at) VALUES (?,'heartbeat','{}',2)", (tid,))
     _read(env)
     assert inputs[-1][1][tid][-1]['kind'] == 'heartbeat'
