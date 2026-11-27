@@ -57,7 +57,7 @@ def require_settled(conn, task_id, run_id, outcome):
         return
     reservations = {json.loads(event[0])['request_id'] for event in conn.execute(
         'SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind=?', (task_id, run_id, _RESERVED))}
-    from hermes_cli.kanban_capability_registry import hub_db_path
+    from hermes_cli.kanban_capability_registry import hub_db_path, _ro
     path = hub_db_path()
     try:
         path.lstat()
@@ -66,7 +66,7 @@ def require_settled(conn, task_id, run_id, outcome):
             _pending(sorted(reservations)[0])
         return
     try:
-        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        with closing(_ro(path)) as db:
             for identity in sorted(reservations):
                 sent = db.execute('SELECT state FROM sent WHERE id=?', (identity,)).fetchone()
                 if not sent or sent[0] not in ('done', 'rejected'):
