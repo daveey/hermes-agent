@@ -58,22 +58,30 @@ def _generation():
 
 
 class _Standby:
-    __slots__ = ('child', 'cpu_s', 'generation', 'recorded', 'spawned')
+    __slots__ = ('accounted', 'child', 'cpu_s', 'generation', 'retiring', 'spawned')
 
     def __init__(self, child, spawned):
-        self.child, self.spawned, self.generation = child, spawned, _generation()
-        self.cpu_s, self.recorded = None, False
+        self.child, self.spawned, self.generation, self.cpu_s = child, spawned, None, None
+        # Retirement can be entered twice: by two threads, or by a signal handler's close() on the
+        # thread already retiring it. ``retiring`` makes other threads wait and lets the same thread
+        # through; ``accounted`` is a lock used as an atomic flag (taken once, never blocked on).
+        self.retiring, self.accounted = threading.RLock(), threading.Lock()
 
 
 class CaptureProcess:
     """One active child at a time; close cancels it, and a later capture gets a fresh child.
 
     ``prepare`` may spawn one standby ahead of the first capture; it serves at most one request.
+
+    ``prepare`` and ``close`` run on the main thread at boot and shutdown, where a SIGTERM/SIGINT
+    handler may call ``close`` in the middle of either. So neither holds ``_lock`` across a spawn or
+    a child stop, and the lock is re-entrant: a handler arriving inside one of their short locked
+    sections runs a whole ``close`` there instead of waiting for the thread it interrupted.
     """
     def __init__(self, *, seconds=5, max_bytes=MAX_RESPONSE, command=None):
         self.seconds, self.max_bytes = seconds, min(max_bytes, MAX_RESPONSE)
         self.command = command
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._child = None
         self._standby = None
         self._closed = False
@@ -92,33 +100,39 @@ class CaptureProcess:
         with self._lock:
             if self._closed or self._standby is not None or self._child is not None:
                 return
-            spawned = time.monotonic()
-            try:
-                child = self._spawn()
-            except OSError:
-                return
-            try:
-                self._standby = _Standby(child, spawned)
-            except BaseException:
-                _la.record('sessions.capture.child', cpu_s=_child_cpu(child.pid) or 0.0,
-                           wall_s=time.monotonic() - spawned, skipped=True, outer=False)
-                _stop(child)
-                raise
-
-    def _discard_standby(self):
-        """Retire the unused standby (caller holds the lock): one ``skipped`` record, then the same
-        custody as any child. A group that does not stop keeps the standby owned for the next try."""
-        standby = self._standby
-        if standby is None:
+        # Spawned with the lock free (see the class docstring); what happened meanwhile is settled below.
+        spawned = time.monotonic()
+        try:
+            child = self._spawn()
+        except OSError:
             return
-        if not standby.recorded:
-            # A standby poll() already reaped lost its counters: use the sample taken before that.
-            cpu_s = _child_cpu(standby.child.pid) if standby.child.returncode is None else standby.cpu_s
-            standby.recorded = True
-            _la.record('sessions.capture.child', cpu_s=cpu_s or 0.0, wall_s=time.monotonic() - standby.spawned,
-                       skipped=True, fallback=cpu_s is None, outer=False)
-        _stop(standby.child)
-        self._standby = None
+        standby, kept = _Standby(child, spawned), False
+        try:
+            standby.generation = _generation()
+            with self._lock:
+                if self._standby is None and self._child is None:  # a capture may have started meanwhile
+                    self._standby = standby
+            # Published BEFORE _closed is read, while close() sets _closed before it reads _standby:
+            # whichever way a close() interleaved, it saw this standby or this line sees it closed.
+            kept = self._standby is standby and not self._closed
+        finally:
+            if not kept:
+                self._retire(standby)
+
+    def _retire(self, standby):
+        """Retire an unused standby: one ``skipped`` record, then the same custody as any child.
+        A group that does not stop keeps the standby owned for the next try. Safe to enter again
+        while it runs (see ``_Standby``): the second entry finishes the stop and records nothing."""
+        with standby.retiring:
+            if standby.accounted.acquire(blocking=False):
+                # A standby poll() already reaped lost its counters: use the sample taken before that.
+                cpu_s = _child_cpu(standby.child.pid) if standby.child.returncode is None else standby.cpu_s
+                _la.record('sessions.capture.child', cpu_s=cpu_s or 0.0, wall_s=time.monotonic() - standby.spawned,
+                           skipped=True, fallback=cpu_s is None, outer=False)
+            _stop(standby.child)
+        with self._lock:
+            if self._standby is standby:
+                self._standby = None
 
     def __call__(self, name, selector):
         return self._request({'name': name, 'selector': selector})
@@ -163,7 +177,7 @@ class CaptureProcess:
                         and standby.generation == _generation()):
                     child, self._standby = standby.child, None
                 else:
-                    self._discard_standby()
+                    self._retire(standby)
             if child is None:
                 try:
                     child = self._spawn()
@@ -214,7 +228,7 @@ class CaptureProcess:
     def close(self):
         with self._lock:
             self._closed = True
-            child = self._child
+            child, standby = self._child, self._standby
         try:
             if child is not None:  # its own request accounts it
                 if child.poll() is None:
@@ -226,8 +240,10 @@ class CaptureProcess:
                     if self._child is child:
                         self._child = None
         finally:
-            with self._lock:  # attempted even when the active child's custody is retained
-                self._discard_standby()
+            # Attempted even when the active child's custody is retained. Outside the lock: a signal
+            # handler's close() arriving mid-stop then finishes this same retirement instead of blocking.
+            if standby is not None:
+                self._retire(standby)
 
 
 def _stop(child):

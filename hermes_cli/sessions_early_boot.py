@@ -54,6 +54,8 @@ def early_sessions(*, headless, isolated):
     reader = CaptureProcess()
     owner = None
     previous = {}
+    preparing = False
+    held = []
 
     def close():
         (reader if owner is None else owner).close()
@@ -61,6 +63,11 @@ def early_sessions(*, headless, isolated):
     def stop(signum, frame):
         handler = previous[signum]
         if handler == signal.SIG_IGN:
+            return
+        if preparing:
+            # The standby is mid-spawn: the reader does not own the child yet, so a close() now would
+            # miss it and an exit raised from here would orphan it. Acted on once prepare() returns.
+            held.append((signum, frame))
             return
         close()
         if callable(handler):
@@ -78,7 +85,13 @@ def early_sessions(*, headless, isolated):
                     previous[signum] = signal.signal(signum, stop)
                 except (ValueError, OSError, RuntimeError):
                     previous.pop(signum, None)
-        reader.prepare()
+        preparing = True
+        try:
+            reader.prepare()
+        finally:
+            preparing = False
+            if held:
+                stop(*held[0])
         from hermes_cli.sessions_native_startup import SessionsRuntime
         from hermes_cli.web_routers import profiles
 

@@ -219,3 +219,112 @@ def test_signal_before_the_owner_exists_closes_the_reader(boot, monkeypatch, sig
         assert signal.getsignal(signum) is previous
     finally:
         signal.signal(signum, original)
+
+
+# The real CaptureProcess under the real handler, with a real signal sent to this process from
+# inside one of the reader's two slow steps. Only admission, the profile lookup, the runtime (its
+# close closes the reader, as the real one does) and the worker's command are stand-ins.
+BOOT_SIGNAL = '''
+import faulthandler, json, os, signal, sys
+from types import SimpleNamespace
+faulthandler.dump_traceback_later(20, exit=True)  # a deadlock ends as a traceback, not a hang
+window, signum, handler = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+from hermes_cli import (isolated_scope, loop_accounting, process_identity, proof_home, update_proxy_env,
+                        sessions_capture_process as capture, sessions_early_boot as early,
+                        sessions_native_startup as native)
+from hermes_cli.web_routers import profiles
+proof_home.assert_backend_home = lambda **kw: None
+update_proxy_env.restore_user_proxy_env = lambda: None
+process_identity.is_desktop_owned_backend = lambda: False
+isolated_scope.record_launch_scope = lambda **kw: None
+profiles._profile_targets = lambda reason: [('default', '/unused')]
+native.SessionsRuntime = lambda profiles, targets, *, capture_reader: SimpleNamespace(
+    start_background=lambda: None, close=capture_reader.close)
+capture.runtime_command = lambda root, module: [sys.executable, '-I', '-c', 'import sys; sys.stdin.buffer.read()']
+capture._generation = lambda: 'boot'
+events, children, stopped = [], [], []
+spawn, kill_tree, survivors = capture.spawn_owned, capture.kill_process_tree, capture.stop_owned_group_survivors
+
+def spawned(*args, **kwargs):
+    children.append(spawn(*args, **kwargs))
+    if window == 'prepare':  # the child exists and prepare() has not been handed it yet
+        events.append('signal')
+        os.kill(os.getpid(), signum)
+        events.append('spawned')
+    return children[-1]
+
+def killing(proc, **kwargs):
+    if window == 'close' and 'signal' not in events:  # close() is retiring the standby, still alive
+        events.append('signal')
+        os.kill(os.getpid(), signum)
+    return kill_tree(proc, **kwargs)
+
+def stopping(pid, **kwargs):
+    stopped.append(pid)
+    return survivors(pid, **kwargs)
+
+def previous(sig, frame):
+    events.append('previous')
+    if handler == 'exits':
+        raise SystemExit(123)
+capture.spawn_owned, capture.kill_process_tree, capture.stop_owned_group_survivors = spawned, killing, stopping
+signal.signal(signum, previous)
+code = None
+try:
+    with early.early_sessions(headless=True, isolated=False) as owner:
+        events.append('yielded')
+except SystemExit as stop:
+    code = stop.code
+faulthandler.cancel_dump_traceback_later()
+counted = loop_accounting.counters().get('sessions.capture.child', {})
+print(json.dumps({'events': events, 'code': code, 'restored': signal.getsignal(signum) is previous,
+                  'children': [child.pid for child in children], 'stopped': stopped,
+                  'alive': [child.pid for child in children if child.poll() is None],
+                  'runs': counted.get('runs', 0), 'skips': counted.get('skips', 0)}))
+'''
+
+
+def _boot_signal(window, signum, handler):
+    import json
+    import os
+    import subprocess
+    from hermes_cli._startup_fast import project_root_str
+    done = subprocess.run([sys.executable, '-c', BOOT_SIGNAL, window, str(int(signum)), handler],
+                          cwd=project_root_str(), env=dict(os.environ, HERMES_FACTS_SESSIONS='1'),
+                          capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, done.stderr[-3000:]  # a deadlock exits 1 with every thread's stack
+    return json.loads(done.stdout.splitlines()[-1])
+
+
+def _stopped_and_accounted_once(seen):
+    assert len(seen['children']) == 1 and not seen['alive']
+    assert seen['children'][0] in seen['stopped']
+    assert seen['runs'] == 1 and seen['skips'] == 1
+    assert seen['restored']
+
+
+@pytest.mark.platforms('linux')
+@pytest.mark.parametrize('signum', [signal.SIGTERM, signal.SIGINT])
+def test_signal_while_the_standby_spawns_stops_the_child_and_chains(signum):
+    seen = _boot_signal('prepare', signum, 'exits')
+    # The spawn finishes, so the reader owns the child before the signal is acted on.
+    assert seen['events'] == ['signal', 'spawned', 'previous'] and seen['code'] == 123
+    _stopped_and_accounted_once(seen)
+
+
+@pytest.mark.platforms('linux')
+@pytest.mark.parametrize('signum', [signal.SIGTERM, signal.SIGINT])
+def test_signal_while_close_retires_the_standby_stops_the_child_and_chains(signum):
+    seen = _boot_signal('close', signum, 'exits')
+    assert seen['events'] == ['yielded', 'signal', 'previous'] and seen['code'] == 123
+    _stopped_and_accounted_once(seen)
+
+
+@pytest.mark.platforms('linux')
+@pytest.mark.parametrize('window,events', [('prepare', ['signal', 'spawned', 'previous', 'yielded']),
+                                           ('close', ['yielded', 'signal', 'previous'])])
+def test_signal_whose_previous_handler_returns_leaves_no_child_behind(window, events):
+    # The interrupted step runs on afterwards: it must neither hang nor stop or account the child again.
+    seen = _boot_signal(window, signal.SIGTERM, 'returns')
+    assert seen['events'] == events and seen['code'] is None
+    _stopped_and_accounted_once(seen)

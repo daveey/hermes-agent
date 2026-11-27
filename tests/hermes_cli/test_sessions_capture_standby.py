@@ -252,6 +252,90 @@ def test_partially_prepared_child_is_rolled_back(spawns, monkeypatch):
     capture.close()
 
 
+def bounded(scenario):
+    """Run ``scenario`` on its own thread, so a self-deadlock fails the test instead of hanging it."""
+    errors = []
+
+    def run():
+        try:
+            scenario()
+        except BaseException as error:  # health: allow BLE001 -- re-raised on the test thread below
+            errors.append(error)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(10)
+    assert not thread.is_alive(), 'the reader deadlocked on its own lock'
+    if errors:
+        raise errors[0]
+
+
+def test_close_reentered_during_the_spawn_retires_the_child_prepare_was_bringing_up(spawns, monkeypatch):
+    # What a signal handler's close() does when it runs on the thread that is inside prepare().
+    children, stopped = spawns
+    capture = CaptureProcess(command=command(PID_FRAME))
+    spawn = module.spawn_owned
+
+    def closing(*args, **kwargs):
+        child = spawn(*args, **kwargs)
+        capture.close()
+        return child
+    monkeypatch.setattr(module, 'spawn_owned', closing)
+    before = stat()
+    bounded(capture.prepare)
+    assert capture._standby is None and len(children) == 1  # no standby on a closed reader
+    assert children[0].poll() is not None and children[0].pid in stopped
+    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 1
+    capture.prepare()
+    capture.close()
+    assert len(children) == 1 and delta(before, 'runs') == 1
+    with pytest.raises(CaptureUnavailable, match='closed'):
+        capture('sessions', {})
+
+
+def test_close_reentered_while_it_retires_the_standby_stops_and_accounts_it_once(spawns, monkeypatch):
+    children, stopped = spawns
+    capture = CaptureProcess(command=command(PID_FRAME))
+    capture.prepare()
+    standby = children[0]
+    kill, entered = module.kill_process_tree, []
+
+    def reentering(proc, **kwargs):
+        if not entered:  # the standby is still alive: the inner close() has all of the work to do
+            entered.append(proc.poll())
+            capture.close()
+        return kill(proc, **kwargs)
+    monkeypatch.setattr(module, 'kill_process_tree', reentering)
+    before = stat()
+    bounded(capture.close)
+    assert entered == [None] and capture._standby is None and len(children) == 1
+    assert standby.poll() is not None and standby.pid in stopped
+    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 1 and delta(before, 'errors') == 0
+
+
+def test_capture_that_starts_while_the_standby_spawns_keeps_one_active_child(spawns, monkeypatch):
+    children, stopped = spawns
+    capture = CaptureProcess(seconds=30, command=command('import time; time.sleep(30)'))
+    spawn, threads = module.spawn_owned, []
+
+    def racing(*args, **kwargs):
+        child = spawn(*args, **kwargs)
+        if not threads:  # prepare()'s spawn: a capture takes the reader before the standby is published
+            threads.append(threading.Thread(target=lambda: pytest.raises(CaptureUnavailable, capture, 'sessions', {})))
+            threads[0].start()
+            wait_until(lambda: capture._child is not None, what='capture racing the standby spawn')
+        return child
+    monkeypatch.setattr(module, 'spawn_owned', racing)
+    before = stat()
+    capture.prepare()
+    assert capture._standby is None and capture._child is children[1]
+    assert children[0].poll() is not None and children[0].pid in stopped  # the late standby is not kept
+    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 1
+    capture.close()
+    threads[0].join(5)
+    assert not threads[0].is_alive() and len(children) == 2
+    assert delta(before, 'runs') == 2
+
+
 def test_every_spawned_child_is_accounted_exactly_once(spawns, monkeypatch):
     children, _ = spawns
     before = stat()
