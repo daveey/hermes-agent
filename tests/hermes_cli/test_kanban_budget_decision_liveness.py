@@ -79,6 +79,26 @@ def test_ordinary_stop_and_completed_scope_decision_allow_budget_edits(board, mo
     assert rc == 0, error
 
 
+def test_a_decided_stop_back_in_a_held_lane_keeps_its_budget_edits(board, monkeypatch):
+    """Only a pending decision is fenced: a renewed stop already released and later held again for another
+    reason (still renewed, still in a release lane) keeps ordinary limit edits."""
+    tid = renewed(board, monkeypatch)
+    out = releases.as_owner(board, tid, runs=7)
+    assert out['ok'], out
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+    assert not decision.pending(board, tid)
+    assert decision.restricted_floor(board, tid) is not None
+    assert not decision.execution_restricted(board, tid)
+    prior = budget.card_override(board, tid)
+    assert prior is not None
+    rc, error = releases.spend_budget(board, monkeypatch, tid, '--runs', '59', '--reason', 'decided, held again',
+                                     '--seen', str(prior['decision_comment']['comment_id']))
+    assert rc == 0, error
+    after = budget.card_override(board, tid)
+    assert after is not None and after['runs'] == 59
+
+
 def test_hold_arriving_at_budget_writer_is_refused(board, monkeypatch):
     """The fence reads under the writer's own transaction: a renewed stop re-held after any preflight still refuses."""
     tid = renewed(board, monkeypatch)
