@@ -282,3 +282,49 @@ def test_failed_thread_start_settles_the_flight(state_db, board, monkeypatch):
     monkeypatch.setattr(threading, "Thread", InlineThread)
     controls_refresh(state_db)
     assert is_done(stored_status(state_db))
+
+
+def _turn_end_under_contention(state_db, board, monkeypatch, *, held_by, concluding_holder):
+    """A turn_end refresh that hits the held counts while ``held_by``'s turn lease is still taken; returns the
+    status published once the deferred refresh ran (review 6092548112)."""
+    controls = Controls()
+    so.register_outcome_provider("user-steps", controls)
+    controls_refresh(state_db)
+    deferred = threading.Event()
+    real_deferred = so._deferred_refresh
+
+    def observed(*args):
+        try:
+            real_deferred(*args)
+        finally:
+            deferred.set()
+
+    monkeypatch.setattr(so, "_deferred_refresh", observed)
+    with SessionDB(db_path=state_db) as handle:
+        assert handle.try_acquire_session_turn_lease("chat", held_by, ttl_seconds=300.0)
+    try:
+        unrelated_write(board)
+        with Held():
+            controls.open = False
+            with SessionDB(db_path=state_db) as handle:
+                so.refresh_outcome("chat", "turn_end", db=handle,
+                                   concluding_turn=so.turn_identity(lease_holder=concluding_holder))
+            held = stored_status(state_db)
+            assert not is_done(held) and held["coverage"]["state"] == "unknown", held
+        assert deferred.wait(10), "the settled recompute did not re-run the chat's refresh"
+        return stored_status(state_db)
+    finally:
+        with SessionDB(db_path=state_db) as handle:
+            handle.release_session_turn_lease("chat", held_by)
+
+
+def test_a_deferred_turn_end_keeps_its_concluding_identity(state_db, board, monkeypatch):
+    """The concluded turn's own unreleased lease is discounted by the deferred refresh too: done, not running."""
+    status = _turn_end_under_contention(state_db, board, monkeypatch, held_by="turn-1", concluding_holder="turn-1")
+    assert is_done(status), status
+
+
+def test_a_deferred_turn_end_still_sees_a_newer_turn_running(state_db, board, monkeypatch):
+    """Negative control: the concluded turn names only its own lease; a newer turn's lease stays a live turn."""
+    status = _turn_end_under_contention(state_db, board, monkeypatch, held_by="turn-2", concluding_holder="turn-1")
+    assert not is_done(status) and status.get("kind") == "running", status

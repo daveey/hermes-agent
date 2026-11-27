@@ -377,18 +377,23 @@ def _agreement_counts() -> tuple[dict[str, int], dict[str, int]]:
         raise
 
 
-def _deferred_refresh(db_path: Optional[Path], sid: str) -> None:
-    """The chat's refresh again after the count recompute settled (trigger ``card_change``, which carries no
-    turn conclusion). A caller-supplied store is reopened by path: the caller's handle may be closed by now."""
+def _deferred_refresh(db_path: Optional[Path], sid: str, trigger: str = "card_change",
+                      concluding: frozenset[str] = frozenset()) -> None:
+    """The chat's refresh again after the count recompute settled, with the deferred refresh's own trigger and
+    concluding-turn identity: a ``turn_end`` that hit contention while its own evidence was still held must not
+    come back as ``running`` (review 6092548112). A caller-supplied store is reopened by path: the caller's
+    handle may be closed by now."""
     token = _agreement_blocking.set(True)
     try:
         if db_path is None:
-            refresh_outcomes_quietly([sid], "card_change")
+            refresh_outcome(sid, trigger, concluding_turn=concluding)
             return
         from hermes_state import SessionDB
 
         with SessionDB(db_path=db_path) as handle:
-            refresh_outcomes_quietly([sid], "card_change", db=handle)
+            refresh_outcome(sid, trigger, db=handle, concluding_turn=concluding)
+    except Exception:  # health: allow BLE001 -- a deferred retry runs on the recompute thread; log, never raise
+        logger.warning("session outcome deferred refresh (%s) failed for %s", trigger, sid, exc_info=True)
     finally:
         _agreement_blocking.reset(token)
 
@@ -1033,8 +1038,10 @@ def refresh_outcome(sid: str, trigger: str, *, db: Any = None,
             return refresh(handle, sid, trigger, frozenset(concluding_turn or ()))
         raw_path = getattr(handle, "db_path", None) if db is not None else None
         path = Path(raw_path) if isinstance(raw_path, (str, Path)) else None
-        retry = functools.partial(contextvars.copy_context().run, _deferred_refresh, path, sid)
-        token = _agreement_target.set({"key": (str(path), sid), "pending": False, "retry": retry})
+        concluding = frozenset(concluding_turn or ())
+        retry = functools.partial(contextvars.copy_context().run, _deferred_refresh, path, sid, trigger, concluding)
+        key = (str(path), sid, trigger, concluding)  # each pending refresh replays with its own turn identity
+        token = _agreement_target.set({"key": key, "pending": False, "retry": retry})
         try:
             return refresh(handle, sid, trigger, frozenset(concluding_turn or ()))
         finally:
