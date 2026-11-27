@@ -85,7 +85,17 @@ def _subs_revision(conn, path):
     return read_revision(conn, (str(path), st.st_dev, st.st_ino))
 
 
-def _notify_content(conn, version, held, path=None):
+# A private (unpublished) read asked for one chat needs only that chat's rows; same order as its slice of
+# _SUBS_SQL. Fetching all of them (4k rows on the hub, one sqlite3 step and GIL handoff each) to return one
+# slice was most of the tui pollers' work under contention (t_01a20286f9f3f262).
+_CHAT_SUBS_SQL = ("SELECT chat_id, task_id, platform, thread_id, last_event_id, inflight_from "
+                  "FROM kanban_notify_subs WHERE chat_id = ? AND LOWER(platform) = 'tui' "
+                  "ORDER BY task_id, platform, thread_id")
+
+
+def _notify_content(conn, version, held, path=None, only_chat=None):
+    """``only_chat``: a private read for one chat; its result is never published, so it reads only that chat's
+    subscription rows and skips the memo-only subscription revision."""
     from tui_gateway.session_notifications import _KANBAN_NOTIFY_KINDS
     present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
                                           "('task_events', 'kanban_notify_subs')")}
@@ -94,7 +104,7 @@ def _notify_content(conn, version, held, path=None):
     conn.execute("BEGIN")  # one snapshot for the event scan and the subscription rows
     try:
         revision = None
-        if path is not None:
+        if path is not None and only_chat is None:
             with contextlib.suppress(Exception):  # unknown coverage: read the rows
                 revision = _subs_revision(conn, path)
         top = int(conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0] or 0)
@@ -106,7 +116,12 @@ def _notify_content(conn, version, held, path=None):
             newest = max(newest, int(row[0] or 0))
         subs_key = revision  # includes inflight_from; no per-commit subscription scan
         by_chat = held[4] if subs_key is not None and held is not None and held[5] == subs_key else None
-        rows = conn.execute(_SUBS_SQL).fetchall() if by_chat is None else ()
+        if by_chat is not None:
+            rows = ()
+        elif only_chat is not None:
+            rows = conn.execute(_CHAT_SUBS_SQL, (only_chat,)).fetchall()
+        else:
+            rows = conn.execute(_SUBS_SQL).fetchall()
     finally:
         conn.execute("COMMIT")
     if by_chat is None:
@@ -130,7 +145,8 @@ def board_signature(path, chat_id=None):
         if held is not None and held[0] is not conn:
             held = None  # another reader (reopened, replaced file): its scan offsets prove nothing here
         if held is None or held[1] != version:
-            held = _notify_content(conn, version, held, path)
+            # A private read is never published: it needs only the asking chat's rows.
+            held = _notify_content(conn, version, held, path, None if retained else chat_id)
             if held is None:
                 return conn, version
             if retained:
