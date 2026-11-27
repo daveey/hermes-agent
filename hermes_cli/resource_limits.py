@@ -227,7 +227,9 @@ def _check_fd_headroom(config, role, now, probe):
                         'failure_since': incident.get('failure_since', time.time())}
     from hermes_cli.fd_headroom_incident import failure_note
     note = failure_note(incident)
-    _fd_status.update(sample, incident=incident, card_error=note)
+    _fd_status.update(sample, sampled_at=time.time(), ratio=count / soft, incident=incident,
+                      last_card_id=incident.get('task_id'), create_error=incident.get('error'),
+                      failure_since=incident.get('failure_since'), card_error=note)
     log = logger.warning if warn or note else logger.info
     log('fd-headroom: host=%s pid=%s role=%s count=%s soft=%s hard=%s census=%s slope=%.6f fd/s core=%s %s',
         sample['host'], sample['pid'], role, count, soft, hard, census, slope, sample['core'], note)

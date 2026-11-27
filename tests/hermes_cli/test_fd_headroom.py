@@ -28,6 +28,21 @@ def check(now=0, **kwargs):
                                     role='gateway', now=now, **kwargs)
 
 
+def test_below_both_updates_status_without_warning_card_or_limit_change(guard, caplog):
+    resource, snapshot, notify = guard
+    snapshot.return_value = (100, {})
+    with caplog.at_level(logging.WARNING):
+        check(0)
+        check(300)
+    assert 'fd-headroom:' not in caplog.text
+    notify.assert_not_called()
+    resource.setrlimit.assert_not_called()
+    state = limits.fd_headroom_status()
+    assert state['sampled_at'] > 0
+    assert (state['count'], state['soft'], state['hard'], state['ratio']) == (100, 1000, 10000, 0.1)
+    assert state['last_card_id'] is None and state['create_error'] is None
+
+
 def test_ratio_trigger(guard, caplog):
     resource, _, notify = guard
     with caplog.at_level(logging.INFO):
