@@ -7,6 +7,11 @@ import pytest
 from hermes_cli import resource_limits as limits
 
 
+@pytest.fixture(autouse=True)
+def fresh_launch_role(monkeypatch):
+    monkeypatch.setattr(limits, '_fd_role', None)
+
+
 def test_requested_tick_one_worker_and_overlap_skip(monkeypatch):
     entered, release = threading.Event(), threading.Event()
     calls = []

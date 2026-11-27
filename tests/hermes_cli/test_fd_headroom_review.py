@@ -76,9 +76,9 @@ def test_late_ticks_at_maximum_interval_keep_mature_slope(guard):
     _, snapshot = guard
     maximum = max(i for i in range(30, 602) if not validated(
         {'runtime': {'fd_headroom': {'interval_seconds': i}}})[1])
-    settings = {'runtime': {'fd_headroom': {'interval_seconds': maximum}}}
+    settings = {'runtime': {'fd_headroom': {'interval_seconds': maximum, 'warn_ratio': .7}}}
     for tick in range(8):
-        snapshot.return_value = (100 + tick * 400, {})
+        snapshot.return_value = (3800 + tick * 400, {})
         sample = limits.check_fd_headroom(settings, now=tick * (maximum + 1), wall_now=tick * 600)
         assert sample is not None
         if tick >= 3:

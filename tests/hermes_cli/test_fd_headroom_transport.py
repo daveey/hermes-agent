@@ -10,6 +10,8 @@ def test_transport_freezes_request_closes_and_bounds(monkeypatch):
     def request(ident, method, path, body, budget_s):
         calls.append((method, path, body, budget_s))
         if method == 'GET' and '/requests/' in path:
+            if '%' in path or '+' in path:
+                raise sync.HubError(404, '{"error":"not found"}')
             raise sync.HubError(404, '{"error":"no such request"}')
         return {}
     monkeypatch.setattr(sync, '_bounded_call', request)

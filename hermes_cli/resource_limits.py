@@ -177,6 +177,7 @@ def fd_headroom_status() -> dict:
 
 _fd_thread: threading.Thread | None = None
 _fd_request_lock = threading.Lock()
+_fd_role: tuple[int, str] | None = None
 
 
 def apply_server_nofile_policy(*, role: str) -> None:
@@ -198,9 +199,14 @@ def fd_headroom_delay(maximum: float) -> float:
 
 def request_fd_headroom(*, role: str) -> None:
     """Nonblocking service tick: retain one worker, count overlap instead of queueing work."""
-    global _fd_thread
+    global _fd_thread, _fd_role
     try:
         with _fd_request_lock:
+            # The launcher's first tick owns the process. An embedded dashboard or
+            # on-demand gateway must not alternate identities for the same FDs.
+            if _fd_role is None or _fd_role[0] != os.getpid():
+                _fd_role = (os.getpid(), role)
+            role = _fd_role[1]
             if _fd_thread is not None and _fd_thread.is_alive():
                 _fd_status['skipped'] = _fd_status.get('skipped', 0) + 1
                 if role == 'gateway':
@@ -330,7 +336,10 @@ def _check_fd_headroom(config, role, now, wall, probe, probe_board):
     elapsed = now - _fd_samples[0][0]
     slope = ((count - _fd_samples[0][1]) * 60 / elapsed
              if len(_fd_samples) >= 4 and elapsed >= 1200 else 0.0)
-    predicted = slope > 0 and (soft - count) / slope <= settings['horizon_hours'] * 60
+    # Startup ramps are not sustained leaks. Keep their slope as diagnostics, but
+    # never predict pressure below half the current soft limit.
+    predicted = (count >= soft * .5 and slope > 0
+                 and (soft - count) / slope <= settings['horizon_hours'] * 60)
     warn = count >= soft * settings['warn_ratio'] or predicted
     sample = dict(host=socket.gethostname(), pid=os.getpid(), role=role, count=count,
                   soft=soft, hard=hard, census=census, slope=slope, core=_fd_core_head(), raised='',

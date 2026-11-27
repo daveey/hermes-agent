@@ -30,12 +30,12 @@ def check(now=0, settings=None):
 
 def test_slope_requires_four_samples_twenty_minutes(guard):
     _, snapshot, notify = guard
-    for now, count in [(0, 100), (300, 120), (600, 140), (900, 160)]:
+    for now, count in [(0, 420), (300, 440), (600, 460), (900, 480)]:
         snapshot.return_value = (count, {})
-        check(now)
+        check(now, settings={'warn_ratio': .7})
     notify.assert_not_called()
-    snapshot.return_value = (180, {})
-    sample = check(1200)
+    snapshot.return_value = (500, {})
+    sample = check(1200, settings={'warn_ratio': .7})
     assert sample['slope'] == 4  # fd/min, endpoint estimator
     assert notify.call_count == 1
 
@@ -122,9 +122,9 @@ def test_invalid_config_falls_back_and_marks_status(guard, caplog, key, value, d
 
 def test_interval_590_retains_four_sample_trend_and_591_falls_back(guard):
     _, snapshot, notify = guard
-    for now, count in [(0, 100), (591, 140), (1182, 180), (1773, 220)]:
+    for now, count in [(0, 400), (591, 440), (1182, 480), (1773, 520)]:
         snapshot.return_value = (count, {})
-        sample = check(now, settings={'interval_seconds': 590})
+        sample = check(now, settings={'interval_seconds': 590, 'warn_ratio': .7})
     assert sample is not None and sample['slope'] == pytest.approx(120 * 60 / 1773)
     assert notify.call_count == 1
     check(2400, settings={'interval_seconds': 591})

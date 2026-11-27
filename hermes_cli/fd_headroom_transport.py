@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from urllib.parse import quote, urlencode
@@ -66,8 +67,11 @@ class Client:
             response = self._call('GET', '/v2/sync/requests/' + envelope['id'])
         except sync.HubError as exc:
             # Only the service's typed missing answer permits resending the frozen request.
-            import json
-            if exc.status != 404 or json.loads(exc.detail).get('error') != 'no such request':
+            try:
+                missing = json.loads(exc.detail) == {'error': 'no such request'}
+            except (ValueError, TypeError):
+                missing = False
+            if exc.status != 404 or not missing:
                 raise
         else:
             request = response.get('request')
