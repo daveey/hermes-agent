@@ -154,3 +154,68 @@ def test_todo_graph_read_is_batched_and_matches_single_card_reader(board):
         assert many == {k: kb.parent_states(board, k) for k in kids}
     assert work[0] == work[1], work  # constant: no per-card graph statement
     assert parent_states_many(board, []) == {}
+
+
+def _terminal(conn, tid, how):
+    if how == 'done':
+        assert kb.complete_task(conn, tid, result='ok')
+    else:
+        assert kb.archive_task(conn, tid)
+
+
+@pytest.mark.parametrize('how', ['done', 'archived'])
+def test_terminal_parent_restriction_check_is_batched_on_the_poll_path(board, how):
+    """Every statement counts: a terminal parent's restriction evidence is read in bounded statements."""
+    blocker = create(board, 'Open blocker')
+    work = []
+    for n in (3, 30):
+        kids = []
+        for i in range(n):
+            done = create(board, f'Terminal {how} {n}-{i}')
+            _terminal(board, done, how)
+            kids.append(create(board, f'Child {how} {n}-{i}', parents=[blocker, done]))
+        seen = []
+        board.set_trace_callback(seen.append)
+        try:
+            info = _local_wait_info(board, kids, now=2000000000)
+        finally:
+            board.set_trace_callback(None)
+        # Only the open blocker gates; the ordinary terminal parent is satisfied and not named.
+        assert set(info) == set(kids) and all(v['waiting_on'] == 'card ' + blocker for v in info.values())
+        work.append(len(seen))
+    assert work[0] == work[1], work  # constant in board size, every statement counted
+
+
+@pytest.mark.parametrize('how', ['done', 'archived'])
+@pytest.mark.parametrize('kind', ['decision_hold_restricted', 'administrative_stop_restricted'])
+def test_restricted_terminal_parent_still_gates_beside_ordinary_ones(board, how, kind):
+    """Negative control: batching keeps held-terminal-parent semantics (restricted never counts as success)."""
+    from hermes_cli.kanban_db_parent_states import parent_blocks, parent_blocks_many
+    held, plain = create(board, 'Held terminal'), create(board, 'Plain terminal')
+    child = create(board, 'Child', parents=[held, plain])
+    other = create(board, 'Other child', parents=[plain])
+    with kb.write_txn(board):
+        kb._append_event(board, held, kind, {'cause': 'scope_stopped'})
+    _terminal(board, held, how)
+    _terminal(board, plain, how)
+    kb.recompute_ready(board)
+    assert kb.get_task(board, child).status == 'todo'  # the real gate agrees: held terminal is not success
+    assert wait(board, child)['waiting_on'] == 'card ' + held
+    assert wait(board, other) is None
+    pairs = [(held, how), (plain, how), ('t_missing', None), (child, 'todo')]
+    assert parent_blocks_many(board, pairs) == {p: parent_blocks(board, p, s) for p, s in pairs}
+    assert parent_blocks_many(board, pairs) == {held: True, plain: False, 't_missing': True, child: True}
+
+
+def test_contained_archive_parent_gates_without_restriction_events(board):
+    """An archived parent whose projection is not archived (containment) gates in the batch too."""
+    from hermes_cli.kanban_db_parent_states import parent_blocks, parent_blocks_many
+    from hermes_cli.kanban_table_columns import table_columns
+    if 'containment_episode' not in table_columns(board, 'tasks'):
+        pytest.skip('legacy schema has no containment marker')
+    parent = create(board, 'Contained')
+    _terminal(board, parent, 'archived')
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET containment_episode='ep' WHERE id=?", (parent,))
+    assert parent_blocks_many(board, [(parent, 'archived')]) == {parent: parent_blocks(board, parent, 'archived')}
+    assert parent_blocks_many(board, [(parent, 'archived')]) == {parent: True}

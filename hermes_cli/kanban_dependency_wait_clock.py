@@ -70,9 +70,8 @@ def overlay(conn, parked, events):
     Use core's parent-state resolver so local parents and stored remote-parent mirrors follow readiness.
     This is presentation evidence, never permission to release/execute a card.
     """
-    from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_table_columns import table_columns
-    from hermes_cli.kanban_db_parent_states import parent_states_many
+    from hermes_cli.kanban_db_parent_states import parent_blocks_many, parent_states_many
     from hermes_state_page_pack import read_rows
 
     ids = [tid for tid, row in parked.items() if row[0] == 'todo']
@@ -80,7 +79,8 @@ def overlay(conn, parked, events):
         return
     try:  # One graph read for every todo card: this reader is on the sidebar poll path.
         graph = parent_states_many(conn, ids)
-        gating = {tid: [pid for pid, status in graph[tid] if kb.parent_blocks(conn, pid, status)] for tid in ids}
+        blocks = parent_blocks_many(conn, [pair for tid in ids for pair in graph[tid]])  # bounded, not per parent
+        gating = {tid: [pid for pid, _status in graph[tid] if blocks[pid]] for tid in ids}
     except sqlite3.Error:
         graph, gating = {}, {}  # No graph evidence, not proof of a dependency wait.
     for tid in ids:

@@ -18,6 +18,51 @@ def parent_blocks(conn: sqlite3.Connection, pid: str, status: str | None) -> boo
     return execution_restricted(conn, pid)
 
 
+# Every event kind ``execution_restricted`` reads on the parent itself: a terminal parent with none of
+# them cannot be restricted, so the exact (per-parent, multi-statement) check runs only on candidates.
+RESTRICTION_EVIDENCE_KINDS = ("administrative_stop_restricted", "spend_budget_triaged",
+                              "decision_hold_restricted", "decision_retained")
+
+
+def parent_blocks_many(conn: sqlite3.Connection, pairs) -> dict[str, bool]:
+    """``parent_blocks`` for many ``(parent, status)`` pairs in a bounded number of statements.
+
+    Read-only presentation readers only. Statement count does not grow with ordinary terminal parents:
+    one archived-projection read, one restriction-evidence prefilter, then the exact ``parent_blocks``
+    check for each parent that actually carries restriction evidence (genuinely held parents).
+    """
+    import json
+
+    from hermes_cli.kanban_containment_terminal import parent_status_sql
+    from hermes_cli.kanban_stop_ended import KIND
+    kinds = tuple(dict.fromkeys((KIND, *RESTRICTION_EVIDENCE_KINDS)))  # the stop kind is read from its owner
+    status_of = dict(pairs)
+    out = {pid: True for pid, status in status_of.items() if status not in ("done", "archived")}
+    terminal = [pid for pid in status_of if pid not in out]
+    if not terminal:
+        return out
+    archived = [pid for pid in terminal if status_of[pid] == "archived"]
+    if archived:
+        projected = parent_status_sql(conn)
+        for pid, status in conn.execute(f"SELECT id, {projected} FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
+                                        (json.dumps(archived),)).fetchall():
+            if status != "archived":
+                out[pid] = True
+    rest = [pid for pid in terminal if pid not in out]
+    if not rest:
+        return out
+    marks = ",".join("?" for _ in kinds)
+    try:
+        candidates = {row[0] for row in conn.execute(
+            f"SELECT DISTINCT task_id FROM task_events WHERE task_id IN (SELECT value FROM json_each(?)) "
+            f"AND kind IN ({marks})", (json.dumps(rest), *kinds)).fetchall()}
+    except sqlite3.OperationalError:
+        candidates = set(rest)  # no prefilter evidence: fall back to the exact check for every parent
+    for pid in rest:
+        out[pid] = parent_blocks(conn, pid, status_of[pid]) if pid in candidates else False
+    return out
+
+
 def mirrored_status(conn: sqlite3.Connection, pid: str, status: str) -> str:
     """Freeze restriction evidence in the status-only foreign-parent mirror, in the replica snapshot."""
     return f"{status}:restricted" if status in ("done", "archived") and parent_blocks(conn, pid, status) else status
