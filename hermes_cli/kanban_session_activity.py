@@ -631,11 +631,6 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         version_column = 'version' if 'version' in columns else 'NULL'
         info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
-        if last_ok is not None and offline is None:
-            _host_copy.note_deadline(last_ok + HUB_STALE_AFTER_S + .001)
-        for beat, window in _scope_heartbeats(info_rows).values():
-            _host_copy.note_deadline(beat)
-            _host_copy.note_deadline(beat + window + .001)
         key = view = rows = probe = None
         packed = '[]'
         memo_hit = None
@@ -690,6 +685,12 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                                 qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out,
                                 closed_out=closed_out)
     _note_known_gateways(moved_out, info_rows)
+    # Replace only after the complete source projection succeeds. A swallowed
+    # lower-level failure must not postpone the published copy's old boundary.
+    deadlines = [last_ok + HUB_STALE_AFTER_S + .001] if last_ok is not None and offline is None else []
+    for beat, window in _scope_heartbeats(info_rows).values():
+        deadlines.extend((beat, beat + window + .001))
+    _host_copy.replace_deadlines(('replica', str(path)), deadlines)
     return cards
 
 

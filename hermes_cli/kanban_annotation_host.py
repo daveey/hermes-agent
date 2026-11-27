@@ -623,6 +623,18 @@ def note_deadline(due: float | None) -> None:
         pending.append(due)
 
 
+def replace_deadlines(owner: tuple, values) -> None:
+    """Stage a successful source's complete current clocks; never replace a peer's."""
+    from hermes_cli.kanban_annotation_deadlines import Plan
+
+    pending = getattr(_holder_ctx, 'deadlines', None)
+    if isinstance(pending, Plan):
+        pending.replace(owner, values, time.time())
+    elif pending is not None:  # legacy holder: retain conservative unowned clocks
+        for due in values:
+            note_deadline(due)
+
+
 def wake_holder() -> None:
     """Wake native demand/registration changes without reading any source."""
     _wake.set()
@@ -656,9 +668,11 @@ def _scope_interested(scope: tuple[str, ...]) -> bool:
 
 
 def _scope_retry(scope: tuple[str, ...]) -> float:
+    from hermes_cli.kanban_annotation_deadlines import retry
+
     now = time.time()
     due = now + HOLDER_INTERVAL_S
-    _clock_deadlines[scope] = sorted({due, *[t for t in _clock_deadlines.get(scope, ()) if t > now]})
+    _clock_deadlines[scope] = retry(_clock_deadlines.get(scope, ()), due, now)
     return due
 
 
@@ -735,13 +749,14 @@ def _event_refresh(events) -> float | None:
             try:
                 # Native scheduling uses part keys, never the legacy narrow-key gate. Do not build its expensive
                 # inventory in prepare or claim its extended display lifetime: publish the ordinary exact copy.
-                # Inner caches can return without emitting their clock boundaries.
-                # Preserve those until consumed; replacing the list needs per-cache
-                # deadline ownership, not just a successful outer projection.
+                # Unread owners and legacy clocks retain their boundaries. A
+                # successful source may replace only its own superseded clocks.
                 confirmations = _settle_deadlines.get(scope, ())
                 started = time.time()
-                pending = [t for t in _clock_deadlines.get(scope, ()) if t not in confirmations]
-                _holder_ctx.deadlines = [t for t in pending if t > started]
+                from hermes_cli.kanban_annotation_deadlines import Plan
+
+                pending = Plan(_clock_deadlines.get(scope, ()), confirmations, started)
+                _holder_ctx.deadlines = pending
                 # [daveey] Force only the parts whose own inputs moved (kanban_annotation_parts). A provider deadline
                 # that came due is a wall-time transition no key sees: it forces them all. A settle confirmation is
                 # not one: it re-takes the keys, which is what shows a commit the first read was too early for. The
@@ -754,7 +769,7 @@ def _event_refresh(events) -> float | None:
                         read_at = _ksa._count_scopes.read_at_locked(scope)
                 if lost:
                     _parts.failed(scope)
-                clock = len(_holder_ctx.deadlines) != len(pending)
+                clock = pending.expired
                 renew = read_at is None or time.monotonic() - read_at >= STRICT_REFRESH_AGE_S
                 forced, part_keys = _parts.plan(scope, clock=clock, renew=renew)
                 _ksa._revalidate.force_read.scope = scope
@@ -775,7 +790,7 @@ def _event_refresh(events) -> float | None:
                 else:
                     confirmations = tuple(t for t in confirmations if t > now)
                 _settle_deadlines[scope] = confirmations
-                _clock_deadlines[scope] = sorted({*_holder_ctx.deadlines, *confirmations})
+                _clock_deadlines[scope] = pending.finish(confirmations)
                 _event_ready.add(scope)
                 return min(_clock_deadlines[scope], default=None)
             except BaseException:
