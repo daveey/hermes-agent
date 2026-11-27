@@ -117,17 +117,18 @@ def origin_refusal(exc, *, origin: bool = True):
     is retried, not dropped. Otherwise it is definitive: ``created: False`` makes :func:`_dispatch_result`
     answer a terminal ``rejected`` with the reason, so the sender stops instead of retrying an endless
     ``pending / origin_dispatch_pending``. A placement-capability refusal also wrote nothing; it reflects
-    the published machine/profile registry at request time, and is returned to the caller for replanning."""
+    the published machine/profile registry at request time. Both origin and bare self-work receivers return
+    it as a terminal rejection for caller replanning; bare self-work authority waits keep their own rule."""
     from hermes_cli.kanban_create_authority import CreateAuthorityRefused
     from hermes_cli.kanban_origin import OriginError
     from hermes_cli.kanban_runs_on_capabilities import PlacementCapabilityMismatch
     from tools.registry import tool_error
     if isinstance(exc, OriginError):
         return tool_error(str(exc), code=exc.code, handoff_complete=False)
-    if origin and isinstance(exc, PlacementCapabilityMismatch):
+    if isinstance(exc, PlacementCapabilityMismatch):
         # Assignment validation refuses before any row is written, against the current registry.
-        # Return the reason for caller replanning rather than retrying the immutable forwarded request.
-        return tool_error(str(exc), code=exc.code, created=False, handoff_complete=False)
+        # Both courier receivers need an explicit terminal outcome for caller replanning.
+        return tool_error(str(exc), status='rejected', code=exc.code, created=False, handoff_complete=False)
     if origin and isinstance(exc, CreateAuthorityRefused):
         if getattr(exc, "wait", None):  # local state that can still change: keep the create, retry it
             return tool_error(str(exc), status="pending", code=exc.wait, refusal=exc.code, handoff_complete=False)

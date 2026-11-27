@@ -105,6 +105,35 @@ def test_postcommit_selfwork_error_stays_pending_then_replays(request_envelope, 
         assert len(kb.list_tasks(conn)) == 1
 
 
+def test_bare_capability_refusal_is_terminal_without_writes(request_envelope, monkeypatch, capsys, tmp_path):
+    from hermes_cli.kanban_runs_on_capabilities import PlacementCapabilityMismatch
+
+    exc = PlacementCapabilityMismatch('ci-sweeper', ['pool:worker'],
+                                      {'worker-a1': ['terminal', 'file', 'kanban'],
+                                       'worker-a2': ['terminal', 'file', 'kanban']})
+    courier._refuse_placement(monkeypatch, exc)
+    before = courier._written(tmp_path)
+    result = invoke(request_envelope, monkeypatch, capsys)
+    assert result['status'] == 'rejected', result
+    assert result['code'] == 'runs_on_capability_mismatch'
+    assert str(exc) in result['error']
+    assert result['created'] is False
+    assert result['handoff_complete'] is False
+    assert courier._written(tmp_path) == before
+    assert all(count == 0 for count in before.values())
+
+
+@pytest.mark.parametrize('kind', ['unknown', 'authority_wait'])
+def test_bare_indeterminate_refusal_stays_pending(request_envelope, monkeypatch, capsys, kind):
+    from hermes_cli.kanban_create_authority import CreateAuthorityRefused
+
+    exc = (RuntimeError('unknown write outcome') if kind == 'unknown'
+           else CreateAuthorityRefused('owner unsynced', wait='origin_owner_unsynced'))
+    courier._refuse_placement(monkeypatch, exc)
+    assert invoke(request_envelope, monkeypatch, capsys) == {
+        'status': 'pending', 'code': 'self_work_dispatch_pending', 'handoff_complete': False}
+
+
 def test_public_context_is_not_authentication(request_envelope):
     args = {**request_envelope['args']['create'], 'board': 'default',
             'selfwork_intent': {'request_id': 'forged', 'sender': 'gw:origin',
