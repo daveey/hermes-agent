@@ -97,6 +97,37 @@ def test_demand_precedes_older_idle_scope(monkeypatch):
     assert [scope for scope, _ctx in ordered] == list(reversed(scopes))
 
 
+def test_gate_runs_in_scope_context(monkeypatch):
+    from hermes_cli.kanban_annotation_fairness import stalest_first
+
+    current = contextvars.ContextVar[tuple[str, str] | None]('sleep_scope', default=None)
+    scopes = [('home', name) for name in ('awake', 'asleep')]
+    contexts = []
+    for scope in scopes:
+        ctx = contextvars.copy_context()
+        ctx.run(current.set, scope)
+        contexts.append((scope, ctx))
+
+    def asleep(scope):
+        assert current.get() == scope, 'sleep gate used the caller profile'
+        return scope == scopes[1]
+
+    monkeypatch.setattr(host._disk, 'demand_age', lambda scope: 0)
+    monkeypatch.setattr(host._disk, 'published_read_at', lambda scope: 100)
+    assert [s for s, _ in stalest_first(contexts, asleep=asleep)] == [scopes[0]]
+    assert current.get() is None
+
+
+def test_future_demand_matches_host_demand_rule(monkeypatch):
+    from hermes_cli.kanban_annotation_fairness import stalest_first
+
+    scopes = [('home', name) for name in ('idle', 'future')]
+    monkeypatch.setattr(host._disk, 'demand_age', lambda scope: None if scope == scopes[0] else -10)
+    monkeypatch.setattr(host._disk, 'published_read_at', lambda scope: 1 if scope == scopes[0] else 100)
+    ordered = stalest_first([(scope, contextvars.copy_context()) for scope in scopes])
+    assert [scope for scope, _ctx in ordered] == list(reversed(scopes))
+
+
 def test_failed_sleep_gate_is_disarmed_for_next_pass(monkeypatch):
     scope = ('home', 'broken')
     monkeypatch.setattr(host, '_known', {scope: contextvars.copy_context()})
