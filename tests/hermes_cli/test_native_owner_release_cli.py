@@ -90,11 +90,12 @@ def launch(monkeypatch, enabled=("terminal",), selected=("terminal",)):
     return result
 
 
-def cli(launch, *extra):
+def cli(launch, *extra, board=None):
     env = build_subprocess_env(scrub_secrets=True)
     env["PYTHONPATH"] = os.getcwd()
     env[bridge.ENV_KEY] = launch.locator
-    return subprocess.run([sys.executable, "-m", "hermes_cli.main", "kanban", "release", "t_target",
+    return subprocess.run([sys.executable, "-m", "hermes_cli.main", "kanban", *(("--board", board) if board else ()),
+                           "release", "t_target",
                            "--episode", "01a216f3-6633-7617-9d00-d3779607ae0b", "--runs", "1",
                            "--capability-episode", "01a21357-6500-7f4a-9891-c1bf7cdd4ca3",
                            "--note", "complete the exact original acceptance", "--json", *extra],
@@ -259,5 +260,44 @@ def test_actual_cli_never_accepts_foreign_integer_seen(turn, transport, monkeypa
         result = cli(native, "--seen", "123")
         assert result.returncode == 2
         assert transport.calls == [] and transport.sent == []
+    finally:
+        close(native)
+
+
+def _assert_no_release_effect(transport):
+    assert transport.calls == [] and transport.sent == [] and transport.carriers == []
+    with kbc.connect_closing() as conn:
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='native_owner_release_intents'").fetchone()
+
+
+def test_actual_cli_foreign_transport_gateway_refuses_before_first_hub_call(turn, transport, monkeypatch):
+    # Origin, primary board/profile and grants are valid; only the authenticated transport differs.
+    transport.ident = SimpleNamespace(gateway="foreign-gateway")
+    native = launch(monkeypatch)
+    try:
+        result = cli(native)
+        assert result.returncode == 2, (result.stdout, result.stderr)
+        value = json.loads(result.stdout)
+        assert not value["ok"] and "intent_uid" not in value
+        _assert_no_release_effect(transport)
+    finally:
+        close(native)
+
+
+@pytest.mark.parametrize("variation", ["profile", "board"])
+def test_actual_cli_nonprimary_profile_or_board_refuses_before_first_hub_call(turn, transport, monkeypatch, variation):
+    extra = {}
+    if variation == "profile":
+        from hermes_cli import kanban_execution_observations as observations
+        monkeypatch.setattr(observations, "board_owner_profile", lambda path: "other-profile")
+    else:
+        extra = {"board": "other-board"}
+    native = launch(monkeypatch)
+    try:
+        result = cli(native, **extra)
+        assert result.returncode == 2, (result.stdout, result.stderr)
+        value = json.loads(result.stdout)
+        assert not value["ok"] and "intent_uid" not in value
+        _assert_no_release_effect(transport)
     finally:
         close(native)
