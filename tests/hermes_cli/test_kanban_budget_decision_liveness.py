@@ -79,27 +79,46 @@ def test_ordinary_stop_and_completed_scope_decision_allow_budget_edits(board, mo
     assert rc == 0, error
 
 
-def test_stop_arriving_at_budget_writer_is_refused(board, monkeypatch):
-    tid = kb.create_task(board, title='Race with budget writer', assignee='default')
+def test_hold_arriving_at_budget_writer_is_refused(board, monkeypatch):
+    """The fence reads under the writer's own transaction: a renewed stop re-held after any preflight still refuses."""
+    tid = renewed(board, monkeypatch)
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))  # no release route here: not fenced
+    before = releases.written(board, tid)
     real = kb.write_txn
     inserted = False
 
     @contextlib.contextmanager
-    def stopping(conn, *args, **kwargs):
+    def holding(conn, *args, **kwargs):
         nonlocal inserted
         if not inserted:
             inserted = True
             with real(conn):
-                conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))  # the stop's own writer
-                kb._append_event(conn, tid, decision.EVENT, {'cause': 'scope_stopped', 'reason': 'scope ended'})
+                conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))  # the hold's own writer
         with real(conn, *args, **kwargs) as transaction:
             yield transaction
 
-    monkeypatch.setattr(kb, 'write_txn', stopping)
+    monkeypatch.setattr(kb, 'write_txn', holding)
     rc, error = releases.spend_budget(board, monkeypatch, tid, '--runs', '59', '--reason', 'racing')
-    assert rc == 1 and 'stop_decision_required' in error
+    assert inserted and rc == 1 and 'stop_decision_required' in error
     assert budget.card_override(board, tid) is None
-    assert not board.execute('SELECT 1 FROM task_comments WHERE task_id=?', (tid,)).fetchone()
+    assert releases.written(board, tid) == before
+
+
+@pytest.mark.parametrize('cause', ['scope_stopped', 'safety_refusal'])
+def test_unrenewed_restricted_stop_keeps_its_ordinary_limit_edit(board, monkeypatch, cause):
+    """No renewal covers the restriction, so a limit edit cannot read as a release: the window stays cumulative
+    and promotion stays refused (tests/hermes_cli/test_kanban_spend_window.py pins the same contract)."""
+    tid = kb.create_task(board, title='Unrenewed restricted stop', assignee='default')
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+        kb._append_event(board, tid, decision.EVENT, {'cause': cause, 'reason': 'scope ended'})
+    assert decision.pending(board, tid) and decision.execution_restricted(board, tid)
+    rc, error = releases.spend_budget(board, monkeypatch, tid, '--runs', '59', '--reason', 'limit only')
+    assert rc == 0, error
+    assert budget.card_override(board, tid)['runs'] == 59
+    assert decision.pending(board, tid) and decision.execution_restricted(board, tid)
+    assert not kb.promote_task(board, tid, actor='operator', reason='budget only')[0]
 
 
 def test_json_refusal_is_structured_and_keeps_budget(board, monkeypatch, capsys):
