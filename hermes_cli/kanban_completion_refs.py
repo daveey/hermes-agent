@@ -29,6 +29,8 @@ import json
 import sqlite3
 from typing import Any, Iterable
 
+from hermes_cli.kanban_table_columns import table_columns
+
 RECEIPT_KINDS = ("pr_acceptance", "goal_verified")
 UID_KEYS = {"pr_acceptance": "pr_acceptance_event_uid", "goal_verified": "goal_verified_event_uid"}
 ID_KEYS = {"pr_acceptance": "pr_acceptance_event_id", "goal_verified": "goal_verified_event_id"}
@@ -49,8 +51,10 @@ def stamp_uids(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
             payload[UID_KEYS[kind]] = row[0]
 
 
-def _columns(conn: sqlite3.Connection) -> set[str]:
-    return {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
+def _columns(conn: sqlite3.Connection) -> frozenset[str]:
+    # One result row, not one per column: each stepped row is a GIL handoff in the serve. The links projection
+    # asks this once per owner card, and live py-spy put 12% of its samples here (t_01a20286f9f3f262).
+    return table_columns(conn, "task_events")
 
 
 def read_candidates(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, list[dict[str, Any]]]:
@@ -80,7 +84,7 @@ def leased_elsewhere(conn: sqlite3.Connection, runs: dict[str, Any]) -> dict[str
     """``{task_id: holder}`` for each ``{task_id: run_id}`` whose run the Board leased to exactly one gateway
     other than this board's own (``claimed`` with ``holder`` and that run's ``run_uid``). One SELECT."""
     runs = {t: r for t, r in runs.items() if type(r) is int}
-    if not runs or "uid" not in {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}:
+    if not runs or "uid" not in table_columns(conn, "task_runs"):
         return {}
     try:
         own = conn.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()

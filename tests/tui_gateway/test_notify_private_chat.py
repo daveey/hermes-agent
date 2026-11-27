@@ -72,7 +72,7 @@ def test_private_fallback_reads_only_the_asking_chat(board, monkeypatch):
         private = {chat: idle.board_signature(path, chat) for chat in (CHAT, OTHER, "absent-chat")}
     assert private == shared  # byte-identical signatures, including the empty slice
     assert idle._SIGS[str(path)] is held  # still never published
-    assert not any(s.startswith(idle._SUBS_SQL) for s in statements), statements
+    assert not any(idle._SUBS_SQL in s for s in statements), statements
     chat_reads = [s for s in statements if "FROM kanban_notify_subs" in s and "chat_id = " in s]
     assert len(chat_reads) == 3, statements
 

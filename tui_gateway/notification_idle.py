@@ -6,7 +6,9 @@ racing the read invalidates the next poll. Errors never establish an idle proof.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -91,6 +93,22 @@ def _subs_revision(conn, path):
 _CHAT_SUBS_SQL = ("SELECT chat_id, task_id, platform, thread_id, last_event_id, inflight_from "
                   "FROM kanban_notify_subs WHERE chat_id = ? AND LOWER(platform) = 'tui' "
                   "ORDER BY task_id, platform, thread_id")
+# Both subscription reads hand their rows to Python in ONE result row, as a JSON array built inside SQLite. A
+# changed subscription revision re-reads all ~4k tui rows on the hub, and each stepped row was a GIL handoff that
+# waited out the serve's convoy: live py-spy put 490 of 714 tui-notif-poller ``_notify_content`` samples on that
+# fetch after the private-read cut (t_01a20286f9f3f262). The columns are TEXT/INTEGER/NULL, which JSON carries
+# exactly, so this skips ``hermes_state_page_pack``'s per-cell type tags (5x the CPU of a plain fetch for these
+# rows; this costs about 1.2x). A value JSON cannot carry (a BLOB) reads plainly instead.
+_SUBS_PACK = ("WITH _subs(a, b, c, d, e, f) AS MATERIALIZED ({}) "
+              "SELECT json_group_array(json_array(a, b, c, d, e, f)) FROM _subs")
+
+
+def _subs_rows(conn, sql, params=()):
+    try:
+        packed = conn.execute(_SUBS_PACK.format(sql), params).fetchone()[0]
+    except sqlite3.OperationalError:
+        return [tuple(r) for r in conn.execute(sql, params).fetchall()]
+    return [tuple(r) for r in json.loads(packed)]
 
 
 def _notify_content(conn, version, held, path=None, only_chat=None):
@@ -119,9 +137,9 @@ def _notify_content(conn, version, held, path=None, only_chat=None):
         if by_chat is not None:
             rows = ()
         elif only_chat is not None:
-            rows = conn.execute(_CHAT_SUBS_SQL, (only_chat,)).fetchall()
+            rows = _subs_rows(conn, _CHAT_SUBS_SQL, (only_chat,))
         else:
-            rows = conn.execute(_SUBS_SQL).fetchall()
+            rows = _subs_rows(conn, _SUBS_SQL)
     finally:
         conn.execute("COMMIT")
     if by_chat is None:

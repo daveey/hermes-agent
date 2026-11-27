@@ -43,7 +43,7 @@ def test_generic_reader_contention_keeps_warm_notification_work_bounded(board, m
         release.set()
         thread.join(5)
     assert not thread.is_alive()
-    scans = [s for s in statements if s.startswith(idle._SUBS_SQL)]
+    scans = [s for s in statements if idle._SUBS_SQL in s]
     zero = [s for s in statements if 'FROM task_events WHERE id > 0 ' in s]
     assert (len(scans), len(zero)) == (0, 0), statements
 
@@ -76,7 +76,7 @@ def test_generic_hold_still_sees_commits_without_cold_event_replay(board):
         assert after[2][0][4] == 96
         for _ in range(3):
             assert idle.board_signature(path, helpers.CHAT) == after
-        assert sum(s.startswith(idle._SUBS_SQL) for s in statements) == 1
+        assert sum(idle._SUBS_SQL in s for s in statements) == 1
         assert not any('FROM task_events WHERE id > 0 ' in s for s in statements)
     finally:
         release.set()
