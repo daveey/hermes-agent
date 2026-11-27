@@ -87,9 +87,10 @@ def sweep(conn) -> None:
     from hermes_cli.kanban_hold_effective import current, previous
     from hermes_cli.kanban_spend_decision import strict_episode
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli.kanban_home_transfer import frozen
     foreign = foreign_ids(conn)
     for (tid,) in conn.execute("SELECT id FROM tasks WHERE status='triage'").fetchall():
-        if tid in foreign:
+        if tid in foreign or frozen(conn, tid):
             continue
         try:
             # A malformed historical cause publishes no notice: the strict read raises
@@ -106,7 +107,7 @@ def sweep(conn) -> None:
                 continue
             with kb.write_txn(conn):
                 row = conn.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()
-                if row is not None and row[0] == 'triage':
+                if row is not None and row[0] == 'triage' and not frozen(conn, tid):
                     publish(conn, tid)
         except DispatchWriteContended:
             raise  # Stop the pass, rather than retrying every hold against the same busy writer.

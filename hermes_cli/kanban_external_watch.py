@@ -361,7 +361,12 @@ def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float
     pending, so the park now waits for the whole commit: one ``ci_wait_widened`` event per park, no comment."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban_home_transfer import frozen
+    if frozen(conn, task_id):
+        return None
     with kb.write_txn(conn):
+        if frozen(conn, task_id):
+            return None
         status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if status is None or status[0] != "scheduled":
             return None

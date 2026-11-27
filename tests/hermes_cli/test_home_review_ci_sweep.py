@@ -41,7 +41,7 @@ def test_ci_sweep_frozen_card_then_healthy_neighbour(board, monkeypatch, phase):
     first = _ci_parked(board, 'first (frozen in custody phases)', 'o/r/pull/1')
     neighbour = _ci_parked(board, 'healthy neighbour', 'o/r/pull/2')
     sup.freeze(board, first, phase)
-    assert {w[0] for w in ci._ci_waits(board)} == {first, neighbour}
+    assert {w[0] for w in ci._ci_waits(board)} == ({first, neighbour} if phase is None else {neighbour})
     snap = _snap(board, first)
     order = []
 

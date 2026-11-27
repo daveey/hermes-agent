@@ -578,7 +578,10 @@ def _ci_waits(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
     from hermes_cli.kanban_awaiting import _latest_park
 
     found = []
+    from hermes_cli.kanban_home_transfer import frozen
     for (task_id,) in conn.execute("SELECT id FROM tasks WHERE status = 'scheduled'").fetchall():
+        if frozen(conn, task_id):
+            continue
         awaiting, reason = _latest_park(conn, task_id)
         if not isinstance(awaiting, dict) or awaiting.get("kind") != "ci":
             continue
@@ -820,9 +823,14 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
                     del state[key]  # re-parked on something else, woken or gone
         from hermes_cli import kanban_external_watch as external_watch
         from hermes_cli.kanban_external_state import jitter_factor
-        for checked, (_last, task_id, ref, hint, park_id) in enumerate(_due(conn, db, waits, now, wall)):
+        from hermes_cli.kanban_home_transfer import frozen
+        checked = 0
+        for _last, task_id, ref, hint, park_id in _due(conn, db, waits, now, wall):
+            if frozen(conn, task_id):
+                continue
             if checked >= MAX_CARDS_PER_SWEEP or time.monotonic() >= deadline:
                 break  # the rest are the least recently checked ones next sweep
+            checked += 1
             rand = external_watch._rand()
             with _LOCK:
                 _LAST_CHECK[(db, task_id)] = _mono_now()
