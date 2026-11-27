@@ -168,6 +168,79 @@ def test_ending_wins_before_submission(pending, monkeypatch):
                                     creator=body['args']['creator'], run_uid='run-current', cfg={}, conn=conn)
 
 
+@pytest.mark.parametrize('reason', [
+    'canonical_home_schema_unavailable: core validation refused; nothing queued',
+    'origin_request_invalid: invalid qualified identity or request ID',
+    'origin_assignee_required: supply --assignee for tracked creation',
+    'origin_forward_creator_required: foreign origins require creator owner and run',
+    'create_option_unsupported: unsupported option',
+])
+def test_prequeue_refusal_releases_reservation(pending, monkeypatch, reason):
+    from hermes_cli import kanban_placement as placement
+    task, run, path, body = pending
+    with sqlite3.connect(path) as db:
+        db.execute('DELETE FROM sent')
+    monkeypatch.setattr(placement, 'hub_carries_options', lambda cli: True)
+    monkeypatch.setattr(placement, 'remote_state', lambda rid: None)
+    monkeypatch.setattr(placement, 'hub_runner', lambda argv: (2, '', reason))
+    with kbc.connect_closing() as conn:
+        result = placement.create_remote({'title': 'child', 'assignee': 'default'}, target='hub', self_gw='worker',
+                                         origin_session='chat', origin_profile='default', origin_gateway='hub',
+                                         creator=body['args']['creator'], run_uid='run-current', cfg={}, conn=conn)
+        assert not result['ok']
+        assert kb.complete_task(conn, task, summary='submit clearly refused', expected_run_id=run)
+
+
+def test_exec_failure_releases_reservation(pending, monkeypatch):
+    from hermes_cli import kanban_placement as placement
+    task, run, path, body = pending
+    with sqlite3.connect(path) as db:
+        db.execute('DELETE FROM sent')
+    monkeypatch.setattr(placement, 'hub_carries_options', lambda cli: True)
+    monkeypatch.setattr(placement, 'remote_state', lambda rid: None)
+    with kbc.connect_closing() as conn:
+        out = placement.create_remote({'title': 'child', 'assignee': 'default'}, target='hub', self_gw='worker',
+                                      origin_session='chat', origin_profile='default', origin_gateway='hub',
+                                      creator=body['args']['creator'], run_uid='run-current', cfg={}, conn=conn,
+                                      hub_cli=str(path.parent / 'missing-hub-cli'))
+        assert not out['ok'] and out['rc'] == 127
+        assert kb.complete_task(conn, task, summary='exec never started', expected_run_id=run)
+
+
+@pytest.mark.parametrize('case', ['timeout', 'unknown', 'queued', 'unreadable', 'concurrent', 'retry'])
+def test_uncertain_or_other_submission_still_holds_run(pending, monkeypatch, case):
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli.kanban_origin_forward_run_end import reserve
+    task, run, path, body = pending
+    with sqlite3.connect(path) as db:
+        db.execute('DELETE FROM sent')
+    monkeypatch.setattr(placement, 'hub_carries_options', lambda cli: True)
+    monkeypatch.setattr(placement, 'remote_state', lambda rid: None)
+    reason = 'origin_request_invalid: invalid qualified identity or request ID'
+    def courier(argv):
+        rid = argv[argv.index('--id') + 1]
+        if case == 'queued':
+            with sqlite3.connect(path) as db:
+                db.execute('INSERT INTO sent VALUES(?,?,?,?)', (rid, 'sent', '{}', json.dumps(body)))
+        if case == 'unreadable':
+            path.write_bytes(b'not a database')
+        if case == 'concurrent':
+            with kbc.connect_closing() as other:
+                reserve(other, task, 'run-current', rid, submission_id='another-attempt')
+        return (127, '', 'timed out') if case == 'timeout' else (2, '', 'unknown' if case == 'unknown' else reason)
+    monkeypatch.setattr(placement, 'hub_runner', courier)
+    kwargs = dict(target='hub', self_gw='worker', origin_session='chat', origin_profile='default',
+                  origin_gateway='hub', creator=body['args']['creator'], run_uid='run-current', cfg={})
+    with kbc.connect_closing() as conn:
+        placement.create_remote({'title': 'child', 'assignee': 'default'}, conn=conn, **kwargs)
+        if case == 'retry':
+            monkeypatch.setattr(placement, 'hub_runner', lambda argv: (3, '', 'queued offline'))
+            placement.create_remote({'title': 'child', 'assignee': 'default'}, conn=conn, **kwargs)
+        with pytest.raises(ValueError, match='origin_forward_(pending|evidence_unavailable)'):
+            kb.complete_task(conn, task, summary='must remain alive', expected_run_id=run)
+        assert kb.latest_run(conn, task).ended_at is None
+
+
 def test_unreadable_courier_is_not_absence(pending):
     task, run, path, _ = pending
     path.write_bytes(b'not a database')

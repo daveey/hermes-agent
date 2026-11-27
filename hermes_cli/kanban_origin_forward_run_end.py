@@ -16,7 +16,7 @@ VOLUNTARY = frozenset({'continued', 'scheduled', 'completed', 'blocked',
 _RESERVED = 'origin_forward_reserved'
 
 
-def reserve(conn, task_id, run_uid, request_id):
+def reserve(conn, task_id, run_uid, request_id, *, submission_id=None):
     """Commit an obligation under the same writer lock as ordinary run endings.
 
     Called before starting the courier subprocess. A concurrent ending either
@@ -31,11 +31,36 @@ def reserve(conn, task_id, run_uid, request_id):
                            'AND r.uid=? AND r.ended_at IS NULL', (task_id, run_uid)).fetchone()
         if row is None:
             raise ValueError('origin_forward_submit_run_ended: no request submitted')
+        token = submission_id or request_id
         found = conn.execute('SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind=? '
-                             "AND json_extract(payload,'$.request_id')=?",
-                             (task_id, row[0], _RESERVED, request_id)).fetchone()
+                             "AND COALESCE(json_extract(payload,'$.submission_id'),json_extract(payload,'$.request_id'))=?",
+                             (task_id, row[0], _RESERVED, token)).fetchone()
         if not found:
-            kb._append_event(conn, task_id, _RESERVED, {'request_id': request_id}, run_id=row[0])
+            kb._append_event(conn, task_id, _RESERVED,
+                             {'request_id': request_id, 'submission_id': token}, run_id=row[0])
+        return row[0], token
+
+
+def settle_unsubmitted(conn, task_id, reservation, request_id, rc, error):
+    """Release only this attempt after a known pre-enqueue refusal and a readable absent row."""
+    prefixes = ('canonical_home_schema_unavailable:', 'canonical_home_origin_required:',
+                'origin_creator_required:', 'origin_assignee_required:', 'origin_request_invalid:',
+                'origin_forward_creator_required:', 'create_option_unsupported:')
+    if not ((rc == 2 and error.startswith(prefixes)) or
+            (rc == 127 and error.startswith('hub_exec_failed:'))):
+        return
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_capability_registry import hub_db_path, _ro
+    with kb.write_txn(conn):
+        try:
+            with closing(_ro(hub_db_path())) as db:
+                if db.execute('SELECT 1 FROM sent WHERE id=?', (request_id,)).fetchone():
+                    return
+        except (sqlite3.Error, OSError):
+            return  # Unknown delivery is still an obligation.
+        run_id, token = reservation
+        kb._append_event(conn, task_id, 'origin_forward_not_submitted',
+                         {'request_id': request_id, 'submission_id': token}, run_id=run_id)
 
 
 def _pending(identity):
@@ -55,8 +80,17 @@ def require_settled(conn, task_id, run_id, outcome):
     row = conn.execute('SELECT uid FROM task_runs WHERE id=? AND task_id=?', (run_id, task_id)).fetchone()
     if not row or not row[0]:
         return
-    reservations = {json.loads(event[0])['request_id'] for event in conn.execute(
-        'SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind=?', (task_id, run_id, _RESERVED))}
+    events = [(kind, json.loads(raw)) for kind, raw in conn.execute(
+        'SELECT kind,payload FROM task_events WHERE task_id=? AND run_id=? AND kind IN (?,?) ORDER BY id',
+        (task_id, run_id, _RESERVED, 'origin_forward_not_submitted'))]
+    active = {}
+    for kind, event in events:
+        token = event.get('submission_id', event['request_id'])
+        if kind == _RESERVED:
+            active[token] = event['request_id']
+        else:
+            active.pop(token, None)
+    reservations = set(active.values())
     from hermes_cli.kanban_capability_registry import hub_db_path, _ro
     path = hub_db_path()
     try:

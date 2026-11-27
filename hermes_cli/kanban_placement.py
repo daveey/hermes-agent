@@ -1232,7 +1232,9 @@ def _default_runner(argv: list[str], timeout: float = HUB_TIMEOUT) -> tuple[int,
         p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout, check=False, stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
+        return 127, "", 'hub_exec_failed: ' + str(exc)
+    except subprocess.TimeoutExpired as exc:
         return 127, "", str(exc)
 
 
@@ -1350,10 +1352,15 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
                 argv += ["--creator-" + flag, value]
     else:
         argv += ["--origin-session", ""]
+    reservation = None
     if foreign_origin and conn is not None:
+        from uuid import uuid4
         from hermes_cli.kanban_origin_forward_run_end import reserve
-        reserve(conn, creator['task_id'], run_uid, rid)
+        reservation = reserve(conn, creator['task_id'], run_uid, rid, submission_id=uuid4().hex)
     rc, out, err = hub_runner(argv)
+    if reservation is not None:
+        from hermes_cli.kanban_origin_forward_run_end import settle_unsubmitted
+        settle_unsubmitted(conn, creator['task_id'], reservation, rid, rc, err or out)
     if rc == 0:
         return {"ok": True, "request_id": rid, "queued_only": False, "retry": prior is not None}
     if rc == 3:  # hub unreachable after the liveness check: queued, sent on the next sync (durable)
