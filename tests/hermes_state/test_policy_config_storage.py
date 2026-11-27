@@ -287,3 +287,12 @@ def test_conflicting_inline_and_reference_custody_cannot_be_retired(conn):
     with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
         delete_receipt(conn, 'one')
     assert conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall() == before
+
+
+def test_transaction_decode_missing_blob_is_typed_storage_failure(conn):
+    from hermes_state_policy_config import decode_receipt
+    store_receipt(conn, 'one', receipt(), intern=True)
+    raw = conn.execute('SELECT value FROM state_meta WHERE key=?', ('gateway.local_policy.v1:one',)).fetchone()[0]
+    conn.execute('DELETE FROM state_meta WHERE key GLOB ?', (BLOB_PREFIX + '*',))
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        decode_receipt(conn, raw)
