@@ -130,3 +130,9 @@ def test_refusal_applies_only_where_release_can_record_the_decision(board, monke
     else:
         assert rc == 0, error
         assert budget.card_override(board, tid)['runs'] == 59
+
+
+def test_a_card_that_is_gone_has_no_decision_to_require(board):
+    """The writer reports an unknown task itself; the fence only answers for a card it can read."""
+    from hermes_cli.kanban_spend_override_fence import require_decision
+    assert require_decision(board, 't_missing') is None
