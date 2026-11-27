@@ -624,7 +624,7 @@ class Attestation:
         self._generation = 0
         self._units = []
         self._known = {}  # identity-keyed strong references: no id recycling
-        self._pending = deque()  # FIFO of [module code, producer code, settled]
+        self._pending = deque()  # FIFO of [kind, payload, settled, result, verdicts] (see _enqueue)
         self._pending_index = {}  # id(nested code) -> its pending entry (entry holds the reference)
         self._settler = None
         self._stopping = self._exit_hooked = False
@@ -954,21 +954,36 @@ class Attestation:
     def _deferred_origin(self, descriptor, codes):
         """Queue a generator's origin, fixed to the modules executed so far.
 
-        Each caller is marked now as executed-by-now or not, so a module that
-        executes later can never vouch for this call. The marked callers are
-        read after exactly their own comparison.
+        Each caller is bound now to the one execution that can vouch for it: the
+        component it already compared clean under, or the pending execution that
+        owns it, whose own outcome is read once it settles. A later execution of
+        the same code object can never vouch for this call.
         """
         index, known = self._pending_index, self._known
-        marks = tuple((code, id(code) in index or id(code) in known) for code in codes)
-        return self._enqueue(["origin", (descriptor, marks), False, None])
+        marks = []
+        for code in codes:
+            entry = index.get(id(code))
+            if entry is not None:
+                # The newest execution decides (as the inline ledger's last write does).
+                if entry[4] is None:
+                    entry[4] = {}
+                entry[4].setdefault(id(code), [code, None])
+                marks.append((code, entry))
+                continue
+            attested = known.get(id(code))
+            if attested is not None and attested[0] is code:
+                marks.append((code, attested[1]))
+                break  # decided at the call; nothing below it is consulted
+            marks.append((code, None))
+        return self._enqueue(["origin", (descriptor, tuple(marks)), False, None, None])
 
     def _settled_origin(self, descriptor, marks):
-        for code, executed in marks:
-            if executed:
-                self._settle_code(code)
-                known = self._known.get(id(code))
-                if known is not None and known[0] is code:
-                    return known[1]
+        for code, mark in marks:
+            if isinstance(mark, list):
+                self._settle_entry(mark)
+                mark = mark[4][id(code)][1]  # that execution's verdict, not a later one's
+            if mark is not None:
+                return mark
             if not self._interpreter_code(code):
                 return self._generated_origin(descriptor, None, code.co_filename)
         return self._generated_origin(descriptor, None, "<top>")
@@ -1053,10 +1068,8 @@ class Attestation:
         code = args[0]
         if isinstance(origin, list):
             if isinstance(code, CodeType):
-                entry = self._enqueue(
-                    ["generated", (descriptor, site, code, source, filename, mode, origin), False, None])
-                for nested in _codes(code):
-                    self._pending_index.setdefault(id(nested), entry)
+                self._own(code, self._enqueue(
+                    ["generated", (descriptor, site, code, source, filename, mode, origin), False, None, None]))
                 return True
             self._settle_entry(origin)
             origin = origin[3]
@@ -1627,13 +1640,25 @@ class Attestation:
         if not isinstance(code, CodeType) or os.getpid() != self._pid:
             self._observe(code, producer)
             return
-        entry = self._enqueue(["module", (code, getattr(producer, "f_code", None)), False, None])
+        self._own(code, self._enqueue(["module", (code, getattr(producer, "f_code", None)), False, None, None]))
+
+    def _own(self, code, entry):
+        """Index ``code`` under its newest pending execution.
+
+        An earlier pending execution of the same code object is settled first, so
+        executions of one code object are always compared in the order they ran.
+        """
         index = self._pending_index
         for nested in _codes(code):
-            index.setdefault(id(nested), entry)
+            earlier = index.get(id(nested))
+            if earlier is not None and earlier is not entry:
+                self._settle_entry(earlier)
+            index[id(nested)] = entry
 
     def _enqueue(self, entry):
-        # [kind, payload, settled, result]; the payload holds every code reference.
+        # [kind, payload, settled, result, verdicts]; the payload holds every code
+        # reference. ``verdicts`` is {id(code): [code, component or None]} for the
+        # callers a pending origin bound to this execution, filled when it settles.
         if len(self._pending) >= MAX_PENDING:
             self._settle()
         self._pending.append(entry)
@@ -1707,6 +1732,14 @@ class Attestation:
             raise
         finally:
             self._tls.busy = busy
+            if entry[4]:
+                # What this execution established, read before any later execution
+                # of the same code object can be compared.
+                known = self._known
+                for verdict in entry[4].values():
+                    attested = known.get(id(verdict[0]))
+                    if attested is not None and attested[0] is verdict[0]:
+                        verdict[1] = attested[1]
 
     def _settle_code(self, code):
         """Settle the pending module that owns ``code`` before its identity is read."""

@@ -205,6 +205,120 @@ def test_module_executed_later_cannot_vouch_for_an_earlier_generation(tmp_path):
     assert deferred == inline
 
 
+LATE_BUILDER = r'''
+        builder = (b'from dataclasses import dataclass\n'
+                   b'def build():\n    @dataclass\n    class Late:\n        number: int = 3\n    return Late\n')
+'''
+
+
+def _both(tmp_path, body):
+    inline = _run(tmp_path, 'inline', LATE_BUILDER + body, defer=False)
+    deferred = _run(tmp_path, 'deferred', LATE_BUILDER + body, defer=True)
+    return inline, deferred
+
+
+def test_reexecution_after_registration_cannot_vouch_for_an_earlier_generation(tmp_path):
+    # The first execution is settled alone (unrooted) at registration; the same code
+    # object then runs again under the root. The generation belongs to the first.
+    inline, deferred = _both(tmp_path, r'''
+        late = pathlib.Path('late').resolve(); late.mkdir()
+        (late / 'm.py').write_bytes(builder)
+        code = compile(builder, str(late / 'm.py'), 'exec')
+        ns = {'__name__': 'fixture_m'}
+        exec(code, ns)
+        ns['build']()
+        a.register_component_root('late', late, 'plugin', digests={'m.py': hashlib.sha256(builder).hexdigest()})
+        exec(code, ns)
+        print(json.dumps(ledger()))
+    ''')
+    assert any(x.startswith('generated-origin-unknown:') for x in inline['unknowns'])
+    assert not [u for u in inline['units'] if u[3]]
+    assert deferred == inline
+
+
+def test_reexecution_after_an_identity_read_cannot_vouch_for_an_earlier_generation(tmp_path):
+    # The first execution fails its comparison when an identity read settles it alone.
+    inline, deferred = _both(tmp_path, r'''
+        a._components['reviewed'][2]['m.py'] = hashlib.sha256(builder).hexdigest()
+        (p / 'm.py').write_bytes(builder + b'# drift\n')
+        code = compile(builder, str(p / 'm.py'), 'exec')
+        ns = {'__name__': 'fixture_m'}
+        exec(code, ns)
+        ns['build']()
+        a.attest_code(ns['build'].__code__)
+        (p / 'm.py').write_bytes(builder)
+        exec(code, ns)
+        print(json.dumps(ledger()))
+    ''')
+    assert any(x.startswith('generated-origin-unknown:') for x in inline['unknowns'])
+    assert not [u for u in inline['units'] if u[3]]
+    assert deferred == inline
+
+
+def test_generation_is_judged_by_the_execution_present_at_the_call(tmp_path):
+    # Repeated executions of one code object with generations between them and no
+    # read until the end: each generation keeps the verdict it had at its call.
+    inline, deferred = _both(tmp_path, r'''
+        late = pathlib.Path('late').resolve(); late.mkdir()
+        path = late / 'm.py'
+        path.write_bytes(builder)
+        code = compile(builder, str(path), 'exec')
+        ns = {'__name__': 'fixture_m'}
+        exec(code, ns)          # first execution: unrooted
+        ns['build']()           # unknown origin
+        exec(code, ns)          # second execution, still unrooted; the first is compared first
+        ns['build']()           # unknown origin
+        owed = len(a._pending)
+        a.register_component_root('late', late, 'plugin', digests={'m.py': hashlib.sha256(builder).hexdigest()})
+        exec(code, ns)          # third execution: clean
+        ns['build']()           # attested origin
+        exec(code, ns)
+        ns['build']()
+        print(json.dumps(dict(ledger(), owed=owed)))
+    ''')
+    assert inline.pop('owed') == 0 and deferred.pop('owed') >= 2
+    assert len([x for x in inline['unknowns'] if x.startswith('generated-origin-unknown:')]) == 1
+    assert len([u for u in inline['units'] if 'dataclass' in u[3]]) == 2
+    assert deferred == inline
+
+
+def test_later_clean_execution_cannot_vouch_while_everything_is_still_pending(tmp_path):
+    # Nothing is settled between the two executions: the skewed first execution is
+    # compared against the repaired file, as inline would have seen it skewed.
+    inline, deferred = _both(tmp_path, r'''
+        a._components['reviewed'][2]['m.py'] = hashlib.sha256(builder).hexdigest()
+        path = p / 'm.py'
+        code = compile(builder + b'X = 1\n', str(path), 'exec')
+        path.write_bytes(builder)
+        ns = {'__name__': 'fixture_m'}
+        exec(code, ns)          # executed code differs from the reviewed source
+        ns['build']()
+        clean = compile(builder, str(path), 'exec')
+        exec(clean, ns)
+        ns['build']()
+        print(json.dumps(ledger()))
+    ''')
+    assert len([x for x in inline['unknowns'] if x.startswith('generated-origin-unknown:')]) == 1
+    assert len([u for u in inline['units'] if 'dataclass' in u[3]]) >= 1
+    assert deferred == inline
+
+
+def test_caller_attested_at_the_call_keeps_that_verdict(tmp_path):
+    inline, deferred = _both(tmp_path, r'''
+        a._components['reviewed'][2]['m.py'] = hashlib.sha256(builder).hexdigest()
+        (p / 'm.py').write_bytes(builder)
+        code = compile(builder, str(p / 'm.py'), 'exec')
+        ns = {'__name__': 'fixture_m'}
+        exec(code, ns)
+        assert a.attest_code(ns['build'].__code__)
+        ns['build']()
+        print(json.dumps(ledger()))
+    ''')
+    assert len([u for u in inline['units'] if 'dataclass' in u[3]]) >= 1
+    assert not inline['unknowns']
+    assert deferred == inline
+
+
 def test_exit_with_a_backlog_does_not_hang_on_the_settler(tmp_path):
     result = _run(tmp_path, 'exit', r'''
         ca.SETTLE_DELAY = 0.0
