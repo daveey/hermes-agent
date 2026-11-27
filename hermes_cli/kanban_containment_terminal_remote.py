@@ -122,7 +122,10 @@ def _request(conn, board, gateway, task, meta=None, human_op=None):
     op = {"op": "archive", "task": task, "client_op_id": uid, **({"archive_metadata": meta} if meta else {}),
           **({"human_operator": human_op} if human_op else {})}
     with kb.write_txn(conn):
-        epoch = canonical.home.capture(conn, op)
+        try:
+            epoch = canonical.home.capture(conn, op)
+        except canonical.home.Pending as exc:
+            raise ContainmentRefused(str(exc)) from exc
         conn.execute("INSERT INTO containment_delivery(request_uid,board,gateway,op_json,confirmed,home_generations) VALUES (?,?,?,?,0,?)",
                      (uid, board, gateway, json.dumps(op, sort_keys=True, separators=(",", ":")), epoch))
     return uid, op, 0

@@ -122,7 +122,10 @@ def _tell_repair_card(conn: sqlite3.Connection, repair_id, task_id: str, blocked
     comment (no writer run), so the repair card's own worker receives it even when this pass ran inside it. [daveey]"""
     from hermes_cli import kanban_db as kb
 
-    if not isinstance(repair_id, str) or kb._task_status(conn, repair_id) in (None, "done", "archived"):
+    from hermes_cli.kanban_home_transfer import frozen
+
+    if (not isinstance(repair_id, str) or kb._task_status(conn, repair_id) in (None, "done", "archived")
+            or frozen(conn, repair_id)):
         return
     why = ("every parent came back (parent_found)" if source == "parent_found"
            else "every parent link was removed while it was blocked (parents_unlinked); no parent came back")

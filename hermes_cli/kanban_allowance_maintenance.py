@@ -44,8 +44,10 @@ def _hold(conn, task_id, valid, note, evidence):
     from hermes_cli import kanban_spend_budget as budget
     from hermes_cli import kanban_spend_decision as decision
     from hermes_cli.kanban_wake_check import foreign_copy
+    from hermes_cli.kanban_home_transfer import frozen
     with kb.write_txn(conn):
-        if not valid() or foreign_copy(conn, task_id):
+        # Recheck under the writer after the Board read.
+        if frozen(conn, task_id) or not valid() or foreign_copy(conn, task_id):
             return False
         if decision.pending(conn, task_id):
             return False  # preserve that episode; ordinary decision maintenance owns its notice
@@ -72,6 +74,7 @@ def sweep(conn):
     """At most eight reads and five seconds per minute per DB, outside write transactions."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli.kanban_wake_check import foreign_copy
+    from hermes_cli.kanban_home_transfer import frozen
     if conn.in_transaction or sync.board_mode(conn) != "primary":
         return []
     state = sync.sync_state(conn)
@@ -98,11 +101,12 @@ def sweep(conn):
         if time.monotonic() >= deadline:
             break
         after = task_id
-        if foreign_copy(conn, task_id):
+        if frozen(conn, task_id) or foreign_copy(conn, task_id):
             continue
         # One read per card: an exhausted exact allowance, else a generic newest budget the Board still refuses.
-        if (triage(conn, task_id, observation.read(conn, task_id, deadline=deadline))
-                or triage_stuck(conn, task_id, observation.stuck(conn, task_id, deadline=deadline))):
+        exhausted = triage(conn, task_id, observation.read(conn, task_id, deadline=deadline))
+        if exhausted or (not frozen(conn, task_id) and triage_stuck(
+                conn, task_id, observation.stuck(conn, task_id, deadline=deadline))):
             held.append(task_id)
     # Wrap only after exhausting this bounded page, not after a deadline-shortened pass.
     if not rows or (len(rows) < BATCH and after == rows[-1][0]):

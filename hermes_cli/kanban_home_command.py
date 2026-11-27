@@ -41,10 +41,28 @@ def install(conn, table: str) -> None:
     if not identities:
         raise ValueError('command epoch identity missing')
     conflict = ' OR '.join(f'({identity})' for identity in identities)
-    conn.execute(f'CREATE TRIGGER IF NOT EXISTS home_epoch1_{table}_insert '
-                 f'BEFORE INSERT ON {table} WHEN EXISTS(SELECT 1 FROM {table} '
-                 f'WHERE ({conflict}) AND home_generations IS NOT NEW.home_generations) '
-                 "BEGIN SELECT RAISE(ABORT,'captured command home generation is immutable'); END")
+    # SQLite hides the conflict mode from triggers. INSERT OR IGNORE must stay a
+    # no-op, while INSERT OR REPLACE must not swap an epoch. So BEFORE INSERT
+    # only remembers the epochs of rows this insert would conflict with; an
+    # IGNOREd insert never reaches AFTER INSERT, whereas a REPLACE does, and
+    # then refuses if any deleted row carried a different epoch. A stale memo
+    # is harmless: the next BEFORE INSERT for the table clears it first.
+    conn.execute('CREATE TABLE IF NOT EXISTS kanban_home_epoch_memo1 '
+                 '(tbl TEXT NOT NULL, epoch TEXT)')
+    name = f'home_epoch1_{table}_insert'
+    old = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)).fetchone()
+    if old and 'kanban_home_epoch_memo1' not in (old[0] or ''):
+        # Upgrade/reconnect: the first design aborted even INSERT OR IGNORE.
+        conn.execute(f'DROP TRIGGER {name}')
+    conn.execute(f'CREATE TRIGGER IF NOT EXISTS {name} BEFORE INSERT ON {table} '
+                 f"BEGIN DELETE FROM kanban_home_epoch_memo1 WHERE tbl='{table}'; "
+                 f"INSERT INTO kanban_home_epoch_memo1(tbl,epoch) SELECT '{table}',home_generations "
+                 f'FROM {table} WHERE {conflict}; END')
+    conn.execute(f'CREATE TRIGGER IF NOT EXISTS home_epoch1_{table}_after AFTER INSERT ON {table} '
+                 f"BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM kanban_home_epoch_memo1 WHERE tbl='{table}' "
+                 "AND epoch IS NOT NEW.home_generations) "
+                 "THEN RAISE(ABORT,'captured command home generation is immutable') END; "
+                 f"DELETE FROM kanban_home_epoch_memo1 WHERE tbl='{table}'; END")
 
 
 def touched(wire: dict) -> set[str]:

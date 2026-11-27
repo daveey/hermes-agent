@@ -31,9 +31,12 @@ def bind(conn, task_id: str, *, replay_event: int | None = None) -> None:
 def creator_pending(conn, task_id: str, identity: str) -> bool:
     """Read-only destination/dedup preflight; callers recheck under their writer."""
     from hermes_cli.kanban_archive_scope import _creator_task_id
+    from hermes_cli.kanban_home_transfer import frozen
     from hermes_cli.kanban_wake_check import foreign_ids
     owner = _creator_task_id(conn, task_id)
-    return bool(owner and owner not in foreign_ids(conn) and conn.execute(
+    # A frozen creator is deferred, not satisfied: no dedup event is written, so
+    # sweeps re-offer the handoff once custody is released or aborted.
+    return bool(owner and owner not in foreign_ids(conn) and not frozen(conn, owner) and conn.execute(
         'SELECT 1 FROM tasks WHERE id=?', (owner,)).fetchone() and not conn.execute(
         "SELECT 1 FROM task_events WHERE task_id=? AND kind='hold_creator_notified' "
         "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.identity') END=? "
@@ -101,7 +104,8 @@ def sweep(conn) -> None:
                 continue
             # New recipients/restrictions are revisions even when the base episode
             # was delivered. Unchanged polls remain read-only.
-            if previous(conn, tid, hold[1]) is not None and all(conn.execute(
+            if previous(conn, tid, hold[1]) is not None and not creator_pending(
+                    conn, tid, hold[1]['revision']) and all(conn.execute(
                     'SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND platform=? AND chat_id=?',
                     (tid, platform, chat)).fetchone() for platform, chat in destinations(conn, tid)):
                 continue

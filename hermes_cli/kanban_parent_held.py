@@ -32,7 +32,7 @@ def current(conn, child: str) -> list[dict]:
     return out
 
 
-def _pending(conn, child):
+def _scan(conn, child):
     from hermes_cli.kanban_hold_audience import describe
     authority = describe(conn, child)
     # Running creator sessions come and go without changing recorded ownership.
@@ -40,11 +40,23 @@ def _pending(conn, child):
                 'creator_task_id': authority['creator_task_id']}
     for signal in current(conn, child):
         revision = hashlib.sha256(json.dumps([signal, audience], sort_keys=True).encode()).hexdigest()
-        if not conn.execute(
+        seen = bool(conn.execute(
                 "SELECT 1 FROM task_events WHERE task_id=? AND kind='parent_held' "
                 "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.revision') END=?",
-                (child, revision)).fetchone():
-            yield {**signal, 'authority': authority, 'revision': revision}
+                (child, revision)).fetchone())
+        yield seen, {**signal, 'authority': authority, 'revision': revision}
+
+
+def _pending(conn, child):
+    return (s for seen, s in _scan(conn, child) if not seen)
+
+
+def _owed(conn, child):
+    """Published signals whose creator handoff was deferred (e.g. frozen creator)."""
+    from hermes_cli.kanban_hold_notices import creator_pending
+    for seen, signal in _scan(conn, child):
+        if seen and creator_pending(conn, child, 'parent:' + signal['revision']):
+            yield signal
 
 
 def sweep(conn) -> None:
@@ -52,6 +64,7 @@ def sweep(conn) -> None:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_dispatch_storage import DispatchWriteContended
     from hermes_cli.kanban_hold_notices import bind, creator
+    from hermes_cli.kanban_home_transfer import frozen
     from hermes_cli.kanban_wake_check import foreign_ids
     copies = foreign_ids(conn)
     children = [r[0] for r in conn.execute(
@@ -59,12 +72,16 @@ def sweep(conn) -> None:
         "JOIN tasks p ON p.id=l.parent_id WHERE c.status NOT IN ('done','archived') "
         "AND p.status IN ('triage','failed')")]
     for child in children:
-        if child in copies:
+        if child in copies or frozen(conn, child):
             continue
         try:
-            if not list(_pending(conn, child)):
+            if not list(_pending(conn, child)) and not list(_owed(conn, child)):
                 continue
             with kb.write_txn(conn):
+                if frozen(conn, child):
+                    continue
+                for signal in _owed(conn, child):
+                    creator(conn, child, 'parent:' + signal['revision'], text(signal))
                 for signal in _pending(conn, child):
                     bind(conn, child)
                     kb._append_event(conn, child, 'parent_held', signal)

@@ -371,6 +371,7 @@ def _liveness():
 def ownerless(conn, live=None) -> list[tuple[str, str]]:
     """``(task_id, producer)`` for open home cards with no live owner (read-only)."""
     from hermes_cli.kanban_wake_check import foreign_copy
+    from hermes_cli.kanban_home_transfer import frozen
     links = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone())
     db = None
     if live is None:
@@ -380,7 +381,7 @@ def ownerless(conn, live=None) -> list[tuple[str, str]]:
         for task_id, created_by in conn.execute(
                 "SELECT id, created_by FROM tasks WHERE status NOT IN ('done','archived') "
                 "ORDER BY created_at").fetchall():
-            if foreign_copy(conn, task_id) or _needs_owner(conn, task_id, links, live) is None:
+            if frozen(conn, task_id) or foreign_copy(conn, task_id) or _needs_owner(conn, task_id, links, live) is None:
                 continue
             out.append((task_id, intake_producer(conn, task_id) or (created_by or "").strip() or "unattributed"))
         return out
@@ -398,6 +399,7 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
     skipped for the rest of the pass (``failed``); a card that stays ownerless after linking is not retried by
     this process, so it cannot hold a batch slot forever."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_home_transfer import frozen
     links = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone())
     db, live = _liveness()
     failed: set[str] = set()
@@ -408,6 +410,8 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
             forced: set[str] = set()
             eligible = [c for c in found if c[0] not in _UNLINKABLE]
             for task_id, producer in eligible[:limit]:
+                if frozen(conn, task_id):
+                    continue  # custody may have arrived since selection; do not create a session for it
                 dead = _needs_owner(conn, task_id, links, live)
                 if dead is None or producer in failed:
                     continue
@@ -422,9 +426,11 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
                 if force:
                     forced.add(producer)
                 with kb.write_txn(conn):
+                    if frozen(conn, task_id):
+                        continue  # a transient custody skip must never poison _UNLINKABLE
                     if _relink(conn, task_id, producer, sid, links, live):
                         linked.append(task_id)
-                    elif _needs_owner(conn, task_id, links, live, check_release=False) is not None:
+                    elif not frozen(conn, task_id) and _needs_owner(conn, task_id, links, live, check_release=False) is not None:
                         _UNLINKABLE.add(task_id)
     finally:
         db.close()
@@ -438,8 +444,11 @@ def backfill(conn, *, apply: bool, limit: Optional[int] = None) -> dict:
 def _relink(conn, task_id: str, producer: str, sid: str, links: bool, live) -> bool:
     """Under the write lock: own the card by ``sid`` if it still needs an owner. True when newly linked or its
     archived chat was just restored."""
+    from hermes_cli.kanban_home_transfer import frozen
     from hermes_cli.kanban_adoption_authority import gateway as _gateway
     from hermes_cli.profiles import get_active_profile_name
+    if frozen(conn, task_id):
+        return False
     dead = _needs_owner(conn, task_id, links, live, check_release=False)
     if dead is None:
         return False

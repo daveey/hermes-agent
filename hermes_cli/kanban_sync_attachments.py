@@ -93,20 +93,26 @@ def _record_local(conn, row, path, key, *, data=None):
         # A read-only verification must not reserve a writer. Any actual byte or
         # metadata publication still rechecks custody and identity under the lock.
         current = conn.execute("SELECT stored_path,blob_key FROM task_attachments WHERE uid=? "
-                               "AND task_id=? AND size=? AND blob_key IS ?",
-                               (row["uid"], row["task_id"], row["size"], row["blob_key"])).fetchone()
-        if current is None or frozen(conn, row["task_id"]):
+                               "AND id=? AND task_id=? AND size=? AND filename=? AND created_at=? AND blob_key IS ?",
+                               (row["uid"], row["id"], row["task_id"], row["size"], row["filename"],
+                                row["created_at"], row["blob_key"])).fetchone()
+        if frozen(conn, row["task_id"]):
             return False
+        # A concurrent pull may already have applied the storage receipt. Changed
+        # or deleted rows need no stale local write; they are not a custody refusal.
+        if current is None:
+            return True
         if current["stored_path"] == str(path) and current["blob_key"] == key:
             return True
     with write_txn(conn):
         if frozen(conn, row["task_id"]):
             return False
         current = conn.execute("SELECT stored_path,blob_key FROM task_attachments WHERE uid=? "
-                               "AND task_id=? AND size=? AND blob_key IS ?",
-                               (row["uid"], row["task_id"], row["size"], row["blob_key"])).fetchone()
+                               "AND id=? AND task_id=? AND size=? AND filename=? AND created_at=? AND blob_key IS ?",
+                               (row["uid"], row["id"], row["task_id"], row["size"], row["filename"],
+                                row["created_at"], row["blob_key"])).fetchone()
         if current is None:
-            return False
+            return True
         if data is not None:
             # Byte publication and local metadata share the custody reservation.
             # No network is performed under this writer lock.
@@ -117,8 +123,9 @@ def _record_local(conn, row, path, key, *, data=None):
         conn.execute("UPDATE kanban_sync_state SET applying=1")
         try:
             conn.execute("UPDATE task_attachments SET stored_path=?,blob_key=? WHERE uid=? "
-                         "AND task_id=? AND size=? AND blob_key IS ?",
-                         (str(path), key, row["uid"], row["task_id"], row["size"], row["blob_key"]))
+                         "AND id=? AND task_id=? AND size=? AND filename=? AND created_at=? AND blob_key IS ?",
+                         (str(path), key, row["uid"], row["id"], row["task_id"], row["size"],
+                          row["filename"], row["created_at"], row["blob_key"]))
         finally:
             conn.execute("UPDATE kanban_sync_state SET applying=?", (previous,))
     return True

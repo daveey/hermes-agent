@@ -24,6 +24,17 @@ def install(conn: sqlite3.Connection) -> None:
     from hermes_cli import kanban_home_revision as revision
     revision.install(conn, ('kanban_home_generations1',))
     add_column_if_missing(conn, "kanban_sync_outbox", "home_generations", "home_generations TEXT")
+    # Pending custody fences the WHOLE task row like prepared custody does, including
+    # local-only claim bookkeeping (worker_pid, claim_lock) that the synced-column
+    # capture triggers never see. Board apply (applying=1) is exempt: it is how the
+    # pending mirror itself is fed. Installed with sync schema on every connect, so
+    # upgraded/reconnected stores gain it; stores without the sync schema have no
+    # pending mirror at all. Cooperating clients only; DDL is out of scope.
+    from hermes_cli.kanban_db_sync import _NOT_APPLYING
+    conn.execute(f"""CREATE TRIGGER IF NOT EXISTS home_pending1_tasks_update
+        BEFORE UPDATE ON tasks WHEN {_NOT_APPLYING} AND EXISTS(SELECT 1 FROM kanban_home_generations1
+            WHERE task_id IN (OLD.id, NEW.id) AND pending != 0)
+        BEGIN SELECT RAISE(ABORT, 'home transfer pending'); END""")
     # Keep this independent from removable sync capture triggers. Do not retrofit
     # a generation onto an extant pending op even if its source row now has one.
     conn.execute("""CREATE TRIGGER IF NOT EXISTS home_generation1_outbox_immutable
