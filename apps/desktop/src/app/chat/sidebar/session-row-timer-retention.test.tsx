@@ -115,12 +115,26 @@ it.each(['lane', 'preview'] as const)('a project-tree %s known-empty read clears
   first.unmount()
   act(() => vi.advanceTimersByTime(120_000))
   const empty = row({ kanban_observed_at: NOW + 120 })
-  act(() => $projectTree.set([{
-    id: 'project', label: 'Project', path: null, sessionCount: 1,
-    previewSessions: source === 'preview' ? [empty] : [],
-    repos: [{ id: 'repo', label: 'Repo', path: null, sessionCount: 1,
-      groups: [{ id: 'lane', label: 'Lane', path: null, sessions: source === 'lane' ? [empty] : [] }] }]
-  }]))
+  act(() =>
+    $projectTree.set([
+      {
+        id: 'project',
+        label: 'Project',
+        path: null,
+        sessionCount: 1,
+        previewSessions: source === 'preview' ? [empty] : [],
+        repos: [
+          {
+            id: 'repo',
+            label: 'Repo',
+            path: null,
+            sessionCount: 1,
+            groups: [{ id: 'lane', label: 'Lane', path: null, sessions: source === 'lane' ? [empty] : [] }]
+          }
+        ]
+      }
+    ])
+  )
   const next = render(view(row({ kanban_unknown: true })))
   expect(next.container.querySelector('[data-card-timer]')).toBeNull()
   act(() => $projectTree.set([]))

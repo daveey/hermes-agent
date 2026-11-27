@@ -15,6 +15,7 @@ export const $projectTree = atom<SidebarProjectTree[]>([])
 $projectTree.listen(projects => {
   for (const project of projects) {
     project.previewSessions?.forEach(rememberRowTimers)
+
     for (const repo of project.repos) {
       for (const group of repo.groups) {
         group.sessions.forEach(rememberRowTimers)

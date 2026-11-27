@@ -1,0 +1,5 @@
+{
+  "kind": "waiting",
+  "on": [{ "kind": "card", "id": "card:owner", "state": "producer_wait" }],
+  "presentation": { "stripe": "external", "reason_codes": ["linked_card_producer_wait"] }
+}
