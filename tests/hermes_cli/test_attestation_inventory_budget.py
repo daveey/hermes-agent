@@ -26,7 +26,7 @@ def test_inventory_expiry_stops_scan_releases_lock_and_never_returns_positive(mo
     monkeypatch.setattr(a, '_module_snapshot', lambda: [('first', SimpleNamespace(__file__='one.py')),
                                                        ('second', SimpleNamespace(__file__='two.py'))])
     seen = []
-    def inspect(name, filename):
+    def inspect(name, filename, *, diagnostics=None):
         seen.append((name, filename))
         clock[0] += 1
     monkeypatch.setattr(a, '_module_file', inspect)
@@ -69,7 +69,7 @@ def test_inventory_expiry_after_final_item_refuses_partial_positive(monkeypatch)
     clock = [10.0]
     monkeypatch.setattr(ca.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(a, '_module_snapshot', lambda: [('only', SimpleNamespace(__file__='one.py'))])
-    monkeypatch.setattr(a, '_module_file', lambda *args: clock.__setitem__(0, 12.0))
+    monkeypatch.setattr(a, '_module_file', lambda *args, **kwargs: clock.__setitem__(0, 12.0))
     with pytest.raises(TimeoutError):
         a.integrity_observation(deadline=11.0)
 

@@ -1,0 +1,95 @@
+"""Bounded, payload-free requested-module-inventory timing; never an admission input.
+
+Wall minus thread CPU does not identify GIL, filesystem or lock wait ownership.
+The outer caller's lock acquisition and pending-code settlement are not measured.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import threading
+from time import monotonic_ns, thread_time_ns
+
+# Never import logging from an audited inventory: its first import may execute
+# stdlib generators after their provenance boundary. Gate optional timing on the
+# service's already-initialized sink instead of changing the observed import graph.
+_logging = sys.modules.get('logging')
+logger = _logging.getLogger(__name__) if _logging is not None else None
+
+
+class InventoryDiagnostics:
+    def __init__(self):
+        self.stages = {name: [0, 0, 0] for name in ('resolve', 'owner', 'classify')}
+        self.count = 0
+        self.enabled = False
+        self.sink = logger
+        try:
+            if self.sink is None:
+                existing = sys.modules.get('logging')
+                getter = getattr(existing, 'getLogger', None)
+                self.sink = getter(__name__) if callable(getter) else None
+            self.enabled = self.sink is not None and self.sink.isEnabledFor(20)
+            self.begin = (monotonic_ns(), thread_time_ns()) if self.enabled else None
+        except Exception:  # health: allow BLE001 -- optional observer failures must not replace an inventory result
+            self.enabled = False
+
+    def call(self, stage, function, *args):
+        begin = None
+        if self.enabled:
+            try:
+                begin = monotonic_ns(), thread_time_ns()
+            except Exception:  # health: allow BLE001 -- a failed clock disables diagnostics, not the observed operation
+                self.enabled = False
+        try:
+            return function(*args)
+        finally:
+            if begin is not None and self.enabled:
+                try:
+                    row = self.stages[stage]
+                    row[0] += 1
+                    row[1] += monotonic_ns() - begin[0]
+                    row[2] += thread_time_ns() - begin[1]
+                except Exception:  # health: allow BLE001 -- preserve the operation's exact exception/result
+                    self.enabled = False
+
+    def finish(self):
+        if not self.enabled:
+            return
+        try:
+            total = monotonic_ns() - self.begin[0], thread_time_ns() - self.begin[1]
+            stages = {key: (row[0], row[1] / 1_000_000, row[2] / 1_000_000)
+                      for key, row in self.stages.items()}
+            stages['modules'] = (self.count,
+                max(0, total[0] - sum(r[1] for r in self.stages.values())) / 1_000_000,
+                max(0, total[1] - sum(r[2] for r in self.stages.values())) / 1_000_000)
+            self.sink.info('code_inventory pid=%d thread=%d request_ns=%d modules=%d '
+                        'wall_ms=%.3f cpu_ms=%.3f stages=%s', os.getpid(),
+                        threading.get_ident(), self.begin[0], self.count,
+                        total[0] / 1_000_000, total[1] / 1_000_000, stages)
+        except Exception:  # health: allow BLE001 S110 -- an optional sink/clock failure must never replace an inventory result; no recursive logging
+            pass
+
+
+def inventory_modules(ledger, *, deadline=None):
+    from hermes_cli.code_attestation import MAX_UNITS, _check_inventory_deadline
+
+    diagnostics = InventoryDiagnostics()
+    try:
+        # Recheck every mutable filename and freshly resolve every path, including
+        # unchanged module identities. This is timing, not a cache or trust shortcut.
+        for name, module in ledger._module_snapshot():
+            _check_inventory_deadline(deadline)
+            diagnostics.count += 1
+            filename = getattr(module, '__file__', None)
+            ledger._module_file(name, filename, diagnostics=diagnostics)
+            key = (name, id(module))
+            identity = (module, filename)
+            if ledger._modules.get(key) == identity:
+                continue
+            if len(ledger._modules) >= MAX_UNITS:
+                ledger.mark_unknown('module-inventory-limit')
+                continue
+            ledger._modules[key] = identity
+            ledger._generation += 1
+    finally:
+        diagnostics.finish()

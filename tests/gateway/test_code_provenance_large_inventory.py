@@ -27,11 +27,11 @@ def test_large_real_inventory_is_not_masked_by_large_projection(runtime, monkeyp
     original = a._module_file
     entered = threading.Event()
     seen, workers = [], []
-    def inspect(name, filename):
+    def inspect(name, filename, *, diagnostics=None):
         if not workers:
             workers.append(threading.current_thread())
             entered.set()
-        original(name, filename)
+        original(name, filename, diagnostics=diagnostics)
         seen.append(name)
     monkeypatch.setattr(a, '_module_file', inspect)
     async def scenario():

@@ -1137,13 +1137,20 @@ class Attestation:
         self._launcher["script_exec_observed"] = True  # route_report's launcher, not the seed copy
         return True
 
-    def _module_file(self, name, filename):
+    def _module_file(self, name, filename, *, diagnostics=None):
         if not filename:
             return
-        # Resolve once per observation, not once per classifier. Never retain this
-        # view across inventories: module filenames and symlink targets can change.
-        path = None if filename.startswith("<") else Path(filename).resolve()
-        owner = self._owner_path(path) if path is not None else None
+        # Resolve freshly even for unchanged identities; timing never caches paths.
+        path = None if filename.startswith("<") else (
+            diagnostics.call('resolve', Path(filename).resolve) if diagnostics is not None
+            else Path(filename).resolve())
+        owner = (diagnostics.call('owner', self._owner_path, path) if diagnostics is not None
+                 else self._owner_path(path)) if path is not None else None
+        if diagnostics is not None:
+            return diagnostics.call('classify', self._classify_module_file, name, filename, path, owner)
+        return self._classify_module_file(name, filename, path, owner)
+
+    def _classify_module_file(self, name, filename, path, owner):
         if owner is not None or path is None or not self._trusted_stdlib_path(path):
             if owner is None and path is not None and self._dependency_module_path(name, path):
                 return
@@ -1157,21 +1164,8 @@ class Attestation:
         return inventory_modules(self, deadline=deadline, progress=progress)
 
     def _inventory_modules(self, *, deadline=None):
-        # Requested snapshots only, never idle scans. Recheck mutable __file__ even
-        # for an unchanged module object; retaining identity avoids id recycling.
-        for name, module in self._module_snapshot():
-            _check_inventory_deadline(deadline)
-            filename = getattr(module, "__file__", None)
-            self._module_file(name, filename)
-            key = (name, id(module))
-            identity = (module, filename)
-            if self._modules.get(key) == identity:
-                continue
-            if len(self._modules) >= MAX_UNITS:
-                self.mark_unknown("module-inventory-limit")
-                continue
-            self._modules[key] = identity
-            self._generation += 1
+        from hermes_cli.code_inventory_diagnostics import inventory_modules
+        return inventory_modules(self, deadline=deadline)
 
     def _audit(self, event, args):
         if event not in ("compile", "exec", "import", "ctypes.dlopen") or getattr(self._tls, "busy", False):
