@@ -479,6 +479,8 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5, reader_cache=None) -> Ite
             _close_quietly(conn)
             raise
         finally:
+            from hermes_cli.kanban_scoped_reader import finish_cached_borrow
+            finish_cached_borrow(conn, cache, cache_lock, key, entry)
             if lowered and cache.get(key) is entry:
                 try:
                     conn.execute(f"PRAGMA busy_timeout={int(_RO_BUSY_TIMEOUT_S * 1000)}")
@@ -515,10 +517,8 @@ ro_stats = {"private_fallbacks": 0}
 
 
 def _close_quietly(conn: sqlite3.Connection) -> None:
-    try:
-        conn.close()
-    except sqlite3.Error:
-        pass
+    from hermes_cli.kanban_scoped_reader import close_read_quietly
+    close_read_quietly(conn)
 
 
 def _self_gateway(conn: sqlite3.Connection) -> str:

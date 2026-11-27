@@ -330,12 +330,14 @@ def evict_readers(path: str) -> None:
 def open_ro(path, check_same_thread: bool = True, *, timeout=0.5) -> sqlite3.Connection:
     """Never create a missing board; retry read/write only to initialize missing WAL sidecars."""
     from hermes_cli import kanban_lockguard
+    from hermes_cli.kanban_scoped_reader import ScopedReadConnection
 
     for mode in ("ro", "rw"):
         conn = None
         try:
             conn = kanban_lockguard.connect(path.resolve().as_uri() + f"?mode={mode}",
-                                           uri=True, timeout=timeout, check_same_thread=check_same_thread)
+                                           uri=True, timeout=timeout, check_same_thread=check_same_thread,
+                                           factory=ScopedReadConnection)
             conn.execute("PRAGMA query_only = ON")
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
             return conn
