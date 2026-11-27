@@ -90,6 +90,7 @@ def test_stop_arriving_at_budget_writer_is_refused(board, monkeypatch):
         if not inserted:
             inserted = True
             with real(conn):
+                conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))  # the stop's own writer
                 kb._append_event(conn, tid, decision.EVENT, {'cause': 'scope_stopped', 'reason': 'scope ended'})
         with real(conn, *args, **kwargs) as transaction:
             yield transaction
@@ -112,3 +113,20 @@ def test_json_refusal_is_structured_and_keeps_budget(board, monkeypatch, capsys)
     assert reply['ok'] is False and reply['error'] == 'stop_decision_required'
     assert f'hermes kanban release {tid}' in reply['message']
     assert releases.written(board, tid) == before
+
+
+@pytest.mark.parametrize('lane', ['scheduled', 'todo', 'ready', 'running'])
+def test_refusal_applies_only_where_release_can_record_the_decision(board, monkeypatch, lane):
+    """Live hub replay: promoted cards still reading a restricted stop as pending sit in todo/ready/running,
+    where release answers not_held. Refusing their standalone budget there would leave no route at all."""
+    tid = renewed(board, monkeypatch)
+    with kb.write_txn(board):
+        board.execute('UPDATE tasks SET status=? WHERE id=?', (lane, tid))
+    assert decision.pending(board, tid) and decision.restricted_floor(board, tid) is not None
+    rc, error = releases.spend_budget(board, monkeypatch, tid, '--runs', '59', '--reason', 'continue goal')
+    if lane == 'scheduled':  # release's held lanes: it is the route, and it is named
+        assert rc == 1 and 'stop_decision_required' in error
+        assert budget.card_override(board, tid) is None
+    else:
+        assert rc == 0, error
+        assert budget.card_override(board, tid)['runs'] == 59

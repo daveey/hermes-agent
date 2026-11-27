@@ -18,9 +18,14 @@ class StopDecisionRequired(ValueError):
 
 
 def require_decision(conn, task_id):
-    """Inside the budget writer: release owns its composition; standalone CLI edits do not."""
+    """Inside the budget writer: release owns its composition; standalone CLI edits do not. Only while the card
+    is held where release can record that decision (its ``_HELD`` lanes): a running, todo or ready card whose
+    Core history still reads a stop as pending has no release route, and refusing there would strand it."""
     from hermes_cli import kanban_spend_decision as decision
-    if decision.pending(conn, task_id) and decision.restricted_floor(conn, task_id) is not None:
+    from hermes_cli.kanban_release import _HELD
+    row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if (row is not None and row[0] in _HELD and decision.pending(conn, task_id)
+            and decision.restricted_floor(conn, task_id) is not None):
         raise StopDecisionRequired(
             f"stop_decision_required: {task_id} still needs a stop decision; no budget was changed. "
             f"Use `hermes kanban release {task_id}` from the owning chat or a human terminal "
