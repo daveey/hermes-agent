@@ -1714,6 +1714,13 @@ def _finish_already_up_to_date(
     """"Already up to date" path: restore stash, repair the checkout, catch up the fleet.
     ``held_message`` replaces "Already up to date!" when the channel's release was held, not reached.
     ``sys.exit(1)`` when the repair is incomplete (after gateway exit code + partial receipt)."""
+    from hermes_cli import update_precommit as precommit
+    if precommit.preparing():
+        # No Git move does not mean no install: completion repairs dependencies
+        # and launches a detached fleet tail. Adopt restart debt and transfer
+        # custody before stash restore or that tail, using the normal pause gate.
+        with _checkout_move(_windows_gateway_resume):
+            pass
     # A parked branch the update switched off stays on the target: re-parking on the stale branch
     # recreates the incident. No other checkout left current_branch (in-place and release updates
     # never switch), so there is nothing to switch back to.

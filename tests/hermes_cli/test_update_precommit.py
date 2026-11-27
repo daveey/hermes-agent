@@ -193,6 +193,48 @@ def test_real_preparation_fetch_is_cancelled_with_checkout_unchanged(fork, capfd
     lock.release()
 
 
+def test_unreaped_killed_child_retains_custody_after_settle_timeout(monkeypatch, capsys):
+    calls = []
+    class Child:
+        pid = 12345
+        def wait(self, timeout=None):
+            calls.append(timeout)
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("owned fixture", timeout)
+            return -signal.SIGKILL
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+    precommit._terminate_uncommitted(Child())
+    assert calls == [(12345, signal.SIGKILL), precommit.CANCEL_SETTLE_SECONDS, None]
+    assert "retaining update custody" in capsys.readouterr().out
+
+
+def test_ordinary_zero_commit_completion_does_not_add_pause(fork, monkeypatch):
+    from hermes_cli import update_cmd as cmd
+    monkeypatch.setattr(cmd, "_checkout_move", lambda *_: pytest.fail("ordinary no-op added pause"))
+    helpers.run(fork, "--up-to", fork.a)
+    assert fork.completed[-1]["expected_sha"] == fork.a
+
+
+def test_zero_commit_expired_after_validation_never_starts_completion(fork, monkeypatch):
+    from hermes_cli import update_cmd as cmd
+    monkeypatch.setattr(precommit, "_child_deadline", precommit.clock() - 1)
+    monkeypatch.setattr(precommit, "_child_channel", object())
+    monkeypatch.setattr(cmd, "_complete_source_update", lambda *_: pytest.fail("expired no-op started completion"))
+    with pytest.raises(SystemExit) as exc:
+        helpers.run(fork, "--up-to", fork.a)
+    assert exc.value.code == precommit.REFUSED_EXIT
+    assert helpers.head(fork) == (fork.a, "main")
+
+
+def test_zero_commit_completion_outlives_deadline_in_custody(fork):
+    command = _command(fork, "apply")
+    command[-2] = fork.a
+    result = precommit.supervise(command, precommit.clock() + 8, dict(os.environ))
+    assert result == 0, "zero-commit completion was still deadline-killable"
+    assert (fork.root.parent / "completed").read_text() == fork.a
+    assert helpers.head(fork) == (fork.a, "main")
+
+
 def test_real_child_live_apply_success_outlives_deadline_in_custody(fork):
     start = precommit.clock()
     result = precommit.supervise(_command(fork, "apply"), start + 8, dict(os.environ))
@@ -534,6 +576,8 @@ def _child():
         assume_yes=True, keep_stash=False, switch_branch=False, discard_local_changes=False)
     def complete(request):
         if mode == "apply":
+            assert precommit._committed and precommit._wrote, "completion lacks install custody"
+            assert not pause._RUN.get("precommit_adoption_pending"), "completion skipped restart-debt adoption"
             # Prove no deadline kill once ACK transferred installation custody.
             remaining = precommit._child_deadline - precommit.clock()
             import threading

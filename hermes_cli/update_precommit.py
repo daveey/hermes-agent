@@ -114,7 +114,13 @@ def _terminate_uncommitted(proc: subprocess.Popen) -> None:
         os.killpg(proc.pid, signal.SIGKILL)  # windows-footgun: ok -- supervisor is POSIX-only
     except ProcessLookupError:
         pass
-    proc.wait(timeout=CANCEL_SETTLE_SECONDS)
+    try:
+        proc.wait(timeout=CANCEL_SETTLE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # A kernel-unresponsive leader is not proof of a safe refusal. Keep
+        # caller holds and turn safety until termination is actually observed.
+        print("↷ Waiting for terminated updater; retaining update custody", flush=True)
+        proc.wait()  # health: allow HX006 -- never release safety while a killed writer remains unreaped
 
 
 def supervise(command: list[str], deadline: float, env: dict[str, str]) -> int:
