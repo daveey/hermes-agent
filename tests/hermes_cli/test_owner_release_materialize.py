@@ -125,6 +125,32 @@ def test_unanswered_effect_transport_is_not_erased_or_overwritten(assembly):
     assert snapshot(a)==before
 
 
+def test_pending_outbox_on_otherwise_matching_effect_refuses_atomically(assembly):
+    """Semantic oracle without message dependence: the pending-custody barrier
+    is the only guard when every canonical row already matches locally."""
+    a=assembly
+    value=adapter(wire(a))
+    row=value['events'][0]
+    cols=[r[1] for r in a.conn.execute('PRAGMA table_info(task_events)')]
+    ins={k:(a.tid if k=='task_id' else row.get(k)) for k in cols if k in row}
+    with kb.write_txn(a.conn):
+        a.conn.execute(f"INSERT INTO task_events({','.join(ins)}) VALUES ({','.join('?'*len(ins))})",tuple(ins.values()))
+    pending_row=a.conn.execute('SELECT COUNT(*) FROM kanban_sync_outbox WHERE table_name=? AND row_uid=?',
+                               ('task_events',row['uid'])).fetchone()
+    assert pending_row is not None
+    pending=pending_row[0]
+    assert pending>=1
+    before=snapshot(a)
+    with pytest.raises(ValueError):
+        subject.materialize(a.conn,value)
+    assert snapshot(a)==before
+    remaining=a.conn.execute('SELECT COUNT(*) FROM kanban_sync_outbox WHERE table_name=? AND row_uid=?',
+                             ('task_events',row['uid'])).fetchone()
+    assert remaining is not None and remaining[0]==pending
+    assert app.verified_application(a.conn,value['operation']['intent_uid']) is None
+    assert subject.verified(a.conn,value['operation']['intent_uid']) is None
+
+
 class Hub:
     def __init__(self,a,loss=False):
         self.a=a
