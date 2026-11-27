@@ -31,6 +31,7 @@ def install(source: str, checkout: str, mode: str) -> None:
     pause._discover_systemd = list
     pause._discover_launchd = list
     pause._discover_bare = lambda *_: ([], [])
+    pause._left_running = lambda units, jobs: (units, jobs, [])
     options = update_cmd._UpdateOptions(pre_update_version=None, gw_input_fn=None,
         assume_yes=True, keep_stash=False, switch_branch=False, discard_local_changes=False)
     update_cmd._resolve_update_options = lambda *_: options

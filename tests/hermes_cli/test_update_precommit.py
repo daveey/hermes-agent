@@ -176,6 +176,19 @@ def test_signal_during_spawn_keeps_child_cleanup_handle(monkeypatch):
     assert len(children) == 1 and children[0].poll() is not None
 
 
+def test_uncommitted_leader_exit_settles_owned_descendants(tmp_path):
+    import threading
+    marker = tmp_path / "orphan-write"
+    descendant = ("import pathlib,threading; threading.Event().wait(1); "
+                  f"pathlib.Path({str(marker)!r}).write_text('survived')")
+    code = ("import os,subprocess,sys; "
+            f"subprocess.Popen([sys.executable,'-c',{descendant!r}],close_fds=True); os._exit(0)")
+    result = precommit.supervise([sys.executable, "-c", code], precommit.clock() + 8, dict(os.environ))
+    threading.Event().wait(1.2)  # health: allow HX013 -- descendant's bounded delayed-write is the negative control
+    assert not marker.exists(), "supervisor returned over an uncommitted surviving descendant"
+    assert result == precommit.REFUSED_EXIT
+
+
 @pytest.mark.parametrize("message", [b"", b"X"])
 def test_eof_or_invalid_request_never_commits(message, tmp_path):
     marker = tmp_path / "completed"
@@ -196,6 +209,45 @@ def test_signal_after_commit_ack_keeps_custody_until_child_exit(tmp_path):
     deadline = precommit.clock() + 5.5
     assert precommit.supervise([sys.executable, "-c", code], deadline, dict(os.environ)) == 0
     assert marker.read_text() == "settled"
+
+
+def test_uncertain_ack_delivery_never_withdraws_custody(monkeypatch, tmp_path):
+    real_send = socket.socket.sendall
+    def send(channel, data, *args, **kwargs):
+        result = real_send(channel, data, *args, **kwargs)
+        if data == b"Y":
+            raise OSError("ACK delivered but send completion uncertain")
+        return result
+    monkeypatch.setattr(socket.socket, "sendall", send)
+    marker = tmp_path / "settled"
+    code = ("import socket,sys,threading; s=socket.socket(fileno=int(sys.argv[1])); "
+            "s.sendall(b'C'); assert s.recv(1)==b'Y'; threading.Event().wait(1); "
+            f"open({str(marker)!r}, 'w').write('done')")
+    assert precommit.supervise([sys.executable, "-c", code], precommit.clock() + 5.5, dict(os.environ)) == 0
+    assert marker.read_text() == "done"
+
+
+@pytest.mark.parametrize("ack", [b"", b"N"])
+def test_child_refuses_missing_or_negative_commit_ack(ack, monkeypatch):
+    import threading
+    parent, child = socket.socketpair()
+    with parent, child:
+        monkeypatch.setattr(precommit, "_child_channel", child)
+        monkeypatch.setattr(precommit, "_child_deadline", precommit.clock() + 10)
+        def peer():
+            assert parent.recv(1) == b"C"
+            parent.sendall(ack)
+            parent.shutdown(socket.SHUT_WR)
+        worker = threading.Thread(target=peer)
+        worker.start()
+        try:
+            with pytest.raises(SystemExit) as exc:
+                precommit.before_checkout_write()
+            assert exc.value.code == precommit.REFUSED_EXIT
+            assert not precommit._wrote and not precommit._committed
+        finally:
+            worker.join(2)
+        assert not worker.is_alive()
 
 
 def test_pause_adoption_waits_until_after_inventory_and_commit_ack(monkeypatch):

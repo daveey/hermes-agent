@@ -142,12 +142,14 @@ def supervise(command: list[str], deadline: float, env: dict[str, str]) -> int:
             proc = subprocess.Popen([*command, str(child.fileno()), repr(deadline)], env=env,
                                     pass_fds=(child.fileno(),), start_new_session=True)  # detached-spawn: ok -- awaited; precommit group killed on timeout
             child.close()
-            channel_open = True
-            while not cancelling and proc.poll() is None:
+            # Do not poll/reap before retiring the owned group: a leader can
+            # exit with live Git descendants, and a reaped PID may be reused.
+            # The private socket EOF observes exit without giving up PID custody.
+            while not cancelling:
                 remaining = cancel_at - clock()
                 if remaining <= 0:
                     break
-                ready, _, _ = select.select([parent] if channel_open else [], [], [], min(remaining, 0.05))
+                ready, _, _ = select.select([parent], [], [], min(remaining, 0.05))
                 if ready:
                     request = parent.recv(1)
                     if request == b"C" and not cancelling and clock() < cancel_at:
@@ -159,20 +161,16 @@ def supervise(command: list[str], deadline: float, env: dict[str, str]) -> int:
                         except OSError:
                             pass  # uncertain delivery retains custody until child exits
                         return proc.wait()  # health: allow HX006 -- committed custody must settle, never deadline-kill
-                    if request:
-                        break
-                    # EOF is not a commitment. A child which closes the channel
-                    # but stays alive is still cancellable at the original deadline.
-                    channel_open = False
-            if proc.returncode is not None:
-                return proc.returncode
+                    # EOF or any other message cannot transfer custody. Retire
+                    # the whole unreaped group before reporting a safe refusal.
+                    break
         except (OSError, subprocess.TimeoutExpired):
             if committed:
                 return proc.wait()  # health: allow HX006 -- observation failure cannot withdraw committed custody
         finally:
             cancelling = True
             try:
-                if proc is not None and not committed and proc.poll() is None:
+                if proc is not None and not committed:
                     _terminate_uncommitted(proc)
             finally:
                 for sig, handler in previous.items():
