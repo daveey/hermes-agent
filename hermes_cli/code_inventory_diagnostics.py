@@ -19,19 +19,34 @@ logger = _logging.getLogger(__name__) if _logging is not None else None
 
 class InventoryDiagnostics:
     def __init__(self):
+        global logger
         self.stages = {name: [0, 0, 0] for name in ('resolve', 'owner', 'classify')}
         self.count = 0
         self.enabled = False
         self.sink = logger
+        acquired = False
+        setup_lock = None
         try:
+            existing = sys.modules.get('logging')
+            setup_lock = getattr(existing, '_lock', None)
+            # getLogger and an isEnabledFor cache miss both take this RLock.
+            # Optional observation must not queue behind logging configuration;
+            # declining timing never skips the underlying attestation inventory.
+            if setup_lock is not None:
+                acquired = setup_lock.acquire(blocking=False)
+                if not acquired:
+                    return
             if self.sink is None:
-                existing = sys.modules.get('logging')
                 getter = getattr(existing, 'getLogger', None)
                 self.sink = getter(__name__) if callable(getter) else None
+                logger = self.sink
             self.enabled = self.sink is not None and self.sink.isEnabledFor(20)
             self.begin = (monotonic_ns(), thread_time_ns()) if self.enabled else None
         except Exception:  # health: allow BLE001 -- optional observer failures must not replace an inventory result
             self.enabled = False
+        finally:
+            if acquired and setup_lock is not None:
+                setup_lock.release()
 
     def call(self, stage, function, *args):
         begin = None
