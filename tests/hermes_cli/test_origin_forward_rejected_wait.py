@@ -195,6 +195,77 @@ def test_key_named_in_a_longer_probe_is_still_refused(refused):
         assert 'origin_forward_rejected_wait' in (refusal('schedule', conn, task, run, wake_check=longer) or '')
 
 
+OTHER_KEY = 'bb-land:817:other'
+
+
+@pytest.mark.parametrize('order', ['lost-last', 'lost-first'])
+@pytest.mark.parametrize('how', ['schedule', 'block', 'continue'])
+def test_lost_key_in_a_conjunction_is_refused_wherever_it_sits(refused, how, order):
+    """``wait-check key OTHER && wait-check key LOST`` can never fire: the lost key is not just the first one."""
+    task, run, _ = refused
+    first, second = (wake(OTHER_KEY), wake()) if order == 'lost-last' else (wake(), wake(OTHER_KEY))
+    with kbc.connect_closing() as conn:
+        why = refusal(how, conn, task, run, wake_check=f'{first} && {second}')
+        assert 'origin_forward_rejected_wait' in (why or ''), why
+        assert KEY in why
+        assert_still_running(conn, task, run)
+
+
+@pytest.mark.parametrize('joiner', ['||', ';', '|'])
+def test_a_probe_with_an_alternative_can_fire_without_the_lost_key_so_it_still_parks(refused, joiner):
+    task, run, _ = refused
+    with kbc.connect_closing() as conn:
+        assert refusal('schedule', conn, task, run, wake_check=f'{wake(OTHER_KEY)} {joiner} {wake()}') is None
+        assert kb.get_task(conn, task).status == 'scheduled'
+
+
+def test_another_creators_completed_request_for_the_key_lifts_the_refusal(refused):
+    """The key may exist (another creator made it): never claim ``wait-check key`` can not see it."""
+    task, run, path = refused
+    journal(path, 'placement:other:done', state='done', result={}, creator=OTHER_CREATOR)
+    with kbc.connect_closing() as conn:
+        assert refusal('schedule', conn, task, run) is None
+        assert kb.get_task(conn, task).status == 'scheduled'
+
+
+def test_another_creators_inflight_request_for_the_key_lifts_the_refusal_without_a_pending_hold(refused):
+    task, run, path = refused
+    journal(path, 'placement:other:sent', state='sent', result={}, creator=OTHER_CREATOR)
+    with kbc.connect_closing() as conn:
+        assert 'origin_forward_rejected_wait' not in (refusal('schedule', conn, task, run) or '')
+
+
+def test_another_creators_own_binding_refusal_for_the_key_does_not_lift_it(refused):
+    task, run, path = refused
+    journal(path, 'placement:other:refused', creator=OTHER_CREATOR)
+    with kbc.connect_closing() as conn:
+        assert 'origin_forward_rejected_wait' in (refusal('schedule', conn, task, run) or '')
+
+
+@pytest.mark.parametrize('handoff', ['absent', 'null'])
+def test_a_refusal_without_an_explicit_incomplete_handoff_is_not_definitive(refused, handoff):
+    task, run, path = refused
+    result = {k: v for k, v in REJECTED.items() if k != 'handoff_complete'}
+    if handoff == 'null':
+        result['handoff_complete'] = None
+    journal(path, 'placement:worker:refused', task=task, result=result)
+    with kbc.connect_closing() as conn:
+        assert refusal('schedule', conn, task, run) is None
+        assert kb.get_task(conn, task).status == 'scheduled'
+
+
+def test_a_non_forward_courier_row_mentioning_the_forward_does_not_lift_the_refusal(refused):
+    """Only ``origin-forward`` requests are evidence: an unrelated action naming it is neither a recovery nor a refusal."""
+    task, run, path = refused
+    journal(path, 'placement:worker:other-action', state='done', result={}, task=task, action='create')
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE sent SET body=replace(body, '\"child\"', '\"origin-forward\"') WHERE id=?",
+                   ('placement:worker:other-action',))
+        assert db.execute("SELECT COUNT(*) FROM sent WHERE body LIKE '%origin-forward%'").fetchone()[0] == 2
+    with kbc.connect_closing() as conn:
+        assert 'origin_forward_rejected_wait' in (refusal('schedule', conn, task, run) or '')
+
+
 @pytest.mark.parametrize('damage', ['missing', 'unreadable', 'no-table'])
 def test_missing_or_unreadable_evidence_is_not_a_refusal(refused, damage):
     task, run, path = refused

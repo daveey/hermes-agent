@@ -22,17 +22,25 @@ CODE = "origin_forward_rejected_wait"
 _REFUSED = "origin_forward_binding_missing"
 
 
-def wait_key(wake_check: Optional[str]) -> Optional[str]:
-    """The product key a ``hermes kanban wait-check key <KEY> ...`` probe waits on, else None."""
+def wait_keys(wake_check: Optional[str]) -> list[str]:
+    """Every product key a ``hermes kanban wait-check key <KEY> ...`` probe waits on, in order.
+
+    A probe that offers an alternative (``||``, ``;``, ``|``) can fire without the lost key, so
+    it is "cannot tell" and yields no keys; only a conjunction (or a lone probe) is judged.
+    """
     try:
         words = shlex.split(wake_check or "")
     except ValueError:
-        return None
+        return []
+    if any(w in ("||", ";", "|", "&") for w in words):
+        return []
+    keys = []
     for i in range(len(words) - 4):
         if words[i:i + 3] == ["hermes", "kanban", "wait-check"] and words[i + 3] == "key":
             key = words[i + 4]
-            return key if key and not key.startswith("-") else None
-    return None
+            if key and not key.startswith("-"):
+                keys.append(key)
+    return keys
 
 
 def _run_uid(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -44,8 +52,8 @@ def _run_uid(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     return row[0] if row and isinstance(row[0], str) and row[0] else None
 
 
-def _attempts(task_id: str, key: str) -> Optional[list[tuple[str, str, dict, str]]]:
-    """``(request id, state, result, run uid)`` per courier row creating ``key`` for this creator."""
+def _attempts(task_id: str, key: str) -> Optional[tuple[list, list]]:
+    """``(request id, state, result, run uid)`` per courier row creating ``key``: this creator's, then others'."""
     from hermes_cli.kanban_capability_registry import hub_db_path, _ro
     try:
         path = hub_db_path()
@@ -54,15 +62,15 @@ def _attempts(task_id: str, key: str) -> Optional[list[tuple[str, str, dict, str
             rows = db.execute("SELECT id,state,result,body FROM sent WHERE body LIKE '%origin-forward%'").fetchall()
     except (sqlite3.Error, OSError):
         return None
-    found = []
+    found, others = [], []
     for rid, state, raw_result, raw_body in rows:
         try:
             body = json.loads(raw_body)
             args = body["args"]
             if (body.get("coll") != "sessions" or body.get("action") != "origin-forward"
-                    or args["creator"]["task_id"] != task_id
                     or args["create"]["idempotency_key"] != key):
                 continue
+            mine = args["creator"]["task_id"] == task_id
             run_uid = args.get("run_uid")
         except (ValueError, TypeError, KeyError, AttributeError):
             continue  # a row we cannot attribute is neither this creator's nor evidence
@@ -70,8 +78,8 @@ def _attempts(task_id: str, key: str) -> Optional[list[tuple[str, str, dict, str
             result = json.loads(raw_result or "{}")
         except (ValueError, TypeError):
             result = None
-        found.append((str(rid), state, result if isinstance(result, dict) else {}, run_uid))
-    return found
+        (found if mine else others).append((str(rid), state, result if isinstance(result, dict) else {}, run_uid))
+    return found, others
 
 
 def _definitive(state, result: dict) -> bool:
@@ -80,24 +88,38 @@ def _definitive(state, result: dict) -> bool:
             and result.get("status") == "rejected" and result.get("handoff_complete") is False)
 
 
+def _lost(task_id: str, key: str, run_uid: str) -> Optional[str]:
+    """The request id of this run's definitively refused creation of ``key``, else None."""
+    evidence = _attempts(task_id, key)
+    if evidence is None:
+        return None
+    attempts, others = evidence
+    if not attempts or not all(_definitive(state, result) for _, state, result, _ in attempts + others):
+        # No evidence, a recovery/in-flight/done request (even another creator's: the key may
+        # exist), or another failure: not this gate.
+        return None
+    mine = [rid for rid, _, _, uid in attempts if uid == run_uid]
+    return sorted(mine)[0] if mine else None  # none: an earlier run's refusal, possibly recovered since
+
+
 def rejected_wait(conn: sqlite3.Connection, task_id: str, wake_check: Optional[str]) -> Optional[str]:
     """Refusal text when this park waits on a key whose creation this run definitively failed."""
-    key = wait_key(wake_check)
-    if key is None:
+    keys = wait_keys(wake_check)
+    if not keys:
         return None
     from hermes_cli.kanban_workspace_publication import _kernel_park
     if _kernel_park.get() == task_id:
         return None  # mandatory kernel parks stay possible, as for the pending gate
     run_uid = _run_uid(conn, task_id)
-    attempts = _attempts(task_id, key) if run_uid else None
-    if not attempts or not all(_definitive(state, result) for _, state, result, _ in attempts):
-        return None  # no evidence, a recovery/in-flight/done request, or another failure: not this gate
-    mine = [rid for rid, _, _, uid in attempts if uid == run_uid]
-    if not mine:
-        return None  # an earlier run's refusal; the owner may have recovered the key since
-    return (f"{CODE}: this run's creation of the child with idempotency key {key} (request "
-            f"{sorted(mine)[0]}) was definitively refused as {_REFUSED}, before any card was created, so "
-            "`wait-check key` can never see it. Do not park on it and do not retry creation in this run. "
-            "End the run reporting the lost child (kanban_complete or kanban_block with the refusal; the "
-            "owning chat already holds the rejection notice), or, if the owning chat created the card "
-            "another way, wait on that card's id instead. No origin binding was inherited, minted or changed.")
+    if not run_uid:
+        return None
+    for key in keys:
+        rid = _lost(task_id, key, run_uid)
+        if rid:
+            return (f"{CODE}: this run's creation of the child with idempotency key {key} (request "
+                    f"{rid}) was definitively refused as {_REFUSED}, before any card was created, so "
+                    "`wait-check key` can never see it. Do not park on it and do not retry creation in this run. "
+                    "End the run reporting the lost child (kanban_complete or kanban_block with the refusal; the "
+                    "owning chat already holds the rejection notice), or, if the owning chat created the card "
+                    "another way, wait on that card's id instead. No origin binding was inherited, minted or changed.")
+    return None
