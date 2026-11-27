@@ -343,6 +343,12 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     # would silently erase that binding and every other local column. Keep the
     # row even when the directory is currently absent; existence is not custody.
     keep += " AND NOT (workspace_kind IN ('dir', 'worktree') AND workspace_path IS NOT NULL)"
+    # Notification subscriptions are local custody too: their acknowledged and
+    # in-flight cursors name this file's event IDs. Re-import assigns new IDs to
+    # the same UIDs, replaying historical notices above those retained cursors.
+    # Keep the namespace until unsubscribe/stale-sub GC releases the last row.
+    # This retains a projection only, never a lease or execution affinity.
+    keep += " AND NOT EXISTS (SELECT 1 FROM kanban_notify_subs n WHERE n.task_id = tasks.id)"
     # A finalized live-home source retains its open replica even if an execution
     # probe row is lost. Its immutable handoff receipt is the fallback custody for
     # legacy hostless probes; this is not home or execution/lease affinity.
