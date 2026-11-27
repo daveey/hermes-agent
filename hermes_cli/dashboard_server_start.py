@@ -5,7 +5,9 @@ def prepare_and_run_server(args, *, headless, prepare_runtime, prepare_auth, boo
     from contextlib import nullcontext
     from hermes_cli.serve_bootstrap_listener import BootstrapListener
     from hermes_cli.sessions_early_boot import early_sessions
+    from hermes_cli.version_info import prewarm_version_info
 
+    prewarm_version_info()  # git waits overlap runtime preparation; web_server joins the result
     listener = BootstrapListener(args.host, args.port) if headless else nullcontext(None)
     with listener as bootstrap_listener:
         with early_sessions(headless=headless, isolated=getattr(args, 'isolated', False)) as owner:

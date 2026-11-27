@@ -194,6 +194,7 @@ def snapshot(ledger, *, deadline: float, progress=None) -> DiagnosticSnapshot:
     try:
         if progress is not None:
             progress.set_phase('inventory')
+        ledger._settle(deadline=deadline)
         ledger._inventory_modules(deadline=deadline)
         if time.monotonic() >= deadline:
             raise TimeoutError('snapshot_deadline')

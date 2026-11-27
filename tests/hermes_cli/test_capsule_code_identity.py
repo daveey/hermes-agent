@@ -28,11 +28,11 @@ def test_bootstrap_scans_only_installed_supported_routes(repo, monkeypatch, rout
     from hermes_cli import code_attestation, local_work
     monkeypatch.setattr(hermes_bootstrap, '_root', repo)
     calls = []
-    capture = identity.record_capsule_boot_identity
+    capture = identity.begin_capsule_boot_identity
     def record(root):
         calls.append(root)
         capture(root)
-    monkeypatch.setattr(identity, 'record_capsule_boot_identity', record)
+    monkeypatch.setattr(identity, 'begin_capsule_boot_identity', record)
     monkeypatch.setattr(code_attestation, 'install', lambda *args: None)
     monkeypatch.setattr(code_attestation, 'route_report', lambda: {'route': route})
     monkeypatch.setattr(local_work, 'install', lambda: None)

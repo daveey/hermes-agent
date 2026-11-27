@@ -5,6 +5,7 @@ fixtures but never establishes bootstrap provenance. Source manifests are review
 inputs, not permission to declare arbitrary code passive. No third-party imports.
 """
 import ast
+import atexit
 import base64
 import csv
 import dis
@@ -16,7 +17,7 @@ import re
 import subprocess
 import sys
 import sysconfig
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from itertools import islice
 import threading
 import time
@@ -68,6 +69,11 @@ MAX_UNITS = 16384
 MAX_LOADED_CODE = 1 << 18  # code objects kept for executed-code lookups; the gateway graph uses ~70k
 MAX_CACHE_ENTRIES = 32
 MAX_CACHE_BYTES = 8 * 1024 * 1024
+# Module executions whose source comparison is still owed. Every ledger read settles
+# them first, so a pending comparison is never reported as verified.
+MAX_PENDING = 8192
+SETTLE_DELAY = 6.0  # seconds after the first deferral before the background settler works
+SETTLE_DUTY = 0.25  # share of one core the settler may take from the importing thread
 _FROZEN_ALIASES: dict[str, str] = {"importlib._bootstrap": "_frozen_importlib",
                    "importlib._bootstrap_external": "_frozen_importlib_external"}
 
@@ -618,6 +624,12 @@ class Attestation:
         self._generation = 0
         self._units = []
         self._known = {}  # identity-keyed strong references: no id recycling
+        self._pending = deque()  # FIFO of [module code, producer code, settled]
+        self._pending_index = {}  # id(nested code) -> its pending entry (entry holds the reference)
+        self._settler = None
+        self._stopping = self._exit_hooked = False
+        self._deferring = False  # set only by defer_comparisons(), never cleared
+        self._demand = threading.Event()  # a bounded reader ran out of budget: settle at full speed
         self._components = {}
         self._seed = []
         self._generators = {}
@@ -703,6 +715,11 @@ class Attestation:
         self._lock = threading.RLock()
         self._tls = threading.local()
         self._known = {}
+        self._pending = deque()
+        self._pending_index = {}
+        self._settler = None
+        self._stopping = self._exit_hooked = False
+        self._demand = threading.Event()
         self.mark_unknown("fork-inherited-attestation")
 
     def mark_unknown(self, reason):
@@ -832,6 +849,7 @@ class Attestation:
         """Register BEFORE executing a reviewed extension; digests are relative sha256s."""
         root = Path(path).resolve()
         with self._lock:
+            self._settle_under(root)
             if component in self._components or any(
                     root.is_relative_to(r) or r.is_relative_to(root)
                     for r, _, _ in self._components.values()):
@@ -912,15 +930,72 @@ class Attestation:
 
     def _origin(self, producer):
         """(component, None) for an attested caller, else (None, unattested caller file)."""
+        return self._origin_codes(self._caller_codes(producer))
+
+    @staticmethod
+    def _caller_codes(producer):
+        codes = []
         frame = producer.f_back
         while frame is not None:
-            known = self._known.get(id(frame.f_code))
-            if known is not None and known[0] is frame.f_code:
-                return known[1], None
-            if not self._interpreter_code(frame.f_code):
-                return None, frame.f_code.co_filename
+            codes.append(frame.f_code)
             frame = frame.f_back
+        return tuple(codes)
+
+    def _origin_codes(self, codes):
+        for code in codes:
+            self._settle_code(code)
+            known = self._known.get(id(code))
+            if known is not None and known[0] is code:
+                return known[1], None
+            if not self._interpreter_code(code):
+                return None, code.co_filename
         return None, "<top>"
+
+    def _deferred_origin(self, descriptor, codes):
+        """Queue a generator's origin, fixed to the modules executed so far.
+
+        Each caller is marked now as executed-by-now or not, so a module that
+        executes later can never vouch for this call. The marked callers are
+        read after exactly their own comparison.
+        """
+        index, known = self._pending_index, self._known
+        marks = tuple((code, id(code) in index or id(code) in known) for code in codes)
+        return self._enqueue(["origin", (descriptor, marks), False, None])
+
+    def _settled_origin(self, descriptor, marks):
+        for code, executed in marks:
+            if executed:
+                self._settle_code(code)
+                known = self._known.get(id(code))
+                if known is not None and known[0] is code:
+                    return known[1]
+            if not self._interpreter_code(code):
+                return self._generated_origin(descriptor, None, code.co_filename)
+        return self._generated_origin(descriptor, None, "<top>")
+
+    def _generated_origin(self, descriptor, codes, unattested=None):
+        origin = None
+        if codes is not None:
+            origin, unattested = self._origin_codes(codes)
+        if origin is None:
+            # Name the unattested caller: a dependency-origin generation stays
+            # unknown, but is distinguishable from a core/plugin escape. Its
+            # receipt is still kept (origin None) so the paired exec is consumed
+            # as already-unknown instead of being misreported as receipt-missing.
+            self._extension_unknown("generated-origin-unknown:" + descriptor.name + ":" + str(unattested), unattested)
+        return origin
+
+    def _generated_unit(self, descriptor, site, code, source, filename, mode, origin):
+        if origin is None:
+            return  # never recorded as an attested unit; the unknown is latched
+        if not _same(code, self._compiled(source, filename, mode)):
+            self.mark_unknown("generated-code-mismatch:" + descriptor.name)
+            return
+        extra = {"producer_distribution": descriptor.distribution} if "dist" in descriptor.distribution else {}
+        self._record(code, origin, _sha(source), filename=filename,
+                     generator=descriptor.name, producer_sha256=descriptor.source_sha256,
+                     producer_site=site, interpreter_sha256=descriptor.distribution.get('binary_sha256'),
+                     **extra)
 
     def _generated_event(self, event, args, frame):
         descriptor = self._generators.get(id(frame.f_code))
@@ -957,13 +1032,11 @@ class Attestation:
                 self.mark_unknown("generated-receipt-overflow:" + descriptor.name)
                 return True
             source = source.encode() if isinstance(source, str) else source
-            origin, unattested = self._origin(frame)
-            if origin is None:
-                # Name the unattested caller: a dependency-origin generation stays
-                # unknown, but is distinguishable from a core/plugin escape. Its
-                # receipt is still kept (origin None) so the paired exec is consumed
-                # as already-unknown instead of being misreported as receipt-missing.
-                self._extension_unknown("generated-origin-unknown:" + descriptor.name + ":" + str(unattested), unattested)
+            codes = self._caller_codes(frame)
+            if self._deferring and os.getpid() == self._pid:
+                origin = self._deferred_origin(descriptor, codes)
+            else:
+                origin = self._generated_origin(descriptor, codes)
             if (len(source) > MAX_SOURCE or len(receipts) >= 8 or
                     sum(len(r[2]) for r in receipts) + len(source) > 2 * MAX_SOURCE):
                 self.mark_unknown("generated-receipt-overflow:" + descriptor.name)
@@ -977,17 +1050,17 @@ class Attestation:
             return True
         receipts.remove(receipt)
         _, _, source, filename, mode, origin = receipt
-        if origin is None:
-            return True  # never recorded as an attested unit; the unknown is latched
         code = args[0]
-        if not _same(code, self._compiled(source, filename, mode)):
-            self.mark_unknown("generated-code-mismatch:" + descriptor.name)
-            return True
-        extra = {"producer_distribution": descriptor.distribution} if "dist" in descriptor.distribution else {}
-        self._record(code, origin, _sha(source), filename=filename,
-                     generator=descriptor.name, producer_sha256=descriptor.source_sha256,
-                     producer_site=site, interpreter_sha256=descriptor.distribution.get('binary_sha256'),
-                     **extra)
+        if isinstance(origin, list):
+            if isinstance(code, CodeType):
+                entry = self._enqueue(
+                    ["generated", (descriptor, site, code, source, filename, mode, origin), False, None])
+                for nested in _codes(code):
+                    self._pending_index.setdefault(id(nested), entry)
+                return True
+            self._settle_entry(origin)
+            origin = origin[3]
+        self._generated_unit(descriptor, site, code, source, filename, mode, origin)
         return True
 
     def _forwardref_event(self, event, args, frame, descriptor):
@@ -1097,6 +1170,9 @@ class Attestation:
                 if event == "ctypes.dlopen":
                     self._native_load(args[0], sys._getframe(1))
                     return
+                # A pending producer module registers its generator descriptors
+                # only when settled: do that before classifying its output.
+                self._settle_code(sys._getframe(1).f_code)
                 if self._pth_event(event, args, sys._getframe(1)):
                     return
                 if self._generated_event(event, args, sys._getframe(1)):
@@ -1104,7 +1180,7 @@ class Attestation:
                 if event == "exec" and self._launcher_event(args[0], sys._getframe(1)):
                     return
                 if event == "exec":
-                    self._observe(args[0], sys._getframe(1))
+                    (self._defer if self._deferring else self._observe)(args[0], sys._getframe(1))
         except Exception as exc:  # health: allow BLE001 -- diagnostic boundary latches unknown; must never alter observed execution
             # A diagnostic failure must not affect the production execution.
             self.mark_unknown("audit-error:" + type(exc).__name__)
@@ -1134,6 +1210,8 @@ class Attestation:
             root = Path(site_dir).resolve()
         except (OSError, ValueError):
             root = None
+        with self._lock:
+            self._settle()  # executions so far are judged against the roots they ran under
         self._tls.busy = True
         try:
             with self._lock:
@@ -1243,20 +1321,21 @@ class Attestation:
                     self.mark_unknown("prehook-unrooted:" + hook)
 
     def _dependency_exec(self, code, producer=None):
+        producer = getattr(producer, "f_code", producer)
         filename = code.co_filename
         try:
             path = Path(filename).resolve()
         except (OSError, ValueError):
             path = None
         if path is None or filename.startswith("<") or not self._deps.indexed(path):
-            provenance = (producer.f_code.co_filename if filename.startswith("<") and producer is not None
+            provenance = (producer.co_filename if filename.startswith("<") and producer is not None
                           else filename)
             self._extension_unknown("unrooted-exec:" + filename, provenance)
             if producer is not None and len(self._unknown_detail) < MAX_DEP_REPORT:
                 # Diagnosis only (which code produced it); the unknown stays latched.
                 self._unknown_detail.setdefault("unrooted-exec:" + filename, set()).add(
-                    f"{producer.f_code.co_filename}:{producer.f_code.co_qualname}")
-                self._unknown_producer_source("unrooted-exec:" + filename, producer.f_code)
+                    f"{producer.co_filename}:{producer.co_qualname}")
+                self._unknown_producer_source("unrooted-exec:" + filename, producer)
             return
         if not self._dep_ready():
             return
@@ -1317,6 +1396,7 @@ class Attestation:
         if caller is None or caller.f_code.co_qualname not in allowed:
             return None
         code = caller.f_code
+        self._settle_code(code)
         known = self._known.get(id(code))
         if (code is not descriptor.attrs_codes.get(code.co_qualname) or
                 known is None or known[0] is not code):
@@ -1411,6 +1491,7 @@ class Attestation:
             frame = frame.f_back
         if frame is None:
             return None
+        self._settle_code(frame.f_code)
         known = self._known.get(id(frame.f_code))
         if known is not None and known[0] is frame.f_code:
             kind = self._components.get(known[1], (None, None, None))[1]
@@ -1445,6 +1526,7 @@ class Attestation:
         An installer receipt for the producer does not attest its output. Keep
         every unknown and the closed generator table unchanged.
         """
+        self._settle_code(code)
         known = self._known.get(id(code))
         if known is None or known[0] is not code:
             return
@@ -1463,6 +1545,7 @@ class Attestation:
     def dependency_receipts(self):
         """Receipts actually used: trusted by installer receipt, not audited, no coverage."""
         with self._lock:
+            self._settle()
             return {"trust": DEPENDENCY_TRUST, "roots": [str(r) for r in self._deps.roots],
                     "dists": self._deps.receipts(),
                     "units": [dict(u) for u in self._dep_units.values()],
@@ -1529,7 +1612,136 @@ class Attestation:
         return _same(code, expected) if module else any(
             _same(code, candidate) for candidate in _codes(expected))
 
+    def defer_comparisons(self):
+        """Let this process compare executed module code after it executes (see ``_defer``)."""
+        with self._lock:
+            self._deferring = True
+
+    def _defer(self, code, producer):
+        """Queue one module execution for the comparison ``_observe`` performs.
+
+        Only the time of the comparison moves. The entry keeps the executed code
+        object itself, the comparison still reads fresh source bytes, and every
+        ledger read settles the queue first: nothing unsettled is ever reported.
+        """
+        if not isinstance(code, CodeType) or os.getpid() != self._pid:
+            self._observe(code, producer)
+            return
+        entry = self._enqueue(["module", (code, getattr(producer, "f_code", None)), False, None])
+        index = self._pending_index
+        for nested in _codes(code):
+            index.setdefault(id(nested), entry)
+
+    def _enqueue(self, entry):
+        # [kind, payload, settled, result]; the payload holds every code reference.
+        if len(self._pending) >= MAX_PENDING:
+            self._settle()
+        self._pending.append(entry)
+        if self._settler is None and not self._stopping:
+            settler = threading.Thread(
+                target=self._settle_slowly, args=(os.getpid(),),
+                name="code-attestation-settle", daemon=True)
+            settler.start()
+            self._settler = settler
+            if not self._exit_hooked:
+                self._exit_hooked = True
+                atexit.register(self._stop_settling)
+        return entry
+
+    def _stop_settling(self):
+        # Interpreter exit freezes daemon threads wherever they are. A settler frozen
+        # inside the ledger lock would hang every audited event of the teardown, so it
+        # is stopped and joined while threads still run. What is still owed stays owed.
+        with self._lock:
+            self._stopping = True
+            settler = self._settler
+        self._demand.set()
+        if settler is not None and settler is not threading.current_thread() and os.getpid() == self._pid:
+            settler.join()
+
+    def _settle_under(self, root):
+        """Settle pending modules executed from under ``root`` before it becomes a component.
+
+        Their comparison then sees the roots they actually ran under: registration
+        after execution stays unrooted, exactly as when compared inline.
+        """
+        below = os.path.join(str(root), "")
+        for entry in tuple(self.__dict__.get("_pending", ())):
+            if entry[0] != "module" or entry[2]:
+                continue
+            if entry[3] is None:
+                filename = entry[1][0].co_filename
+                try:
+                    entry[3] = "" if filename.startswith("<") else str(Path(filename).resolve())
+                except (OSError, ValueError):
+                    entry[3] = ""
+            if entry[3].startswith(below):
+                self._settle_entry(entry)
+
+    def _settle_entry(self, entry):
+        if entry[2]:
+            return
+        entry[2] = True
+        kind, payload = entry[0], entry[1]
+        entry[1] = None
+        busy = getattr(self._tls, "busy", False)
+        self._tls.busy = True
+        try:
+            index = self._pending_index
+            if kind != "origin":
+                for nested in _codes(payload[0] if kind == "module" else payload[2]):
+                    if index.get(id(nested)) is entry:
+                        del index[id(nested)]
+            if kind == "module":
+                self._observe(*payload)
+            elif kind == "origin":
+                entry[3] = self._settled_origin(*payload)
+            else:
+                self._settle_entry(payload[6])
+                self._generated_unit(*payload[:6], payload[6][3])
+        except Exception as exc:  # health: allow BLE001 -- diagnostic boundary latches unknown; must never alter observed execution
+            self.mark_unknown("audit-error:" + type(exc).__name__)
+        except BaseException as exc:
+            # The module already ran: an interrupted comparison is unknown, never skipped.
+            self.mark_unknown("audit-error:" + type(exc).__name__)
+            raise
+        finally:
+            self._tls.busy = busy
+
+    def _settle_code(self, code):
+        """Settle the pending module that owns ``code`` before its identity is read."""
+        # Callers hold the ledger lock. Bare fixtures have no queue.
+        entry = self.__dict__.get("_pending_index", {}).get(id(code))
+        if entry is not None:
+            self._settle_entry(entry)
+
+    def _settle(self, *, deadline=None):
+        """Settle every pending comparison in execution order; a deadline keeps the rest pending."""
+        # Callers hold the ledger lock. Bare fixtures have no queue.
+        pending = self.__dict__.get("_pending")
+        if pending and deadline is not None:
+            self._demand.set()  # a bounded reader waits on the backlog: stop pacing it
+        while pending:
+            _check_inventory_deadline(deadline)
+            self._settle_entry(pending.popleft())
+
+    def _settle_slowly(self, pid):
+        # Background only: bounded share of the interpreter, one comparison per lock hold.
+        demand = self._demand
+        demand.wait(SETTLE_DELAY)
+        while os.getpid() == pid and self._pid == pid:
+            began = time.perf_counter()
+            with self._lock:
+                if not self._pending or self._stopping:
+                    self._settler = None
+                    demand.clear()  # the next backlog is paced again
+                    return
+                self._settle_entry(self._pending.popleft())
+            if not demand.is_set():
+                time.sleep(max(0.001, (time.perf_counter() - began) * (1 / SETTLE_DUTY - 1)))
+
     def _observe(self, code, producer=None):
+        producer = getattr(producer, "f_code", producer)
         owner = self._owner(code.co_filename)
         if owner is None:
             filename = code.co_filename
@@ -1578,6 +1790,7 @@ class Attestation:
     def attest_code(self, code):
         """Identity-bind a currently loaded callback, never trust filename alone."""
         with self._lock:
+            self._settle_code(code)
             known = self._known.get(id(code))
             if known is not None and known[0] is code:
                 return True
@@ -1586,6 +1799,7 @@ class Attestation:
 
     def executed_units(self):
         with self._lock:
+            self._settle()
             return tuple(dict(unit) for unit in self._units)
 
     def trusted_bootstrap_seed(self):
@@ -1601,6 +1815,7 @@ class Attestation:
 
     def unknowns(self):
         with self._lock:
+            self._settle()
             self._inventory_modules()
             return tuple(sorted(self._unknown))
 
@@ -1610,12 +1825,15 @@ class Attestation:
         Consumers must reject pending/unsupported provenance, not manufacture a
         ledger after startup or filter observational unknowns into permission.
         """
+        if deadline is not None and self.__dict__.get("_pending"):
+            self._demand.set()  # even a reader that is already out of budget is waiting
         _check_inventory_deadline(deadline)
         acquired = (self._lock.acquire() if deadline is None else
                     self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())))
         if not acquired:
             raise TimeoutError('code attestation inventory budget exhausted')
         try:
+            self._settle(deadline=deadline)
             _check_inventory_deadline(deadline)
             self._inventory_modules(deadline=deadline)
             _check_inventory_deadline(deadline)
@@ -1632,10 +1850,12 @@ class Attestation:
     def latched_unknowns(self):
         """The latched unknowns without a module inventory (cheap: polled while measuring)."""
         with self._lock:
+            self._settle()
             return tuple(sorted(self._unknown))
 
     def generation(self):
         with self._lock:
+            self._settle()
             return self._generation
 
 
@@ -1694,6 +1914,14 @@ def register_dependency_environment(site_dir):
     if _installed is None:
         return False
     return _installed.register_dependency_environment(site_dir)
+
+
+def defer_comparisons():
+    """Opt this process into deferred module comparisons; False when nothing is installed."""
+    if _installed is None:
+        return False
+    _installed.defer_comparisons()
+    return True
 
 
 def _check_inventory_deadline(deadline):

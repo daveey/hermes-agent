@@ -574,13 +574,17 @@ def _install_code_attestation() -> None:
         boot_sha = fingerprint.rsplit(":", 1)[-1] if fingerprint else None
         local_work.install()
         code_attestation.install(_root, boot_sha)
+        if sys.argv[1:2] == ["serve"]:
+            # The sessions backend must answer within seconds of its unit start. Its module
+            # comparisons are settled after it serves, and before any ledger read.
+            code_attestation.defer_comparisons()
         # Only supported owner/worker launch routes need the strict Git fence.
         # Capture before dependencies or application code can load, retaining
         # the original boot fingerprint; the installed ledger is never rebuilt.
         if code_attestation.route_report()['route'] in (
                 'managed-stub', 'managed-stub-relaunch', 'console-main-first',
                 'managed-worker-stub'):
-            git_fingerprint.record_capsule_boot_identity(_root)
+            git_fingerprint.begin_capsule_boot_identity(_root)
     except Exception:  # health: allow BLE001 -- observation must never fail a launch; a missing installation is refused downstream
         return
 

@@ -94,3 +94,22 @@ than hiding the legacy answer. OS scheduling or synchronous thread-start stalls
 cannot be hard-preempted by a Python deadline; this is not a hard-real-time
 promise. Owner launch still performs full synchronous verification, without
 filtering the ledger's unknowns.
+
+## Deferred comparison in the sessions backend
+
+`hermes serve` must answer within seconds of its unit start, so it is the one
+process that compares executed module code after the module has run instead of
+during its import. Nothing else changes: the ledger keeps the executed code
+object, reads the source and its approval fresh, recompiles and requires the
+same exact code equality. Every ledger read (`unknowns`, `integrity_observation`,
+`executed_units`, `dependency_receipts`, `attest_code`, `generation`, snapshots)
+first settles what is owed, so an uncompared module is never reported as
+verified, and a deadline-bound read that cannot settle in time raises instead of
+answering. A background thread settles the backlog at a bounded share of one
+core once startup is past.
+
+Two consequences follow. Source is read at comparison time, so a file that
+changes between execution and comparison is reported unknown even when the bytes
+that ran were approved. And an executed module is judged against the component
+roots registered when it ran: registering a root still has to happen before its
+code executes. All other processes compare inline.

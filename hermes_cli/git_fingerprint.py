@@ -99,6 +99,8 @@ def process_boot_fingerprint(root) -> str | None:
 # Capsule compatibility is stricter than the ordinary restart-ignore heuristic.
 # A missing/dirty initial observation is sticky for this process, never adopted late.
 _capsule_boot: dict[str, str | None] = {}
+# Boot captures still running: the status read started at bootstrap, its result is not in yet.
+_capsule_capturing: dict[str, object] = {}
 
 
 def _capsule_clean_sha(root) -> str | None:
@@ -107,6 +109,12 @@ def _capsule_clean_sha(root) -> str | None:
     Bracket the bounded status read with HEAD reads. This is an operational update
     fence, not protection against a same-uid attacker rewriting and restoring code.
     """
+    started = _capsule_status_start(root)
+    return _capsule_status_finish(started) if started is not None else None
+
+
+def _capsule_status_start(root):
+    """Read HEAD, check the quiescence markers and start the status process; None is unknown."""
     import re
     import subprocess
     import threading
@@ -128,13 +136,25 @@ def _capsule_clean_sha(root) -> str | None:
             return None
         # Read at most one byte: any output means dirty. A timer bounds even a
         # Git process which never closes stdout; no arbitrary status buffer.
-        with subprocess.Popen(
-                ['git', '-C', str(root), 'status', '--porcelain=v1', '-z', '--untracked-files=normal'],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                env={'PATH': os.defpath, 'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
-                     'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull}) as process:
-            timer = threading.Timer(2, process.kill)
-            timer.start()
+        process = subprocess.Popen(
+            ['git', '-C', str(root), 'status', '--porcelain=v1', '-z', '--untracked-files=normal'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={'PATH': os.defpath, 'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
+                 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull})
+        timer = threading.Timer(2, process.kill)
+        timer.start()
+        return root, before, sha, process, timer
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _capsule_status_finish(started) -> str | None:
+    """Wait for a started status read and bracket it with the second HEAD read."""
+    import subprocess
+
+    root, before, sha, process, timer = started
+    try:
+        with process:
             try:
                 dirty = process.stdout.read(1)
                 if dirty:
@@ -150,13 +170,50 @@ def _capsule_clean_sha(root) -> str | None:
 def record_capsule_boot_identity(root) -> None:
     """Bootstrap-only capture; repeated calls cannot repair an unknown/dirty boot."""
     key = _key(root)
-    if key not in _capsule_boot:
+    if key not in _capsule_boot and key not in _capsule_capturing:
         fingerprint = process_boot_fingerprint(root)
         sha = _capsule_clean_sha(root)
         _capsule_boot[key] = sha if fingerprint and fingerprint.rsplit(':', 1)[-1] == sha else None
 
 
+def begin_capsule_boot_identity(root) -> None:
+    """Start the bootstrap capture now and let the launch continue while Git reads the tree.
+
+    HEAD is read, the quiescence markers are checked and the status process is started on
+    this thread, before dependencies or application code load, exactly as
+    ``record_capsule_boot_identity`` does. Only waiting for Git moves: readers join the
+    capture, and one that cannot finish leaves the boot unknown for this process.
+    """
+    import threading
+
+    key = _key(root)
+    if key in _capsule_boot or key in _capsule_capturing:
+        return
+    fingerprint = process_boot_fingerprint(root)
+    pid = os.getpid()
+    started = _capsule_status_start(root)
+
+    def capture():
+        sha = _capsule_status_finish(started) if started is not None else None
+        if os.getpid() == pid:
+            _capsule_boot.setdefault(key, sha if fingerprint and fingerprint.rsplit(':', 1)[-1] == sha else None)
+
+    thread = threading.Thread(target=capture, name='capsule-boot-identity', daemon=True)
+    _capsule_capturing[key] = thread
+    thread.start()
+
+
+def _capsule_boot_sha(key) -> str | None:
+    thread = _capsule_capturing.get(key)
+    if thread is not None:
+        thread.join()
+        # A capture that did not record (a fork lost its thread) is unknown, never retried.
+        _capsule_boot.setdefault(key, None)
+        _capsule_capturing.pop(key, None)
+    return _capsule_boot.get(key)
+
+
 def capsule_code_sha(root) -> str | None:
     """Strict boot/disk identity for capsule launches; absence is not proof."""
-    boot = _capsule_boot.get(_key(root))
+    boot = _capsule_boot_sha(_key(root))
     return boot if boot and _capsule_clean_sha(root) == boot else None

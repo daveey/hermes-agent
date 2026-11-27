@@ -12,7 +12,9 @@ Resolution order:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import threading
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -267,6 +269,17 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
 # --- Cache + public API -----------------------------------------------------
 
 _cached_version_info: VersionInfo | None = None
+_version_info_lock = threading.Lock()
+
+
+def _fresh_version_info_lock() -> None:
+    # A fork during a resolution would leave the child's copy held forever.
+    global _version_info_lock
+    _version_info_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_fresh_version_info_lock)
 
 
 def _reset_version_info_cache() -> None:
@@ -295,22 +308,37 @@ def get_version_info() -> VersionInfo:
     global _cached_version_info
     if _cached_version_info is not None:
         return _cached_version_info
+    # One resolution at a time: a caller arriving during ``prewarm_version_info``
+    # waits for that read instead of starting the same git walk again.
+    with _version_info_lock:
+        if _cached_version_info is not None:
+            return _cached_version_info
 
-    # 1. Install stamp (packaged builds: Docker, Nix)
-    info = _stamp_or_none()
+        # 1. Install stamp (packaged builds: Docker, Nix)
+        info = _stamp_or_none()
 
-    # 2. Live git (source/dev installs)
-    if info is None:
-        repo_dir = _resolve_repo_dir()
-        if repo_dir is not None:
-            info = _git_version_info(repo_dir)
+        # 2. Live git (source/dev installs)
+        if info is None:
+            repo_dir = _resolve_repo_dir()
+            if repo_dir is not None:
+                info = _git_version_info(repo_dir)
 
-    # 3. Unknown — no stamp, no git
-    if info is None:
-        info = VersionInfo("unknown", "unknown", None, None, None, "unknown")
+        # 3. Unknown — no stamp, no git
+        if info is None:
+            info = VersionInfo("unknown", "unknown", None, None, None, "unknown")
 
-    _cached_version_info = info
-    return info
+        _cached_version_info = info
+        return info
+
+
+def prewarm_version_info() -> None:
+    """Resolve the identity on a daemon thread while the caller keeps importing.
+
+    A source checkout pays several git subprocesses for it. ``serve`` needs the
+    answer when it builds its app, so it starts the read first and joins it there.
+    """
+    if _cached_version_info is None:
+        threading.Thread(target=get_version_info, name="version-info-prewarm", daemon=True).start()
 
 
 def hermes_user_agent(product: str = "hermes-cli") -> str:
