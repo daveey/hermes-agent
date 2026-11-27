@@ -1392,12 +1392,16 @@ def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
     path = _main_db_file(conn)
     if path and Path(path).parent.name == SHADOW_DIR:
         return
+    # Primary files also receive paged canonical tasks. A versioned task is
+    # not evidence of pre-ledger local execution, even outside sync-shadow.
+    # Preserve unversioned legacy backfill and never rewrite existing custody.
+    unversioned = " AND sync_version IS NULL" if "sync_version" in _column_names(conn, "tasks") else ""
     with write_txn(conn):
         inflight = conn.execute(
             "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
             "       max_runtime_seconds, last_heartbeat_at, started_at "
             "FROM tasks "
-            "WHERE status = 'running' AND current_run_id IS NULL"
+            "WHERE status = 'running' AND current_run_id IS NULL" + unversioned
         ).fetchall()
         for row in inflight:
             started = row["started_at"] or int(time.time())
