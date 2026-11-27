@@ -45,7 +45,8 @@ def settle_unsubmitted(conn, task_id, reservation, request_id, rc, error):
     """Release only this attempt after a known pre-enqueue refusal and a readable absent row."""
     prefixes = ('canonical_home_schema_unavailable:', 'canonical_home_origin_required:',
                 'origin_creator_required:', 'origin_assignee_required:', 'origin_request_invalid:',
-                'origin_forward_creator_required:', 'create_option_unsupported:')
+                'origin_forward_creator_required:', 'create_option_unsupported:',
+                'create_option_unknown:', 'create_option_invalid:')
     if not ((rc == 2 and error.startswith(prefixes)) or
             (rc == 127 and error.startswith('hub_exec_failed:'))):
         return

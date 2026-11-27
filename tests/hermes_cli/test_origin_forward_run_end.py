@@ -174,6 +174,9 @@ def test_ending_wins_before_submission(pending, monkeypatch):
     'origin_assignee_required: supply --assignee for tracked creation',
     'origin_forward_creator_required: foreign origins require creator owner and run',
     'create_option_unsupported: unsupported option',
+    'create_option_unknown: self_work',
+    'create_option_invalid: payload too large',
+    'create_option_invalid: malformed option value',
 ])
 def test_prequeue_refusal_releases_reservation(pending, monkeypatch, reason):
     from hermes_cli import kanban_placement as placement
@@ -207,8 +210,10 @@ def test_exec_failure_releases_reservation(pending, monkeypatch):
         assert kb.complete_task(conn, task, summary='exec never started', expected_run_id=run)
 
 
+@pytest.mark.parametrize('reason', ['origin_request_invalid: invalid qualified identity or request ID',
+                                    'create_option_unknown: self_work', 'create_option_invalid: payload too large'])
 @pytest.mark.parametrize('case', ['timeout', 'unknown', 'queued', 'unreadable', 'concurrent', 'retry'])
-def test_uncertain_or_other_submission_still_holds_run(pending, monkeypatch, case):
+def test_uncertain_or_other_submission_still_holds_run(pending, monkeypatch, case, reason):
     from hermes_cli import kanban_placement as placement
     from hermes_cli.kanban_origin_forward_run_end import reserve
     task, run, path, body = pending
@@ -216,7 +221,6 @@ def test_uncertain_or_other_submission_still_holds_run(pending, monkeypatch, cas
         db.execute('DELETE FROM sent')
     monkeypatch.setattr(placement, 'hub_carries_options', lambda cli: True)
     monkeypatch.setattr(placement, 'remote_state', lambda rid: None)
-    reason = 'origin_request_invalid: invalid qualified identity or request ID'
     def courier(argv):
         rid = argv[argv.index('--id') + 1]
         if case == 'queued':
