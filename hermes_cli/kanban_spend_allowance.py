@@ -110,7 +110,5 @@ def grant_refusal(conn: sqlite3.Connection, task_id: str, gate) -> Optional[str]
     if current is None:
         # A paged/removed local budget cannot turn an actual portable debit into legacy authority.
         return REFUSAL if getattr(lease, "spend_allowance", None) is not None else None
-    if current == BOARD:
-        if lease is not None and evidence_ok(expected(conn, task_id), getattr(lease, "spend_allowance", None)):
-            return None
-    return REFUSAL
+    # ``unproven`` has no expected identity and no lease has no evidence: evidence_ok refuses both.
+    return None if evidence_ok(expected(conn, task_id), getattr(lease, "spend_allowance", None)) else REFUSAL

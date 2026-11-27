@@ -77,7 +77,7 @@ def sweep(conn):
     state = sync.sync_state(conn)
     if not state:
         return []
-    path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    path = conn.execute("SELECT file FROM pragma_database_list WHERE name='main'").fetchone()[0]
     key = (path, state["board_id"])
     now = time.monotonic()
     after, next_at = _CURSORS.get(key, ("", 0.0))

@@ -1,0 +1,295 @@
+"""Guard boundaries of home allowance maintenance, claim admission and the Board allowance basis. [daveey]
+
+Each case pins one predicate the broader suites leave masked by a neighbouring check: the order of
+the in-transaction claim refusals, the races between an allowance read and its write, and the
+bounded pacing state. Fakes stand in only for the Board transport and the race being forced.
+"""
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+import pytest
+
+from hermes_cli import kanban_allowance_maintenance as maintenance
+from hermes_cli import kanban_allowance_observation as observation
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_spend_allowance as allowance
+from tests.hermes_cli import test_kanban_allowance_maintenance as maint_cases
+from tests.hermes_cli import test_kanban_allowance_observation as reads
+from tests.hermes_cli import test_kanban_allowance_supersession as supersession
+from tests.hermes_cli import test_kanban_spend_allowance as fixtures
+
+kanban_home = fixtures.kanban_home
+primary = fixtures.primary
+lease_client = fixtures.lease_client
+
+
+@pytest.fixture(autouse=True)
+def isolated_cursors():
+    maintenance._CURSORS.clear()
+    yield
+    maintenance._CURSORS.clear()
+
+
+def _events(conn, tid):
+    return conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (tid,)).fetchone()[0]
+
+
+# -- maintenance: the pre-write fences each hold on their own ----------------------------------------------
+
+def test_foreign_copy_never_opens_the_exhaustion_write(primary, monkeypatch):
+    from hermes_cli import kanban_wake_check
+    tid = maint_cases._prepare(primary, monkeypatch)
+    observed = observation.read(primary, tid)
+    monkeypatch.setattr(kanban_wake_check, "foreign_copy", lambda conn, task: True)
+    monkeypatch.setattr(maintenance, "_hold", lambda *a: pytest.fail("a foreign copy reached the write"))
+    assert not maintenance.triage(primary, tid, observed)
+
+
+def test_foreign_copy_never_opens_the_stuck_write(primary, monkeypatch):
+    from hermes_cli import kanban_wake_check
+    tid, _, _ = supersession._decided(primary, monkeypatch)
+    held = observation.stuck(primary, tid)
+    assert held is not None
+    monkeypatch.setattr(kanban_wake_check, "foreign_copy", lambda conn, task: True)
+    monkeypatch.setattr(maintenance, "_hold", lambda *a: pytest.fail("a foreign copy reached the write"))
+    assert not maintenance.triage_stuck(primary, tid, held)
+
+
+def test_copy_that_turns_foreign_between_read_and_write_is_not_triaged(primary, monkeypatch):
+    from hermes_cli import kanban_wake_check
+    tid = maint_cases._prepare(primary, monkeypatch)
+    observed = observation.read(primary, tid)
+    answers = iter([False, True])  # local when read, foreign inside the write transaction
+    monkeypatch.setattr(kanban_wake_check, "foreign_copy", lambda conn, task: next(answers))
+    before = _events(primary, tid)
+    assert not maintenance.triage(primary, tid, observed)
+    assert kb.get_task(primary, tid).status == "ready"
+    assert _events(primary, tid) == before
+
+
+def test_an_already_pending_decision_keeps_its_own_episode(primary, monkeypatch):
+    from hermes_cli import kanban_spend_decision as decision
+    tid = maint_cases._prepare(primary, monkeypatch)
+    observed = observation.read(primary, tid)
+    monkeypatch.setattr(decision, "pending", lambda conn, task: True)
+    before = _events(primary, tid)
+    assert not maintenance.triage(primary, tid, observed)
+    assert kb.get_task(primary, tid).status == "ready"
+    assert _events(primary, tid) == before
+
+
+def test_non_primary_board_with_sync_identity_is_never_swept(primary, monkeypatch):
+    maint_cases._prepare(primary, monkeypatch)
+    assert fixtures.sync.sync_state(primary)  # the identity survives; only the mode differs
+    monkeypatch.setattr(fixtures.sync, "board_mode", lambda conn: "shadow")
+    monkeypatch.setattr(observation, "read", lambda *a, **kw: pytest.fail("non-primary sweep read the Board"))
+    assert maintenance.sweep(primary) == []
+    assert not maintenance._CURSORS
+
+
+def test_pacing_state_stays_bounded(primary, monkeypatch):
+    maint_cases._prepare(primary, monkeypatch, used=0, remaining=10)
+    monkeypatch.setattr(maintenance, "MAX_BOARDS", 1)
+    maintenance._CURSORS[("stale.db", "other-board")] = ("", 0.0)
+    maintenance.sweep(primary)
+    key = (primary.execute("SELECT file FROM pragma_database_list WHERE name='main'").fetchone()[0],
+           fixtures.sync.sync_state(primary)["board_id"])
+    assert list(maintenance._CURSORS) == [key]
+
+
+def test_deadline_ends_the_pass_and_the_cursor_resumes_rather_than_wraps(primary, monkeypatch):
+    tids = sorted(maint_cases._prepare(primary, monkeypatch, used=0, remaining=10) for _ in range(3))
+    clock = [100.0]
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: clock[0])
+    reads_seen = []
+
+    def slow_read(conn, tid, **kw):
+        reads_seen.append(tid)
+        clock[0] += observation.READ_SECONDS + 1  # this one read spends the whole pass's budget; answers nothing
+
+    monkeypatch.setattr(observation, "read", slow_read)
+    monkeypatch.setattr(observation, "stuck", lambda *a, **kw: None)
+    assert maintenance.sweep(primary) == []
+    assert reads_seen == tids[:1]
+    clock[0] += maintenance.CADENCE
+    maintenance.sweep(primary)
+    assert reads_seen == tids[:2]  # resumes after the shortened pass, not from the start
+
+
+# -- claim admission: every in-transaction refusal precedes the allowance check ----------------------------
+
+@pytest.mark.parametrize("lane", ["ready", "review"])
+@pytest.mark.parametrize("source", ["containment", "spend", "admission", "admits"])
+def test_in_transaction_refusals_precede_the_allowance_check(primary, monkeypatch, lane, source):
+    tid = kb.create_task(primary, title="Admission order", assignee="worker")
+    with fixtures.kbc.write_txn(primary):
+        primary.execute("UPDATE tasks SET status=? WHERE id=?", (lane, tid))
+    fixtures.sync.set_mode(primary, "off")
+
+    @contextmanager
+    def admitted(conn, **kwargs):
+        yield True
+
+    held = iter([False, source == "containment"])  # free before the transaction, held inside it
+    spend = iter([False, source == "spend"])
+    reached = []
+
+    def refused(conn, task_id, gate):
+        reached.append(task_id)
+        return True  # refuse: no run is opened either way
+
+    monkeypatch.setattr(kb, "claim_transaction", admitted)
+    monkeypatch.setattr(kb._containment, "held", lambda conn, task_id: next(held))
+    monkeypatch.setattr(kb._spend_claim, "claim_check", lambda conn, task_id: lambda: next(spend))
+    monkeypatch.setattr(kb._spend_allowance, "claim_refused", refused)
+    monkeypatch.setattr(kb, "claim_and_open_run", lambda *a, **kw: pytest.fail("refused claim opened a run"))
+    check = {"admission": lambda: True, "admits": lambda: False}.get(source)
+    claim = kb.claim_task if lane == "ready" else kb.claim_review_task
+    assert claim(primary, tid, admission_check=check) is None
+    assert reached == ([tid] if source == "admits" else [])
+    assert not primary.execute("SELECT 1 FROM task_runs WHERE task_id=?", (tid,)).fetchone()
+
+
+def test_a_lease_client_without_the_allowance_keyword_still_claims_plain_cards(primary, lease_client):
+    """The keyword is sent only when the card has a Board allowance identity to name."""
+    fake = lease_client
+
+    class Legacy:
+        def acquire(self, *, board_id, task_uid, run_uid, gateway_id, ttl_s, lane="ready", source_protocol=None):
+            return fake.acquire(board_id=board_id, task_uid=task_uid, run_uid=run_uid, gateway_id=gateway_id,
+                                ttl_s=ttl_s, lane=lane)
+
+        def renew(self, **kw):
+            return fake.renew(**kw)
+
+        def release(self, **kw):
+            return fake.release(**kw)
+
+    previous = fixtures.sync.set_lease_client(Legacy())
+    try:
+        tid = kb.create_task(primary, title="plain", assignee="worker")
+        assert kb.claim_task(primary, tid, ttl_seconds=900, claimer="host:a") is not None
+    finally:
+        fixtures.sync.set_lease_client(previous)
+    assert fake.count("acquire") == 1
+
+
+# -- the allowance basis is a primary synced board's ---------------------------------------------------------
+
+def test_history_is_a_primary_synced_boards_question_only(primary, monkeypatch):
+    tid, _ = fixtures._released(primary)
+    assert allowance.history(primary, tid)
+    with monkeypatch.context() as m:
+        m.setattr(fixtures.sync, "board_mode", lambda conn: "shadow")  # sync identity still present
+        assert not allowance.history(primary, tid)
+    with monkeypatch.context() as m:
+        m.setattr(fixtures.sync, "sync_state", lambda conn: None)  # primary mode, no identity
+        assert not allowance.history(primary, tid)
+
+
+def test_plain_card_claims_with_or_without_a_lease_and_never_with_a_stray_charge(primary):
+    tid = kb.create_task(primary, title="plain", assignee="worker")
+    assert allowance.state(primary, tid) is None
+    assert allowance.grant_refusal(primary, tid, SimpleNamespace(lease=None)) is None
+    assert allowance.grant_refusal(primary, tid, SimpleNamespace(lease=SimpleNamespace(spend_allowance=None))) is None
+    stray = SimpleNamespace(lease=SimpleNamespace(spend_allowance=fixtures._evidence("budget")))
+    assert allowance.grant_refusal(primary, tid, stray) == allowance.REFUSAL
+
+
+def test_unproven_basis_refuses_even_charge_shaped_evidence(primary):
+    tid = kb.create_task(primary, title="unproven", assignee="worker")
+    uid = fixtures._override(primary, tid, runs=10, runs_basis=allowance.BASIS)  # no review identity
+    assert allowance.state(primary, tid) == allowance.UNPROVEN
+    gate = SimpleNamespace(lease=SimpleNamespace(spend_allowance=fixtures._evidence(uid)))
+    assert allowance.grant_refusal(primary, tid, gate) == allowance.REFUSAL
+
+
+# -- the judge reads a canonical ordinary stop against the original acceptance --------------------------------
+
+@pytest.mark.parametrize("ctx, caused", [({}, False), ({"cause": "scope_stopped"}, True), ({"_canonical": True}, True)])
+def test_canonical_ordinary_review_uses_the_acceptance_prompt(monkeypatch, ctx, caused):
+    from hermes_cli import kanban_spend_caused_review as caused_review
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    from tests.hermes_cli import test_kanban_spend_reviewer as judge_cases
+    from agent import auxiliary_client as aux
+    from agent import model_routing_managed as managed
+    seen = []
+
+    def call_llm(**kw):
+        seen.append(kw["messages"][0]["content"])
+        kw["route_info"].update(judge_cases._meta("anthropic", "claude-sonnet-5-5"))
+        message = SimpleNamespace(content='{"decision": "escalate", "reason": "x"}')
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    monkeypatch.setattr(aux, "call_llm", call_llm)
+    monkeypatch.setattr(managed, "managed_config", lambda config_=None: judge_cases._routing(*judge_cases._REGISTRY))
+    assert reviewer.judge({"_cap": 3, "_corpus": "", "title": "t", **ctx}) == {"decision": "escalate", "reason": "x"}
+    expected = (caused_review.PROMPT if caused else reviewer.PROMPT).replace("CAP", "3")
+    assert seen == [expected]
+
+
+# -- the lease request names only what the claim actually carries ---------------------------------------------
+
+@pytest.mark.parametrize("protocol", [None, 0, 2])
+def test_lease_request_sends_source_protocol_only_when_the_claim_has_one(protocol):
+    from hermes_cli import kanban_sync_client as client
+    sent = []
+
+    class Hub:
+        def leases(self, board_id, body):
+            sent.append(body)
+            return {"status": "applied", "lease": {"run_uid": body["run_uid"], "task_id": body["task"],
+                                                   "holder": "gw", "expires": 1}}
+
+    identity = {"review_uid": "r", "budget_event_uid": "b"}
+    client.HubLeaseClient(Hub()).acquire(board_id="b", task_uid="t", run_uid="u", gateway_id="gw", ttl_s=5,
+                                         source_protocol=protocol, expected_reviewer_allowance=identity)
+    assert ("source_protocol" in sent[0]) is bool(protocol)
+    assert sent[0].get("source_protocol") == (protocol or None)
+    assert sent[0]["expected_reviewer_allowance"] == identity
+
+
+# -- the advisory caused-review count and canonical decision shape ------------------------------------------
+
+def _review_row(conn, tid, kind, **payload):
+    with fixtures.kbc.write_txn(conn):
+        kb._append_event(conn, tid, kind, payload)
+
+
+def test_grant_count_counts_episodes_a_grant_or_release_produced(primary):
+    from hermes_cli import kanban_spend_caused_review as caused_review
+    tid = kb.create_task(primary, title="counted", assignee="worker")
+    _review_row(primary, tid, "spend_review", verdict="escalate", episode="e0")
+    assert caused_review.grant_count(primary, tid) == 0
+    _review_row(primary, tid, "spend_review_granted", episode="e1")  # a grant names no verdict
+    _review_row(primary, tid, "spend_review_granted", episode="e1")  # the same episode once
+    assert caused_review.grant_count(primary, tid) == 1
+    _review_row(primary, tid, "spend_review_settled", verdict="release", episode="e2")
+    assert caused_review.grant_count(primary, tid) == 2
+    _review_row(primary, tid, "spend_review_granted")  # legacy rows without an episode count by row
+    _review_row(primary, tid, "spend_review_granted")
+    assert caused_review.grant_count(primary, tid) == 4
+
+
+def test_canonical_review_needs_a_primary_board_with_its_sync_identity(primary, monkeypatch):
+    from hermes_cli import kanban_spend_caused_review as caused_review
+    tid = kb.create_task(primary, title="canonical", assignee="worker")
+    with fixtures.kbc.write_txn(primary):
+        kb._append_event(primary, tid, "scope_renewed", {"version": 1, "authority_kind": "human",
+                                                         "actor_kind": "human"})
+    stop = {"id": 1, "uid": "stop-1", "payload": "{}"}
+    monkeypatch.setattr(caused_review, "effective_cause", lambda conn, task, stop: None)
+    assert caused_review._human_reset(primary, tid) is not None
+    assert caused_review.enrich(primary, tid, stop, {"comments": [], "runs": []})["_canonical"] is True
+    monkeypatch.setattr(fixtures.sync, "sync_state", lambda conn: None)  # primary mode, identity gone
+    assert caused_review._human_reset(primary, tid) is None
+    assert caused_review.enrich(primary, tid, stop, {"comments": [], "runs": []}) == {
+        "comments": [], "runs": [], "_canonical": False}
+
+
+@pytest.mark.parametrize("verdict", [{"decision": "grant", "reason": "more"}, {"decision": "x", "reason": "more"},
+                                     {"decision": "release", "reason": "more", "runs": 3}])
+def test_canonical_decision_refuses_grant_unknown_and_custom_runs(verdict):
+    from hermes_cli import kanban_spend_caused_review as caused_review
+    with pytest.raises(ValueError):
+        caused_review.validate(verdict, {})

@@ -1193,3 +1193,21 @@ def test_the_persons_own_note_is_printed_when_it_is_readable(board, monkeypatch)
                         writer_kind='human')
     rc, err = spend_budget(board, monkeypatch, tid, '--exempt', '--reason', 'lift')
     assert rc == 4 and 'set by david: cheap.' in err and 'AGENT NOTE' not in err and 'Budget event' not in err
+
+
+@pytest.mark.parametrize('supersede', [True, False])
+def test_release_supersedes_through_the_renewal_only_when_the_board_allowance_needs_it(board, monkeypatch, supersede):
+    """A human release over an active Board allowance retires it through the same validated renewal, once."""
+    from hermes_cli import kanban_scope_renewal_cli as renewal_cli
+    tid = spend_stopped(board)
+    renewed = []
+
+    def board_allowance(conn, s):
+        s.supersede, s.keep_allowance = supersede, False
+
+    monkeypatch.setattr(release, '_board_allowance', board_allowance)
+    monkeypatch.setattr(renewal_cli, 'renew', lambda conn, task, **kw: renewed.append((task, kw['allowance_only'])))
+    out = run(board, tid, runs=3)
+    assert out['outcome'] == 'released' and out['scope_renewed'] is False
+    assert renewed == ([(tid, True)] if supersede else [])
+    assert out.get('allowance_superseded') is (True if supersede else None)

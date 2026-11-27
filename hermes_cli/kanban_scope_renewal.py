@@ -240,7 +240,7 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id:
                              "reread the card")
     done = covered(conn, task_id)
     evidence = [e for e in scope_evidence(conn, task_id, episode) if key(e) not in done]
-    supersedes = allowance_only and not evidence and actor.authority == "human" and actor.kind == "human"
+    supersedes = allowance_only and actor.authority == "human" and actor.kind == "human"
     if not evidence and not supersedes:
         raise RenewalRefused("not_scope_stopped", f"stop {episode} on {task_id} carries no unrenewed scope restriction")
     comment = _mandate_comment(conn, task_id, comment_id)

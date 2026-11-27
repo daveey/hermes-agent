@@ -235,11 +235,10 @@ def review(conn, task_id, episode, verdict, ctx):
         stop = decision.strict_episode(conn, task_id)
         enabled, cap = reviewer.settings()
         cause = effective_cause(conn, task_id, stop) if stop else None
-        ordinary = stop is not None and cause is None and reviewer._refusal(conn, task_id, episode) is None
         allowed = (stop is not None and reviewer.episode_of(stop) == episode and not fenced(conn, task_id)
                    and not foreign_copy(conn, task_id) and not reviewer._disposed(conn, task_id, episode)
                    and not reviewer._human_after_stop(conn, task_id, stop) and enabled
-                   and (cause in CAUSES or ordinary)
+                   and (cause in CAUSES or (cause is None and reviewer._refusal(conn, task_id, episode) is None))
                    and grant_count(conn, task_id) < min(cap, 2))
         if reviewer.state(conn, task_id, episode) != reviewer.STARTED:
             return "moot"
