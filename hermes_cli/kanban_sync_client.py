@@ -1981,13 +1981,11 @@ class HubLeaseClient:
                           holder=lease.get("holder"), reason=None if granted else res.get("reason"),
                           version=res.get("version"), source_snapshot=snapshot_from_row(res.get("row"), grant={
                               k: res.get(k) for k in ("status", "lease", "source_predecessor")}),
-                          spend_allowance=res.get("spend_allowance") if granted and
-                          lease.get("task_id") == body.get("task") and lease.get("holder") == gateway_id and isinstance(
-                              res.get("spend_allowance"), dict) else None)
+                          spend_allowance=res.get("spend_allowance") if granted and lease.get("task_id") == body.get("task")
+                          and lease.get("holder") == gateway_id and isinstance(res.get("spend_allowance"), dict) else None)
 
-    def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
-                lane: str = "ready", source_protocol: Optional[int] = None,
-                expected_reviewer_allowance: Optional[dict] = None) -> sync.Lease:
+    def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int, lane: str = "ready",
+                source_protocol: Optional[int] = None, expected_reviewer_allowance: Optional[dict] = None) -> sync.Lease:
         return self._lease(board_id, {"action": "grant", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s, "lane": lane,
                                       **({"source_protocol": source_protocol} if source_protocol else {}),
                                       "expected_reviewer_allowance": expected_reviewer_allowance}, run_uid, gateway_id)
