@@ -10,7 +10,7 @@ def _callback(*args):
     pytest.fail('class metadata callback executed')
 
 
-def _module(kind):
+def _module(kind, *, mixin_after=False):
     attrs = {
         'attribute': {'__file__': 'class.py'},
         'property': {'__file__': property(_callback)},
@@ -21,15 +21,19 @@ def _module(kind):
     class OpaqueMeta(type):
         def __getattribute__(self, name):
             pytest.fail('metaclass attribute callback executed')
-    parent = OpaqueMeta('Parent', (ModuleType,), attrs[kind])
-    child = OpaqueMeta('Child', (parent,), {})
+    parent = OpaqueMeta('Parent', (object,) if mixin_after else (ModuleType,), attrs[kind])
+    child = OpaqueMeta('Child', (ModuleType, parent) if mixin_after else (parent,), {})
     return child('opaque')
 
 
-@pytest.mark.parametrize('kind', ['attribute', 'property', 'getattr', 'getattribute', 'slot'])
+@pytest.mark.parametrize(('kind', 'mixin_after'), [
+    (kind, after) for after in (False, True)
+    for kind in ('attribute', 'property', 'getattr', 'getattribute', 'slot')
+    if not (after and kind == 'slot')
+])
 @pytest.mark.parametrize('explicit_none', [False, True])
-def test_class_metadata_without_concrete_file_refuses_before_classification(kind, explicit_none):
-    module = _module(kind)
+def test_class_metadata_without_concrete_file_refuses_before_classification(kind, mixin_after, explicit_none):
+    module = _module(kind, mixin_after=mixin_after)
     namespace = ModuleType.__dict__['__dict__'].__get__(module)
     if explicit_none:
         namespace['__file__'] = None
@@ -50,10 +54,13 @@ def test_concrete_namespace_file_is_authoritative_without_class_callbacks(kind):
     assert inv._module_filename(module, deadline=None, budget=[0]) == 'concrete.py'
 
 
-def test_benign_subclass_without_file_remains_placeholder():
-    class Benign(ModuleType):
+@pytest.mark.parametrize('mixin_after', [False, True])
+def test_benign_subclass_without_file_remains_placeholder(mixin_after):
+    class Mixin:
         pass
-    assert inv._module_filename(Benign('placeholder'), deadline=None, budget=[0]) is None
+    bases = (ModuleType, Mixin) if mixin_after else (ModuleType,)
+    benign = type('Benign', bases, {})
+    assert inv._module_filename(benign('placeholder'), deadline=None, budget=[0]) is None
 
 
 @pytest.mark.parametrize('limit', ['MAX_MODULE_NAMESPACE_ITEMS', 'MAX_INVENTORY_NAMESPACE_ITEMS'])

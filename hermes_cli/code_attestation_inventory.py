@@ -112,8 +112,8 @@ def _check_class_metadata(cls, *, deadline, budget):
     mro = type.__dict__['__mro__'].__get__(cls)
     for base in mro:
         ca._check_inventory_deadline(deadline)
-        if base is ModuleType:
-            return
+        if base is ModuleType or base is object:
+            continue
         namespace = type.__dict__['__dict__'].__get__(base)
         count = 0
         for key in namespace:
