@@ -301,8 +301,16 @@ def collect_acceptance(contract: str, published_pr: str | None,
             if not selected:
                 outcomes.append("missing")
                 receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
+            successful_apps = {r["app"]["id"] for r in matching
+                               if check_receipt(r, sha)["classification"] == "success"}
             for check in selected:
                 evidence = check_receipt(check, sha)
+                # Only a real completed exact-head success from this same app
+                # can satisfy a duplicate soft run; legacy statuses do not lend it.
+                if (check.get("conclusion") in {"skipped", "neutral"}
+                        and check.get("status") == "completed" and check.get("head_sha") == sha
+                        and check["app"]["id"] in successful_apps):
+                    evidence["classification"] = "success"
                 outcomes.append(evidence["classification"])
                 receipt["checks"].append(evidence)
         outcomes = fallback_outcomes(receipt, required, outcomes, runs, statuses, suites,

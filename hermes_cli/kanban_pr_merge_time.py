@@ -66,6 +66,7 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False, attemp
 
     gated = {gate_key(c) for c in checks if start(c) < cutoff and concluded_at_merge(c)} if runs else set()
     latest = {}
+    substantive = {}
     post = []
     for check in checks:
         started = start(check)
@@ -82,6 +83,9 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False, attemp
             latest.setdefault(key, []).append(check)
             continue
         order = (started, check["id"])
+        if runs and check.get("conclusion") not in {"skipped", "neutral"}:
+            if key not in substantive or order > substantive[key][0]:
+                substantive[key] = (order, check)
         if key not in latest or order > latest[key][0]:
             latest[key] = (order, check)
     if runs and distinct_suites:
@@ -91,7 +95,18 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False, attemp
         kept = [c for key, group in latest.items()
                 for c in _unsuperseded(group, start, family[key], attempt_of)]
         return _drop_cancelled_superseded(kept, checks, cutoff, run_of), post
-    return [entry[1] for entry in latest.values()], post
+    kept = [entry[1] for entry in latest.values()]
+    # Required contexts normally use the latest name/app row. A soft latest
+    # conclusion may also carry its latest substantive success, never an older
+    # success superseded by a failure/pending run or one completed after merge.
+    if runs:
+        for key, (_, check) in latest.items():
+            previous = substantive.get(key)
+            if check.get("conclusion") in {"skipped", "neutral"} and previous:
+                candidate = previous[1]
+                if candidate.get("conclusion") == "success" and concluded_at_merge(candidate):
+                    kept.append(candidate)
+    return kept, post
 
 
 def _unsuperseded(group, start, family, attempt_of):
