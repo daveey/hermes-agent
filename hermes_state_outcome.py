@@ -408,6 +408,9 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
             display_state = "producer_wait"
         item: dict[str, Any] = {"kind": "card", "id": tid, "label": _str(card.get("title")) or tid,
                                 "state": display_state}
+        if status == "triage" and card.get("retained_stop") and not human:
+            item.update(state="retained", retained_stop=card["retained_stop"])
+            item['label'] = 'Stopped, retained and incomplete: ' + str(card['retained_stop'].get('summary') or item['label'])
         if explained:
             item["waiting_on"] = explained  # retained scope stop: an open parent or recorded wait, agent work
         eta = wait.get("until") or wait.get("eta")
@@ -814,6 +817,8 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
     if lost:
         return _outcome("unresolved", now, reason=lost, **carry)
     if waits:
+        if all(w.get("state") == "retained" for w in waits):
+            return _outcome("unresolved", now, reason="linked_work_retained", on=waits, **carry)
         return _outcome("waiting", now, on=waits, **carry)
     # A lost subagent ranks like a killed one: never done, and never a wait that cannot end, so it outranks a
     # declaration made before it went silent (``_lost_subagent_items`` drops those made after). A notice that

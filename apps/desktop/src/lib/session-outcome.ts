@@ -141,6 +141,11 @@ const validEta = (eta: unknown): number | undefined =>
 
 /** One `on[]` entry in words: a card reads `t_… scheduled · 14:00`, anything else `capacity: hub slot`. */
 export const outcomeWaitingLine = (item: SessionOutcomeWaitingOn): string => {
+  if (item.kind === 'card' && item.state === 'retained') {
+    return [item.id, item.label || item.state, item.retained_stop?.episode_uid,
+      item.retained_stop?.event_uid, ...(item.retained_stop?.evidence || [])].filter(Boolean).join(' · ')
+  }
+
   if (item.kind === 'card' && item.state === 'triage_overdue') {
     return `${item.id} · overdue triage · waiting on this chat's agent`
   }
@@ -163,6 +168,9 @@ type RowCopy = Pick<
   | 'outcomeWaiting'
   | 'outcomeWatches'
 >
+
+const retainedLines = (outcome: SessionOutcome): string[] =>
+  (outcome.status?.on || outcome.on || []).filter(item => item.state === 'retained').map(outcomeWaitingLine)
 
 /** Workflow-only text stays independent of historical artifact acceptance. */
 const workflowTooltip = (outcome: null | SessionOutcome | undefined, r: RowCopy): null | string => {
@@ -198,8 +206,9 @@ const workflowTooltip = (outcome: null | SessionOutcome | undefined, r: RowCopy)
       return lines.length ? lines.join('\n') : fallback
     }
 
-    case 'unresolved':
-      return r.outcomeUnresolved(outcome.reason ?? null)
+    case 'unresolved': {
+      return [r.outcomeUnresolved(outcome.reason ?? null), ...retainedLines(outcome)].join('\n')
+    }
 
     default:
       return null

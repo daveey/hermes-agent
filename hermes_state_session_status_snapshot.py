@@ -136,7 +136,7 @@ def _turn(tail: list[dict], live: set[str], concluding: frozenset[str], trigger:
 
 
 def _open_state(state: Any) -> str:
-    return state if state in _OPEN else "waiting"
+    return state if state in _OPEN or state == "retained" else "waiting"
 
 
 def _control_items(sid: str) -> tuple[list[dict], list[dict]]:
@@ -278,7 +278,8 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
     # Work that failed before this generation's request is retained failure, cleared only by this
     # generation's own successful completion; it is not this generation's linked work.
     earlier = [p for p in processes if p["state"] == "failed" and 0 < p["at"] < since]
-    work = ([{"kind": "card", "id": f"card:{w['id']}", "state": _open_state(w.get("state"))} for w in card_waits]
+    work = ([{"kind": "card", "id": f"card:{w['id']}", "state": _open_state(w.get("state")),
+              **({"retained_stop": w["retained_stop"], "label": w.get("label")} if w.get("retained_stop") else {})} for w in card_waits]
             + [{"kind": w["kind"], "id": f"control:{w['id']}", "state": _open_state(w.get("state"))}
                for w in control_waits]
             + [{"kind": "subagent", "id": s["id"], "state": s["state"]} for s in subagents]

@@ -26,6 +26,7 @@ export interface SessionOutcomeWaitingOn {
   state?: string
   /** Epoch seconds. */
   eta?: number
+  retained_stop?: { reason?: string; summary?: string; evidence?: string[]; episode_uid?: string; event_uid?: string }
 }
 
 /** Historical scoped claims, not current execution status or permission to run remaining work. */
@@ -49,6 +50,8 @@ export type CanonicalStripe = 'attention' | 'blocked' | 'done' | 'external' | 'n
 /** [daveey] Canonical status envelope (`outcome.status`, `status_version` 1), reduced by the backend from work
  *  evidence only. `presentation.stripe` is the status every surface paints; nothing else on the row selects it. */
 export interface SessionStatusEnvelope {
+  on?: SessionOutcomeWaitingOn[]
+  reason?: string
   status_version?: number
   kind?: SessionOutcomeKind | string
   /** Monotonic per qualified owner: it changes exactly when the published status does. */

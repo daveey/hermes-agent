@@ -81,6 +81,18 @@ describe('sessionStatusStripe without a protocol', () => {
 })
 
 describe('outcomeTooltip', () => {
+  it('keeps stopped incomplete work and its evidence visible without an execution wait', () => {
+    const item = { kind: 'card', id: 'card:retained', state: 'retained', label: 'Stopped, retained and incomplete',
+      retained_stop: { reason: 'scope_stopped', episode_uid: 'stop-episode', evidence: ['acceptance remains unmet'] } }
+
+    const outcome = { kind: 'unresolved', reason: 'linked_work_retained', on: [item] }
+
+    expect(outcomeWaitingLine(item)).toContain('Stopped, retained and incomplete')
+    expect(outcomeTooltip(outcome, r)).toContain('stop-episode')
+    expect(outcomeTooltip(outcome, r)).toContain('acceptance remains unmet')
+    expect(outcomeTooltip(outcome, r)).not.toContain('Waiting')
+  })
+
   it('done shows the summary', () => {
     expect(outcomeTooltip(OUTCOMES.done, r)).toBe('Shipped PR #12 and closed the card.')
     expect(outcomeTooltip({ kind: 'done' }, r)).toBe('Done')

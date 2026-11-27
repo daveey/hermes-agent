@@ -89,24 +89,29 @@ def _verdict(snapshot: dict, coverage: dict, generation: int, failures: list[dic
     work = [item for item in snapshot.get("work") or () if not (
         item.get("passive") is True and item.get("state") in {"watching", "scheduled"})]
     open_work = [item for item in work if item.get("state") in _OPEN]
+    displayed = open_work + [item for item in work if item.get("state") == "retained"]
     if any(item.get("kind") == "card" and item.get("state") == "running" for item in open_work):
-        return {"kind": "running", "on": deepcopy(open_work),
+        return {"kind": "running", "on": deepcopy(displayed),
                 "presentation": {"stripe": "waiting", "reason_codes": ["linked_work_running"]}}
     if any(f["id"].startswith("subagent:") for f in failures):
         return {"kind": "unresolved", "reason": "linked_work_unsuccessful",
                 "presentation": {"stripe": "attention", "reason_codes": ["linked_work_unsuccessful"]}}
     if any(item.get("state") == "source_unknown" for item in open_work):
-        return {"kind": "waiting", "on": deepcopy(open_work),
+        return {"kind": "waiting", "on": deepcopy(displayed),
                 "presentation": {"stripe": "none", "reason_codes": ["linked_status_unknown"]}}
     if any(item.get("state") == "producer_wait" for item in open_work):
-        return {"kind": "waiting", "on": deepcopy(open_work),
+        return {"kind": "waiting", "on": deepcopy(displayed),
                 "presentation": {"stripe": "external", "reason_codes": ["linked_card_producer_wait"]}}
     if any(item.get("state") in ("external_unknown", "external_running") for item in open_work):
-        return {"kind": "waiting", "on": deepcopy(open_work),
+        return {"kind": "waiting", "on": deepcopy(displayed),
                 "presentation": {"stripe": "external", "reason_codes": ["linked_ci_deploy_wait"]}}
     if open_work:
-        return {"kind": "waiting", "on": deepcopy(open_work),
+        return {"kind": "waiting", "on": deepcopy(displayed),
                 "presentation": {"stripe": "waiting", "reason_codes": ["linked_work_open"]}}
+    retained = [item for item in work if item.get("state") == "retained"]
+    if retained and coverage["state"] == "complete" and not failures:
+        return {"kind": "unresolved", "reason": "linked_work_retained", "on": deepcopy(retained),
+                "presentation": {"stripe": "attention", "reason_codes": ["linked_work_retained"]}}
     reason = None
     if coverage["state"] != "complete":
         reason = "source_unknown"

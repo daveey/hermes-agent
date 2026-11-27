@@ -95,6 +95,8 @@ def current_entry(row):
 
 
 def overdue(row, *, now):
+    if row.get('retained_stop'):
+        return False
     entered = current_entry(row)
     return entered is not None and entered <= now and now - entered > TRIAGE_AFTER_S
 
@@ -113,6 +115,8 @@ def annotate(conn, rows):
     their existing source revision memo; elapsed clock passes never call here.
     """
     rows = list(rows)
+    from hermes_cli.kanban_retained_status import annotate as retained_status
+    retained_status(conn, rows)
     targets = {str(row['id']) for row in rows if row.get('status') == 'triage'}
     events = {tid: [] for tid in targets}
     # One statement per call and none without a triage card: hot membership passes call this per status set,
