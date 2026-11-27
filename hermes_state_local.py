@@ -390,17 +390,9 @@ def annotate_local_lineages(sessions, heads):
 
 
 def local_receipt(db, session_id):
+    from hermes_state_policy_config import load_receipt
     with db._read_ctx() as conn:
-        row = conn.execute('SELECT value FROM state_meta WHERE key=?', (POLICY_PREFIX + session_id,)).fetchone()
-    if row is None:
-        raise RuntimeStoreError('storage_unavailable')
-    try:
-        value = json.loads(row[0])
-        if not isinstance(value, dict):
-            raise ValueError('invalid receipt')
-        return value
-    except (TypeError, ValueError) as exc:
-        raise RuntimeStoreError('storage_unavailable') from exc
+        return load_receipt(conn, session_id)
 
 
 def end_idle_local_session(db, *, epoch, session_id, target_id, reason):
