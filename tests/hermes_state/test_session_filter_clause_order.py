@@ -95,7 +95,7 @@ def test_pinned_backfill_is_index_driven_on_fresh_store(tmp_path):
     path = tmp_path / "state.db"
     _fixture(path)
     with SessionDB(db_path=path) as db:
-        db._conn.execute("UPDATE sessions SET pinned = 1 WHERE id IN ('r1', 'r3')")
+        db._conn.execute("UPDATE sessions SET pinned = 1 WHERE id IN ('r7', 'r9')")
         db._conn.commit()
         _assert_no_sessions_scan(_pinned_plan(db))
 
@@ -106,7 +106,7 @@ def test_pinned_backfill_index_installed_on_existing_store(tmp_path):
     # A store written by the parent schema: everything but the new index.
     with sqlite3.connect(path) as conn:
         conn.execute("DROP INDEX IF EXISTS idx_sessions_pinned")
-        conn.execute("UPDATE sessions SET pinned = 1 WHERE id IN ('r1', 'r3')")
+        conn.execute("UPDATE sessions SET pinned = 1 WHERE id IN ('r7', 'r9')")
     with SessionDB(db_path=path) as db:
         names = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
         assert "idx_sessions_pinned" in names

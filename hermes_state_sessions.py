@@ -1394,7 +1394,6 @@ class SessionSessionsMixin:
         # constraint: the sidebar lists with include_archived=False, and a pin
         # must stay reachable even when that row is also archived.
         if include_pinned:
-            seen_ids = {s["id"] for s in sessions}
             pinned_clauses, pinned_params = _session_filter_where(
                 exclude_children=not include_children, source=source, sources=sources,
                 session_key=session_key, exclude_sources=exclude_sources, cwd_prefix=cwd_prefix,
@@ -1408,24 +1407,8 @@ class SessionSessionsMixin:
             if heads:
                 exclude_superseded_segments(self, pinned_clauses, pinned_params)
             pinned_clauses.append("s.pinned = 1")
-            pinned_where = _where_sql(pinned_clauses)
-            # [daveey] Driven from the (few) pinned ids: planned as a full ``sessions`` walk in started_at
-            # order, the filter ran on every row (~14 ms on 7.7k sessions, per slice) for a handful of pins.
-            pinned_query = f"""
-                {select_head}{_sql_session_last_active("s")} AS last_active
-                FROM (SELECT id AS _pin_id FROM sessions WHERE pinned = 1) pin
-                CROSS JOIN sessions s ON s.id = pin._pin_id
-                {prompt_join}
-                {pinned_where}
-                ORDER BY s.started_at DESC
-            """
-            from hermes_state_page_pack import read_chunks
-            pinned_rows = self._read_retrying_ioerr(lambda conn: read_chunks(conn, pinned_query, pinned_params))
-            for row in pinned_rows:
-                s = self._list_row(row)
-                if s["id"] not in seen_ids:
-                    seen_ids.add(s["id"])
-                    sessions.append(s)
+            from hermes_state_pinned_backfill import backfill_pins
+            backfill_pins(self, sessions, select_head, prompt_join, pinned_clauses, pinned_params)
         if project_compression_tips and not include_children:
             from hermes_state_session_list import project_compression_tips
             sessions = project_compression_tips(self, sessions, compact_rows)
@@ -1566,7 +1549,9 @@ class SessionSessionsMixin:
         if exclude_children:
             from hermes_state_local import exclude_superseded_segments
             exclude_superseded_segments(self, where_clauses, params)
-        return self._read_one(f"SELECT COUNT(*) FROM sessions s{_where_sql(where_clauses, ' ')}", params)[0]
+        from hermes_state_session_count import count_query
+        query = count_query(where_clauses, seek_sources=bool(exclude_sources) and not (source or sources))
+        return self._read_one(query, params)[0]
 
     def session_count_ge(self, n: int = 1) -> bool:
         """At least N sessions exist (archived included); LIMIT short-circuits session_count()'s scan."""

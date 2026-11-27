@@ -202,6 +202,7 @@ def _drop_session_column(path, column):
         # SQLite refuses DROP COLUMN while an index references it; a pre-column store has neither.
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
         conn.execute("DROP INDEX IF EXISTS idx_sessions_pinned")
+        conn.execute("DROP INDEX IF EXISTS idx_sessions_count_admission")  # [daveey] Also depends on archived.
         conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
         conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")
         conn.execute(f"ALTER TABLE sessions DROP COLUMN {column}")

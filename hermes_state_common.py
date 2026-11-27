@@ -1031,6 +1031,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_local_created_started
 """
 
 
+# [daveey] Count-only covering admission index, after every referenced column is reconciled.
+from hermes_state_session_count import count_index_sql as _count_index_sql
+DEFERRED_INDEX_SQL += _count_index_sql(_sql_json_extract)
+
+
 # ── Deferred FTS rebuild bookkeeping (schema v23) ──
 # While a background index rebuild is pending, two state_meta keys define
 # which message rows are currently IN the FTS indexes:

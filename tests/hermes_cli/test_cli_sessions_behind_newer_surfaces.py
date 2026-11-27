@@ -131,6 +131,7 @@ def _pre_column_readonly(tmp_path) -> SessionDB:
     with writer._lock:
         writer._conn.execute("UPDATE sessions SET message_count=1 WHERE id='legacy-cli'")
         writer._conn.execute("DROP INDEX IF EXISTS idx_sessions_local_created_started")
+        writer._conn.execute("DROP INDEX IF EXISTS idx_sessions_count_admission")  # [daveey] Recreate the old schema.
         writer._conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")  # names every column
         writer._conn.execute("ALTER TABLE sessions DROP COLUMN created_source")
         writer._conn.commit()
