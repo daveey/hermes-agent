@@ -27,7 +27,11 @@ def at_capacity(conn, task_id):
     if cap is None:
         return False
     count = lanes._running(conn, pol)[name] - int(row["status"] == "running")
-    return count >= cap
+    if count >= cap:
+        from hermes_cli.kanban_lane_samples import rejected_at_claim
+        rejected_at_claim(name, task_id, count)
+        return True
+    return False
 
 
 def drop_full(conn, rows):
@@ -40,5 +44,7 @@ def drop_full(conn, rows):
     full = {name for name, spec in pol.lanes.items()
             if spec.max_workers is not None and counts[name] >= spec.max_workers}
     from hermes_cli.kanban_lane_samples import rejected
-    rejected([row["id"] for row in rows if names.get(row["id"], pol.default) in full], names, pol.default)
+    for name in full:
+        rejected([row["id"] for row in rows if names.get(row["id"], pol.default) == name],
+                 names, pol.default, counts[name])
     return [row for row in rows if names.get(row["id"], pol.default) not in full]

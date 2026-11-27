@@ -13,14 +13,39 @@ _log = logging.getLogger(__name__)
 RETENTION = 8 * 86400
 
 
-def rejected(ids, names, default):
-    """Only real cap-filter decisions inside an admitted dispatcher pass count."""
+class Capture(dict):
+    """lane -> task IDs refused by a cap this pass (a set dedups repeat attempts), plus the
+    occupancy each refusal observed in ``witness`` (lane -> highest running count)."""
+
+    def __init__(self, lane_names):
+        super().__init__((name, set()) for name in lane_names)
+        self.witness = {}
+
+
+def rejected(ids, names, default, running=None):
+    """Only real cap-filter decisions inside an admitted dispatcher pass count.
+
+    Advisory: a malformed argument can never raise into the admission path that called this.
+    """
     capture = _current.get()
-    if capture is not None:
+    if capture is None:
+        return
+    try:
         for task_id in ids:
             lane = names.get(task_id, default)
             if lane in capture:
                 capture[lane].add(task_id)
+                if running is not None:
+                    seen = getattr(capture, "witness", None)
+                    if seen is not None:
+                        seen[lane] = max(seen.get(lane, 0), running)
+    except (AttributeError, LookupError, TypeError, ValueError):
+        _log.warning("lane rejection capture failed", exc_info=True)
+
+
+def rejected_at_claim(lane, task_id, running):
+    """The claim-time cap recheck refused ``task_id`` while ``lane`` held ``running`` others."""
+    rejected([task_id], {task_id: lane}, lane, running)
 
 
 @contextmanager
@@ -35,7 +60,7 @@ def observe(conn, *, dry_run=False):
         _log.warning("lane occupancy census unavailable", exc_info=True)
         yield
         return
-    capture = {name: set() for name in pol.lanes}
+    capture = Capture(pol.lanes)
     token = _current.set(capture)
     try:
         yield
@@ -48,25 +73,42 @@ def observe(conn, *, dry_run=False):
             _log.warning("lane occupancy sample unavailable", exc_info=True)
 
 
+UPSERT = (
+    "INSERT INTO lane_samples VALUES (?,?,?,?,?,?) ON CONFLICT(ts,lane) DO UPDATE SET "
+    # Preserve the occupancy/cap pair that witnessed rejection, even if the
+    # lane drains or its cap changes later in this minute. Otherwise keep peak occupancy.
+    "running=CASE WHEN excluded.rejected>0 OR (lane_samples.rejected=0 AND "
+    "excluded.running>=lane_samples.running) THEN excluded.running ELSE lane_samples.running END, "
+    "cap=CASE WHEN excluded.rejected>0 OR (lane_samples.rejected=0 AND "
+    "excluded.running>=lane_samples.running) THEN excluded.cap ELSE lane_samples.cap END, "
+    "ready=MAX(lane_samples.ready,excluded.ready), rejected=lane_samples.rejected+excluded.rejected")
+SCHEMA = ("CREATE TABLE IF NOT EXISTS lane_samples (ts INTEGER NOT NULL, lane TEXT NOT NULL, "
+          "running INTEGER NOT NULL, cap INTEGER, ready INTEGER NOT NULL, rejected INTEGER NOT NULL, "
+          "PRIMARY KEY(ts,lane))")
+
+
 def record(conn, pol, counts, capture, *, now=None):
     minute = int(time.time() if now is None else now) // 60 * 60
     ready = Counter(pol.lane_of(r[0]) for r in conn.execute(
         "SELECT tenant FROM tasks WHERE status='ready' AND claim_lock IS NULL"))
-    conn.execute("CREATE TABLE IF NOT EXISTS lane_samples ("
-                 "ts INTEGER NOT NULL, lane TEXT NOT NULL, running INTEGER NOT NULL, cap INTEGER, "
-                 "ready INTEGER NOT NULL, rejected INTEGER NOT NULL, PRIMARY KEY(ts,lane))")
-    conn.executemany(
-        "INSERT INTO lane_samples VALUES (?,?,?,?,?,?) ON CONFLICT(ts,lane) DO UPDATE SET "
-        # Preserve the occupancy/cap pair that witnessed rejection, even if the
-        # lane drains or its cap changes later in this minute. Otherwise keep peak occupancy.
-        "running=CASE WHEN excluded.rejected>0 OR (lane_samples.rejected=0 AND "
-        "excluded.running>=lane_samples.running) THEN excluded.running ELSE lane_samples.running END, "
-        "cap=CASE WHEN excluded.rejected>0 OR (lane_samples.rejected=0 AND "
-        "excluded.running>=lane_samples.running) THEN excluded.cap ELSE lane_samples.cap END, "
-        "ready=MAX(lane_samples.ready,excluded.ready), rejected=lane_samples.rejected+excluded.rejected",
-        [(minute, name, counts[name], spec.max_workers, ready[name], len(capture[name]))
-         for name, spec in pol.lanes.items()])
-    conn.execute("DELETE FROM lane_samples WHERE ts < ?", (minute - RETENTION,))
+    witness = getattr(capture, "witness", {})
+    # A refusal observed occupancy at or above the cap; the pass-start census may predate this
+    # pass's own claims.
+    rows = [(minute, name, max(counts[name], witness.get(name, 0)) if capture[name] else counts[name],
+             spec.max_workers, ready[name], len(capture[name])) for name, spec in pol.lanes.items()]
+    # One advisory write unit. A SAVEPOINT nests inside a caller's transaction without
+    # committing or rolling back anything the caller owns, and commits itself when outermost.
+    conn.execute("SAVEPOINT lane_samples_record")
+    try:
+        conn.execute(SCHEMA)
+        conn.executemany(UPSERT, rows)
+        # PRIMARY KEY(ts,lane) is the ts-prefixed index this range delete uses.
+        conn.execute("DELETE FROM lane_samples WHERE ts < ?", (minute - RETENTION,))
+    except BaseException:
+        conn.execute("ROLLBACK TO lane_samples_record")
+        conn.execute("RELEASE lane_samples_record")
+        raise
+    conn.execute("RELEASE lane_samples_record")
 
 
 def ticks(conn, pol, *, window_s=86400, count=48, now=None):
@@ -97,7 +139,8 @@ def ticks(conn, pol, *, window_s=86400, count=48, now=None):
         rank = {'empty': 0, 'partial': 1, 'full': 2, 'rejecting': 3}
         tick = out[name][index]
         tick['rejected'] = (tick['rejected'] or 0) + rejects
-        if tick['state'] == 'unknown' or rank[state] >= rank[tick['state']]:
+        # Same severity: the busier minute is the witness; equal busyness takes the latest cap.
+        if tick['state'] == 'unknown' or (rank[state], running) >= (rank[tick['state']], tick['running']):
             tick.update(state=state, running=running, cap=cap)
         observed[(name, index)] = True
     # Sweep real run endpoints per historical bucket: counting overlapping runs
@@ -107,7 +150,9 @@ def ticks(conn, pol, *, window_s=86400, count=48, now=None):
             "SELECT t.tenant,r.started_at,COALESCE(r.ended_at,?) FROM task_runs r "
             "JOIN tasks t ON t.id=r.task_id WHERE r.started_at<? AND COALESCE(r.ended_at,?)>?",
             (now, now, now, start)):
-        endpoints[pol.lane_of(tenant)].append((max(start, began), min(now, ended)))
+        left, right = max(start, began), min(now, ended)
+        if left < right:  # a zero-length or inverted span proves no occupancy
+            endpoints[pol.lane_of(tenant)].append((left, right))
     for name, spans in endpoints.items():
         for index, tick in enumerate(out[name]):
             if (name, index) in observed:
