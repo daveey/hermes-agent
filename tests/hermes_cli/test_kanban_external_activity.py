@@ -297,10 +297,13 @@ def test_blocks_nest_and_another_thread_reads_on_its_own(kanban_home, monkeypatc
         stamp, opens = _counting(monkeypatch, conn)
         with kea.one_board_read():
             stamp([{"id": "s1"}])
+            # A commit before the inner block: were the inner block to start its own read set,
+            # the moved signature would force a second open here.
+            _session_card(conn, "s1")
             with kea.one_board_read():
                 stamp([{"id": "s1"}])
             stamp([{"id": "s1"}])  # the inner block's end does not drop the outer one's read
-            assert len(opens) == 1
+            assert len(opens) == 1, "a nested block shares the outer block's read"
             _session_card(conn, "s1")
             worker = threading.Thread(target=lambda: stamp([{"id": "s1"}]))
             worker.start()

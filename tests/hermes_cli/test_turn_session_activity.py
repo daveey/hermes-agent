@@ -479,7 +479,14 @@ def test_removed_profile_store_drops_its_retained_read(home, wal_store):
     now = time.time()
     work = home / "profiles" / "work" / "state.db"
     _leases(work, [("p", _holder(os.getpid(), "p"), now - 5, now + 600)])
-    assert "p" in tsa._collect(now)
+    keeper = sqlite3.connect(work)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("SELECT * FROM session_turn_leases").fetchall()  # initialize the WAL index
+    try:
+        assert "p" in tsa._collect(now)
+        assert work in tsa._store_reads, "a WAL store with a known stamp is retained"
+    finally:
+        keeper.close()
     for suffix in ("", "-wal", "-shm"):
         (work.parent / f"state.db{suffix}").unlink(missing_ok=True)
     assert "p" not in tsa._collect(now + 1)
