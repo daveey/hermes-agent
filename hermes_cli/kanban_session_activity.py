@@ -1826,7 +1826,10 @@ def _annotation_snapshot_owned(*, display: bool = False) -> tuple | None:
         if parts is None:
             parts = previous is not None and _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
         parts = parts or _host_copy.adopt(scope)
-    except BaseException:
+        if parts is None and display and _bounded.in_capture_role():
+            parts = _bounded.recent_copy(previous if previous is not None else _annotation_copy.seed(
+                scope, _last_annotation, _identity.freeze_annotation), _annotation_copy.observed_at)
+    except BaseException:  # health: allow BLE001 -- release owned lock before propagating candidate/read failures
         _annotate_refresh_lock.release()
         raise
     if parts is not None:

@@ -141,6 +141,16 @@ class SessionsSource:
             for key in keys:
                 self._dirty.pop(key)
             self._capturing.update(keys)
+        # The feed retains the launch profile's context. Teach its long-lived
+        # holder this scope once per batch; a child's demand cannot do that.
+        # Do not pull annotation imports into early sessions bootstrap.
+        import sys
+        try:
+            ksa = sys.modules.get('hermes_cli.kanban_session_activity')
+            if ksa is not None:
+                ksa._host_copy.demand(ksa._origin_scope())
+        except Exception:  # health: allow BLE001 -- advisory holder demand must never fail capture
+            logger.debug('sessions annotation demand unavailable', exc_info=True)
         try:
             bodies = (self.reader_many(views) if self.reader_many is not None else
                       [self.reader(*views[0])])

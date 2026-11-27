@@ -404,9 +404,12 @@ def refresh_locked(scope: tuple[str, ...], read_at: float | None = None) -> tupl
         ksa._bounded.record(scope, value, holder_counts.observed_at(read_at))
         ksa._last_annotation[scope] = value
         ksa._annotate_flight_result = value
-        if not holder_counts.reused():
-            ksa._annotation_copy.published(scope, value)
-        publish(scope, prepared, value)
+        # The capture child has no plugin checks/sources; it may use its read
+        # locally, but must never replace the long-lived holder's shared copies.
+        if not ksa._bounded.in_capture_role():
+            if not holder_counts.reused():
+                ksa._annotation_copy.published(scope, value)
+            publish(scope, prepared, value)
         return value
     finally:
         holder_counts.clear_use()

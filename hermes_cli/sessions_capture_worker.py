@@ -9,14 +9,21 @@ MAX_RESPONSE = 4 * 1024 * 1024
 
 
 def capture(name, selector):
-    from hermes_cli.web_routers import profiles
-    from hermes_cli.web_json_response import native_json_response
-    readers = {'sessions': profiles.get_profiles_sessions,
-               'sessions_sidebar': profiles.get_profiles_sessions_sidebar.__wrapped__,
-               'sessions_stamps': profiles.get_profiles_session_stamps}
-    # No native binding is installed in this fresh child. Keep the canonical
-    # SQL/policy/ordering and all seven annotation families, bypassing sidebar TTL.
-    return native_json_response(readers[name](**selector)).body
+    from contextlib import nullcontext
+    import os
+    from hermes_cli.kanban_annotation_refresh import capture_role
+
+    # health: allow HX002 -- creator-defined rollback switch, never a credential
+    role = nullcontext() if os.environ.get('HERMES_SESSIONS_CAPTURE_COPY_FIRST') == '0' else capture_role()
+    with role:
+        from hermes_cli.web_routers import profiles
+        from hermes_cli.web_json_response import native_json_response
+        readers = {'sessions': profiles.get_profiles_sessions,
+                   'sessions_sidebar': profiles.get_profiles_sessions_sidebar.__wrapped__,
+                   'sessions_stamps': profiles.get_profiles_session_stamps}
+        # No native binding is installed in this fresh child. Keep the canonical
+        # SQL/policy/ordering and all seven annotation families, bypassing sidebar TTL.
+        return native_json_response(readers[name](**selector)).body
 
 
 def main():

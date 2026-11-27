@@ -10,6 +10,7 @@ as the answer and publishes itself for the next poll.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import contextvars
 import logging
 import threading
@@ -17,6 +18,24 @@ import time
 from typing import Any, Callable
 
 _log = logging.getLogger("hermes_cli.kanban_session_activity")
+
+COPY_FIRST_MAX_AGE_S = 30.0
+_capture_role = contextvars.ContextVar('annotation_capture_role', default=False)
+
+
+@contextmanager
+def capture_role():
+    """Scope the plugin-incomplete child's reads, including bounded helper threads."""
+    token = _capture_role.set(True)
+    try:
+        yield
+    finally:
+        _capture_role.reset(token)
+
+
+def in_capture_role() -> bool:
+    return _capture_role.get()
+
 
 # Wall time each published parts tuple was read (by identity): a served previous read keeps its own date.
 _read_at: dict[tuple[str, ...], tuple[tuple, float]] = {}
@@ -50,6 +69,22 @@ def read_at(parts: Any) -> float | None:
 def unavailable(parts: tuple | None, display: bool, observed_at: float | None) -> bool:
     """Match the Desktop's persisted observation horizon; expiry is unknown, never empty/done."""
     return parts is None or (display and observed_at is not None and time.time() - observed_at > 180.0)
+
+
+def recent_copy(candidate: tuple | None, saved_at: Callable[[Any], float | None]) -> tuple | None:
+    """``candidate`` when the capture child may serve it at once instead of starting a refresh it cannot finish.
+
+    A publication-age shortcut, not a data-age guarantee: a restart copy carries its SAVE time (``saved_at``), a
+    previous read its read time. Rows keep the copy's own date (``copy_at`` in ``annotate_kanban_activity``). Past
+    ``COPY_FIRST_MAX_AGE_S``, or with an unknown or future date, the caller runs the ordinary bounded refresh, and
+    the 180 s display horizon (:func:`unavailable`) still marks expired rows unknown.
+    """
+    if candidate is None:
+        return None
+    date = saved_at(candidate)
+    if date is None:
+        date = read_at(candidate)
+    return candidate if date is not None and 0 <= time.time() - date <= COPY_FIRST_MAX_AGE_S else None
 
 
 def reset() -> None:
