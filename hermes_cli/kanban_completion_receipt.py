@@ -242,18 +242,20 @@ def keep_admitted_receipt(conn, run_id, metadata):
     """
     import json
 
-    prior = None
+    stored = {}
     if run_id is not None:
         row = conn.execute("SELECT metadata FROM task_runs WHERE id = ?", (run_id,)).fetchone()
         try:
             stored = json.loads(row[0]) if row and row[0] else {}
         except (TypeError, ValueError):
             stored = {}
-        prior = stored.get("completion_receipt") if isinstance(stored, dict) else None
-    if "completion_receipt" in metadata and metadata["completion_receipt"] != prior:
-        raise ReceiptEditRefused("completion_receipt: only kanban complete admits a receipt; "
-                                 "edit keeps the admitted one (omit completion_receipt)")
-    edited = {k: v for k, v in metadata.items() if k != "completion_receipt"}
-    if prior is not None:
-        edited["completion_receipt"] = prior
+    edited = dict(metadata)
+    for key in ("completion_receipt", "acceptance_continuations"):
+        prior = stored.get(key) if isinstance(stored, dict) else None
+        if key in metadata and metadata[key] != prior:
+            raise ReceiptEditRefused(f"{key}: only kanban complete admits this evidence; "
+                                     f"edit keeps the admitted one (omit {key})")
+        edited.pop(key, None)
+        if prior is not None:
+            edited[key] = prior
     return edited

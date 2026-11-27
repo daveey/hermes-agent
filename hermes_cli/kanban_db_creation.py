@@ -78,6 +78,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    creation_receipt=None, board=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_consent import snapshot
+    from hermes_cli.kanban_acceptance_continuations import source_digest
 
     source = conn.execute("SELECT created_by, session_id, priority FROM tasks WHERE id=?", (task_id,)).fetchone()
     kb._append_event(conn, task_id, "created", {
@@ -104,6 +105,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         "placement_policy": placement_policy,
         "priority": source[2],
         "consent_stops": snapshot(conn, task_id, creator_task_id),
+        "source_body_sha256": source_digest(conn, task_id),
     })
     from hermes_cli.kanban_fairness_creation import stage
     stage(conn, task_id, creator_task_id=creator_task_id, board=board, receipt=creation_receipt)

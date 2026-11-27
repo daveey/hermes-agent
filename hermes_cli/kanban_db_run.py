@@ -5,6 +5,14 @@ import sqlite3
 import time
 from typing import Optional
 
+
+def _claim_is_live(trow) -> bool:
+    """True when a ``running`` task's claim still protects a run: its spawned worker exists (PID + start-time
+    fingerprint). TTL is not consulted: the process is the liveness authority (``reclaim_stale_tasks`` extends it)."""
+    from hermes_cli import kanban_db as kb
+    return bool(trow["status"] == "running" and trow["claim_lock"] is not None
+                and trow["worker_pid"] and kb._worker_alive(trow["worker_pid"], trow["worker_started_at"]))
+
 def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     row = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return int(row["current_run_id"]) if row and row["current_run_id"] else None

@@ -138,7 +138,13 @@ def _relane(conn, pol, action, row, _state) -> Optional[str]:
     return None
 
 
-_HANDLERS = {"admit": _admit, "merge": _merge, "reprioritize": _reprioritize, "relane": _relane}
+def _admit_continuation(conn, pol, action, row, state):
+    from hermes_cli.kanban_acceptance_continuations import admit
+    return admit(conn, pol, action, row, state)
+
+
+_HANDLERS = {"admit": _admit, "admit_continuation": _admit_continuation,
+             "merge": _merge, "reprioritize": _reprioritize, "relane": _relane}
 
 
 def apply(conn, actions, *, now: Optional[float] = None, dry_run: bool = False, actor: str = ACTOR) -> dict:

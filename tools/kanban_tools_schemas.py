@@ -223,6 +223,23 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "workers alongside ``summary``."
         )), "properties": {
             "completion_receipt": _completion_receipt_schema(),
+            "acceptance_continuations": {
+                "type": "object", "additionalProperties": False,
+                "description": "Optional explicit attestation: these never-run created children are REQUIRED to finish "
+                               "this card's original acceptance, not improvements. Copy source_body_sha256 from this "
+                               "card's immutable created event; body must be unchanged. Only owned claimed-run completion "
+                               "admits it. Planner rechecks unchanged scope, dependencies, holds and existing lane budgets.",
+                "required": ["version", "source_body_sha256", "items"],
+                "properties": {
+                    "version": {"type": "integer", "enum": [1]},
+                    "source_body_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "items": {"type": "array", "minItems": 1, "maxItems": 16, "items": {
+                        "type": "object", "additionalProperties": False, "required": ["card", "criterion"],
+                        "properties": {"card": {"type": "string"}, "criterion": {
+                            "type": "string", "minLength": 16, "maxLength": 2000,
+                            "description": "Verbatim original acceptance criterion. This is executor attestation, not inferred authority."}}}},
+                },
+            },
             "containment_retained": {"description": "Retained episode uids; explain why in summary."},
             # Advertise canonical values without narrowing formerly free-form metadata.
             # Existing readers and ship gates, not deferred transport, own validation.

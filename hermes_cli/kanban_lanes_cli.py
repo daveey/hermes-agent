@@ -81,17 +81,22 @@ def _show(args) -> int:
     return 0
 
 
-def _cards(args, rows) -> int:
+def _cards(args, rows, *, continuations=None) -> int:
     data = [{"id": r["id"], "title": r["title"], "lane": r["tenant"], "priority": r["priority"],
              "created_at": r["created_at"], "created_by": r["created_by"]} for r in rows]
+    if continuations is not None:
+        for card in data:
+            card["continuation"] = continuations[card["id"]]
     if not _json_out(args, data):
         print("\n".join(f"{c['id']}  [{c['lane']}]  {c['title']}" for c in data) or "none")
     return 0
 
 
 def _held(args) -> int:
+    from hermes_cli.kanban_acceptance_continuations import candidates
     with kbc.connect_closing() as conn:
-        return _cards(args, lanes.held(conn, args.lane)[:args.limit])
+        rows = lanes.held(conn, args.lane)[:args.limit]
+        return _cards(args, rows, continuations={c["card"]: c for c in candidates(conn, rows)})
 
 
 def _unclassified(args) -> int:

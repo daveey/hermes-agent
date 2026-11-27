@@ -1792,7 +1792,7 @@ def _append_event(
     append_event(conn, task_id, kind, payload, run_id=run_id)
 
 
-from hermes_cli.kanban_db_run import _end_run
+from hermes_cli.kanban_db_run import _end_run, _claim_is_live
 
 
 def _task_status(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -2386,12 +2386,6 @@ class LiveClaimError(ValueError):
         )
 
 
-def _claim_is_live(trow) -> bool:
-    """True when a ``running`` task's claim still protects a run: its spawned worker exists (PID + start-time
-    fingerprint). TTL is not consulted: the process is the liveness authority (``reclaim_stale_tasks`` extends it)."""
-    return bool(trow["status"] == "running" and trow["claim_lock"] is not None
-                and trow["worker_pid"] and _worker_alive(trow["worker_pid"], trow["worker_started_at"]))
-
 
 @source_receipt_preflight  # workspace_source: the ending's receipt (published/unchanged/retained), S6
 def complete_task(
@@ -2449,6 +2443,8 @@ def complete_task(
         if not _parents_satisfied(conn, task_id):
             return False
         receipt_admission.recheck(conn, task_id, receipt_owners)
+        from hermes_cli.kanban_acceptance_continuations import prepare as prepare_continuations
+        continuations = prepare_continuations(conn, task_id, metadata, expected_run_id, force=force)
         validate_repair_completion(conn, task_id, observation=repair_observation)
         from hermes_cli.kanban_goal_receipt import record as record_goal
         goal_event_id = record_goal(conn, task_id, goal_verification, (summary or result or '').strip())
@@ -2503,6 +2499,8 @@ def complete_task(
             event_summary = _REVIEW_APPROVED_NOTE
         from hermes_cli.kanban_db_completion_payload import completed_event_payload
         completion_payload = completed_event_payload(result, event_summary, verified_cards, metadata, acceptance)
+        if continuations is not None:
+            completion_payload['acceptance_continuations'] = continuations
         if isinstance(metadata, dict) and "completion_receipt" in metadata:
             completion_payload["completion_receipt_admission"] = 1
         if goal_event_id is not None:
