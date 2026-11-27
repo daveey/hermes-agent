@@ -95,7 +95,8 @@ def test_closure_cannot_overwrite_another_profile_root(tmp_path, monkeypatch):
     unknowns = []
     foreign = (tmp_path / 'other-profile', 'plugin', digests)
     ledger = SimpleNamespace(core_root=tmp_path / 'core', _blobs={}, _lock=RLock(),
-                             _components={'plugin:sibling': foreign}, mark_unknown=unknowns.append)
+                             _components={'plugin:sibling': foreign}, mark_unknown=unknowns.append,
+                             _settle_under=lambda root: None)
     ledger.register_component_root = lambda *args, **kwargs: ca.Attestation.register_component_root(
         ledger, *args, **kwargs)
     monkeypatch.setattr(ca, '_installed', ledger)
