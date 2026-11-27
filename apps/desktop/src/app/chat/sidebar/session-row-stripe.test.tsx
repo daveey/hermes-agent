@@ -17,6 +17,21 @@ import { SessionRowStatusStripe, useSessionRowStripe } from './session-row-strip
 const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 4, source: 'desktop', started_at: 0, title: id, ...extra }) as SessionInfo
 
+it('operational overdue triage paints red without asking for a decision', () => {
+  const outcome = canonicalOutcome('stuck', { kind: 'waiting',
+    presentation: { stripe: 'stuck', reason_codes: ['open_work', 'triage_overdue'] } },
+    { kind: 'waiting', on: [{ kind: 'card', id: 't_owned', state: 'triage_overdue' }] })
+
+  const session = row('triage-chat', { outcome, kanban_active: 1, needs_you: [] })
+  setSessions([session])
+  const { result } = renderHook(() => useSessionRowStripe(session, 'background', true))
+  const { container } = render(<SessionRowStatusStripe outcomePainted={result.current.outcomePainted} session={session} statusStripe={result.current.statusStripe} />)
+  expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('stuck')
+  expect(stripe(container)?.className).toContain('--color-red-500')
+  expect(stripe(container)?.getAttribute('aria-label')).toContain("overdue triage · waiting on this chat's agent")
+  expect(stripe(container)?.getAttribute('aria-label')).not.toContain('your decision')
+})
+
 it.each(['ci', 'deploy'])('a replica %s park paints the canonical light-blue hollow cloud', () => {
   const session = row('replica-wait', {
     kanban_active: 1, kanban_parked: 1, kanban_external: 1, kanban_external_unknown: 1,

@@ -36,16 +36,21 @@ export function sessionCardColours(
   session: SessionInfo,
   executionUnknown: number
 ): { colour: CardColour; count: number }[] {
-  const parked = session.kanban_parked ?? 0
-  const stalled = session.kanban_stalled ?? 0
-  const live = Math.max(0, (session.kanban_active ?? 0) - parked - (session.kanban_held ?? 0))
+  const attention = hasFreshKanbanObservation(session) ? session.kanban_triage_attention : undefined
+  const aged = attention?.count ?? 0
+  const agedParked = attention?.parked ?? 0
+  const agedHeld = attention?.held ?? 0
+  const parked = Math.max(0, (session.kanban_parked ?? 0) - agedParked)
+  const held = Math.max(0, (session.kanban_held ?? 0) - agedHeld)
+  const stalled = Math.max(0, (session.kanban_stalled ?? 0) - (attention?.stalled ?? 0))
+  const live = Math.max(0, (session.kanban_active ?? 0) - parked - held - aged)
   const work = sidebarCardWork(session)
   const queued = Math.min(live, work.queued)
   const quiet = Math.min(Math.max(0, live - queued), work.quiet)
 
   const counts: Record<CardColour, number> = {
-    red: session.needs_you?.length ?? session.kanban_blocked ?? 0,
-    pink: session.kanban_held ?? 0,
+    red: (session.needs_you?.length ?? session.kanban_blocked ?? 0) + aged,
+    pink: held,
     orange: stalled + quiet,
     green: queued,
     amber: session.kanban_attention ?? 0,
@@ -103,7 +108,7 @@ export function BackgroundCardSquares({ sessions }: { sessions: SessionInfo[] })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const colours = useMemo(() => aggregateCardColours(sessions), [sessions, tick])
 
-  return <CardSquares colours={colours} counts />
+  return <CardSquares attention={sessions.some(s => hasFreshKanbanObservation(s) && Boolean(s.kanban_triage_attention?.count))} colours={colours} counts />
 }
 
 const trailingColours = (session: SessionInfo, executionUnknown: number) =>
@@ -119,15 +124,17 @@ export function SessionRowCardSquares({
   const counts = useContext(CardCountsContext)
   const colours = counts ? backgroundCardColours(session) : trailingColours(session, executionUnknown)
 
-  return counts ? <BackgroundCardSquares sessions={[session]} /> : <CardSquares colours={colours} />
+  return counts ? <BackgroundCardSquares sessions={[session]} /> : <CardSquares attention={hasFreshKanbanObservation(session) && Boolean(session.kanban_triage_attention?.count)} colours={colours} />
 }
 
 export function CardSquares({
   colours,
-  counts = false
+  counts = false,
+  attention = false
 }: {
   colours: ReturnType<typeof sessionCardColours>
   counts?: boolean
+  attention?: boolean
 }) {
   const { t } = useI18n()
 
@@ -138,7 +145,7 @@ export function CardSquares({
   const label = colours
     .map(
       ({ colour, count }) =>
-        `${colour === 'unknown' ? t.messaging.unknown : t.sidebar.row.cardColours[colour]} ${count}`
+        `${colour === 'unknown' ? t.messaging.unknown : t.sidebar.row.cardColours[colour === 'red' && attention ? 'amber' : colour]} ${count}`
     )
     .join(' · ')
 

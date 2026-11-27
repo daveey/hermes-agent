@@ -106,7 +106,7 @@ export const sessionDotVariant = (
       : stripe === 'done'
         ? r.outcomeDone
         : stripe === 'stuck'
-          ? r.outcomeDecision
+          ? outcome?.status?.presentation?.reason_codes?.includes('triage_overdue') ? r.outcomeTriageOverdue : r.outcomeDecision
           : stripe === 'blocked'
             ? r.outcomeMuted
             : stripe === 'attention'

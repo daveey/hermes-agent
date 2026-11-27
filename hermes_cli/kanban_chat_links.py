@@ -720,6 +720,8 @@ def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) ->
         "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
         "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
         (gateway, profile, gateway)).fetchall()]
+    from hermes_cli.kanban_triage_attention import annotate
+    annotate(conn, rows)
     return enrich(conn, rows)
 
 
@@ -1052,6 +1054,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "source": "replica",
             }
             out[pair].update(upstream_fields(r))
+            out[pair]['triage_entered_at'] = r.get('triage_entered_at')
             out[pair].update({k: v for k, v in r.items() if k.startswith('timer_')})
             out[pair].update(_ledger_wait(index, owner, owner_profile, board, tid, status,
                                           named=named and not unknown))

@@ -77,6 +77,8 @@ def local(conn, pairs):
             (json.dumps(ids),))}
         from hermes_cli.kanban_producer_wait import stamp
         stamp(conn, list(found.values()))
+        from hermes_cli.kanban_triage_attention import annotate
+        annotate(conn, found.values())
         return found
     except (sqlite3.Error, TypeError, ValueError):
         return {}

@@ -21,6 +21,14 @@ const mount = (outcome?: SessionOutcome) => render(
 )
 
 describe('SessionStatusDot published status', () => {
+  it('red overdue triage is agent attention, not a human decision', () => {
+    const outcome = canonicalOutcome('stuck', { kind: 'waiting', presentation: { stripe: 'stuck', reason_codes: ['triage_overdue'] } })
+    const { container } = mount(outcome)
+    const dot = container.querySelector('[data-session-status-dot]')!
+    expect(dot.getAttribute('data-session-status-dot')).toBe('stuck')
+    expect(dot.getAttribute('aria-label')).toBe("Overdue triage · waiting on this chat's agent")
+    expect(dot.className).toContain('--color-red-500')
+  })
   it.each(['done', 'waiting', 'attention', 'blocked', 'stuck', 'none'] as const)(
     'paints %s independently of local activity, unread and card counts', stripe => {
       const { container } = mount(canonicalOutcome(stripe, {}, { kind: 'done' }))
@@ -60,6 +68,7 @@ describe('SessionStatusDot published status', () => {
       reason: 'empty',
       presentation: { stripe: 'none', reason_codes: ['never_started'] }
     }
+
     const { container } = mount({ kind: 'unresolved', status })
     const dot = container.querySelector('[data-session-status-dot]')!
 

@@ -4991,6 +4991,7 @@
     "sidebar.row.outcomeDone",
     "sidebar.row.outcomeMuted",
     "sidebar.row.outcomeRunning",
+    "sidebar.row.outcomeTriageOverdue",
     "sidebar.row.outcomeUnresolved",
     "sidebar.row.outcomeWaiting",
     "sidebar.row.outcomeWatches",

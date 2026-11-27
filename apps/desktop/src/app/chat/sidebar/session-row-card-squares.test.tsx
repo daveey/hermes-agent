@@ -84,6 +84,28 @@ afterEach(() => {
 })
 
 describe('sessionCardColours', () => {
+  it('counts backend overdue triage once on ordinary and Background rows, without needs_you', () => {
+    const fields = { kanban_active: 1, kanban_parked: 1, kanban_stalled: 1, needs_you: [],
+      kanban_observed_at: Date.now() / 1000,
+      kanban_triage_attention: { count: 1, refs: ['owner/default/work/t_card'], parked: 1, held: 0, stalled: 1 } }
+
+    expect(sessionCardColours(session(fields), 0)).toEqual([{ colour: 'red', count: 1 }])
+    expect(aggregateCardColours([session(fields)])).toEqual([{ colour: 'red', count: 1 }])
+    const { container } = draw(fields)
+    expect(container.querySelector('[data-card-colour="red"]')).not.toBeNull()
+    expect(container.querySelector('[role="img"]')?.getAttribute('aria-label')).toBe('Needs attention 1')
+    const mounted = render(<BackgroundCardSquares sessions={[session(fields)]} />)
+    expect(mounted.container.querySelector('[data-card-colour="red"]')?.textContent).toBe('1')
+  })
+  it.each(['expired', 'unstamped', 'future'] as const)('overdue attention needs a fresh observation: %s', stamp => {
+    const now = Date.now() / 1000
+
+    const value = session({ kanban_active: 1, kanban_parked: 1,
+      kanban_observed_at: stamp === 'unstamped' ? undefined : now + (stamp === 'expired' ? -181 : 3600),
+      needs_you: [], kanban_triage_attention: { count: 1, refs: ['owner/default/work/t_card'], parked: 1, held: 0, stalled: 0 } })
+
+    expect(aggregateCardColours([value])).toEqual([{ colour: 'unknown', count: 1 }])
+  })
   it('red uses needs_you when present, including an empty array, otherwise blocked', () => {
     expect(sessionCardColours(session({ kanban_blocked: 2 }), 0)).toEqual([{ colour: 'red', count: 2 }])
     expect(

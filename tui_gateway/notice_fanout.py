@@ -66,6 +66,8 @@ def _reset_for_tests() -> None:
     _remote_pending.clear()
     from tui_gateway import notice_fanout_state
     notice_fanout_state.reset_for_tests()
+    from tui_gateway import notice_triage_clock
+    notice_triage_clock.reset()
 
 
 def chat_skip_reason(db: Any, chat_id: str) -> Optional[str]:
@@ -194,7 +196,7 @@ def _changed_tasks(conn: sqlite3.Connection, ident: str) -> tuple[list[str], int
     return list(dict.fromkeys(str(r[0]) for r in rows)), boundary
 
 
-def _board_idle(ident: str) -> bool:
+def _board_idle(ident: str, report=None) -> bool:
     """True when the board's newest ``task_events`` id equals the durable cursor: nothing happened since the last
     pass, so the per-pass board connect (schema prepare, 121 of the pass's 647 profile samples) and the fan-out are
     skipped. Read through the shared retained reader. The cursor IS the effective key (a changed board, or any
@@ -207,6 +209,12 @@ def _board_idle(ident: str) -> bool:
             return False
         with reader(Path(ident)) as ro:
             top = int(ro.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
+            from tui_gateway import notice_triage_clock
+            aged, due = notice_triage_clock.local(ro, ident, top, now=time.time())
+            if report is not None:
+                report.clock(due)
+            if aged:
+                return False
             if top == since:
                 return True
             if top < since:
@@ -308,7 +316,7 @@ def _remote_inputs_key() -> Optional[tuple]:
 # The ledger-card fields ``kanban_chat_links.replica_cards`` reads (owner labels, profile-board cards, cold-start
 # fallback) and the pass keeps (key, status, chat, origin chat, unfinished).
 _LEDGER_KEY_FIELDS = ("key", "board", "id", "gateway", "profile", "session", "origin_session", "origin_gateway",
-                      "origin_profile", "status", "unfinished", "released", "ownership_state")
+                      "origin_profile", "status", "unfinished", "released", "ownership_state", "triage_entered_at")
 
 
 def _ledger_content_key(cards: list[dict]) -> str:
@@ -359,6 +367,10 @@ def _task_prints(conn: sqlite3.Connection, ids: list) -> dict:
         marks = ",".join("?" * len(chunk))
         for tid, status, owner in conn.execute(f"SELECT id, status, created_on FROM tasks WHERE id IN ({marks})", chunk):
             out[tid] = [(status, owner), []]
+        from hermes_cli.kanban_triage_attention import annotate
+        triage = [{'id': tid, 'status': 'triage'} for tid in chunk if tid in out and out[tid][0][0] == 'triage']
+        for card in annotate(conn, triage):
+            out[card['id']][0] += (card['triage_entered_at'],)
         for row in conn.execute(f"SELECT task_id, chat_gateway, chat_profile, chat_session, kind, released "
                                 f"FROM task_chat_links WHERE task_id IN ({marks})", chunk):
             if row[0] in out:
@@ -450,7 +462,11 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
             remote_retry(out, 'initial_poll_failed')
             inputs = None
     memo = _remote_memo
-    if not diagnostic.test('health_pending', health_generation is not None) and not absent_due and not _remote_pending and inputs is not None \
+    from tui_gateway import notice_triage_clock
+    due = notice_triage_clock.remote_due()
+    out.clock(due)
+    clock_due = due is not None and time.time() >= due
+    if not clock_due and not diagnostic.test('health_pending', health_generation is not None) and not absent_due and not _remote_pending and inputs is not None \
             and not diagnostic.test('no_memo', memo is None) \
             and not diagnostic.test('inputs_changed', memo[0] != inputs[0]) \
             and not diagnostic.check('ledger_changed', lambda: memo[1] != _ledger_content_key(inputs[1])) \
@@ -461,13 +477,15 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
     _remote_memo = None
     from tui_gateway import notice_fanout_state as state
     snapshot, known = _remote_projection(activity)
+    out.clock_deadline = None
+    out.clock(notice_triage_clock.remote_due())
     previous = state.load_remote(strict=True)
     if previous is None:
         if not state.seed_remote(snapshot):
             remote_retry(out, 'seed_failed')
             diagnostic.call = 'seed_failed'
             return out
-        if health_generation is None:
+        if health_generation is None and not any(s == 'triage_overdue' for values in snapshot.values() for _, s in values):
             diagnostic.call = 'seed_only'
             return out
         previous = {}  # first source publication must also repair retained unknown outcomes
@@ -518,11 +536,16 @@ def _remote_projection(activity):
     from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
     current: dict[str, set[tuple[str, str]]] = {}
     known: dict[str, set[str]] = {}
-    for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=False):
+    from tui_gateway import notice_triage_clock
+    from hermes_cli.kanban_triage_attention import overdue
+    now = time.time()
+    for card in notice_triage_clock.remote_cards(activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=False), now=now):
         known.setdefault(str(card.get("board")), set()).add(str(card.get("id")))
         status = card.get("status")
         if status not in activity.LISTED_STATUSES and not (status in PENDING_RELEASE_STATUSES and card.get("unfinished")):
             continue
+        if overdue(card, now=now):
+            status = 'triage_overdue'
         for chat in {card.get("session"), card.get("origin_session")} - {None, ""}:
             current.setdefault(chat, set()).add((card["key"], status))
     return {chat: frozenset(cards) for chat, cards in current.items()}, known
@@ -643,14 +666,21 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
     for slug in boards:
         try:
             ident = str(_kb.kanban_db_path(slug).resolve())
-            if _board_idle(ident):
+            if _board_idle(ident, done):
                 continue
             with contextlib.closing(_kbc.connect(board=slug)) as conn:
                 from tui_gateway import notice_fanout_state as state
                 tids, cursor = _changed_tasks(conn, ident)
+                from tui_gateway import notice_triage_clock
+                top = int(conn.execute('SELECT COALESCE(MAX(id), 0) FROM task_events').fetchone()[0])
+                aged, due = notice_triage_clock.local(conn, ident, top, now=time.time())
+                done.clock(due)
+                tids = list(dict.fromkeys([*tids, *sorted(aged)]))
                 done += _fan_out_changes(conn, _kb, session_db, slug, tids, hosted)
                 if not state.set_cursor(ident, cursor):
                     local_retry(done, 'set_cursor_failed')
+                else:
+                    notice_triage_clock.ack(ident, aged)
                 top = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
                 if top > cursor:
                     local_retry(done, 'top_gt_cursor', 0.0)

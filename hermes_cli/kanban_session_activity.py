@@ -1313,6 +1313,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
             remote_keys.setdefault(sid, set()).update(_external_activity.replica_markers(card))
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
         remote_keys[sid].update(_identity.timers.marker(card))
+        from hermes_cli.kanban_triage_attention import marker
+        remote_keys[sid].update(marker(card))
         _replica_exec.collect(card, execution)
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
         # only its last report) is never counted stalled, so stalled can't exceed what the row shows parked.

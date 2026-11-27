@@ -20,6 +20,7 @@ export interface SessionRowStatusCopy {
   /** [daveey] Cards a done chat still watches; `label` = card title, `eta` = wake time in epoch seconds, when known. */
   outcomeWatches: (cards: { id: string; label?: string; eta?: number }[]) => string
   outcomeDecision: string
+  outcomeTriageOverdue: string
   outcomeMuted: string
   outcomeRunning: string
   outcomeWaiting: string

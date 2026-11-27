@@ -63,6 +63,7 @@ export const enSessionRowStatus = {
   outcomeCrons: names => `Keeps running: ${names.join(', ')}`,
   outcomeWatches: cards => `Still watching: ${cards.map(watchLabel).join(', ')}`,
   outcomeDecision: 'Waiting on your decision',
+  outcomeTriageOverdue: "Overdue triage · waiting on this chat's agent",
   outcomeMuted: 'Muted',
   outcomeRunning: 'Running',
   outcomeWaiting: 'Waiting',

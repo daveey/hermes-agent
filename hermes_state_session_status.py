@@ -15,7 +15,7 @@ _IDENTITY_KEYS = ("gateway", "profile", "session_id", "owner_epoch")
 _SUCCESS = frozenset({"succeeded", "done", "completed"})
 _TURN_REASONS = frozenset({"notice_tail", "turn_unsettled", "subagent_killed"})
 _OPEN = frozenset({"ready", "todo", "running", "waiting", "blocked", "scheduled", "review", "triage",
-                   "external_running", "external_unknown", "source_unknown", "pending", "queued", "producer_wait"})
+                   "external_running", "external_unknown", "source_unknown", "pending", "queued", "producer_wait", "triage_overdue"})
 
 
 def _identity(value: Any) -> dict[str, str]:
@@ -79,6 +79,7 @@ def _verdict(snapshot: dict, coverage: dict, generation: int, failures: list[dic
     turn = snapshot.get("turn") or {}
     own_turn = turn.get("generation") == generation
     asks = snapshot.get("asks") or []
+
     if snapshot.get("muted"):
         return {"kind": "muted", "presentation": {"stripe": "blocked", "reason_codes": ["muted"]}}
     if asks:
@@ -144,6 +145,12 @@ def reduce_status(snapshot: dict[str, Any], *, previous: dict | None = None) -> 
     value = {"status_version": STATUS_VERSION, "identity": identity, "generation": generation,
              "source_revisions": revisions, "coverage": coverage, "failures": failures,
              **_verdict(snapshot, coverage, generation, failures)}
+    overdue = [item for item in snapshot.get('work') or ()
+               if item.get('kind') == 'card' and item.get('state') == 'triage_overdue']
+    if overdue and not snapshot.get('asks'):
+        value['presentation'] = {'stripe': 'stuck', 'reason_codes': list(dict.fromkeys([
+            *value['presentation']['reason_codes'], 'triage_overdue']))}
+        value.setdefault('on', deepcopy(overdue))
     old = {key: prior.get(key) for key in value}
     # An owner change is itself evidence even if the presentation is unchanged.
     revision = int(prior.get("revision", 0))

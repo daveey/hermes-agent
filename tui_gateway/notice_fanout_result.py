@@ -17,6 +17,7 @@ class FanoutResult(list[dict]):
         super().__init__()
         self.incomplete = False
         self.next_deadline: float | None = None
+        self.clock_deadline: float | None = None
         self.retry_origin = None
         self.subpass = origin(subpass)[0]
 
@@ -33,6 +34,9 @@ class FanoutResult(list[dict]):
 
     def absorb(self, other: FanoutResult) -> None:
         self.extend(other)
+        if other.clock_deadline is not None:
+            self.clock_deadline = (other.clock_deadline if self.clock_deadline is None
+                                   else min(self.clock_deadline, other.clock_deadline))
         if other.incomplete:
             self.incomplete = True
             if other.next_deadline is not None:
@@ -41,3 +45,9 @@ class FanoutResult(list[dict]):
             source = getattr(other, 'retry_origin', None)
             if source is not None:
                 self.retry_origin = earliest(self.retry_origin, *source)
+
+    def clock(self, wall_due):
+        """A successful pass can owe a future semantic transition, not a retry."""
+        if wall_due is not None:
+            due = time.monotonic() + max(0., wall_due - time.time())
+            self.clock_deadline = due if self.clock_deadline is None else min(self.clock_deadline, due)

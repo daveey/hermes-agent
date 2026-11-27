@@ -673,6 +673,8 @@ def run(kind: str, work, *args, live: set[str], every_store: bool = True, **kwar
             if getattr(result, 'next_deadline', None) is not None:
                 source = getattr(result, 'retry_origin', None)
                 due_report(report, result.next_deadline, *(source[1:] if source is not None else (kind, 'unknown')), cause='retry')
+            if getattr(result, 'clock_deadline', None) is not None:
+                due_report(report, result.clock_deadline, kind)
             return result
         inputs = probe(kind, every_store=every_store, live=live) if every_store else Inputs()
         if report is not None:

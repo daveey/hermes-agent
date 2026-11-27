@@ -141,6 +141,10 @@ const validEta = (eta: unknown): number | undefined =>
 
 /** One `on[]` entry in words: a card reads `t_… scheduled · 14:00`, anything else `capacity: hub slot`. */
 export const outcomeWaitingLine = (item: SessionOutcomeWaitingOn): string => {
+  if (item.kind === 'card' && item.state === 'triage_overdue') {
+    return `${item.id} · overdue triage · waiting on this chat's agent`
+  }
+
   const head = item.kind === 'card' ? item.id : `${item.kind}: ${item.label || item.id}`
   const state = item.state ? ` ${item.state}` : ''
   const eta = typeof item.eta === 'number' && Number.isFinite(item.eta) ? ` · ${outcomeEtaLabel(item.eta)}` : ''

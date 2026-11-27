@@ -20,6 +20,8 @@ def local_keys(path, reads, board=None):
         card = reads.get('timers', {}).get(tid)
         if card:
             out.setdefault(sid, set()).update(timers.marker({**card, 'key': f'{label}/{tid}'}))
+            from hermes_cli.kanban_triage_attention import marker
+            out[sid].update(marker({**card, 'key': f'{label}/{tid}'}))
     return out
 
 
@@ -104,7 +106,7 @@ def mark_unknown(rows):
     """Drop the counts and stamp ``kanban_unknown`` (a failed read is unknown, never \"no work\")."""
     for row in rows:
         for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale",
-                    "kanban_parked", "kanban_held", "kanban_stalled"):
+                    "kanban_parked", "kanban_held", "kanban_stalled", "kanban_triage_attention"):
             row.pop(key, None)
         row.pop("kanban_observed_at", None)
         row.pop("kanban_waiting_on", None)

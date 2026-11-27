@@ -20,7 +20,7 @@ _log = logging.getLogger(__name__)
 FIELDS = {
     'kanban': frozenset(('kanban_active', 'kanban_blocked', 'kanban_unseen',
         'kanban_attention', 'kanban_remote_stale', 'kanban_parked', 'kanban_held',
-        'kanban_stalled', 'kanban_observed_at', 'kanban_unknown', 'kanban_waiting_on',
+        'kanban_stalled', 'kanban_observed_at', 'kanban_unknown', 'kanban_waiting_on', 'kanban_triage_attention',
         'kanban_blocked_on', 'needs_you', 'kanban_external', 'kanban_external_unknown',
         'kanban_external_down', 'kanban_external_cards', 'kanban_timed_cards', 'kanban_timed_more')),
     'goal': frozenset(('goal_active',)),

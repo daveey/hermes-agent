@@ -294,6 +294,11 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
             payload.update(published_park(conn, task['id']))
     # No per-task timestamp: an unchanged task must publish an identical record, or every sync republishes
     # every task. Owner liveness is the collector's per-scope heartbeat (``task_scopes[].observed_at``).
+    if row[0] == 'triage':
+        from hermes_cli.kanban_triage_attention import annotate
+        annotate(conn, [payload])
+    else:
+        payload.pop('triage_entered_at', None)
     observation = {
         'schema': 1,
         'task_hash': hashlib.sha256(_json(payload).encode()).hexdigest(),
@@ -735,7 +740,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 result.append({
                     **diagnostic_fields(task, owner, current=current and not final, now=now),
                     **remote_fields(task, **owner),
-                    **{k: task.get(k) for k in ('title', 'assignee', 'block_kind', 'created_at', 'started_at', 'priority')},
+                    **{k: task.get(k) for k in ('title', 'assignee', 'block_kind', 'created_at', 'started_at', 'priority', 'triage_entered_at')},
                     **owner, 'id': owner['task_id'],
                     'key': '/'.join(owner[k] for k in ('gateway', 'profile', 'board', 'task_id')),
                     'session': resolved, 'origin_session': origin['session'],

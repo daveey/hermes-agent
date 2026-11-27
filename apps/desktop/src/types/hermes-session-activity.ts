@@ -61,6 +61,8 @@ export interface SessionActivityFields {
   /** [daveey] How many of `kanban_active` are queued behind a card blocked on a human ask (painted red). Absent
    *  when zero. */
   kanban_held?: number
+  /** Backend-authored overdue triage attention; never a human request. */
+  kanban_triage_attention?: { count: number; refs: string[]; parked: number; held: number; stalled: number }
   /** [daveey] How many of `kanban_parked` wait on something only an agent can end (transient/capability block,
    *  triage, continuation exhausted, a park with no named producer) and have waited over 2 h. Painted amber
    *  "stalled", distinct from grey waiting and red needs-you. Absent when zero. */

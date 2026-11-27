@@ -39,7 +39,7 @@ LINK_RELS = ('shepherd', 'cross_task', 'create-task', 'adopt-task')
 # ``_fold_legacy_aliases`` (status, sessions, created_at, created_by), and the record's own identity. Release
 # evidence (``record_attests_terminal``) is computed in ``_stage`` from the whole record before it is slimmed.
 SLIM_FIELDS = ('id', 'status', 'profile', 'board', 'gateway', 'created_at', 'created_by', 'sessions')
-_REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
+_REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority", "triage_entered_at")
 
 
 def linked_sessions(task: dict[str, Any], me: str, origin_profile: str) -> tuple[str, ...]:

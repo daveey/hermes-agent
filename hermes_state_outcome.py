@@ -394,6 +394,9 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         # Only a fresh owner watch reporting a running job can make this claim.
         external = wait.get("external") if isinstance(wait.get("external"), dict) else {}
         display_state = status
+        from hermes_cli.kanban_triage_attention import overdue
+        if overdue(card, now=time.time()):
+            display_state = 'triage_overdue'
         if (status == "scheduled" and wait_kind != "clock"
                 and wait.get("wait_state") == "external_running" and external.get("job") == "running"):
             display_state = "external_running"

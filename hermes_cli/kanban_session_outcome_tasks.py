@@ -79,6 +79,8 @@ def select_listed_local_task_set(conn: sqlite3.Connection, ids: Iterable[str], s
     except sqlite3.Error:  # board predates notify subscriptions
         if strict and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'").fetchone():
             raise
+    from hermes_cli.kanban_triage_attention import annotate
+    annotate(conn, found.values())
     return found, pairs
 
 

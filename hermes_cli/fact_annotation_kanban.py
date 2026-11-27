@@ -34,6 +34,8 @@ def _remote(cards, maps, keys, execution):
             keys.setdefault(sid, set()).update(activity._external_activity.replica_markers(card))
         keys.setdefault(sid, set()).add((str(card.get('key')), str(bucket), is_parked))
         keys[sid].update(activity._identity.timers.marker(card))
+        from hermes_cli.kanban_triage_attention import marker
+        keys[sid].update(marker(card))
         activity._replica_exec.collect(card, execution)
         if card.get('status') not in activity.PENDING_RELEASE_STATUSES and (
                 activity._remote_wait(card) or {}).get('wait_state') == 'stalled':
@@ -125,6 +127,8 @@ def capture(budget, *, now):
     parts = (*maps[:4], waiting, parked, held, stalled, activity._identity.merge_keys(remote_keys, local_keys),
              activity._extra_waiting(), _attention(paths, now, due), execution)
     _, provider_due = activity._host_copy.waiting_events(now)
+    from hermes_cli.kanban_triage_attention import deadlines
+    due.extend(deadlines({m for values in parts[8].values() for m in values}, now=now))
     if provider_due is not None:
         due.append(provider_due)
     value = freeze({'parts': parts, 'observed_at': now, 'external': external})
