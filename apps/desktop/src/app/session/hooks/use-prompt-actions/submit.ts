@@ -83,6 +83,7 @@ import {
   type GatewayRequest,
   inlineErrorMessage,
   isAdmittedSubmissionConflict,
+  isChatModelLoadingError,
   isForwardedReceipt,
   isProviderSetupError,
   isSessionBusyError,
@@ -271,7 +272,8 @@ function isDefiniteSubmitRefusal(error: unknown): boolean {
     }
   }
 
-  return isPreAdmissionRefusal(error)
+  // 400 "Chat model is still loading": refused before admission.
+  return isChatModelLoadingError(error) || isPreAdmissionRefusal(error)
 }
 
 export function useSubmitPrompt(deps: SubmitPromptDeps) {
@@ -1040,9 +1042,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         let createdId: null | string
 
         try {
-          createdId = await createBackendSessionForSend(bubbleText, {
-            onComposerScopeAssigned: options?.onComposerScopeAssigned
-          })
+          // A hub still loading its chat model refuses the create too: wait it out instead of
+          // failing a first send the user cannot see again.
+          createdId = await withSessionBusyRetry(() =>
+            createBackendSessionForSend(bubbleText, {
+              onComposerScopeAssigned: options?.onComposerScopeAssigned
+            })
+          )
         } catch (err) {
           dropOptimistic(null)
           releaseBusy()

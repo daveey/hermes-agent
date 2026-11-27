@@ -24,6 +24,7 @@ import { notify } from '@/store/notifications'
 import { isOnboardingChat } from '@/store/onboarding-session'
 import { answerParkedCard, skipParkedCards, yieldParkedCardsToMessage } from '@/store/parked-card-answers'
 import { hasBlockingPromptRequest } from '@/store/prompts'
+import { $sessions, setUnlistedSessionOwnerRows } from '@/store/session'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { onComposerSubmitRequest } from '../focus'
@@ -45,6 +46,17 @@ function stashStillHoldsSent(scope: string | null, text: string, attachments: Co
     (stashed.text === text || pathifyRefs(stashed.text) === text) &&
     stashed.attachments.every(attachment => attachments.some(sent => sameOccurrence(sent, attachment)))
   )
+}
+
+// A first send's chat exists only in this window until the hub admits its prompt, so the server list
+// never carries it. Keep its optimistic row as an unlisted stub: the sidebar shows it as "Not sent -
+// retry" for as long as its retry draft exists.
+function keepUnsentChatListed(sessionId: string): void {
+  const row = $sessions.get().find(session => session.id === sessionId)
+
+  if (row) {
+    setUnlistedSessionOwnerRows(prev => [row, ...prev.filter(stub => stub.id !== sessionId)])
+  }
 }
 
 interface UseComposerSubmitArgs {
@@ -174,6 +186,17 @@ export function useComposerSubmit({
       stashAt(restoreScope, text, submittedAttachments)
       // Restored with its identity: Enter on this exact draft retries the same send.
       rememberDraftRetry?.(restoreScope, draftRetry(submissionId, text, submittedAttachments))
+
+      // A first message whose session.create succeeded but whose prompt the hub never accepted: the
+      // chat exists only here, so the server list will not carry it. Say so, and keep a sidebar row
+      // ("Not sent - retry") so the parked words are never in a chat nobody can open.
+      if (submittedScope === null && restoreScope !== null && !displayKind) {
+        console.warn('[first-send-parked]', `session ${restoreScope} first message parked as a retry draft`, {
+          sessionId: restoreScope,
+          submissionId
+        })
+        keepUnsentChatListed(restoreScope)
+      }
 
       if ((isFreshDraftScope(draftScopeRef.current) ? null : draftScopeRef.current) === restoreScope) {
         loadIntoComposer(text, submittedAttachments)

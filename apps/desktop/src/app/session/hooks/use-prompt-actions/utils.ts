@@ -402,12 +402,22 @@ export function isVoiceStoppedReceipt(result: { voice_stopped?: boolean } | unde
   return result?.voice_stopped === true
 }
 
+/** The hub answered 400 "Chat model is still loading; retry when it is ready": nothing was admitted and
+ *  the condition clears on its own (a gateway restart or model warm-up), so callers wait it out. */
+export function isChatModelLoadingError(error: unknown): boolean {
+  return /chat model is still loading/i.test(error instanceof Error ? error.message : String(error))
+}
+
+export const CHAT_MODEL_LOADING_RETRY_TIMEOUT_MS = 180_000
+export const CHAT_MODEL_LOADING_RETRY_INTERVAL_MS = 2_000
+
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 // Retry a gateway call across transient "session busy" so it never reaches the
 // user — the turn settles within the deadline and the call lands.
 export async function withSessionBusyRetry<T>(call: () => Promise<T>): Promise<T> {
   const deadline = Date.now() + SESSION_BUSY_RETRY_TIMEOUT_MS
+  const loadingDeadline = Date.now() + CHAT_MODEL_LOADING_RETRY_TIMEOUT_MS
 
   for (;;) {
     try {
@@ -415,6 +425,12 @@ export async function withSessionBusyRetry<T>(call: () => Promise<T>): Promise<T
     } catch (err) {
       if (isSessionBusyError(err) && Date.now() < deadline) {
         await sleep(SESSION_BUSY_RETRY_INTERVAL_MS)
+
+        continue
+      }
+
+      if (isChatModelLoadingError(err) && Date.now() < loadingDeadline) {
+        await sleep(CHAT_MODEL_LOADING_RETRY_INTERVAL_MS)
 
         continue
       }

@@ -9,6 +9,7 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { $draftTitles, $freshDraftKey, takeSessionDraft } from '@/store/composer'
+import { readDraftRetry } from '@/store/composer-draft-retry'
 import { $projectOwnerBySessionId, $projects, $projectTree } from '@/store/projects'
 import {
   $activeSessionId,
@@ -28,6 +29,8 @@ interface DraftRow {
   git_repo_root?: string | null
   selected: boolean
   main: boolean
+  /** A first message the hub never accepted: parked as a retry draft in this chat. */
+  unsent?: boolean
 }
 
 /** Presentation only: drafts never enter $sessions, project snapshots, or storage. */
@@ -67,19 +70,25 @@ export function SidebarDraftRows({
     const tile = tiles.find(candidate => candidate.storedSessionId === stub.id)
     const draft = takeSessionDraft(stub.id)
 
+    // A first send the hub refused parks its words as a retry draft in a chat the server never
+    // listed: the row stays (tile or not) until the send lands, so the words are never orphaned.
+    const unsent = Boolean(readDraftRetry(stub.id))
+
     if (
-      tile &&
-      !tile.error &&
-      (tile.workspaceMode ?? 'sessions') === 'sessions' &&
       !sessions.some(session => session.id === stub.id) &&
-      (focused === stub.id || titles[stub.id] || draft.attachments.length)
+      (unsent ||
+        (tile &&
+          !tile.error &&
+          (tile.workspaceMode ?? 'sessions') === 'sessions' &&
+          (focused === stub.id || titles[stub.id] || draft.attachments.length)))
     ) {
       rows.set(stub.id, {
         cwd: stub.cwd ?? null,
         git_repo_root: stub.git_repo_root,
         id: stub.id,
         main: false,
-        selected: focused === stub.id
+        selected: focused === stub.id,
+        unsent
       })
     }
   }
@@ -120,7 +129,10 @@ export function SidebarDraftRows({
         }}
         type="button"
       >
-        <span className="truncate">{titles[row.id] || t.sidebar.nav['new-session']}</span>
+        <span className="truncate">
+          {row.unsent ? 'Not sent \u2013 retry: ' : ''}
+          {titles[row.id] || t.sidebar.nav['new-session']}
+        </span>
       </button>
     )
   })

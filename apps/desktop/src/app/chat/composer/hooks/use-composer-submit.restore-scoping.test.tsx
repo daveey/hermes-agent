@@ -21,6 +21,7 @@ import { $newChatRoute } from '@/store/profile'
 import {
   $activeSessionId,
   $selectedStoredSessionId,
+  $unlistedSessionOwnerRows,
   _resetSessionOwnerHintsForTests,
   setActiveSessionId,
   setAwaitingResponse,
@@ -28,6 +29,7 @@ import {
   setMessages,
   setSelectedStoredSessionId,
   setSessions,
+  setUnlistedSessionOwnerRows,
   setYoloActive
 } from '@/store/session'
 import { _resetSessionOwnerHoldsForTests } from '@/store/session-states'
@@ -277,6 +279,7 @@ afterEach(() => {
   setActiveSessionId(null)
   setSelectedStoredSessionId(null)
   setSessions([])
+  setUnlistedSessionOwnerRows([])
   setBusy(false)
   setAwaitingResponse(false)
   setMessages([])
@@ -595,4 +598,73 @@ it('a new identical message never adopts an unconfirmed send; the restored draft
   await act(async () => handles.submit.submitDraft())
   await waitFor(() => expect(ids()).toHaveLength(4))
   expect(ids()[3]).toBe(ids()[2])
+})
+
+const outboxKeys = () => Object.keys(window.localStorage).filter(key => key.startsWith('hermes:composer-outbox:'))
+
+// A hub that created the session but answers prompt.submit with `onSubmit` (receives the call number
+// and the composer's submission id).
+const mockHubFirstSend = (onSubmit: (call: number, submissionId: string) => unknown) => {
+  let call = 0
+
+  vi.mocked(requestGatewayForAgent).mockImplementation(async (_connection, _profile, method, params) => {
+    if (method === 'session.create') {
+      return { session_id: 'rt-B', stored_session_id: 'stored-B', info: {} }
+    }
+
+    if (method === 'prompt.submit') {
+      call += 1
+
+      return await onSubmit(call, (params as { submission_id: string }).submission_id)
+    }
+
+    throw new Error(`unexpected ${method}`)
+  })
+
+  return () => call
+}
+
+it('waits out a hub that is still loading its chat model, then delivers the first send', async () => {
+  stashSessionDraft(null, 'first message while the model loads', [])
+  $newChatRoute.set({ connectionId: 'connection-loading', profile: 'default' })
+
+  const calls = mockHubFirstSend((call, submissionId) => {
+    if (call === 1) {
+      throw new Error('400: Chat model is still loading; retry when it is ready')
+    }
+
+    return { status: 'started', session_id: 'rt-B', submission_id: submissionId }
+  })
+
+  seed({}, null)
+  act(() => handles.submit.submitDraft())
+  await waitFor(() => expect(calls()).toBe(2), { timeout: 8_000 })
+  await waitFor(() => expect(outboxKeys()).toEqual([]))
+  // Delivered, never parked: no retry draft and no unsent row.
+  expect(window.localStorage.getItem('hermes:composer-draft-retry:v1:stored-B')).toBeNull()
+  expect($unlistedSessionOwnerRows.get()).toEqual([])
+}, 15_000)
+
+it('parks a refused first send with a warning naming the session and keeps its chat listed as unsent', async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  stashSessionDraft(null, 'first message the hub refuses', [])
+  $newChatRoute.set({ connectionId: 'connection-refused', profile: 'default' })
+  mockHubFirstSend(() => {
+    throw new Error('fixture hub refused the first send')
+  })
+
+  seed({}, null)
+  act(() => handles.submit.submitDraft())
+
+  await waitFor(() =>
+    expect(warn).toHaveBeenCalledWith('[first-send-parked]', expect.stringContaining('stored-B'), expect.anything())
+  )
+  await waitFor(() => expect(outboxKeys()).toEqual([]))
+
+  // The words sit in the retry draft AND the chat has a sidebar row to find them from.
+  expect(JSON.parse(window.localStorage.getItem('hermes:composer-draft-retry:v1:stored-B') ?? 'null')).toMatchObject({
+    text: expect.stringContaining('first message the hub refuses')
+  })
+  expect($unlistedSessionOwnerRows.get().map(row => row.id)).toContain('stored-B')
+  warn.mockRestore()
 })
