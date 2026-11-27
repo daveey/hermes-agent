@@ -130,7 +130,12 @@ def main(argv=None):
             result = convert_policy_config_batch(db, intern=args.direction == 'intern', apply=args.apply,
                 readers_compatible=args.readers_compatible, after=args.after,
                 limit=args.limit, max_bytes=args.max_bytes)
-    except (RuntimeStoreError, sqlite3.Error):
+    except RuntimeStoreError as exc:
+        # Only fixed public labels: never echo detail, config or exception text.
+        reason = 'invalid_params' if exc.reason == 'invalid_params' else 'storage_unavailable'
+        print(json.dumps({'error': reason}))
+        return 2
+    except sqlite3.Error:
         # Never echo frozen config, request data or SQLite exception payloads.
         print(json.dumps({'error': 'storage_unavailable'}))
         return 2

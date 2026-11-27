@@ -46,6 +46,22 @@ def test_dry_run_and_unacknowledged_conversion_never_write(tmp_path):
         assert local_receipt(db, sid) == expected
 
 
+@pytest.mark.parametrize('ack', [False, None, 1, 'yes', [True], {'compatible': True}])
+def test_conversion_requires_literal_true_ack_without_mutation(tmp_path, ack):
+    from hermes_state_policy_rollout import convert_policy_config_batch
+    with closing(SessionDB(tmp_path / 'state.db')) as db:
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        sid, expected = create(db, epoch, tmp_path, False)
+        with db._read_ctx() as conn:
+            before = conn.execute('SELECT key,value FROM state_meta ORDER BY key').fetchall()
+        with pytest.raises(rt.RuntimeStoreError) as refusal:
+            convert_policy_config_batch(db, intern=True, apply=True, readers_compatible=ack)
+        assert refusal.value.reason == 'runtime_coordination_required'
+        with db._read_ctx() as conn:
+            assert conn.execute('SELECT key,value FROM state_meta ORDER BY key').fetchall() == before
+        assert local_receipt(db, sid) == expected
+
+
 def test_converter_rolls_back_earlier_owner_on_later_bad_receipt(tmp_path):
     from hermes_state_policy_rollout import convert_policy_config_batch
     with closing(SessionDB(tmp_path / 'state.db')) as db:
