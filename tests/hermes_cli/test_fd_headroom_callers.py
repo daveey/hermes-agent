@@ -210,8 +210,12 @@ def test_gateway_thread_publishes_public_status(monkeypatch, tmp_path):
                         'incident': {'error': '/private/path'}})
     monkeypatch.setattr(status, '_get_runtime_status_path', lambda: tmp_path / 'gateway_state.json')
     monkeypatch.setattr(status, '_emit_runtime_status_transition', lambda *a: None)
-    limits.gateway_fd_headroom_tick()
-    assert status.flush_runtime_status()
+    assert status.acquire_gateway_runtime_lock()
+    try:
+        limits.gateway_fd_headroom_tick()
+        assert status.flush_runtime_status()
+    finally:
+        status.release_gateway_runtime_lock()
     saved = status.read_runtime_status(tmp_path / 'gateway_state.json')['fd_headroom']
     assert saved['count'] == 50 and saved['create_state'] == 'failing'
     assert 'private' not in str(saved)

@@ -204,8 +204,7 @@ def request_fd_headroom(*, role: str) -> None:
             if _fd_thread is not None and _fd_thread.is_alive():
                 _fd_status['skipped'] = _fd_status.get('skipped', 0) + 1
                 if role == 'gateway':
-                    from gateway.status import publish_runtime_status
-                    publish_runtime_status(fd_headroom=fd_headroom_status())
+                    _publish_gateway_fd_headroom()
                 return
             import contextvars
             scope = contextvars.copy_context()
@@ -229,7 +228,14 @@ def gateway_fd_headroom_tick() -> None:
     """The gateway's existing housekeeping thread owns this process-wide tick."""
     check_fd_headroom(role='gateway')
     if _fd_status:
-        from gateway.status import publish_runtime_status
+        _publish_gateway_fd_headroom()
+
+
+def _publish_gateway_fd_headroom() -> None:
+    # Boot samples run before reservation. Publishing then stamps a contender's PID as a
+    # live starting owner, making sibling starts refuse before any runtime lock exists.
+    from gateway.status import owns_gateway_runtime_lock, publish_runtime_status
+    if owns_gateway_runtime_lock():
         publish_runtime_status(fd_headroom=fd_headroom_status())
 
 
