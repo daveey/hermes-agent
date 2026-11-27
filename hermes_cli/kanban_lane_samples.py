@@ -69,7 +69,7 @@ def observe(conn, *, dry_run=False):
         # Instrumentation failure cannot change dispatch's admission result.
         try:
             record(conn, pol, counts, capture)
-        except (sqlite3.Error, OSError):
+        except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
             _log.warning("lane occupancy sample unavailable", exc_info=True)
 
 
@@ -104,11 +104,17 @@ def record(conn, pol, counts, capture, *, now=None):
         conn.executemany(UPSERT, rows)
         # PRIMARY KEY(ts,lane) is the ts-prefixed index this range delete uses.
         conn.execute("DELETE FROM lane_samples WHERE ts < ?", (minute - RETENTION,))
-    except BaseException:
-        conn.execute("ROLLBACK TO lane_samples_record")
         conn.execute("RELEASE lane_samples_record")
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK TO lane_samples_record")
+            conn.execute("RELEASE lane_samples_record")
+        except sqlite3.Error:
+            # SQLITE_FULL/IOERR can erase the savepoint themselves. If cleanup failed
+            # with a transaction still live, do not leak it into the next dispatch writer.
+            if conn.in_transaction:
+                conn.rollback()
         raise
-    conn.execute("RELEASE lane_samples_record")
 
 
 def ticks(conn, pol, *, window_s=86400, count=48, now=None):
