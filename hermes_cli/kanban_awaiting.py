@@ -348,6 +348,10 @@ def dependency_cycle_reason(conn: sqlite3.Connection, task_id: str, ref: str) ->
 def park_cycle_error(conn: sqlite3.Connection, task_id: str, record: Optional[dict],
                      wake_check: Optional[str]) -> Optional[str]:
     """Refusal text when this park's producer or wake probe would cycle, else None."""
+    from hermes_cli.kanban_origin_forward_wait import rejected_wait
+    lost = rejected_wait(conn, task_id, wake_check)  # a key whose creation this run saw refused
+    if lost:
+        return lost
     from hermes_cli.kanban_awaiting_board import other_board_path
     refs: list[str] = []
     foreign_ref = record.get("ref") if record and other_board_path(conn, record) else None

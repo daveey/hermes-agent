@@ -180,6 +180,10 @@ def park(
         wake_at, reason = kdw.apply(record, wake_at, reason, now=now)
         reason, check_every = kaw.resource_apply(record, reason, check_every)
     wake_check, clock_only = kaw.park_probe(conn, task_id, record, wake_check, clock_only)
+    from hermes_cli.kanban_origin_forward_wait import rejected_wait
+    lost = rejected_wait(conn, task_id, wake_check)
+    if lost:
+        raise kaw.AwaitingError(kaw.INVALID_AWAITING, lost)
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
     from hermes_cli.kanban_wake_check_hub_relay import relay_host
