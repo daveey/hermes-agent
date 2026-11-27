@@ -750,12 +750,14 @@ class DashboardHealth:
     def snapshot(self) -> dict[str, Any]:
         """Public component payload: status enum + counts + timestamps only."""
         errors = self.recent_error_count()
+        from hermes_cli.resource_limits import fd_headroom_status
         status = "degraded" if (errors or self.selftest_status == "failing") else "ok"
         return {
             "status": status,
             "recent_unhandled_errors": errors,
             "last_error_at": self.last_error_at,
             "selftest": self.selftest_status,
+            "fd_headroom": fd_headroom_status(),
         }
 
 
@@ -826,12 +828,10 @@ async def _dashboard_selftest_once() -> None:
 
 async def _dashboard_selftest_loop() -> None:
     """Periodic self-test driver started from the lifespan."""
-    try:
-        import httpx
-    except ImportError:
-        _log.debug("httpx unavailable — dashboard self-test disabled")
-        return
+    from hermes_cli.resource_limits import check_fd_headroom
     while True:
+        # Same lifespan for cmd_dashboard and direct _start_server_runtime; never block the loop.
+        await asyncio.to_thread(check_fd_headroom, role='backend')
         await asyncio.sleep(_DASHBOARD_SELFTEST_INTERVAL_SECONDS)
         # OAuth-gated binds don't honour the session token; the probe would false-alarm 401.
         if getattr(app.state, "auth_required", False):

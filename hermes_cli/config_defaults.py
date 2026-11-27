@@ -21,6 +21,7 @@ from hermes_cli.config_env_registry import EnvVarRegistry as _EnvVarRegistry
 from hermes_cli.config_defaults_routing import routing_defaults
 from hermes_cli.kanban_workspace_source_config import DEFAULTS as _WORKSPACE_SOURCE_DEFAULTS
 from hermes_cli.kanban_pacing_defaults import DEFAULTS as _PACING_DEFAULTS
+from hermes_cli.fd_headroom_config import DEFAULTS as _FD_HEADROOM_DEFAULTS
 
 DEFAULT_CONFIG = {
     "model": "",
@@ -44,8 +45,7 @@ DEFAULT_CONFIG = {
         "wal_autocheckpoint": None,
         "journal_size_limit": None,
     },
-    # Server-process fd soft limit (clamped to the hard limit) + glibc arena cap; 0/false/null = off.
-    "runtime": {"nofile_soft_limit": 4096, "malloc_arena_max": 4},
+    "runtime": {"nofile_soft_limit": 4096, "malloc_arena_max": 4, "fd_headroom": _FD_HEADROOM_DEFAULTS},
     # Global active chat session cap across CLI, TUI/dashboard, and messaging. None/0 = unbounded.
     "max_concurrent_sessions": None,
     # Soft LRU cap on in-memory TUI/desktop/dashboard sessions. Above it the gateway evicts the

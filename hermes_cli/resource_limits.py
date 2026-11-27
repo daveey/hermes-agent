@@ -5,6 +5,11 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import socket
+import subprocess
+import threading
+import time
+from collections import Counter, deque
 from collections.abc import Mapping
 from typing import Any
 
@@ -87,6 +92,146 @@ def apply_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> bool:
     except Exception:
         logger.debug("Could not raise RLIMIT_NOFILE soft limit", exc_info=True)
         return False
+
+
+_fd_samples: deque[tuple[float, int]] = deque(maxlen=1801)
+_fd_last_check: float | None = None
+_fd_pid = os.getpid()
+_fd_lock = threading.Lock()
+
+
+def _fd_snapshot(soft: int) -> tuple[int, dict[str, int]]:
+    """Count actual entries, then classify only above 25%; closed/racing entries are harmless."""
+    for directory in ('/proc/self/fd', '/dev/fd'):
+        try:
+            names = os.listdir(directory)
+            break
+        except FileNotFoundError:
+            continue
+    else:
+        raise OSError('no process fd directory')
+    census: Counter[str] = Counter()
+    if len(names) > soft * 0.25:
+        for name in names:
+            try:
+                target = os.readlink(f'{directory}/{name}').removesuffix(' (deleted)')
+            except OSError:
+                continue
+            if '/.resource-leases/' in target:
+                kind = 'resource-leases'
+            elif target.endswith(('.db', '-wal', '-shm')):
+                kind = 'sqlite'
+            elif target.startswith(('socket:', 'socket[')):
+                kind = 'socket'
+            elif target.startswith(('pipe:', 'pipe[')):
+                kind = 'pipe'
+            else:
+                kind = 'other'
+            census[kind] += 1
+    return len(names), dict(census)
+
+
+def _fd_core_head() -> str:
+    from hermes_cli._startup_fast import project_root_str
+    try:
+        return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=project_root_str(),
+                              capture_output=True, text=True, encoding='utf-8', errors='replace',
+                              timeout=2, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return 'unknown'
+
+
+def _notify_fd_incident(sample: dict, *, probe: bool = False) -> dict:
+    from hermes_cli.fd_headroom_incident import report
+    return report(sample, probe=probe)
+
+
+_fd_status: dict = {}
+
+
+def fd_headroom_status() -> dict:
+    """Latest census and incident-delivery state for existing runtime status readers."""
+    return dict(_fd_status)
+
+
+def gateway_fd_headroom_tick() -> None:
+    """The gateway's existing housekeeping thread owns this process-wide tick."""
+    sample = check_fd_headroom(role='gateway')
+    if sample is not None:
+        from gateway.status import publish_runtime_status
+        publish_runtime_status(fd_headroom=fd_headroom_status())
+
+
+def check_fd_headroom(config: Mapping[str, Any] | None = None, *, role: str = 'backend',
+                      now: float | None = None, probe: bool = False) -> dict | None:
+    """Due-gated, never-raising own-process census/rescue. Call from existing service ticks.
+
+    Samples cover 30 minutes; the endpoint slope projects time to the current soft limit.
+    A host-shared reporter serializes incident cards across profiles and processes. ``probe``
+    uses a separate incident namespace and [probe] title, never a production incident.
+    """
+    try:
+        with _fd_lock:
+            return _check_fd_headroom(config, role, time.monotonic() if now is None else now, probe)
+    except Exception:  # health: allow BLE001 -- diagnostics must never escape a service tick
+        logger.debug('fd-headroom: check failed', exc_info=True)
+        return None
+
+
+def _check_fd_headroom(config, role, now, probe):
+    global _fd_last_check, _fd_pid
+    if _resource is None:
+        return None
+    if config is None:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly()
+    settings = {**DEFAULT_CONFIG['runtime']['fd_headroom'], **config.get('runtime', {}).get('fd_headroom', {})}
+    if settings['enabled'] is not True:
+        return None
+    if _fd_pid != os.getpid():
+        _fd_pid, _fd_last_check = os.getpid(), None
+        _fd_samples.clear()
+    interval = max(1.0, float(settings['interval_seconds']))
+    if _fd_last_check is not None and now - _fd_last_check < interval:
+        return None
+    _fd_last_check = now
+    soft, hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+    if soft <= 0 or soft == _resource.RLIM_INFINITY:
+        return None
+    count, census = _fd_snapshot(soft)
+    while _fd_samples and _fd_samples[0][0] < now - 1800:
+        _fd_samples.popleft()
+    _fd_samples.append((now, count))
+    elapsed = now - _fd_samples[0][0]
+    slope = (count - _fd_samples[0][1]) / elapsed if elapsed > 0 else 0.0
+    predicted = slope > 0 and (soft - count) / slope <= float(settings['horizon_hours']) * 3600
+    warn = count >= soft * float(settings['warn_ratio']) or predicted
+    sample = dict(host=socket.gethostname(), pid=os.getpid(), role=role, count=count,
+                  soft=soft, hard=hard, census=census, slope=slope, core=_fd_core_head(), raised='')
+    if count >= soft * float(settings['raise_ratio']):
+        target = soft * 4 if hard == _resource.RLIM_INFINITY else min(hard, soft * 4)
+        if target > soft:
+            try:
+                _resource.setrlimit(_resource.RLIMIT_NOFILE, (target, hard))
+                sample['raised'] = f'fd-headroom: raised soft {soft}→{target}'
+            except (OSError, ValueError) as exc:
+                sample['raised'] = f'fd-headroom: raise failed: {exc}'
+            logger.warning('%s', sample['raised'])
+    sample['triggered'] = bool(warn or sample['raised'])
+    incident = _fd_status.get('incident', {})
+    if sample['triggered'] or incident:
+        try:
+            incident = _notify_fd_incident(sample, probe=probe) or {}
+        except Exception as exc:  # health: allow BLE001 -- even unwritable reporter state must not hide the census
+            incident = {**incident, 'error': str(exc)[:500],
+                        'failure_since': incident.get('failure_since', time.time())}
+    from hermes_cli.fd_headroom_incident import failure_note
+    note = failure_note(incident)
+    _fd_status.update(sample, incident=incident, card_error=note)
+    log = logger.warning if warn or note else logger.info
+    log('fd-headroom: host=%s pid=%s role=%s count=%s soft=%s hard=%s census=%s slope=%.6f fd/s core=%s %s',
+        sample['host'], sample['pid'], role, count, soft, hard, census, slope, sample['core'], note)
+    return sample
 
 
 def glibc_malloc() -> Any | None:
@@ -172,4 +317,4 @@ def apply_malloc_arena_max(config: Mapping[str, Any] | None = None) -> bool:
 
 __all__ = [
     "DEFAULT_MALLOC_ARENA_MAX", "DEFAULT_NOFILE_SOFT_LIMIT", "apply_malloc_arena_max",
-    "apply_nofile_soft_limit", "configured_nofile_soft_limit", "glibc_malloc", "server_process_argv"]
+    "apply_nofile_soft_limit", "check_fd_headroom", "configured_nofile_soft_limit", "glibc_malloc", "server_process_argv"]

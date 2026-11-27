@@ -268,6 +268,31 @@ sandboxes
 where the limit cannot be changed, startup continues without changing the
 limit.
 
+On Linux and macOS, long-lived gateways and dashboard/Desktop backends also monitor
+file-descriptor headroom using their existing periodic ticks:
+
+```yaml
+runtime:
+  fd_headroom:
+    enabled: true
+    warn_ratio: 0.5
+    raise_ratio: 0.75
+    horizon_hours: 6
+    interval_seconds: 300
+```
+
+`fd-headroom:` census logs include the process count and limits. Above 25% usage,
+readlink targets are counted as resource-leases, sqlite, socket, pipe or other;
+paths themselves are not published. A warning fires at `warn_ratio` or when the
+last 30 minutes' growth projects exhaustion within `horizon_hours`. The hub default
+board receives one portable incident card per host, with at most one update per hour.
+Failed deliveries back off for an hour; prolonged failure appears in warnings and
+runtime status (`gateway_state.json` or dashboard health's `fd_headroom` field).
+At `raise_ratio`, Hermes raises only its own soft limit to four times the current
+value, clamped to the existing hard limit. This never changes `runtime.nofile_soft_limit`,
+the hard limit, another process or service configuration. Set `enabled: false` to
+turn off monitoring and this in-process rescue.
+
 On Linux with glibc, the gateway, `hermes serve` and `hermes dashboard` also cap the number of
 malloc arenas the process may create:
 

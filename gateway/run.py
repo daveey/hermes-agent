@@ -4260,10 +4260,7 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
         release_or_close(_adb)
 
 
-def _housekeeping_memory_trim() -> None:
-    """Messaging-gateway counterpart to the TUI idle reaper; timer lane: full GC only once idle (#139763)."""
-    from hermes_cli.mem_trim import trim_memory_when_idle
-    trim_memory_when_idle(reason="messaging gateway housekeeping")
+from gateway.run_housekeeping_resources import housekeeping_memory_trim as _housekeeping_memory_trim
 
 
 def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
@@ -4305,6 +4302,7 @@ def _start_gateway_housekeeping(
     from gateway.run_profile_reconcile import _mcp_config_reconciler, profile_scoped_chore
     from gateway.run_housekeeping_disk import housekeeping_gone_board_handles, housekeeping_media_caches, maybe_post_auto_prune_prompt
     from hermes_cli.plugins_idle_tasks import IdleTaskFence
+    from hermes_cli.resource_limits import gateway_fd_headroom_tick
     prune_worker = CheckpointPruneWorker(logger, start=process_ownership.start_writer)
     chores: list[tuple[int, str, Any]] = [
         # First stamp thread liveness (#113372), then request a coalesced loop-side recount.
@@ -4338,6 +4336,7 @@ def _start_gateway_housekeeping(
         # Per served profile: plugins dir, last-run marker and plugins.auto_apply are all the
         # profile's own (get_hermes_home()/load_config_readonly() bind to the scope).
         (1, "Plugin update check", profile_scoped_chore(runner, _housekeeping_plugin_update_check)),
+        (1, "FD headroom", gateway_fd_headroom_tick),
         (1, "Deferred FTS retry tick", _housekeeping_deferred_fts_retry),
         (1, "FTS backfill tick", _housekeeping_fts_backfill),
         (1, "gateway housekeeping memory trim", _housekeeping_memory_trim),
