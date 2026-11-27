@@ -335,12 +335,20 @@ def test_pool_worker_attests_replica_only_child(conn, configured, tmp_path, monk
         replica.close()
 
 
-@pytest.mark.parametrize("case", ["unlinked", "no_replica"])
+@pytest.mark.parametrize("case", ["unlinked", "no_replica", "ran"])
 def test_replica_lookup_keeps_lineage_and_fails_closed(conn, configured, tmp_path, monkeypatch, case):
+    from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_foreign_card as foreign
-    parent, _child, run, metadata, _ = _partial_live_file(conn, tmp_path, monkeypatch, link=case != "unlinked")
+    parent, child, run, metadata, path = _partial_live_file(conn, tmp_path, monkeypatch, link=case != "unlinked")
     if case == "no_replica":
         monkeypatch.setattr(foreign, "replica_path", lambda db_path: None)
+    if case == "ran":
+        # The hold must be read from the replica: the live file has none of a replica-only child's runs.
+        replica = kbc.connect(db_path=path)
+        replica.execute("INSERT INTO task_runs (task_id, profile, status, started_at) "
+                        "VALUES (?, 'default', 'crashed', 1)", (child,))
+        replica.commit()
+        replica.close()
     with pytest.raises(ValueError, match="created dependency"):
         kb.complete_task(conn, parent, summary="done", metadata=metadata, expected_run_id=run)
     assert kb.get_task(conn, parent).status == "running"
