@@ -102,7 +102,7 @@ def saved(conn, intent_uid):
     return op
 
 
-def freeze(conn, proof, *, delivery_uid):
+def freeze(conn, proof, *, delivery_uid, application_version=1):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_sync import uuid7
     install(conn)
@@ -111,7 +111,8 @@ def freeze(conn, proof, *, delivery_uid):
         if prior['proposal']['delivery_uid'] != delivery_uid or cert.encode(prior['proposal']['consumption']) != cert.encode(proof):
             raise ValueError('final application replay differs')
         return prior
-    proposal = prepared.prepare(conn, proof, delivery_uid=delivery_uid)
+    proposal = (prepared.prepare(conn, proof, delivery_uid=delivery_uid) if application_version == 1 else
+                prepared.prepare(conn, proof, delivery_uid=delivery_uid, application_version=application_version))
     with kb.write_txn(conn):
         prior = saved(conn, proof['intent']['intent_uid'])
         if prior is not None:
@@ -168,8 +169,10 @@ def validate(value, op):
 def _validate(value, op):
     _wire(op)
     value = cert.parse(cert.encode(value), max_bytes=MAX_BYTES)
-    if (not cert._exact(value, {'version', 'operation', 'consumption', 'task', 'events', 'comments', 'allowance'})
-            or type(value['version']) is not int or value['version'] != 1
+    version = op['proposal']['version']
+    fields = {'version', 'operation', 'consumption', 'task', 'events', 'comments'}
+    if (not cert._exact(value, fields | ({'allowance'} if version == 1 else {'governance'}))
+            or type(value['version']) is not int or value['version'] != version
             or cert.encode(value['operation']) != cert.encode(op)
             or cert.encode(value['consumption']) != cert.encode(op['proposal']['consumption'])):
         raise ValueError('canonical application operation differs')
@@ -181,7 +184,15 @@ def _validate(value, op):
     task = value['task']
     if not isinstance(task, dict) or task.get('uid') != body['task_id'] or task.get('status') != 'ready':
         raise ValueError('canonical application historical task differs')
-    allowance = value['allowance']
+    if version == 2:
+        governance = value['governance']
+        if cert._exact(governance, {'state'}) and governance['state'] == 'ungoverned':
+            return value
+        if not cert._exact(governance, {'state', 'allowance'}) or governance['state'] != 'governed':
+            raise ValueError('canonical application governance differs')
+        allowance = governance['allowance']
+    else:
+        allowance = value['allowance']
     if (not cert._exact(allowance, {'window_uid', 'episode_uid', 'runs', 'used', 'remaining'})
             or not cert.intent._coordinate(allowance['window_uid']) or allowance['episode_uid'] != body['episode']
             or not all(cert._integer(allowance[k]) for k in ('runs', 'used', 'remaining'))

@@ -6,11 +6,15 @@ Network authentication must precede apply(), never run while its writer is held.
 """
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 from hermes_cli import kanban_release_application as app, kanban_release_certificate as cert
 from hermes_cli import kanban_release_replica as replica, kanban_scope_renewal as renewal
+
+# Per-invocation observation only; helper return contracts remain unchanged.
+_BUDGET_OBSERVATION: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar('owner_release_budget_observation', default=None)
 
 
 def _scope(conn, proof):
@@ -135,6 +139,9 @@ def _budget(conn, body, seen):
     actor = body['actor']
     state = SimpleNamespace(tid=body['task_id'], writer=('agent', actor['session'], 'native-owner'), runs=body['runs'])
     runs, cache, _spent, text = release._budget_plan(conn, state)
+    capture = _BUDGET_OBSERVATION.get()
+    if capture is not None:
+        capture.append(_spent)
     if runs is not None:
         kept = budget.carried(state.prior).get('cache_read_writer_kind', 'unknown') if state.keeps_limit else 'agent'
         prior_runs = budget.runs_attribution(state.prior) or 'unknown'

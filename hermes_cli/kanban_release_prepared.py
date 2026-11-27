@@ -33,8 +33,17 @@ def install(conn):
 
 
 def _validate(data):
-    if not cert._exact(data, _FIELDS) or type(data['version']) is not int or data['version'] != 1:
+    version = data.get('version') if isinstance(data, dict) else None
+    if (type(version) is not int or version not in (1, 2)
+            or not cert._exact(data, _FIELDS | ({'accounting'} if version == 2 else set()))):
         raise ValueError('prepared proposal shape differs')
+    if version == 2:
+        accounting = data['accounting']
+        if (not cert._exact(accounting, {'semantics', 'spent_runs'})
+                or accounting['semantics'] != 'core_home_ordinary_v1'
+                or type(accounting['spent_runs']) is not int
+                or not 0 <= accounting['spent_runs'] <= 9007199254740991):
+            raise ValueError('prepared proposal accounting differs')
     proof = cert.parse(cert.encode(data['consumption']))
     body, delivery = proof['intent'], data['delivery_uid']
     cert.validate(proof, board=body['board'], task=body['task_id'], intent_uid=body['intent_uid'])
@@ -116,7 +125,7 @@ class _Trial:
     raw: str
 
 
-def _observe(conn, proof, delivery):
+def _observe(conn, proof, delivery, *, application_version=1):
     from hermes_cli import kanban_release_assemble as assemble
     if app._PERMIT.get() is not conn or app._INVOCATION.get() is None or not conn.in_transaction:
         raise ValueError('proposal trial requires its unique application writer')
@@ -125,19 +134,26 @@ def _observe(conn, proof, delivery):
     marks = {table:conn.execute(f'SELECT COALESCE(MAX(id),0) FROM {table}').fetchone()[0]
              for table in ('task_events', 'task_comments')}
     conn.execute('SAVEPOINT owner_release_proposal_trial')
+    observed = []
+    token = assemble._BUDGET_OBSERVATION.set(observed if application_version == 2 else None)
     try:
         assemble._compose(conn, proof, delivery)
         application = app.verified_application(conn, proof['intent']['intent_uid'])
         if application is None:
             raise ValueError('trial failed to produce actual application proof')
-        data = dict(version=1, consumption=proof, delivery_uid=delivery, task_before=before,
+        data = dict(version=application_version, consumption=proof, delivery_uid=delivery, task_before=before,
                     task_after=dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()),
                     events=[dict(r) for r in conn.execute('SELECT * FROM task_events WHERE id>? ORDER BY id', (marks['task_events'],))],
                     comments=[dict(r) for r in conn.execute('SELECT * FROM task_comments WHERE id>? ORDER BY id', (marks['task_comments'],))],
                     application=application)
+        if application_version == 2:
+            if len(observed) != 1:
+                raise ValueError('proposal requires exactly one real budget observation')
+            data['accounting'] = dict(semantics='core_home_ordinary_v1', spent_runs=observed[0])
         raw = cert.encode(_validate(data))
         cert.parse(raw)  # whole-envelope cap, not merely per-row limits
     finally:
+        assemble._BUDGET_OBSERVATION.reset(token)
         conn.execute('ROLLBACK TO owner_release_proposal_trial')
         conn.execute('RELEASE owner_release_proposal_trial')
     return _Trial(conn, app._INVOCATION.get(), raw)
@@ -166,8 +182,10 @@ def _replay(conn, proof, delivery):
     return None
 
 
-def prepare(conn, proof, *, delivery_uid):
+def prepare(conn, proof, *, delivery_uid, application_version=1):
     """Retain only an immutable proposal; real trial effects never survive commit."""
+    if type(application_version) is not int or application_version not in (1, 2):
+        raise ValueError('unsupported application version')
     install(conn)
     prior = _replay(conn, proof, delivery_uid)
     if prior is not None:
@@ -179,6 +197,7 @@ def prepare(conn, proof, *, delivery_uid):
             return prior
         if app.verified_application(conn, proof['intent']['intent_uid']) is not None:
             raise ValueError('existing application cannot be converted into a proposal')
-        trial = _observe(conn, proof, delivery_uid)
+        trial = (_observe(conn, proof, delivery_uid) if application_version == 1 else
+                 _observe(conn, proof, delivery_uid, application_version=application_version))
         _store(conn, trial)
     return verified_prepared(conn, proof['intent']['intent_uid'])

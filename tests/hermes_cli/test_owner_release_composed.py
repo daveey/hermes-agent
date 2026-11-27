@@ -364,7 +364,7 @@ def applied(home, intent_uid):
                 and home.conn.execute("SELECT 1 FROM owner_release_applied_receipts WHERE intent_uid=?", (intent_uid,)).fetchone())
 
 
-def authorize_and_drive_home(origin, parties, monkeypatch, *, stacked=False, select=True):
+def authorize_and_drive_home(origin, parties, monkeypatch, *, stacked=False, select=True, governed=True):
     home, executor = parties
     ident, native = origin
     if stacked:
@@ -394,7 +394,8 @@ def authorize_and_drive_home(origin, parties, monkeypatch, *, stacked=False, sel
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE kind='stop_released'").fetchone()[0] == 0
     # 2. real HOME: pull carrier, queue, consume, final apply, atomic materialization.
     home.resync()
-    install_allowance(home, task, episode, intent_uid)
+    if governed:
+        install_allowance(home, task, episode, intent_uid)
     for _ in range(80):  # the HOME queue also drains stale releases left on the reused disposable Board
         home_tick(home, monkeypatch)
         if applied(home, intent_uid):
