@@ -684,12 +684,12 @@ class Roller:
         if body.get("sessions_early_owner") is True:
             from hermes_cli.always_on_sessions import await_sessions, incarnation, PROBE_S
 
-            before = incarnation(self, port, deadline)
+            before = incarnation(self, port, deadline, log=log)
             if before is None or not await_sessions(self, port, deadline):
                 log(f"roll: backend :{port} canonical sessions unavailable; keeping :{active_port or '-'}")
                 self._abandon(port, active_port, may_have_served=adopted or active_port is None)
                 return False
-            after = incarnation(self, port, deadline)
+            after = incarnation(self, port, deadline, log=log)
             left = deadline - self.clock()
             status, _, final = self.get(port, "/api/health", min(PROBE_S, left)) if left > 0 else (None, 0, None)
             if (after != before or status != 200 or not final or final.get("ok") is not True

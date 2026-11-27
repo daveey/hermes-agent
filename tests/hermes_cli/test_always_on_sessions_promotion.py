@@ -289,3 +289,98 @@ def test_legacy_or_nonboolean_policy_keeps_warm_before_switch(home, policy):
     roller.get, roller.warm = get, warm
     assert roller.roll("legacy") is True
     assert canonical == []
+
+
+# ── a busy successor is asked again, not abandoned (run64 canary, 23:36:50Z) ─────────────────────────
+
+
+@pytest.mark.parametrize("probe,miss", [
+    ("/api/host/identity", None), ("/api/host/identity", 503),
+    ("/api/ssh/ownership", None), ("/api/ssh/ownership", 503),
+])
+def test_incarnation_probe_that_misses_once_is_retried(home, capsys, probe, miss):
+    roller, host = native_roller(home)
+    original = roller.get
+    misses = [2]
+
+    def get(port, path, timeout):
+        if path == probe and misses[0] > 0:
+            misses[0] -= 1
+            return miss, timeout, None
+        return original(port, path, timeout)
+
+    roller.get = get
+    roller.replay_paths = lambda pid: []
+    assert roller.roll("busy successor") is True
+    assert ro.read_active()["port"] == 9149
+    assert not any(call[0] == "stop" for call in host.calls)
+    err = capsys.readouterr().err
+    assert f"incarnation pending ({probe} {miss})" in err
+    assert "canonical sessions unavailable" not in err
+
+
+def test_slow_unit_pid_while_unit_active_is_retried(home):
+    roller, _host = native_roller(home)
+    misses = [1]
+    real = roller.unit_pid
+
+    def unit_pid(port, timeout=15):
+        if misses[0] > 0:
+            misses[0] -= 1
+            return 0  # systemctl show timed out under boot load
+        return real(port, timeout=timeout)
+
+    roller.unit_pid = unit_pid
+    roller.replay_paths = lambda pid: []
+    assert roller.roll("slow systemctl") is True
+    assert ro.read_active()["port"] == 9149
+
+
+def test_successor_that_never_answers_identity_is_abandoned_at_deadline(home):
+    roller, _host = native_roller(home)
+    original = roller.get
+    roller.get = lambda port, path, timeout: ((None, timeout, None) if path == "/api/host/identity"
+                                              else original(port, path, timeout))
+    started = roller.clock()
+    assert roller.roll("never answers") is False
+    assert roller.clock() - started >= roller.boot_timeout_s - 1  # waited the bounded boot budget
+    assert ro.read_active()["port"] == 9148
+    assert not ro.read_active()["warming"]
+
+
+def test_successor_unit_that_died_is_not_waited_for(home):
+    roller, host = native_roller(home)
+    original = roller.get
+
+    def get(port, path, timeout):
+        if path == "/api/host/identity":
+            host.running.discard(port)  # the unit exited: MainPID 0, is-active inactive
+            return None, timeout, None
+        return original(port, path, timeout)
+
+    roller.get = get
+    started = roller.clock()
+    assert roller.roll("died") is False
+    assert roller.clock() - started < 1.0
+    assert ro.read_active()["port"] == 9148
+
+
+@pytest.mark.parametrize("selector", [LIST, SIDEBAR])
+def test_real_store_selector_slower_than_fast_probe_still_promotes(home, selector):
+    roller, _host = native_roller(home)
+    original = roller.get
+    timeouts = []
+
+    def get(port, path, timeout):
+        if path == selector:
+            timeouts.append(timeout)
+            if timeout < .6:  # a 471 KB canonical envelope took 0.23-0.57 s on the hub
+                roller.sleep(timeout)
+                return None, timeout, None
+        return original(port, path, timeout)
+
+    roller.get = get
+    roller.replay_paths = lambda pid: []
+    assert roller.roll("slow selector") is True
+    assert timeouts[0] == pytest.approx(.25)
+    assert timeouts[-1] >= .6
