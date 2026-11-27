@@ -247,9 +247,12 @@ spawn, kill_tree, survivors = capture.spawn_owned, capture.kill_process_tree, ca
 
 def spawned(*args, **kwargs):
     children.append(spawn(*args, **kwargs))
-    if window == 'prepare':  # the child exists and prepare() has not been handed it yet
+    if window.startswith('prepare'):  # the child exists and prepare() has not been handed it yet
         events.append('signal')
         os.kill(os.getpid(), signum)
+        if window != 'prepare':  # a second signal held behind the first: the other one, or the same
+            events.append('signal')
+            os.kill(os.getpid(), other if window == 'prepare-both' else signum)
         events.append('spawned')
     return children[-1]
 
@@ -264,11 +267,13 @@ def stopping(pid, **kwargs):
     return survivors(pid, **kwargs)
 
 def previous(sig, frame):
-    events.append('previous')
+    events.append('previous' if sig == signum else 'previous-other')
     if handler == 'exits':
-        raise SystemExit(123)
+        raise SystemExit(123 if sig == signum else 124)
 capture.spawn_owned, capture.kill_process_tree, capture.stop_owned_group_survivors = spawned, killing, stopping
+other = signal.SIGINT if signum == signal.SIGTERM else signal.SIGTERM
 signal.signal(signum, previous)
+signal.signal(other, previous)
 code = None
 try:
     with early.early_sessions(headless=True, isolated=False) as owner:
@@ -327,4 +332,23 @@ def test_signal_whose_previous_handler_returns_leaves_no_child_behind(window, ev
     # The interrupted step runs on afterwards: it must neither hang nor stop or account the child again.
     seen = _boot_signal(window, signal.SIGTERM, 'returns')
     assert seen['events'] == events and seen['code'] is None
+    _stopped_and_accounted_once(seen)
+
+
+@pytest.mark.platforms('linux')
+@pytest.mark.parametrize('signum', [signal.SIGTERM, signal.SIGINT])
+@pytest.mark.parametrize('handler,code,tail', [('returns', None, ['yielded']), ('exits', 124, [])])
+def test_two_distinct_signals_held_during_prepare_are_both_delivered_in_order(signum, handler, code, tail):
+    # Held behind the first, the second must not be lost; when the first handler raises, the second
+    # still runs (as an unheld pending signal would) and its exit is the one that propagates.
+    seen = _boot_signal('prepare-both', signum, handler)
+    assert seen['events'] == ['signal', 'signal', 'spawned', 'previous', 'previous-other', *tail]
+    assert seen['code'] == code
+    _stopped_and_accounted_once(seen)
+
+
+@pytest.mark.platforms('linux')
+def test_a_repeated_signal_held_during_prepare_is_delivered_once():
+    seen = _boot_signal('prepare-twice', signal.SIGTERM, 'returns')
+    assert seen['events'] == ['signal', 'signal', 'spawned', 'previous', 'yielded'] and seen['code'] is None
     _stopped_and_accounted_once(seen)

@@ -109,15 +109,25 @@ class CaptureProcess:
         standby, kept = _Standby(child, spawned), False
         try:
             standby.generation = _generation()
+            # One locked step decides who owns the child. Kept: published on an open, idle reader, so
+            # from here only a capture (which takes it under this lock) or close() (which sets _closed
+            # and reads _standby under it) may touch it. Not kept: never visible to anyone else, so
+            # retiring it below is this call's alone. Deciding after the release would let a capture
+            # take the child in between and have it stopped mid-request.
             with self._lock:
-                if self._standby is None and self._child is None:  # a capture may have started meanwhile
-                    self._standby = standby
-            # Published BEFORE _closed is read, while close() sets _closed before it reads _standby:
-            # whichever way a close() interleaved, it saw this standby or this line sees it closed.
-            kept = self._standby is standby and not self._closed
+                if not self._closed and self._standby is None and self._child is None:
+                    self._standby, kept = standby, True
         finally:
             if not kept:
-                self._retire(standby)
+                try:
+                    self._retire(standby)
+                except BaseException:
+                    # Its group did not stop (or the stop was interrupted): publish it so the reader's
+                    # close() tries again rather than nobody owning the child. A spare slot only.
+                    with self._lock:
+                        if self._standby is None:
+                            self._standby = standby
+                    raise
 
     def _retire(self, standby):
         """Retire an unused standby: one ``skipped`` record, then the same custody as any child.
@@ -173,7 +183,9 @@ class CaptureProcess:
             child, standby = None, self._standby
             if standby is not None:
                 standby.cpu_s = _child_cpu(standby.child.pid)  # before poll() can reap a dead one
-                if (standby.child.poll() is None and time.monotonic() - standby.spawned <= STANDBY_MAX_AGE_S
+                # A standby whose retirement already began (accounted) is never used, only retired again.
+                if (not standby.accounted.locked() and standby.child.poll() is None
+                        and time.monotonic() - standby.spawned <= STANDBY_MAX_AGE_S
                         and standby.generation == _generation()):
                     child, self._standby = standby.child, None
                 else:

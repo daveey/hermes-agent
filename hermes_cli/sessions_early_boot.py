@@ -32,6 +32,16 @@ def adopted_early_owner(state):
             and getattr(state, 'sessions_facts', None) is owner.runtime)
 
 
+def _deliver(stop, pending):
+    """Run ``stop`` for each held signal in order; a raising handler does not cancel the later ones
+    (their exceptions chain, the last one propagates)."""
+    if pending:
+        try:
+            stop(*pending[0])
+        finally:
+            _deliver(stop, pending[1:])
+
+
 @contextmanager
 def early_sessions(*, headless, isolated):
     # Preserve legacy/embedded/non-Linux ordering and the supported rollback.
@@ -90,8 +100,15 @@ def early_sessions(*, headless, isolated):
             reader.prepare()
         finally:
             preparing = False
-            if held:
-                stop(*held[0])
+            # Every distinct signal held, in arrival order (a repeat of one already held collapses, as
+            # a pending signal does). Each is delivered even when an earlier handler raised: an
+            # unheld second signal would also have run its handler while the first one unwound.
+            pending = []
+            for signum, frame in held:
+                if all(signum != seen for seen, _ in pending):
+                    pending.append((signum, frame))
+            held.clear()
+            _deliver(stop, pending)
         from hermes_cli.sessions_native_startup import SessionsRuntime
         from hermes_cli.web_routers import profiles
 

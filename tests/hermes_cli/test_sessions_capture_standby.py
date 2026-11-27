@@ -336,6 +336,110 @@ def test_capture_that_starts_while_the_standby_spawns_keeps_one_active_child(spa
     assert delta(before, 'runs') == 2
 
 
+class _HandoffLock:
+    """The reader's lock, which runs ``after_publish`` on the preparing thread the moment prepare()
+    releases the lock it published the standby under (once, at the outermost release)."""
+    def __init__(self, capture, after_publish):
+        self.capture, self.after_publish = capture, after_publish
+        self.inner, self.depth, self.owner, self.fired = threading.RLock(), 0, None, False
+
+    def __enter__(self):
+        self.inner.acquire()
+        self.depth += 1
+        self.owner = threading.get_ident()
+        return self
+
+    def __exit__(self, *exc):
+        self.depth -= 1
+        fire = (self.depth == 0 and not self.fired and self.owner == preparing[0]
+                and self.capture._standby is not None)
+        self.inner.release()
+        if fire:
+            self.fired = True
+            self.after_publish()
+
+
+preparing: list = [None]
+
+
+def test_capture_that_takes_the_just_published_standby_keeps_it(spawns):
+    # The handoff window: published, lock released, prepare() not yet returned. A capture that takes
+    # the standby there owns it; prepare() must neither stop it nor account it.
+    children, _ = spawns
+    capture = CaptureProcess(seconds=30, command=command(PID_FRAME))
+    served, threads = [], []
+
+    def take():
+        threads.append(threading.Thread(target=lambda: served.append(served_by(capture))))
+        threads[0].start()
+        wait_until(lambda: capture._child is not None or served, what='capture taking the standby')
+    lock = _HandoffLock(capture, take)
+    capture._lock = lock  # type: ignore[assignment]
+    preparing[0] = threading.get_ident()
+    before = stat()
+    capture.prepare()
+    threads[0].join(10)
+    assert not threads[0].is_alive() and lock.fired
+    assert served == [children[0].pid] and len(children) == 1
+    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 0 and delta(before, 'errors') == 0
+    capture.close()
+    assert delta(before, 'runs') == 1
+
+
+def test_close_in_the_handoff_window_retires_the_published_standby_once(spawns):
+    children, stopped = spawns
+    capture = CaptureProcess(command=command(PID_FRAME))
+    lock = _HandoffLock(capture, capture.close)
+    capture._lock = lock  # type: ignore[assignment]
+    before = stat()
+
+    def prepare():
+        preparing[0] = threading.get_ident()
+        capture.prepare()
+    bounded(prepare)
+    assert lock.fired and capture._standby is None and len(children) == 1
+    assert children[0].poll() is not None and children[0].pid in stopped
+    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 1
+
+
+def test_unkept_standby_whose_group_does_not_stop_stays_owned_for_close(spawns, monkeypatch):
+    # prepare() lost the race to close(); its own rollback cannot stop the group. The child must stay
+    # owned (published) so a later close() retries, accounted once, and is never used for a capture.
+    children, _ = spawns
+    capture = CaptureProcess(command=command(PID_FRAME))
+    spawn = module.spawn_owned
+
+    def closing(*args, **kwargs):
+        child = spawn(*args, **kwargs)
+        capture.close()
+        return child
+    monkeypatch.setattr(module, 'spawn_owned', closing)
+    tracked = module.stop_owned_group_survivors
+    monkeypatch.setattr(module, 'stop_owned_group_survivors', lambda pid, **kwargs: False)
+    before = stat()
+    with pytest.raises(TimeoutError, match='custody retained'):
+        capture.prepare()
+    assert capture._standby is not None and capture._standby.child is children[0]
+    monkeypatch.setattr(module, 'stop_owned_group_survivors', tracked)
+    capture.close()
+    assert capture._standby is None and children[0].poll() is not None
+    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 1
+
+
+def test_standby_whose_retirement_began_is_retired_not_used(spawns, monkeypatch):
+    children, stopped = spawns
+    capture = CaptureProcess(command=command(PID_FRAME))
+    capture.prepare()
+    standby = capture._standby
+    assert standby is not None
+    assert standby.accounted.acquire(blocking=False)  # as a failed or interrupted retirement leaves it
+    before = stat()
+    assert served_by(capture) == children[1].pid != standby.child.pid
+    assert standby.child.poll() is not None and standby.child.pid in stopped
+    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 0  # its record was already taken
+    capture.close()
+
+
 def test_every_spawned_child_is_accounted_exactly_once(spawns, monkeypatch):
     children, _ = spawns
     before = stat()
