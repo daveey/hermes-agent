@@ -94,6 +94,33 @@ def _module_filename(module, *, deadline, budget):
         raise ValueError('module_metadata_unavailable') from None
     if filename is not None and type(filename) is not str:
         raise ValueError('module_metadata_unavailable')
-    if filename is None and dynamic:
-        raise ValueError('module_metadata_unavailable')
+    if filename is None:
+        if dynamic:
+            raise ValueError('module_metadata_unavailable')
+        try:
+            _check_class_metadata(type(module), deadline=deadline, budget=budget)
+        except RuntimeError:
+            raise ValueError('module_metadata_unavailable') from None
+    # A concrete raw namespace file is authoritative for diagnostics, even when
+    # a subclass descriptor overrides ordinary access. Never invoke that access.
     return filename
+
+
+def _check_class_metadata(cls, *, deadline, budget):
+    from hermes_cli import code_attestation as ca
+    # Base type descriptors bypass hostile metaclass attribute hooks too.
+    mro = type.__dict__['__mro__'].__get__(cls)
+    for base in mro:
+        ca._check_inventory_deadline(deadline)
+        if base is ModuleType:
+            return
+        namespace = type.__dict__['__dict__'].__get__(base)
+        count = 0
+        for key in namespace:
+            ca._check_inventory_deadline(deadline)
+            count += 1
+            budget[0] += 1
+            if count > MAX_MODULE_NAMESPACE_ITEMS or budget[0] > MAX_INVENTORY_NAMESPACE_ITEMS:
+                raise ValueError('module_metadata_unavailable')
+            if type(key) is not str or key in ('__file__', '__getattr__', '__getattribute__'):
+                raise ValueError('module_metadata_unavailable')
