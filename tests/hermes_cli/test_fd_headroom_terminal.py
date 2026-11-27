@@ -66,7 +66,8 @@ def test_terminal_receipt_latches_once_then_healthy_crossing_rearms(tmp_path, mo
 
 
 @pytest.mark.parametrize('outcome', ['rejected', 'failed', 'expired'])
-def test_restart_healthy_sample_rearms_persisted_terminal(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize('probe', [False, True])
+def test_restart_healthy_sample_rearms_persisted_terminal(tmp_path, monkeypatch, outcome, probe):
     """Exercise the actual checker/reporter/transport, losing all process caches."""
     from unittest.mock import Mock
     from hermes_cli import resource_limits as limits
@@ -98,9 +99,10 @@ def test_restart_healthy_sample_rearms_persisted_terminal(tmp_path, monkeypatch,
     count = 600
     monkeypatch.setattr(limits, '_fd_snapshot', lambda soft: (count, {'classes': {'other': count}}))
     def check(now):
-        return limits.check_fd_headroom({}, role='gateway', now=now, wall_now=10000 + now)
+        return limits.check_fd_headroom({}, role='gateway', now=now, wall_now=10000 + now,
+                                        probe=probe, probe_board='fd-proof' if probe else None)
     first = check(0)
-    path = incidents._path(first, False)
+    path = incidents._path(first, probe)
     rejected = json.loads(path.read_text())
     assert rejected['terminal']['state'] == outcome and len(calls) == 1
     # A real restart loses every in-memory hint, not the incident file.
@@ -108,6 +110,7 @@ def test_restart_healthy_sample_rearms_persisted_terminal(tmp_path, monkeypatch,
     limits._fd_status.clear()
     limits._fd_samples.clear()
     limits._fd_last_check = None
+    monkeypatch.setattr(incidents, '_producer_token', None)
     count = 100
     check(300)
     assert json.loads(path.read_text()).get('terminal_rearmed') is True
@@ -140,7 +143,8 @@ def test_rearm_failure_is_recorded_without_escape(tmp_path, monkeypatch, broken)
     path = tmp_path / 'incident.json'
     state = {}
     incidents._new_envelope(sample(), state, 10000, False, 'default')
-    state.update(terminal={'state': 'rejected', 'result': {'error': 'refused'}}, terminal_rearmed=True)
+    state.update(terminal={'state': 'rejected', 'result': {'error': 'refused'}}, terminal_rearmed=True,
+                 terminal_rearmed_by=[incidents._producer()])
     warning = sample()
     if broken == 'missing_envelope':
         state.pop('envelope')

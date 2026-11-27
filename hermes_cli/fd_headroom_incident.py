@@ -27,8 +27,21 @@ def _path(sample, probe):
 
 
 def has_incident(sample: dict, *, probe=False) -> bool:
-    """Discover shared persisted state even before this process has warned."""
-    return _path(sample, probe).is_file()
+    """Discover unresolved delivery/terminal state, not resolved historical cards."""
+    state = _load(_path(sample, probe), recover=False)
+    return bool(state.get('terminal') or (state.get('envelope') and not state.get('task_id')))
+
+
+_producer_token = None
+
+
+def _producer():
+    """Birth-qualified token: renewed after exec/restart AND fork, without PID reuse."""
+    global _producer_token
+    if _producer_token is None or _producer_token[0] != os.getpid():
+        import uuid
+        _producer_token = (os.getpid(), uuid.uuid4().hex)
+    return ':'.join(map(str, _producer_token))
 
 
 def _load(path, *, recover=True) -> dict:
@@ -122,9 +135,14 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
         transport = client
         try:
             if state.get('terminal'):
+                producer = _producer()
+                rearmed = state.get('terminal_rearmed_by', [])
                 if not sample.get('triggered'):
-                    state['terminal_rearmed'] = True
-                if not sample.get('triggered') or not state.get('terminal_rearmed'):
+                    # A sibling's low count says nothing about this producer's growth.
+                    # Bound stale births; eviction can only prevent, never grant, rearm.
+                    state['terminal_rearmed_by'] = (list(dict.fromkeys([*rearmed, producer])))[-64:]
+                    state['terminal_rearmed'] = True  # Legacy diagnostic, not authority.
+                if not sample.get('triggered') or producer not in rearmed:
                     _save(path, state)
                     return state  # No identity/transport I/O after a definitive receipt.
                 state['last_terminal'] = {'envelope': state['envelope'], 'receipt': state['terminal']}
