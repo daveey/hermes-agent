@@ -188,3 +188,10 @@ def test_annotate_without_an_event_table_is_unknown_not_aged():
     import sqlite3
     conn = sqlite3.connect(':memory:')
     assert attention.annotate(conn, [{'id': 't1', 'status': 'triage'}])[0]['triage_entered_at'] is None
+
+
+@pytest.mark.parametrize('age,red', [(599, False), (600, False), (601, True), (6 * 86400, True)])
+def test_an_explicitly_stopped_retained_scope_ages_like_every_other_triage_cause(age, red):
+    row = {'status': 'triage', 'triage_entered_at': NOW - age, 'retained_stop': {'reason': 'scope_stopped'}}
+    assert attention.overdue(row, now=NOW) is red
+    assert (attention.next_transition(row, now=NOW) is None) is red

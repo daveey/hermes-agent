@@ -75,10 +75,11 @@ def test_natural_threshold_refreshes_existing_canonical_without_card_mutation(db
     assert not fanout.card_change_pass(session_db=opener)
 
 
-def test_remote_projection_changes_with_clock_and_clears_after_exit():
+@pytest.mark.parametrize('retained', [{}, {'retained_stop': {'reason': 'scope_stopped'}}])
+def test_remote_projection_changes_with_clock_and_clears_after_exit(retained):
     from types import SimpleNamespace
     card = {'id': 't_same', 'key': 'remote/default/work/t_same', 'status': 'triage',
-            'session': 'chat', 'triage_entered_at': 1000}
+            'session': 'chat', 'triage_entered_at': 1000, **retained}
     source = SimpleNamespace(LISTED_STATUSES=('triage', 'ready'), _remote_cards=lambda *a, **k: [card])
     from unittest.mock import patch
     with patch.object(fanout.time, 'time', return_value=1600):

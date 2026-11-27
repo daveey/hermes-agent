@@ -279,7 +279,8 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
     # generation's own successful completion; it is not this generation's linked work.
     earlier = [p for p in processes if p["state"] == "failed" and 0 < p["at"] < since]
     work = ([{"kind": "card", "id": f"card:{w['id']}", "state": _open_state(w.get("state")),
-              **({"retained_stop": w["retained_stop"], "label": w.get("label")} if w.get("retained_stop") else {})} for w in card_waits]
+              **({"retained_stop": w["retained_stop"], "label": w.get("label")} if w.get("retained_stop") else {}),
+              **({"triage_overdue": True} if w.get("triage_overdue") is True else {})} for w in card_waits]
             + [{"kind": w["kind"], "id": f"control:{w['id']}", "state": _open_state(w.get("state"))}
                for w in control_waits]
             + [{"kind": "subagent", "id": s["id"], "state": s["state"]} for s in subagents]

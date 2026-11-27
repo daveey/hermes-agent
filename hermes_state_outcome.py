@@ -410,6 +410,8 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
                                 "state": display_state}
         if status == "triage" and card.get("retained_stop") and not human:
             item.update(state="retained", retained_stop=card["retained_stop"])
+            if display_state == 'triage_overdue':
+                item['triage_overdue'] = True  # still stopped and retained; the age only adds attention
             item['label'] = 'Stopped, retained and incomplete: ' + str(card['retained_stop'].get('summary') or item['label'])
         if explained:
             item["waiting_on"] = explained  # retained scope stop: an open parent or recorded wait, agent work

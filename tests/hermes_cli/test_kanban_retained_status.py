@@ -152,3 +152,105 @@ def test_rehomed_sql_and_owner_record_projection(board, monkeypatch, stale):
     _, waits = outcome._read_card_items(['s1'])
     assert waits[0]['state'] == ('source_unknown' if stale else 'retained')
     assert reduce(waits)['kind'] != 'done'
+
+
+NOW = 2_000_000_000
+
+
+def aged(conn, tid, age):
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind='decision_retained'", (NOW - age, tid))
+
+
+@pytest.mark.parametrize('age,red', [(599, False), (600, False), (601, True), (6 * 86400, True)])
+def test_stopped_retained_scope_ages_red_without_becoming_a_wait_or_an_ask(board, monkeypatch, age, red):
+    """t_01a1fc39f68b07ba: six days retained in triage stayed amber; every triage cause ages after 600 s."""
+    with kbc.connect_closing() as conn:
+        tid = stopped(conn)
+        aged(conn, tid, age)
+        before = conn.execute('SELECT status,human_request,current_run_id,claim_lock FROM tasks WHERE id=?', (tid,)).fetchone()
+        events = conn.execute('SELECT COUNT(*) FROM task_events').fetchone()[0]
+    monkeypatch.setattr(outcome.time, 'time', lambda: NOW)
+    asks, waits = helpers._items()
+    assert asks == []
+    assert waits[0]['state'] == 'retained'
+    assert waits[0]['retained_stop']['reason'] == 'scope_stopped'
+    assert waits[0]['label'].startswith('Stopped, retained and incomplete')
+    assert (waits[0].get('triage_overdue') is True) is red
+    status = reduce(waits)
+    assert (status['kind'], status['reason']) == ('unresolved', 'linked_work_retained')
+    assert status['on'][0]['state'] == 'retained'
+    assert status['presentation'] == (
+        {'stripe': 'stuck', 'reason_codes': ['linked_work_retained', 'triage_overdue']} if red
+        else {'stripe': 'attention', 'reason_codes': ['linked_work_retained']})
+    with kbc.connect_closing() as conn:  # colour is not authority: no lifecycle, ask or history write
+        assert conn.execute('SELECT status,human_request,current_run_id,claim_lock FROM tasks WHERE id=?',
+                            (tid,)).fetchone() == before
+        assert conn.execute('SELECT COUNT(*) FROM task_events').fetchone()[0] == events
+
+
+def test_real_refresh_turns_the_retained_session_red_at_the_crossing_and_clears_on_exit(board, tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+
+    with kbc.connect_closing() as conn:
+        tid = stopped(conn)
+        aged(conn, tid, 600)
+    clock = [NOW]
+    monkeypatch.setattr(outcome.time, 'time', lambda: clock[0])
+    outcome._reset_hooks_for_tests()
+    try:
+        with SessionDB(db_path=tmp_path / 'status.db') as db:
+            db.create_session('s1', source='desktop')
+            db.append_message('s1', role='user', content='Keep the stopped work retained.')
+            db.append_message('s1', role='assistant', content='The work remains stopped and incomplete.')
+            at_600 = outcome.refresh_outcome('s1', 'card_change', db=db)['status']
+            assert at_600['presentation']['stripe'] == 'attention'
+            clock[0] = NOW + 1  # unchanged task data: only the clock crosses
+            at_601 = outcome.refresh_outcome('s1', 'card_change', db=db)['status']
+            assert at_601['presentation'] == {'stripe': 'stuck', 'reason_codes': ['linked_work_retained', 'triage_overdue']}
+            assert (at_601['kind'], at_601['reason']) == ('unresolved', 'linked_work_retained')
+            assert at_601['on'][0]['retained_stop']['reason'] == 'scope_stopped'
+            assert at_601['on'][0]['triage_overdue'] is True
+            assert at_601['revision'] == at_600['revision'] + 1
+            stored = json.loads(db._read_one('SELECT outcome_json FROM sessions WHERE id=?', ('s1',))[0])
+            assert stored['status'] == at_601
+            with kbc.connect_closing() as conn, kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+                kb._append_event(conn, tid, 'unblocked', {})
+            left = outcome.refresh_outcome('s1', 'card_change', db=db)['status']
+            assert left['presentation']['stripe'] != 'stuck'
+            assert 'triage_overdue' not in left['presentation']['reason_codes']
+    finally:
+        outcome._reset_hooks_for_tests()
+
+
+@pytest.mark.parametrize('extra,kind,stripe', [
+    (dict(muted=True), 'muted', 'blocked'),
+    (dict(asks=[{'id': 'ask'}]), 'decision', 'stuck'),
+])
+def test_mute_and_human_ask_keep_precedence_over_an_aged_retained_stop(extra, kind, stripe):
+    identity = dict(gateway='example', profile='default', session_id='s1', owner_epoch='epoch')
+    status = reduce_status(dict(
+        identity=identity, generation=1, started=True, turn=dict(generation=1, state='completed'),
+        sources={name: dict(identity=identity, generation=1, revision=1, current_revision=1,
+                            coverage='complete') for name in REQUIRED_SOURCES},
+        work=[dict(kind='card', id='card:t', state='retained', triage_overdue=True,
+                   retained_stop={'reason': 'scope_stopped'})], **extra))
+    assert (status['kind'], status['presentation']['stripe']) == (kind, stripe)
+    assert 'triage_overdue' not in status['presentation']['reason_codes']
+
+
+def test_stale_retained_replica_is_unknown_not_red(board, monkeypatch):
+    from hermes_cli import kanban_session_activity as activity
+
+    card = dict(id='t_stale', key='other/default/default/t_stale', status='triage', stale=True, title='x',
+                triage_entered_at=NOW - 6 * 86400, retained_stop={'reason': 'scope_stopped'}, session='s1')
+    monkeypatch.setattr(activity, '_board_db_paths', list)
+    monkeypatch.setattr(activity, '_remote_cards', lambda *a: [card])
+    monkeypatch.setattr(outcome.time, 'time', lambda: NOW)
+    _, waits = outcome._read_card_items(['s1'])
+    assert waits[0]['state'] == 'source_unknown' and 'triage_overdue' not in waits[0]
+    assert reduce(waits)['presentation']['stripe'] != 'stuck'
+    card.pop('stale')
+    _, waits = outcome._read_card_items(['s1'])
+    assert waits[0]['state'] == 'retained' and waits[0]['triage_overdue'] is True

@@ -26,6 +26,8 @@ export interface SessionOutcomeWaitingOn {
   state?: string
   /** Epoch seconds. */
   eta?: number
+  /** A stopped, retained card past the triage age: attention only, still not executing. */
+  triage_overdue?: boolean
   retained_stop?: { reason?: string; summary?: string; evidence?: string[]; episode_uid?: string; event_uid?: string }
 }
 

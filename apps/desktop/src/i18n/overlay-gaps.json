@@ -2037,6 +2037,7 @@
   "sidebar.row.outcomeDone": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeDecision": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeTriageOverdue": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "sidebar.row.outcomeTriageOverdueRetained": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeMuted": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeRunning": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeWaiting": ["ar","de","es","fr","ja","ru","zh","zh-hant"],

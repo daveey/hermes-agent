@@ -150,7 +150,8 @@ def reduce_status(snapshot: dict[str, Any], *, previous: dict | None = None) -> 
              "source_revisions": revisions, "coverage": coverage, "failures": failures,
              **_verdict(snapshot, coverage, generation, failures)}
     overdue = [item for item in snapshot.get('work') or ()
-               if item.get('kind') == 'card' and item.get('state') == 'triage_overdue']
+               if item.get('kind') == 'card' and (item.get('state') == 'triage_overdue' or (
+                   item.get('state') == 'retained' and item.get('triage_overdue') is True))]
     # Operational attention never beats a user mute or a human ask (both decided in _verdict).
     if overdue and not snapshot.get('asks') and value.get('kind') != 'muted':
         value['presentation'] = {'stripe': 'stuck', 'reason_codes': list(dict.fromkeys([

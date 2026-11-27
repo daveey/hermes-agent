@@ -95,8 +95,8 @@ def current_entry(row):
 
 
 def overdue(row, *, now):
-    if row.get('retained_stop'):
-        return False
+    # Every triage cause ages, an explicitly stopped retained scope included: red is overdue attention only,
+    # never an ask, a release or a claim that execution is pending.
     entered = current_entry(row)
     return entered is not None and entered <= now and now - entered > TRIAGE_AFTER_S
 

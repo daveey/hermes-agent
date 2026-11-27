@@ -61,6 +61,13 @@ def reduce(value, previous=None):
       "asks": [{"id": "ask"}]}, "muted", "blocked"),
     ({"work": [{"id": "t1", "kind": "card", "state": "triage_overdue"}], "asks": [{"id": "ask"}]},
      "decision", "stuck"),
+    # A stopped, retained scope stays unresolved (never a wait); only its age turns the stripe red.
+    ({"work": [{"id": "t1", "kind": "card", "state": "retained"}]}, "unresolved", "attention"),
+    ({"work": [{"id": "t1", "kind": "card", "state": "retained", "triage_overdue": True}]}, "unresolved", "stuck"),
+    ({"work": [{"id": "t1", "kind": "card", "state": "retained", "triage_overdue": 1}]}, "unresolved", "attention"),
+    ({"work": [{"id": "t1", "kind": "card", "state": "retained", "triage_overdue": True}], "muted": True},
+     "muted", "blocked"),
+    ({"work": [{"id": "t1", "kind": "process", "state": "retained", "triage_overdue": True}]}, "unresolved", "attention"),
 ])
 def test_precedence(changes, kind, stripe):
     out = reduce(snapshot(**changes))

@@ -21,6 +21,7 @@ export interface SessionRowStatusCopy {
   outcomeWatches: (cards: { id: string; label?: string; eta?: number }[]) => string
   outcomeDecision: string
   outcomeTriageOverdue: string
+  outcomeTriageOverdueRetained: string
   outcomeMuted: string
   outcomeRunning: string
   outcomeWaiting: string

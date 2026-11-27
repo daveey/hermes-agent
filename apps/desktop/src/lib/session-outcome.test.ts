@@ -91,6 +91,11 @@ describe('outcomeTooltip', () => {
     expect(outcomeTooltip(outcome, r)).toContain('stop-episode')
     expect(outcomeTooltip(outcome, r)).toContain('acceptance remains unmet')
     expect(outcomeTooltip(outcome, r)).not.toContain('Waiting')
+    expect(outcomeWaitingLine(item)).not.toContain('overdue triage')
+    const aged = outcomeTooltip({ ...outcome, on: [{ ...item, triage_overdue: true }] }, r)
+    expect(aged).toContain('card:retained · overdue triage · Stopped, retained and incomplete')
+    expect(aged).toContain('stop-episode')
+    expect(aged).not.toContain('Waiting')
   })
 
   it('done shows the summary', () => {

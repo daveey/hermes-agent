@@ -142,7 +142,7 @@ const validEta = (eta: unknown): number | undefined =>
 /** One `on[]` entry in words: a card reads `t_… scheduled · 14:00`, anything else `capacity: hub slot`. */
 export const outcomeWaitingLine = (item: SessionOutcomeWaitingOn): string => {
   if (item.kind === 'card' && item.state === 'retained') {
-    return [item.id, item.label || item.state, item.retained_stop?.episode_uid,
+    return [item.id, item.triage_overdue === true && 'overdue triage', item.label || item.state, item.retained_stop?.episode_uid,
       item.retained_stop?.event_uid, ...(item.retained_stop?.evidence || [])].filter(Boolean).join(' · ')
   }
 
