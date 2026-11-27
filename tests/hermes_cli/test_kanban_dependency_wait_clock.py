@@ -132,3 +132,25 @@ def test_claim_parent_recheck_dates_new_dependency_episode(board, monkeypatch):
     assert kb.claim_task(board, child) is None
     assert kb.get_task(board, child).status == 'todo'
     assert wait(board, child)['waiting_since'] == entry
+
+
+def test_todo_graph_read_is_batched_and_matches_single_card_reader(board):
+    """The sidebar poll path reads every todo card's parents in one statement, not one per card."""
+    from hermes_cli.kanban_db_parent_states import parent_states_many
+
+    parent = create(board, 'Parent')
+    work = []
+    for n in (3, 30):
+        kids = [create(board, f'Child {n}-{i}', parents=[parent]) for i in range(n)]
+        seen = []
+        board.set_trace_callback(seen.append)
+        try:
+            info = _local_wait_info(board, kids, now=2000000000)
+        finally:
+            board.set_trace_callback(None)
+        assert set(info) == set(kids) and all(v['waiting_on'] == 'card ' + parent for v in info.values())
+        work.append(sum('task_links' in s for s in seen))
+        many = parent_states_many(board, kids)
+        assert many == {k: kb.parent_states(board, k) for k in kids}
+    assert work[0] == work[1], work  # constant: no per-card graph statement
+    assert parent_states_many(board, []) == {}

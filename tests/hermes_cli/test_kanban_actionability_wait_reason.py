@@ -221,7 +221,12 @@ def test_wake_into_todo_clears_the_old_reason(tmp_path, monkeypatch):
         assert kb.get_task(conn, tid).status == 'todo'
         row = _row(conn, tid, T0 + 500)
         assert WHY not in row['instruction'] and WHY not in str(row['blocker'])
-        assert _local_wait_info(conn, [tid], now=T0 + 500) == {}
+        # The stale clock reason is gone; what remains is the real prerequisite, the late parent.
+        wait = _local_wait_info(conn, [tid], now=T0 + 500)
+        assert set(wait) == {tid} and wait[tid]['waiting_on'] == f'card {parent}', wait
+        assert WHY not in str(wait) and 'prerequisite' not in wait[tid] and 'next_actor' not in wait[tid]
+        kb.unlink_tasks(conn, parent, tid)
+        assert _local_wait_info(conn, [tid], now=T0 + 600) == {}  # no parent left: no wait, no reason
 
 
 def test_core_inferred_awaiting_is_never_reported_as_the_parkers_reason():

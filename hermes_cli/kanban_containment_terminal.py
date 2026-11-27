@@ -144,7 +144,8 @@ def archive_local(conn, task, *, comment=None, precondition=None, via=None, even
 
 def parent_status_sql(conn, alias="", *, table="tasks"):
     """Legacy schemas lack the marker; ordinary archived parents remain successful."""
+    from hermes_cli.kanban_table_columns import table_columns  # one row, not one per column
     prefix = alias + "." if alias else ""
-    if "containment_episode" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+    if "containment_episode" not in table_columns(conn, table):
         return prefix + "status"
     return f"CASE WHEN {prefix}status='archived' AND {prefix}containment_episode IS NOT NULL THEN 'triage' ELSE {prefix}status END"

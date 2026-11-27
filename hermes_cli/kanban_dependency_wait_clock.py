@@ -72,9 +72,22 @@ def overlay(conn, parked, events):
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_table_columns import table_columns
+    from hermes_cli.kanban_db_parent_states import parent_states_many
     from hermes_state_page_pack import read_rows
 
     ids = [tid for tid, row in parked.items() if row[0] == 'todo']
+    if not ids:
+        return
+    try:  # One graph read for every todo card: this reader is on the sidebar poll path.
+        graph = parent_states_many(conn, ids)
+        gating = {tid: [pid for pid, status in graph[tid] if kb.parent_blocks(conn, pid, status)] for tid in ids}
+    except sqlite3.Error:
+        graph, gating = {}, {}  # No graph evidence, not proof of a dependency wait.
+    for tid in ids:
+        if not gating.get(tid):
+            parked.pop(tid)
+            events.pop(tid, None)
+    ids = [tid for tid in ids if gating.get(tid)]
     if not ids:
         return
     history = {tid: [] for tid in ids}
@@ -92,16 +105,5 @@ def overlay(conn, parked, events):
     except sqlite3.Error:
         pass  # Old/incomplete boards still name dependencies, without inventing a start time.
     for tid in ids:
-        try:
-            states = kb.parent_states(conn, tid)
-        except sqlite3.Error:
-            parked.pop(tid)
-            events.pop(tid, None)
-            continue  # No graph evidence, not proof of a dependency wait.
-        parents = [pid for pid, status in states if kb.parent_blocks(conn, pid, status)]
-        if not parents:
-            parked.pop(tid)
-            events.pop(tid, None)
-            continue
-        events[tid] = ('dependency_wait', {'parents': parents},
-                       episode(history[tid], parents_now=[pid for pid, _status in states]))
+        events[tid] = ('dependency_wait', {'parents': gating[tid]},
+                       episode(history[tid], parents_now=[pid for pid, _status in graph[tid]]))
