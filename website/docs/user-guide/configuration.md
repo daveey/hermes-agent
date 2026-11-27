@@ -1565,6 +1565,21 @@ automatically requeue the message because doing so without durable ordering and
 idempotency could process it twice. Non-positive values use the 5-second
 default.
 
+## Frozen Policy Configuration Storage
+
+`sessions.intern_policy_configs` defaults to `false`. Only the boolean `true` enables
+sharing identical frozen policy configuration bytes between newly created local
+policy receipts. Existing receipt updates retain their current storage format;
+this option does not change session retention or prune messages.
+
+Keep this option disabled until **every process reading the session database**
+supports interned policy configurations. Disabling it restores inline storage for
+new receipts but does not rewrite existing interned receipts. Before rolling back
+to an older reader, use the bounded `hermes_state_policy_rollout` hydration tool
+under exclusive maintenance ownership to restore all existing references to inline
+configuration. Preview and apply are explicit operations; there is no automatic
+conversion, background sweeper, checkpoint, or database compaction.
+
 ## Gateway SessionDB Loop Guard
 
 A debugging aid for gateway stalls: a synchronous `state.db` read or write on the
