@@ -71,7 +71,7 @@ def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str], *, repli
     parked: dict[str, tuple] = {}
     for tid, status, kind, request, awaiting in read_rows(conn,
             f"SELECT {pick} FROM tasks t WHERE t.id IN (SELECT value FROM json_each(?)) "
-            "AND t.status IN ('scheduled', 'blocked', 'triage')", (json.dumps(ids),), 5):
+            "AND t.status IN ('scheduled', 'blocked', 'triage', 'todo')", (json.dumps(ids),), 5):
         parked[str(tid)] = (status, kind, request, awaiting)
     if not parked:
         return {}, {}
@@ -87,6 +87,8 @@ def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str], *, repli
             events[str(tid)] = (kind, payload, at)
     except sqlite3.Error:  # board predates task_events
         pass
+    from hermes_cli.kanban_dependency_wait_clock import overlay as dependency_overlay
+    dependency_overlay(conn, parked, events)
     if replica is ...:
         _overlay_contained(conn, parked, events)
     else:

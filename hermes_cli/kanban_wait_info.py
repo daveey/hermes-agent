@@ -365,7 +365,20 @@ def _blocked_wait(kind: Optional[str]) -> Optional[tuple]:
 def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: Any = None,
              park_kind: Any = None, since: Any = None, awaiting: Any = None, reason: Any = None,
              now: Optional[float] = None) -> Optional[dict[str, Any]]:
-    """Wait info for one card, or None when it is not parked (running, ready, review, todo, done).
+    """Canonical wait projection, including reader-verified todo dependency episodes."""
+    if status == 'todo':
+        from hermes_cli.kanban_dependency_wait_clock import describe as dependency_wait
+        return dependency_wait(park, park_kind, since)
+    return _describe_parked(status, block_kind=block_kind, human=human, park=park, park_kind=park_kind,
+                            since=since, awaiting=awaiting, reason=reason, now=now)
+
+
+def _describe_parked(status: Any, *, block_kind: Any = None, human: bool = False, park: Any = None,
+             park_kind: Any = None, since: Any = None, awaiting: Any = None, reason: Any = None,
+             now: Optional[float] = None) -> Optional[dict[str, Any]]:
+    """Wait info for one card, or None when it is not parked (running, ready, review, done).
+
+    Todo requires a reader-verified dependency payload; an ordinary todo row has no wait clock.
 
     ``park`` is the newest park event's payload (dict or JSON text) and ``park_kind`` its event kind; ``since``
     when the card parked (defaults to nothing: no age, never stalled). ``awaiting`` overrides the payload's.
