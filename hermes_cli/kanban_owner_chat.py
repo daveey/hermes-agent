@@ -66,6 +66,8 @@ def session_id(producer: str, generation: int = 1) -> str:
 
 
 def title(producer: str) -> str:
+    if slug(producer) == "needs_you":  # kanban_human_chat's standing chat for human asks no other chat owns
+        return "Needs you"
     name = str(producer or "").strip() or "unattributed"
     if name.startswith("cron:"):
         from cron.jobs import get_job
@@ -76,6 +78,10 @@ def title(producer: str) -> str:
 
 
 def brief(producer: str) -> str:
+    if slug(producer) == "needs_you":
+        return ("I am the standing \"Needs you\" chat. A Kanban card that waits on you, and that no chat of yours "
+                "created, is linked here, so this chat turns red while any of them waits. Each card's panel says "
+                "what is stuck, the steps to take and what Unblock and Archive do.")
     return (f"I am the standing owner chat for Kanban cards created by `{producer}`. Those cards have no other chat, "
             "so when one stops (spend budget, scope stop) or needs a decision, the notice comes here and I decide: "
             "release it with a goal-level mandate (`hermes kanban release <id> --note ...`), re-scope it, or archive "

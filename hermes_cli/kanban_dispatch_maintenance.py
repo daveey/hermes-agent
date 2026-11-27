@@ -20,6 +20,8 @@ def sweep(conn, result, guard_notice, parent_unclaimed, *, checkpoint=lambda: No
     checkpoint()
     _own_ownerless_cards(conn)
     checkpoint()
+    _link_human_chats(conn)
+    checkpoint()
 
 
 def place_workers(conn, timed):
@@ -45,6 +47,19 @@ def _own_ownerless_cards(conn):
         raise
     except Exception:  # health: allow BLE001 -- ownerless cards stay as they were; the next hour retries
         logging.getLogger(__name__).warning("kanban: owner-chat backfill failed", exc_info=True)
+
+
+def _link_human_chats(conn):
+    """Every card blocked on a human gets a chat the human reads (kanban_human_chat), on the home gateway."""
+    import logging
+    import time
+    from hermes_cli.kanban_human_chat import maybe_sweep
+    try:
+        maybe_sweep(conn, now=time.monotonic())
+    except DispatchWriteContended:
+        raise
+    except Exception:  # health: allow BLE001 -- the asks keep their links; the next tick retries
+        logging.getLogger(__name__).warning("kanban: human-chat link pass failed", exc_info=True)
 
 
 def _start_spend_reviews(conn):

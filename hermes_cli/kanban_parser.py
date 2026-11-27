@@ -664,6 +664,11 @@ _SPECS = [
         _arg("--apply", action="store_true", help="Link each ownerless open card to its producer's owner chat"),
         _json_flag(),
     ], help="List open home cards with no owning chat; --apply gives each its producer's standing owner chat"),
+    _cmd("human-chats", [
+        _arg("--apply", action="store_true", help="Link each open human ask that has no human chat (home gateway)"),
+        _json_flag(),
+    ], help="List cards blocked on a human with no chat the human reads; --apply links the creator chain's chat "
+            "or the standing Needs-you chat"),
     _cmd("renew-scope", [
         _TASK_ID,
         _arg("--episode", required=True, help="Uid of the scope stop (spend_budget_triaged event) being renewed"),

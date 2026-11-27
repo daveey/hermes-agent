@@ -1833,6 +1833,7 @@ _HANDLERS = {
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "renew-scope": lambda a: importlib.import_module("hermes_cli.kanban_scope_renewal_cli").command(a),
     "owner-chats": lambda a: importlib.import_module("hermes_cli.kanban_owner_chat").command(a),
+    "human-chats": lambda a: importlib.import_module("hermes_cli.kanban_human_chat").command(a),
     "delegate": lambda a: importlib.import_module("hermes_cli.kanban_scope_delegate").command(a),
     "release": lambda a: importlib.import_module("hermes_cli.kanban_release").command(a),
     "spend-stop-watch": lambda a: importlib.import_module("hermes_cli.kanban_spend_stop_watch").command(a),
