@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "plugins": {
+    "hermes-monitor": {
+      "commit": "026a7066554d1f19ab34ac291b6c94a4c419ae6e",
+      "prefix": "",
+      "files": {
+        "__init__.py": "bfd1c58ff8adb440284d493a6300910fe3479585574a626fa97dac3d16efebbb",
+        "dashboard/__init__.py": "e5154d242acfddd8b62abed4967edfb34ea98f48293e462c1aeee5bd6acc62fe",
+        "dashboard/manifest.json": "9bc93b7ddf0d09249685e8879e61b047b0e1834da510a65aea2a10a45fef5058",
+        "dashboard/plugin_api.py": "19a2f05aca66175aac44182b689440a0ca6b5bcf6946072c9a5a58dfd1ea8b66",
+        "dashboard/quotas.py": "de3cb1dcbf9dcdeba91de3bb97bc9a3dc1b2a0f5da66085f70e9124340c28081",
+        "dashboard/workers.py": "6ddfb53445ba0c14390706a97209a44b5dd325168df989c3ab42635fa8ef68f8",
+        "desktop/plugin.js": "1a4da5d5869f54a703214df03914137df1a5300cbc1998939318cbb4cc6d4957",
+        "plugin.yaml": "0a36ebb24590326f6c9fd259e6ef618887f3b9d7f585caea191270742d17222a"
+      },
+      "review_task": "t_01a21f0aee8b998b",
+      "reviewed_sha": "2bea2d60396bdea8f3834a1df85f235416ab68ad",
+      "pr": "https://github.com/daveey/hermes-monitor/pull/1",
+      "review_map_sha256": "a8ee63ac7973a161a568784bf0695b47a4ae2332697073b69443f0dfce6e51b7"
+    },
+    "kanban-db-hint": {
+      "commit": "4e87fd850b3ebb73dda0ffa40952ba321fed1d73",
+      "prefix": "plugins/kanban-db-hint/",
+      "files": {
+        "README.md": "ba79ac52ccc6ad1d964fa262d16cd30e1ffc8118fe3cf961a96aa026f8d0e705",
+        "__init__.py": "f932acb0256f459ac7eee67c1d6aa1717051e874d739e4b1015e876c532a4aa3",
+        "plugin.yaml": "9de341e0a744a4ffed626eadf5ab038afc52110853acf642ac2344d80ceec25a",
+        "tests/test_kanban_db_hint.py": "5d4ea742799a74706878a28719b1f977573fbb4a962a34d4b8aea9ee65722bb9"
+      },
+      "review_task": "t_01a21e98d9614899",
+      "reviewed_sha": "b01b6f94d1517cd4a8fb28e3d6c971e1282ea1da",
+      "pr": "https://github.com/daveey/hermes-mods/pull/517",
+      "review_chain": [
+        "t_01a21e41eb011c61 (original source finding; request_changes, not approval)",
+        "t_01a21e7d09e45cd8 (full corrective PR review)",
+        "t_01a21e8a21bcfb1c (first test-only delta)",
+        "t_01a21e98d9614899 (final exact-head approval; independently read this run)"
+      ]
+    }
+  }
+}
