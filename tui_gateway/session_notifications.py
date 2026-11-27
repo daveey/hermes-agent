@@ -811,7 +811,10 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
     chats = chat_lineage(session_key, _session_lineage)  # its local rows may sit on the lineage root
     with contextlib.closing(conn):
         try:
-            subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key)
+            # A global deliverable-event hint also wakes chats with only historical rows. Keep quiet and
+            # silent-only rows inside SQLite; in-flight rows stay eligible for clock/liveness recovery.
+            subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key, pending_only=True,
+                                         pending_kinds={"tui": _KANBAN_NOTIFY_KINDS})
         except Exception:
             return []
         if subs:

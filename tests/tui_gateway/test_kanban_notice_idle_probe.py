@@ -106,6 +106,56 @@ def test_unseen_events_of_silent_kinds_only_take_no_write_lock():
     assert texts == [] and begins == []
 
 
+def test_loaded_poll_only_walks_pending_kind_and_inflight_candidates(monkeypatch):
+    """A global board hint must not replay the chat's entire historical subscription set."""
+    tid = _task()
+    _poll([])
+    with contextlib.closing(kbc.connect()) as conn:
+        with kb.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO kanban_notify_subs(task_id, platform, chat_id, thread_id, created_at, last_event_id) "
+                "VALUES (?, 'tui', ?, '', 0, 0)",
+                [(f"quiet-{n}", KEY) for n in range(300)],
+            )
+            for n in range(300):
+                kb._append_event(conn, f"quiet-{n}", "commented", {})
+    listed, claimed = [], []
+    real_list, real_claim = kbn.list_notify_subs, kbn.claim_unseen_events_for_sub
+
+    def listing(*args, **kwargs):
+        rows = real_list(*args, **kwargs)
+        listed.append([row["task_id"] for row in rows])
+        return rows
+
+    def claiming(*args, **kwargs):
+        claimed.append(kwargs["task_id"])
+        return real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(kbn, "list_notify_subs", listing)
+    monkeypatch.setattr(kbn, "claim_unseen_events_for_sub", claiming)
+    _event(tid, "blocked")
+    texts, _ = _poll([])
+    assert len(texts) == 1 and tid in texts[0]
+    assert listed == [[tid]], "quiet/silent-only subscriptions must stay inside SQLite"
+    assert claimed == [tid]
+    # Even with no unseen event, own in-flight custody remains eligible until ACK.
+    listed.clear()
+    claimed.clear()
+    assert _poll([])[0] == []
+    assert listed == [[tid]] and claimed == [tid]
+
+
+def test_loaded_poll_keeps_unseen_silent_notify_kinds_eligible(monkeypatch):
+    """Unblocked has no text but must still advance and settle the cursor."""
+    tid = _task()
+    _poll([])
+    eid = _event(tid, "unblocked")
+    assert _poll([])[0] == []
+    sub = _sub(tid)
+    assert sub["last_event_id"] == eid
+    assert sub["inflight_from"] is None
+
+
 def test_an_unsubscribed_row_claims_nothing_without_the_write_lock():
     tid = _task()
     _event(tid, "blocked")
