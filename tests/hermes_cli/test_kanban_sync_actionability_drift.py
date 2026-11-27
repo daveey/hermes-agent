@@ -6,6 +6,7 @@ import pytest
 
 from hermes_cli import kanban_actionability_transport as transport
 from hermes_cli import kanban_sync_retain_drift as drift
+from tests.hermes_cli.kanban_legacy_command_support import seed_legacy_command
 
 
 @pytest.fixture
@@ -72,7 +73,7 @@ def test_exact_superseded_rejection_is_read_only(stores):
 ])
 def test_each_custody_mismatch_stays_dirty(stores, column, value):
     live, shadow, op = stores
-    live.execute(f'UPDATE kanban_actionability_commands SET {column}=?', (value,))
+    seed_legacy_command(live, **{column: value})
     assert not drift.audited_rejection(live, shadow, op)
 
 
@@ -141,8 +142,8 @@ def _refreeze(live, op, facts):
     payload['facts'] = facts
     wire = transport.envelope(old['task'], payload)
     text = transport.canonical(wire)
-    live.execute('UPDATE kanban_actionability_commands SET op_id=?,contract_key=?,request_json=?,request_sha256=?',
-                 (wire['client_op_id'], wire['payload']['contract_key'], text, transport.digest(text)))
+    seed_legacy_command(live, op_id=wire['client_op_id'], contract_key=wire['payload']['contract_key'],
+                        request_json=text, request_sha256=transport.digest(text))
     op.update(op_id=wire['client_op_id'], fields=text)
 
 

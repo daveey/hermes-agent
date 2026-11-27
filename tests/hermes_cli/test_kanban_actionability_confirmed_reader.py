@@ -10,6 +10,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_actionability_cli import report
 from hermes_cli.kanban_actionability_sources import describe
 from tests.hermes_cli import test_kanban_actionability_transport as support
+from tests.hermes_cli.kanban_legacy_command_support import seed_legacy_command
 
 live = support.live
 
@@ -86,8 +87,7 @@ def test_unconfirmed_damaged_or_stale_contract_does_not_hide_violation(live, cha
         'pending': [("UPDATE kanban_actionability_commands SET delivery_state='pending'", ())],
         'rejected': [("UPDATE kanban_actionability_commands SET delivery_state='rejected'", ())],
         'digest': [("UPDATE kanban_actionability_commands SET request_sha256='not-the-digest'", ())],
-        'op-id': [("UPDATE kanban_actionability_commands SET op_id='different'", ())],
-        'contract-key': [("UPDATE kanban_actionability_commands SET contract_key='different'", ())],
+
         'event': [('DELETE FROM task_events WHERE uid=?', (wire['contract_uid'],))],
         'home': [("UPDATE tasks SET created_on='other-home' WHERE id=?", (tid,))],
         'status': [("UPDATE tasks SET status='triage' WHERE id=?", (tid,))],
@@ -101,8 +101,12 @@ def test_unconfirmed_damaged_or_stale_contract_does_not_hide_violation(live, cha
         changes[label] = [('UPDATE kanban_actionability_commands SET canonical_receipt_json=?', (raw,)),
                           ('UPDATE task_events SET payload=? WHERE uid=?', (raw, wire['contract_uid']))]
     with kbc.write_txn(live):
-        for sql, params in changes[change]:
-            live.execute(sql, params)
+        if change in ('op-id', 'contract-key'):
+            column = {'op-id': 'op_id', 'contract-key': 'contract_key'}[change]
+            seed_legacy_command(live, **{column: 'different'})
+        else:
+            for sql, params in changes[change]:
+                live.execute(sql, params)
     # The ordinary ready fixture is runnable, so its missing deadline is no violation
     # (not_required). Custody is the point: no unconfirmed or stale contract may fill it,
     # and every card that still waits keeps its missing-deadline violation.

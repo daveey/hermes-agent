@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 from hermes_cli import kanban_sync_actionability_drift as audit
+from tests.hermes_cli.kanban_legacy_command_support import seed_legacy_command
 pytest_plugins = ['tests.hermes_cli.test_kanban_sync_actionability_drift']
 
 
@@ -104,7 +105,7 @@ def test_local_event_and_run_ids_are_not_portable_order(completed):
 ])
 def test_terminal_branch_never_bypasses_command_custody(completed, column, value):
     live, shadow, op = completed
-    live.execute(f'UPDATE kanban_actionability_commands SET {column}=?', (value,))
+    seed_legacy_command(live, **{column: value})
     assert not audit.audited_rejection(live, shadow, op)
 
 
