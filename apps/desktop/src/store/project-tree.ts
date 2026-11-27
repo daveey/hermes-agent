@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import type { SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
+import { rememberRowTimers } from '@/app/chat/sidebar/session-row-timer-memory'
 
 // The project tree atom lives in this leaf so store/session-states.ts can
 // read it (a focused tile's session is often older than the paginated recents
@@ -9,3 +10,15 @@ import type { SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-g
 // suite that partially mocks the gateway. store/projects.ts owns all writes
 // and re-exports the atom so existing call sites keep their import path.
 export const $projectTree = atom<SidebarProjectTree[]>([])
+
+// Virtualized project rows can receive a known-zero update without mounting.
+$projectTree.listen(projects => {
+  for (const project of projects) {
+    project.previewSessions?.forEach(rememberRowTimers)
+    for (const repo of project.repos) {
+      for (const group of repo.groups) {
+        group.sessions.forEach(rememberRowTimers)
+      }
+    }
+  }
+})

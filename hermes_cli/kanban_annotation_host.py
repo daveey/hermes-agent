@@ -863,7 +863,8 @@ def _holder_pass() -> int:
     another input's, or aging. A scope whose watched files have not moved since the holder last verified it, and
     whose due time has not come, costs a signature and nothing else. Returns how many it refreshed."""
     refreshed = 0
-    for scope, ctx in stalest_first(list(_known.items()), asleep=_asleep):
+    for scope, ctx in stalest_first(list(_known.items()), asleep=_asleep,
+                                    gate_failed=lambda scope: _gates.pop(scope, None)):
         try:
             refreshed += bool(ctx.run(_holder_refresh, scope))
         except Exception:  # health: allow BLE001 -- one scope's failed read must not stop the others

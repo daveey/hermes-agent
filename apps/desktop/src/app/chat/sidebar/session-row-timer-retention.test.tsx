@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
 import { I18nProvider } from '@/i18n'
+import { $projectTree } from '@/store/project-tree'
 import { setSessions } from '@/store/session'
 
 import { flatRowCardMarks } from './session-row-card-squares'
@@ -106,4 +107,21 @@ it('a known-empty list read clears retention while the row is unmounted', () => 
   const next = render(view(row({ kanban_unknown: true })))
   expect(next.container.querySelector('[data-card-timer]')).toBeNull()
   act(() => setSessions([]))
+})
+
+it.each(['lane', 'preview'] as const)('a project-tree %s known-empty read clears an unmounted timer', source => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+  const first = render(view(row({ kanban_observed_at: NOW, kanban_timed_cards: cards })))
+  first.unmount()
+  act(() => vi.advanceTimersByTime(120_000))
+  const empty = row({ kanban_observed_at: NOW + 120 })
+  act(() => $projectTree.set([{
+    id: 'project', label: 'Project', path: null, sessionCount: 1,
+    previewSessions: source === 'preview' ? [empty] : [],
+    repos: [{ id: 'repo', label: 'Repo', path: null, sessionCount: 1,
+      groups: [{ id: 'lane', label: 'Lane', path: null, sessions: source === 'lane' ? [empty] : [] }] }]
+  }]))
+  const next = render(view(row({ kanban_unknown: true })))
+  expect(next.container.querySelector('[data-card-timer]')).toBeNull()
+  act(() => $projectTree.set([]))
 })

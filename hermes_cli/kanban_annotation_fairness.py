@@ -9,7 +9,7 @@ from hermes_cli import kanban_annotation_disk as disk
 log = logging.getLogger(__name__)
 
 
-def stalest_first(scopes, *, asleep=None):
+def stalest_first(scopes, *, asleep=None, gate_failed=None):
     """Demanded scopes precede idle ones; missing publications are oldest.
 
     Only read the published copy and demand metadata, never source counts. Keep
@@ -41,5 +41,7 @@ def stalest_first(scopes, *, asleep=None):
             if asleep is None or not ctx.run(asleep, scope):
                 awake.append((scope, ctx))
         except Exception:  # health: allow BLE001 -- a broken scope gate must not stop peers
+            if gate_failed is not None:
+                gate_failed(scope)
             log.debug('annotation holder gate unavailable', exc_info=True)
     return sorted(awake, key=priority)

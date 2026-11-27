@@ -64,6 +64,58 @@ def test_stalest_demanded_scope_first(monkeypatch, tmp_path, native, seconds):
     assert calls == [scopes[i] for i in [3, 6, 5, 4, 2, 1, 0]]
 
 
+@pytest.mark.parametrize('failure', ['priority', 'gate'])
+def test_broken_metadata_does_not_starve_peers(monkeypatch, failure):
+    from hermes_cli.kanban_annotation_fairness import stalest_first
+
+    scopes = [('home', name) for name in ('good', 'broken')]
+    contexts = [(scope, contextvars.copy_context()) for scope in scopes]
+
+    def read(scope):
+        if scope == scopes[1] and failure == 'priority':
+            raise RuntimeError('metadata unavailable')
+        return 100
+
+    def asleep(scope):
+        if scope == scopes[1] and failure == 'gate':
+            raise RuntimeError('gate unavailable')
+        return False
+
+    monkeypatch.setattr(host._disk, 'demand_age', lambda scope: 0)
+    monkeypatch.setattr(host._disk, 'published_read_at', read)
+    ordered = [scope for scope, _ctx in stalest_first(contexts, asleep=asleep)]
+    assert ordered == ([scopes[1], scopes[0]] if failure == 'priority' else [scopes[0]])
+
+
+def test_demand_precedes_older_idle_scope(monkeypatch):
+    from hermes_cli.kanban_annotation_fairness import stalest_first
+
+    scopes = [('home', name) for name in ('idle', 'demanded')]
+    monkeypatch.setattr(host._disk, 'demand_age', lambda scope: None if scope == scopes[0] else 0)
+    monkeypatch.setattr(host._disk, 'published_read_at', lambda scope: 1 if scope == scopes[0] else 100)
+    ordered = stalest_first([(scope, contextvars.copy_context()) for scope in scopes])
+    assert [scope for scope, _ctx in ordered] == list(reversed(scopes))
+
+
+def test_failed_sleep_gate_is_disarmed_for_next_pass(monkeypatch):
+    scope = ('home', 'broken')
+    monkeypatch.setattr(host, '_known', {scope: contextvars.copy_context()})
+    monkeypatch.setattr(host, '_gates', {scope: object()})
+    monkeypatch.setattr(host._disk, 'demand_age', lambda scope: 0)
+    monkeypatch.setattr(host._disk, 'published_read_at', lambda scope: 100)
+
+    def asleep(scope):
+        if scope in host._gates:
+            raise RuntimeError('broken gate')
+        return False
+
+    monkeypatch.setattr(host, '_asleep', asleep)
+    monkeypatch.setattr(host, '_holder_refresh', lambda scope: True)
+    assert host._holder_pass() == 0
+    assert scope not in host._gates
+    assert host._holder_pass() == 1
+
+
 def test_priority_read_never_resurrects_retired_profile(monkeypatch, tmp_path):
     from hermes_cli.kanban_annotation_fairness import stalest_first
 
