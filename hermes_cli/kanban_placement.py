@@ -1288,7 +1288,7 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
                   self_gw: str, cfg: Optional[dict] = None, hub_cli: str = "hermes-hub",
                   transport_key: Optional[str] = None, origin_gateway: Optional[str] = None,
                   creator: Optional[dict] = None, run_uid: Optional[str] = None,
-                  canonical_home: bool = False) -> dict:
+                  canonical_home: bool = False, conn=None) -> dict:
     """Queue on ``target``; a fatal refusal must not fall back to a second local card."""
     c = _Cfg(config() if cfg is None else cfg)
     foreign_origin = bool(origin_gateway and origin_gateway != self_gw)
@@ -1350,6 +1350,9 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
                 argv += ["--creator-" + flag, value]
     else:
         argv += ["--origin-session", ""]
+    if foreign_origin and conn is not None:
+        from hermes_cli.kanban_origin_forward_run_end import reserve
+        reserve(conn, creator['task_id'], run_uid, rid)
     rc, out, err = hub_runner(argv)
     if rc == 0:
         return {"ok": True, "request_id": rid, "queued_only": False, "retry": prior is not None}

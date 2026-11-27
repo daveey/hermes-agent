@@ -1478,7 +1478,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         placed = kp.create_remote(view, target=target, origin_session=session_id,
                                   origin_profile=origin_profile or current_profile_name("default") or "default",
                                   self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")),
-                                  **({"canonical_home": True} if home is not None else {}), **forwarding)
+                                  **({"canonical_home": True} if home is not None else {}), **({"conn": conn} if forwarding else {}), **forwarding)
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s)",
                            target, placed.get("error"))

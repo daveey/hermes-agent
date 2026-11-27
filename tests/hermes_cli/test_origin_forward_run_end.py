@@ -108,6 +108,66 @@ def test_kernel_forced_park_remains_possible(pending):
         assert kb.latest_run(conn, task).ended_at is not None
 
 
+def test_forward_reserves_before_enqueue(pending, monkeypatch):
+    from hermes_cli import kanban_placement as placement
+    task, run, path, body = pending
+    with sqlite3.connect(path) as db:
+        db.execute('DELETE FROM sent')
+    monkeypatch.setattr(placement, 'hub_carries_options', lambda cli: True)
+    monkeypatch.setattr(placement, 'remote_state', lambda rid: None)
+    calls = []
+    with kbc.connect_closing() as conn:
+        def enqueue(argv):
+            # Enqueue is paused BEFORE its courier row exists. The durable
+            # board reservation must already prevent a concurrent lifecycle.
+            with kbc.connect_closing() as other:
+                with pytest.raises(ValueError, match='origin_forward_pending'):
+                    continuation.continue_task(other, task, checkpoint='next', expected_run_id=run)
+            calls.append(argv)
+            return 3, '', 'queued offline'
+        monkeypatch.setattr(placement, 'hub_runner', enqueue)
+        out = placement.create_remote({'title': 'child', 'assignee': 'default'}, target='hub', self_gw='worker',
+                                      origin_session='chat', origin_profile='default', origin_gateway='hub',
+                                      creator=body['args']['creator'], run_uid='run-current', cfg={}, conn=conn)
+        assert out['ok'], out
+        assert len(calls) == 1
+
+
+@pytest.mark.parametrize('missing', ['row', 'store'])
+def test_reservation_survives_missing_courier_evidence(pending, missing):
+    from hermes_cli.kanban_origin_forward_run_end import reserve
+    task, run, path, body = pending
+    with kbc.connect_closing() as conn:
+        reserve(conn, task, 'run-current', body['id'])
+        reserve(conn, task, 'run-current', body['id'])
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE kind='origin_forward_reserved'").fetchone()[0] == 1
+    if missing == 'store':
+        path.unlink()
+    else:
+        with sqlite3.connect(path) as db:
+            db.execute('DELETE FROM sent')
+    with kbc.connect_closing() as conn:
+        with pytest.raises(ValueError, match='origin_forward_pending'):
+            continuation.continue_task(conn, task, checkpoint='next', expected_run_id=run)
+        assert kb.get_task(conn, task).status == 'running'
+
+
+def test_ending_wins_before_submission(pending, monkeypatch):
+    from hermes_cli import kanban_placement as placement
+    task, run, path, body = pending
+    with sqlite3.connect(path) as db:
+        db.execute('DELETE FROM sent')
+    monkeypatch.setattr(placement, 'hub_carries_options', lambda cli: True)
+    monkeypatch.setattr(placement, 'remote_state', lambda rid: None)
+    monkeypatch.setattr(placement, 'hub_runner', lambda argv: pytest.fail('ended creator must not enqueue'))
+    with kbc.connect_closing() as conn:
+        assert continuation.continue_task(conn, task, checkpoint='next', expected_run_id=run)['ok']
+        with pytest.raises(ValueError, match='origin_forward_submit_run_ended'):
+            placement.create_remote({'title': 'child', 'assignee': 'default'}, target='hub', self_gw='worker',
+                                    origin_session='chat', origin_profile='default', origin_gateway='hub',
+                                    creator=body['args']['creator'], run_uid='run-current', cfg={}, conn=conn)
+
+
 def test_unreadable_courier_is_not_absence(pending):
     task, run, path, _ = pending
     path.write_bytes(b'not a database')
