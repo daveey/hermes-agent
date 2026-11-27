@@ -24,7 +24,9 @@ withheld.
 
 The example digest placeholders are not valid records. The registry enrolls only
 explicitly reviewed byte sets; see [the run28 enrollment](run28-review-records.md)
-for the first records and their independent-review provenance.
+for the first records and their independent-review provenance. The
+[quiet-start approved-source cohort](quiet-start-review-records.md) records a
+later partial enrollment and its remaining closure and live-acceptance limits.
 To enroll another, review the exact plugin sources, calculate their SHA256 digests,
 and submit the record through the normal independent core review and CI path.
 Include every executable source and any file whose integrity is part of that
