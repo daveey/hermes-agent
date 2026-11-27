@@ -76,8 +76,12 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
     path = _main_db_file(conn)
     if path is None:
         raise ValueError('sender requires an on-disk board')
-    client.refuse_if_schema_ahead(conn)
-    if not journal.bound_custody(conn):
+    try:
+        client.refuse_if_schema_ahead(conn)
+        bound = journal.bound_custody(conn)
+    except ValueError:
+        bound = True  # Loss/invalid anchors are judged, and held, by _push under the fence.
+    if not bound:
         return _push(conn, hub, board, gateway, primary=primary, max_batches=max_batches,
                      before_head=before_head, seen=seen)
     with _sender_fence(path):

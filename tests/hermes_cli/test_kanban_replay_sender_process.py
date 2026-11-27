@@ -140,3 +140,29 @@ def test_sender_refuses_nonpersistent_board_before_any_io():
         assert receiver.calls == []
     finally:
         conn.close()
+
+
+def test_direct_push_on_bound_board_waits_for_a_briefly_held_fence(live, monkeypatch):
+    from hermes_cli import kanban_replay_sender
+    from hermes_cli.kanban_sync_guard import sender_lock
+    kb.create_task(live, title='direct caller', assignee='worker')
+    path = Path(live.execute('PRAGMA database_list').fetchone()[2])
+    monkeypatch.setattr(kanban_replay_sender, 'DIRECT_WAIT_S', 20)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with sender_lock(path):
+            held.set()
+            release.wait(30)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert held.wait(10)
+        threading.Timer(0.5, release.set).start()
+        receiver = helpers.Receiver()
+        result = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+        assert result.applied == 1
+    finally:
+        release.set()
+        thread.join(10)
