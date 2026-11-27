@@ -10,7 +10,8 @@ review lane preloads that skill into the worker it spawns, so only a reviewer's 
 Flow under test (``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS=0``, ``agent.api_max_retries: 1``):
 
 1. tick: implementer spawned; the provider answers HTTP 429; the worker exits 75.
-2. tick: the dead worker is reaped as ``rate_limited`` (no failure tick) and respawned; the retry
+2. tick: the dead worker is reaped as ``rate_limited`` (no failure tick); once the provider's
+   Retry-After expires it is respawned. The retry
    calls ``kanban_request_review`` -> the card moves to ``review``.
 3. tick: the review lane must spawn the reviewer, which approves (``kanban_complete``) -> ``done``.
 
@@ -46,7 +47,8 @@ REVIEW_SKILL = "sdlc-review"
 REVIEW_MARK = "E2E_REVIEW_LANE_SKILL_5d21c9"
 REVIEW_MODEL = "fake-model"  # independence is a separate execution, not a model name
 RATE_LIMIT_EXIT_CODE = 75  # KANBAN_RATE_LIMIT_EXIT_CODE — documented worker exit contract
-MAX_TICKS = 6  # a healthy rate-limited card is done on tick 3; the rest prove "forever"
+MAX_TICKS = 6  # includes a possible provider-quota hold before retrying
+RETRY_AFTER_SECONDS = 1
 
 # Scenario -> (pattern, reason) for ``known_gate``; it only matches ``ReviewerNeverSpawned``.
 KNOWN: dict[str, tuple[str, str]] = {
@@ -117,7 +119,8 @@ class TwoRoleModel:
         if impl_no <= self.rate_limited_attempts:
             # A zero/expired hint correctly falls back to the real pool's default cooldown.
             # Give the server a short future reset so the next process tick can retry.
-            return Error(status=429, message="Rate limit exceeded: quota for this key", retry_after=1)
+            return Error(status=429, message="Rate limit exceeded: quota for this key",
+                         retry_after=RETRY_AFTER_SECONDS)
         return ToolCall("kanban_request_review", {
             "summary": "implementation ready for review",
             "metadata": {"review_model": "class:deep"},
@@ -171,6 +174,10 @@ def drive(board: Board, tid: str, model: TwoRoleModel, max_ticks: int = MAX_TICK
         })
         if t["status"] == "done":
             break
+        if ticks[-1]["guarded"] == ["subscription_quota_reset"]:
+            # A real provider wall is independent of the zero dispatcher cooldown. Do not burn
+            # every bounded driver tick while that wall is still active on a fast runner.
+            threading.Event().wait(RETRY_AFTER_SECONDS)
     return ticks
 
 
@@ -211,13 +218,17 @@ def test_rate_limited_attempt_is_billed_once_and_requeued_without_a_failure(rate
     assert b.task(tid)["consecutive_failures"] == 0, diag
     for kind in ("crashed", "gave_up", "blocked", "protocol_violation"):
         assert not b.events(tid, kind), f"{kind} event on a rate-limited card\n{diag}"
-    # Cooldown is 0: the reap and the respawn happen on the SAME tick right after the 429 worker died.
-    assert [t["spawned"] for t in f.ticks[:2]] == [1, 1], diag
+    # Dispatcher cooldown is zero, but the real credential pool must still honor Retry-After.
+    # Fast CI process startup can reach a tick before that independent one-second wall expires.
+    retry_tick = f.model.by_role("impl")[1].tick
+    assert f.ticks[0]["spawned"] == 1, diag
+    assert all(t["spawned"] == 0 and t["guarded"] == ["subscription_quota_reset"]
+               for t in f.ticks[1:retry_tick - 1]), diag
     # Provider-side billing: the 429 attempt is ONE request (api_max_retries: 1, no retry loop and
     # no fallback re-send); the retry opens with the handoff call and at most one closing turn.
     impl = f.model.by_role("impl")
     assert [(a.tick, a.requests, a.answers) for a in impl[:1]] == [(1, 1, ["Error"])], diag
-    assert [a.tick for a in impl] == [1, 2] and one_terminal_turn(impl[1], "kanban_request_review"), diag
+    assert [a.tick for a in impl] == [1, retry_tick] and one_terminal_turn(impl[1], "kanban_request_review"), diag
     assert len(runs) - 2 == len(f.model.by_role("review")), diag
 
 
@@ -257,7 +268,9 @@ def test_rate_limited_then_review_handoff_reaches_the_reviewer(rate_limited_flow
                 f"reviewer attempts={len(reviewers)}, respawn_guarded={guarded}\n{diag}")
     # Once fixed, the whole contract must hold, not just "something spawned".
     assert f.run_outcomes() == ["rate_limited", "review_requested", "completed"], diag
-    # The reviewer starts on the tick right after the handoff (cooldown 0), billed one tool turn.
-    assert [a.tick for a in reviewers] == [3] and one_terminal_turn(reviewers[0], "kanban_complete"), diag
+    # The reviewer still starts on the very next tick after handoff, billed one tool turn.
+    handoff_tick = f.model.by_role("impl")[-1].tick
+    assert [a.tick for a in reviewers] == [handoff_tick + 1], diag
+    assert one_terminal_turn(reviewers[0], "kanban_complete"), diag
     assert "blocker_auth" not in guarded, diag
     assert not b.events(tid, "gave_up") and b.task(tid)["consecutive_failures"] == 0, diag
