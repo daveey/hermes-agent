@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { test, vi } from 'vitest'
-import WebSocket from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
 
 import { waitForDashboardPort } from './backend-ready'
 import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
@@ -37,35 +37,126 @@ async function stop(child: ChildProcess): Promise<void> {
   })
 }
 
-async function ping(port: number, token: string): Promise<unknown> {
-  const socket: WebSocket = new WebSocket(`ws://127.0.0.1:${port}/api/ws?token=${token}`)
+async function ping(port: number, token: string, timeoutMs: number = 15_000): Promise<unknown> {
+  let socket: WebSocket | undefined
+  let timer: NodeJS.Timeout | undefined
+  let retry: NodeJS.Timeout | undefined
+  let finished: boolean = false
 
   try {
     return await new Promise<unknown>((resolve: (value: unknown) => void, reject: (error: Error) => void): void => {
-      const timer: NodeJS.Timeout = setTimeout((): void => {
+      // Health is listener readiness, not service readiness. Retry only the boot
+      // gate's explicit warming close, under one deadline shared by every dial.
+      timer = setTimeout((): void => {
         reject(new Error('RPC timed out'))
-      }, 15_000)
+      }, timeoutMs)
 
-      socket.once('error', (error: Error): void => {
-        clearTimeout(timer)
-        reject(error)
-      })
-      socket.once('open', (): void => {
-        socket.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping', params: {} }))
-      })
-      socket.on('message', (data: WebSocket.RawData): void => {
-        const response: { id?: number; result?: unknown; error?: unknown } = JSON.parse(data.toString())
+      const connect = (): void => {
+        const current: WebSocket = new WebSocket(`ws://127.0.0.1:${port}/api/ws?token=${token}`)
+        socket = current
+        current.once('error', reject)
+        current.once('open', (): void => {
+          current.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping', params: {} }))
+        })
+        current.once('close', (code: number): void => {
+          if (finished) {
+            return
+          }
 
-        if (response.id === 1) {
-          clearTimeout(timer)
-          resolve(response)
-        }
-      })
+          if (code === 1013) {
+            retry = setTimeout(connect, 100)
+          } else {
+            reject(new Error(`RPC socket closed (${code})`))
+          }
+        })
+        current.on('message', (data: WebSocket.RawData): void => {
+          const response: { id?: number; result?: unknown; error?: unknown } = JSON.parse(data.toString())
+
+          if (response.id === 1) {
+            resolve(response)
+          }
+        })
+      }
+
+      connect()
     })
   } finally {
-    socket.terminate()
+    finished = true
+    clearTimeout(timer)
+    clearTimeout(retry)
+    socket?.terminate()
   }
 }
+
+test('the backend ping reconnects after a warming close, but rejects terminal closes', async (): Promise<void> => {
+  const server: WebSocketServer = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise<void>((resolve): void => {
+    server.once('listening', resolve)
+  })
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  let connections: number = 0
+  server.on('connection', (socket: WebSocket): void => {
+    connections += 1
+
+    if (connections === 1) {
+      socket.close(1013, 'Backend services warming')
+    } else if (connections === 2) {
+      socket.once('message', (): void => {
+        socket.send(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { pong: true } }))
+      })
+    } else {
+      socket.close(1008, 'Denied')
+    }
+  })
+
+  try {
+    assert.deepEqual(await ping(address.port, 'fixture'), { jsonrpc: '2.0', id: 1, result: { pong: true } })
+    await assert.rejects(ping(address.port, 'fixture'), /1008/)
+    assert.equal(connections, 3)
+  } finally {
+    for (const socket of server.clients) {
+      socket.terminate()
+    }
+
+    await new Promise<void>((resolve): void => {
+      server.close((): void => {
+        resolve()
+      })
+    })
+  }
+})
+
+test.each([true, false])(
+  'the backend ping retains its deadline (warming=%s)',
+  async (warming: boolean): Promise<void> => {
+    const server: WebSocketServer = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+    await new Promise<void>((resolve): void => {
+      server.once('listening', resolve)
+    })
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    server.on('connection', (socket: WebSocket): void => {
+      if (warming) {
+        socket.close(1013, 'Still warming')
+      }
+    })
+
+    try {
+      await assert.rejects(ping(address.port, 'fixture', 250), /RPC timed out/)
+    } finally {
+      for (const socket of server.clients) {
+        socket.terminate()
+      }
+
+      await new Promise<void>((resolve): void => {
+        server.close((): void => {
+          resolve()
+        })
+      })
+    }
+  }
+)
 
 test.skipIf(process.platform === 'win32')(
   'a PM source launcher reaches real health and RPC without adopting a legacy venv (POSIX)',
