@@ -289,6 +289,15 @@ capture.spawn_owned, capture.kill_process_tree, capture.stop_owned_group_survivo
 other = signal.SIGINT if signum == signal.SIGTERM else signal.SIGTERM
 signal.signal(signum, previous)
 signal.signal(other, previous)
+real_signal = signal.signal
+
+def installing(sig, new):  # a signal handled right after early_sessions installs its handler
+    old = real_signal(sig, new)
+    if window == 'install' and sig == signum and new is not previous and 'signal' not in events:
+        events.append('signal')
+        os.kill(os.getpid(), signum)
+    return old
+signal.signal = installing
 code = None
 try:
     with early.early_sessions(headless=True, isolated=False) as owner:
@@ -389,3 +398,14 @@ def test_signal_while_the_runtime_closes_does_not_reenter_its_close(signum):
     seen = _boot_signal('runtime-close', signum, 'exits')
     assert seen['events'] == ['yielded', 'signal', 'feed-closed', 'previous'] and seen['code'] == 123
     _stopped_and_accounted_once(seen)
+
+
+@pytest.mark.platforms('linux')
+@pytest.mark.parametrize('handler,code,tail', [('returns', None, ['yielded']), ('exits', 123, [])])
+def test_signal_right_after_the_handler_is_installed_reaches_the_previous_handler(handler, code, tail):
+    # The previous handler is recorded before ours is installed: a signal handled at once after
+    # the install is delivered to it (it was a KeyError and a leaked handler), and ours is removed.
+    # The reader it closed spawns nothing afterwards.
+    seen = _boot_signal('install', signal.SIGTERM, handler)
+    assert seen['events'] == ['signal', 'previous', *tail] and seen['code'] == code
+    assert seen['restored'] and seen['children'] == []

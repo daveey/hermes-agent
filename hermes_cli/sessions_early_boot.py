@@ -40,34 +40,61 @@ class _ExitSignals:
     Python signal handlers).
 
     A signal is never acted on inside a custody step: a spawn whose child ``prepare()`` alone owns,
-    or a close (the reader's, or the runtime's, whose locks are not re-entrant). Every signal goes
-    through one FIFO queue, and only the dispatcher pops it, so:
-      * ``handler`` always enqueues first (a repeat of a still-queued signal collapses into it, as
-        a pending signal does), then dispatches only when ``depth`` is 0;
-      * the dispatcher holds ``depth`` above 0 while it runs, so a signal arriving inside it, its
-        close or a previous handler is queued behind, never run inside them and never ahead of
-        an older one; every entry it pops is delivered even when an earlier handler raised (the
-        last exception propagates, chained), as an unqueued signal would run while it unwound;
-      * whoever brings ``depth`` back to 0 reads the queue AFTER the decrement and dispatches it:
-        a signal queued before the decrement is seen there; one after it dispatches itself.
-    A thread signal mask cannot do this: a process-directed signal caught on another thread still
-    runs its Python handler on the main thread, so masking the main thread does not defer it.
+    or a close (the reader's, or the runtime's, whose locks are not re-entrant). Every handler
+    invocation is one entry of an ordered queue (``_queue``: handler frame -> entry), so:
+      * an invocation is queued by ONE ``dict.setdefault`` keyed by its own frame: a C call, so no
+        other handler runs inside it. A handler that interrupts an outer handler invocation (at any
+        bytecode, even before that one's first line) first queues every such outer invocation, by
+        the same setdefault on the outer frame, then its own. So whichever runs first queues an
+        invocation exactly once, older invocations stay ahead, and an exit raised by the inner one
+        cannot drop the outer signal;
+      * the dispatcher runs only at ``depth`` 0 and holds ``depth`` above 0 while it runs, so a
+        signal arriving inside it, its close or a previous handler is queued behind, never run
+        inside them; it marks each entry delivered before acting, and delivers every queued entry
+        even when an earlier handler raised (the last exception propagates, chained);
+      * a delivered entry stays queued, as a tombstone, until its invocation has returned, so the
+        invocation's own setdefault cannot queue it a second time;
+      * an undelivered entry for a signal being delivered collapses into it, as a pending signal;
+      * whoever brings ``depth`` back to 0 reads the queue AFTER the decrement and dispatches it.
+    Order is CPython's handler-invocation order (it runs tripped handlers in signal-number order,
+    not kernel arrival order). A thread signal mask cannot do this: a process-directed signal caught
+    on another thread still runs its Python handler on the main thread.
 
-    Contract: a previous handler must return or raise; one that blocks keeps later signals queued
-    (exit escalation is then the supervisor's SIGKILL).
+    A close that keeps custody (raises) is logged and the previous handler still runs: a returning
+    one resumes the interrupted code, which must not see the close's exception; the next close
+    retries. Contract: a previous handler must return or raise; one that blocks keeps later signals
+    queued (exit escalation is then the supervisor's SIGKILL).
     """
+    _DELIVERED, _RETURNED = 1, 2
+
     def __init__(self, previous, close):
         self.previous, self._close = previous, close
         self.depth = 0
-        self.pending = []  # (signum, frame) in arrival order
+        self._queue = {}  # handler frame -> [signum, flags], invocation order
+
+    @property
+    def pending(self):
+        return [entry[0] for entry in self._queue.values() if not entry[1] & self._DELIVERED]
 
     def handler(self, signum, frame):
-        if self.previous[signum] == signal.SIG_IGN:
-            return
-        if all(signum != queued for queued, _ in self.pending):
-            self.pending.append((signum, frame))
-        if self.depth == 0:
-            self._dispatch()
+        me = sys._getframe()
+        try:
+            outer, walk = [], frame
+            while walk is not None:  # outer handler invocations this one interrupted
+                if walk.f_code is _HANDLER_CODE and walk.f_locals.get('self') is self:
+                    outer.append(walk)
+                walk = walk.f_back
+            for invocation in reversed(outer):  # outermost (oldest) first
+                self._queue.setdefault(invocation, [invocation.f_locals['signum'], 0])
+            self._queue.setdefault(me, [signum, 0])
+            if self.depth == 0:
+                self._dispatch()
+        finally:
+            entry = self._queue.get(me)
+            if entry is not None:
+                entry[1] |= self._RETURNED
+                if entry[1] & self._DELIVERED:
+                    self._queue.pop(me, None)
 
     @contextmanager
     def deferred(self):
@@ -79,7 +106,7 @@ class _ExitSignals:
 
     def _leave(self):
         self.depth -= 1
-        if self.pending and self.depth == 0:
+        if self.depth == 0 and self._next() is not None:
             self._dispatch()
 
     def _dispatch(self):
@@ -89,23 +116,45 @@ class _ExitSignals:
         finally:
             self._leave()
 
+    def _next(self):
+        for key, entry in list(self._queue.items()):
+            if not entry[1] & self._DELIVERED:
+                return key, entry
+        return None
+
     def _deliver_queue(self):
-        if self.pending:  # depth > 0: no handler can pop or run in between
-            signum, frame = self.pending.pop(0)
-            try:
-                self._act(signum, frame)
-            finally:
-                self._deliver_queue()
+        found = self._next()  # depth > 0: a handler arriving now only queues
+        if found is None:
+            return
+        key, entry = found
+        signum = entry[0]
+        for other_key, other in list(self._queue.items()):  # one delivery per pending signal
+            if other[0] == signum and not other[1] & self._DELIVERED:
+                other[1] |= self._DELIVERED
+                if other[1] & self._RETURNED:
+                    self._queue.pop(other_key, None)
+        try:
+            self._act(signum, key)
+        finally:
+            self._deliver_queue()
 
     def _act(self, signum, frame):
-        handler = self.previous[signum]
+        handler = self.previous.get(signum, signal.SIG_DFL)
+        if handler == signal.SIG_IGN:
+            return
         try:
             self._close()
-        finally:  # a close that keeps custody still lets the previous handler exit
-            if callable(handler):
-                handler(signum, frame)
-            else:
-                raise SystemExit(128 + signum)
+        except Exception:  # health: allow BLE001 -- signal boundary: any close failure keeps custody (next close retries); the previous handler must still run
+            import logging
+            logging.getLogger(__name__).warning(
+                'sessions capture close on signal %s kept custody', signum, exc_info=True)
+        if callable(handler):
+            handler(signum, frame)
+        else:
+            raise SystemExit(128 + signum)
+
+
+_HANDLER_CODE = _ExitSignals.handler.__code__
 
 
 @contextmanager
@@ -144,7 +193,10 @@ def early_sessions(*, headless, isolated):
         if threading.current_thread() is threading.main_thread():
             for signum in _EXIT_SIGNALS:
                 try:
-                    previous[signum] = signal.signal(signum, stop)
+                    # Record the previous handler BEFORE installing ours: a signal handled right
+                    # after the install must find it.
+                    previous[signum] = signal.getsignal(signum)
+                    signal.signal(signum, stop)
                 except (ValueError, OSError, RuntimeError):
                     previous.pop(signum, None)
         with signals.deferred():
