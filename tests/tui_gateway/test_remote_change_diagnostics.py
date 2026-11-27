@@ -16,6 +16,8 @@ def remote(monkeypatch, record_property):
                     polls=[{'board': (set(), 10)}, {'board': (set(), 10)}], recovered=True,
                     skipped=None, refreshed=True, db=object(), calls=[])
     monkeypatch.setattr(nf, '_remote_memo', None)
+    monkeypatch.setattr(nf, '_remote_absent', {})
+    monkeypatch.setattr(nf, '_remote_absent_warned', set())
     monkeypatch.setattr(activity, '_origin_scope', lambda: ('gw', 'default'))
     monkeypatch.setattr(fact_links_health, 'pending', lambda origin: controls['health'])
     monkeypatch.setattr(nf, '_remote_inputs_key', lambda: (('base',), []))

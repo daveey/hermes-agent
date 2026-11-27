@@ -85,7 +85,13 @@ def test_A3_later_session_only_rechecked_at_maintenance(absent):
     assert absent['opened'] == ['missing']
     assert absent['remote']['calls'].count('refresh') == 0
     absent['clock'][0] = 1060.25
-    assert not absent['run']().incomplete
+    # Elapsed time alone must not turn an unrelated retry into maintenance.
+    from tui_gateway.unloaded_diagnostics import Admission
+    with Admission(1060.25, deadlines=[('retry', 1060.25, 'remote_notices', 'unknown')]):
+        assert not absent['run']().incomplete
+    assert absent['opened'] == ['missing']
+    with Admission(1060.25, maintenance=True):
+        assert not absent['run']().incomplete
     assert absent['opened'] == ['missing', 'missing']
     assert absent['remote']['calls'].count('refresh') == 1
 
@@ -123,6 +129,16 @@ def test_A5_absence_does_not_force_other_chat_on_two_retry_passes(absent, monkey
     assert remote['calls'].count('refresh') == 1
     assert helpers.runs('chat.trigger') == {'snapshot_diff': 2, 'unchanged_skip': 4}
     assert helpers.runs('health') == {'complete_true': 1, 'no_generation': 2}
+
+
+def test_new_health_generation_uses_cached_absence_without_lookup(absent):
+    absent['run']()
+    absent['clock'][0] += 1
+    absent['remote']['health'] = 2
+    assert not absent['run']().incomplete
+    assert absent['opened'] == ['missing']
+    assert absent['acks'][-1] == {'missing': frozenset({('owner/board/card', 'blocked')})}
+    assert helpers.runs('health') == {'no_generation': 1, 'complete_true': 1}
 
 
 @pytest.mark.parametrize('failure', ['raise', 'none', 'healthy'])

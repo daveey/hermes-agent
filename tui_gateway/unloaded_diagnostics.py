@@ -5,6 +5,7 @@ The shared accounting registry reports capacity overflow as ``_overflow``.
 """
 from contextvars import ContextVar
 from functools import wraps
+from time import thread_time
 
 from gateway.notification_retry_provenance import REASONS, SUBPASSES, origin
 from hermes_cli import loop_accounting as accounting
@@ -134,6 +135,55 @@ def holder_pending(remote, row):
 
 
 _admission = ContextVar('unloaded_host_admission', default=None)
+
+
+_stage = ContextVar('unloaded_card_stage', default=None)
+STAGES = frozenset(('dispatch', 'enumeration', 'local_board', 'remote_flow', 'inputs', 'poll',
+                    'projection', 'lookup', 'outcome_refresh', 'certification', 'health', 'unknown'))
+
+
+class Stage:
+    """Disjoint thread CPU: a parent excludes the complete lexical child interval.
+
+    Outcome receipts are per entered stage, including early returns and BaseException.
+    These exclusive CPU rows may be summed; never add the enclosing host/subpass CPU.
+    """
+    def __init__(self, name):
+        self.name = name if name in STAGES else 'unknown'
+        self.outcome = 'unknown'
+        self.children = 0.0
+
+    def __enter__(self):
+        self.parent = _stage.get()
+        self.token = _stage.set(self)
+        self.started = thread_time()
+        return self
+
+    def __exit__(self, kind, exc, tb):
+        elapsed = thread_time() - self.started
+        _stage.reset(self.token)
+        self.outcome = 'exception' if kind is not None else 'complete'
+        accounting.record('unloaded.diag.card_stage.' + self.name + '.' + self.outcome,
+                          cpu_s=max(0.0, elapsed - self.children), outer=False)
+        if self.parent is not None:
+            # Include child instrumentation so it is not incorrectly charged to parent work.
+            self.parent.children += thread_time() - self.started
+
+
+def stage_accounted(name):
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            with Stage(name):
+                return fn(*args, **kwargs)
+        return wrapped
+    return decorate
+
+
+def maintenance_admitted():
+    """Only the actual host maintenance admission may reopen cached absence."""
+    admission = _admission.get()
+    return admission is not None and 'maintenance' in admission.flags
 
 
 class Admission:

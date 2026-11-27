@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from tui_gateway.notice_fanout_result import FanoutResult
+from tui_gateway.unloaded_diagnostics import Stage, stage_accounted
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,7 @@ def apply_card_change(db: Any, tip: str, chat_id: str, task_id: str, status: str
     return None
 
 
+@stage_accounted('local_board')
 def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, slug: str, tids: list[str], hosted: Callable) -> list[dict]:
     """Every linked chat's share of this pass's changed cards on one board. A chat linked to several changed cards
     is opened once: each card marks its stale notices, then the outcome is refreshed ONCE (it derives from current
@@ -277,6 +279,7 @@ def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, s
 _remote_memo: Optional[tuple] = None
 
 
+@stage_accounted('inputs')
 def _remote_inputs_key() -> Optional[tuple]:
     """``(base, ledger cards)`` of everything ``activity._remote_cards`` reads for the replica projection that
     ``_remote_change_pass`` keeps (card key, status, chat, origin chat), or None when any of it cannot be vouched
@@ -314,6 +317,7 @@ def _ledger_content_key(cards: list[dict]) -> str:
     return hashlib.blake2b("\n".join(rows).encode(), digest_size=16).hexdigest()
 
 
+@stage_accounted('poll')
 def _poll_boards(base: tuple, previous: Optional[dict]) -> Optional[dict]:
     """``{board: (task ids changed since the memo's cursor or FULL, next cursor)}`` over the synced replicas, or
     None when any is unreadable or cannot vouch for a cursor (the per-task change table)."""
@@ -403,6 +407,7 @@ def _remote_boards_quiet(base: tuple, polled: dict, known: dict) -> bool:
     return True
 
 
+@stage_accounted('remote_flow')
 def _remote_change_pass(session_db: Callable, origin_db: Optional[Callable] = None) -> FanoutResult:
     """Observe the same remote projection as outcomes; failed reads never mean cards finished."""
     from tui_gateway.unloaded_diagnostics import RemoteCall
@@ -415,12 +420,13 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli import fact_links_health
     from tui_gateway import notice_links_health
-    from tui_gateway.unloaded_diagnostics import Chat, emit, remote_retry
+    from tui_gateway.unloaded_diagnostics import Chat, emit, maintenance_admitted, remote_retry
     origin = activity._origin_scope()
     health_generation = fact_links_health.pending(origin)
     out = FanoutResult(subpass='remote_card_change')
     now = time.monotonic()
-    absent_due = {chat for chat, (_, checked) in _remote_absent.items() if now >= checked + 60.0}
+    absent_due = {chat for chat, (_, checked) in _remote_absent.items()
+                  if maintenance_admitted() and now >= checked + 60.0}
     try:
         inputs = _remote_inputs_key()
         diagnostic.test('inputs_error', False)
@@ -452,17 +458,7 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
         return out
     _remote_memo = None
     from tui_gateway import notice_fanout_state as state
-    from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
-    current: dict[str, set[tuple[str, str]]] = {}
-    known: dict[str, set[str]] = {}
-    for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=False):
-        known.setdefault(str(card.get("board")), set()).add(str(card.get("id")))
-        status = card.get("status")
-        if status not in activity.LISTED_STATUSES and not (status in PENDING_RELEASE_STATUSES and card.get("unfinished")):
-            continue
-        for chat in {card.get("session"), card.get("origin_session")} - {None, ""}:
-            current.setdefault(chat, set()).add((card["key"], status))
-    snapshot = {chat: frozenset(cards) for chat, cards in current.items()}
+    snapshot, known = _remote_projection(activity)
     previous = state.load_remote(strict=True)
     if previous is None:
         if not state.seed_remote(snapshot):
@@ -504,10 +500,26 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
     diagnostic.cert_active = False
     diagnostic.health = 'exception'
     complete = committed and recovered_all and (previous.keys() | snapshot.keys()) <= acked.keys()
-    fact_links_health.acknowledge(origin, health_generation, complete=complete)
+    with Stage('health'):
+        fact_links_health.acknowledge(origin, health_generation, complete=complete)
     diagnostic.health = 'no_generation' if health_generation is None else ('complete_true' if complete else 'complete_false')
     diagnostic.call = 'refreshed'
     return out
+
+
+@stage_accounted('projection')
+def _remote_projection(activity):
+    from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
+    current: dict[str, set[tuple[str, str]]] = {}
+    known: dict[str, set[str]] = {}
+    for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=False):
+        known.setdefault(str(card.get("board")), set()).add(str(card.get("id")))
+        status = card.get("status")
+        if status not in activity.LISTED_STATUSES and not (status in PENDING_RELEASE_STATUSES and card.get("unfinished")):
+            continue
+        for chat in {card.get("session"), card.get("origin_session")} - {None, ""}:
+            current.setdefault(chat, set()).add((card["key"], status))
+    return {chat: frozenset(cards) for chat, cards in current.items()}, known
 
 
 def _prune_remote_absent(snapshot, committed):
@@ -527,7 +539,7 @@ def _refresh_remote_chat(chat, entry, session_db, out, now):
     from tui_gateway.unloaded_diagnostics import remote_retry
 
     try:
-        with session_db(chat) as lookup:
+        with Stage('lookup'), session_db(chat) as lookup:
             db, tip = lookup
             if db is None:
                 if getattr(lookup, 'unavailable', True):
@@ -542,9 +554,12 @@ def _refresh_remote_chat(chat, entry, session_db, out, now):
             else:
                 _remote_absent.pop(chat, None)
                 skipped = chat_skip_reason(db, chat)
-            if db is not None and skipped is None and not refresh_outcomes_quietly([tip], "card_change", db=db):
-                remote_retry(out, 'refresh_failed')
-                return None, None, 'refresh_failed'
+            if db is not None and skipped is None:
+                with Stage('outcome_refresh'):
+                    refreshed = refresh_outcomes_quietly([tip], "card_change", db=db)
+                if not refreshed:
+                    remote_retry(out, 'refresh_failed')
+                    return None, None, 'refresh_failed'
     except Exception:  # health: allow BLE001 -- retain the invalidation and continue other chats
         remote_retry(out, 'exception')
         logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
@@ -552,6 +567,7 @@ def _refresh_remote_chat(chat, entry, session_db, out, now):
     return tip, skipped, 'acked_refreshed' if skipped is None else 'acked_intentionally_skipped'
 
 
+@stage_accounted('certification')
 def _certify_remote(inputs, polled, known, diagnostic):
     """Observe the original post-fingerprint cursor certification, without an early return."""
     global _remote_memo
@@ -582,6 +598,7 @@ def _certify_remote(inputs, polled, known, diagnostic):
         diagnostic.cert = 'certified'
 
 
+@stage_accounted('enumeration')
 def _board_slugs(kb: Any) -> list[str]:
     """Enumerate without turning an unavailable roster into an empty success."""
     unique: dict[str, str] = {}
@@ -593,6 +610,7 @@ def _board_slugs(kb: Any) -> list[str]:
     return list(unique.values())
 
 
+@stage_accounted('dispatch')
 def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[Iterable[str]] = None,
                      hosted: Optional[Callable] = None) -> FanoutResult:
     """Refresh linked chats, returning the legacy row list plus scheduling state.

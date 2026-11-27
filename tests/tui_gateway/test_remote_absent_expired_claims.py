@@ -185,3 +185,297 @@ def test_T9_writer_lock_acquired_before_decisive_read(claim, monkeypatch):
     # Once the settlement commits, an unrelated healthy writer progresses normally.
     execute(claim, 'INSERT INTO observations VALUES (?,?,?,?)',
             (str(claim[1]), 'hub/default/default/t_healthy', STATE, NOW))
+
+
+# ---- additional R5 coverage: T4 errors, T5 holder race, T7 public custody, T9 two-connection races ----
+import pathlib
+import threading
+import time
+
+HUB_ALIAS = 'hub/default/default/t_expired'
+
+
+def hooked(monkeypatch, before_begin=None, on_select=None, fail=None, busy_zero=False):
+    """Wrap the real ledger connection; hooks run real peer SQLite connections at exact points."""
+    real_ledger = notices._ledger
+
+    class Connection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def execute(self, sql, parameters=()):
+            if sql == 'BEGIN IMMEDIATE' and before_begin:
+                before_begin()
+            if fail and fail in sql:
+                raise sqlite3.OperationalError('injected read failure')
+            if sql.startswith('SELECT') and 'FROM observations' in sql and on_select:
+                on_select()
+            return self.conn.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def __enter__(self):
+            self.conn.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.conn.__exit__(*args)
+
+    def opened(path):
+        conn = real_ledger(path)
+        if busy_zero:
+            conn.execute('PRAGMA busy_timeout=0')
+        return Connection(conn)
+    monkeypatch.setattr(notices, '_ledger', opened)
+    return real_ledger
+
+
+def swept_count(claim):
+    with sqlite3.connect(claim[0]) as conn:
+        try:
+            return conn.execute('SELECT COUNT(*) FROM swept').fetchone()[0]
+        except sqlite3.OperationalError:  # no table: nothing was ever swept
+            return 0
+
+
+def no_warning(caplog):
+    return not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def row_for(claim, ref):
+    with contextlib.closing(notices._ledger(claim[0])) as conn:
+        return dict(conn.execute('SELECT * FROM notices WHERE session=? AND ref=?', (CHAT, ref)).fetchone())
+
+
+@pytest.mark.parametrize('ref', ['bad', 'worker/default/default', 'worker//default/t_expired',
+                                 'worker/default/default/not_task', 'worker/default/default/t_expired/extra'])
+def test_T4_malformed_refs_retained(claim, ref, caplog):
+    execute(claim, 'UPDATE notices SET ref=?', (ref,))
+    execute(claim, 'UPDATE observations SET ref=?', (ref,))
+    before = row_for(claim, ref)
+    assert run(claim) == 0
+    assert row_for(claim, ref) == before
+    assert no_warning(caplog) and swept_count(claim) == 0
+
+
+@pytest.mark.parametrize('fail', ['SELECT session, ref, state, holder_pid, holder_start, notice_key FROM notices',
+                                  'FROM notices WHERE session=? AND ref=? AND state=?',
+                                  'FROM observations', 'FROM notices WHERE session=? AND state=?'])
+def test_T4_read_errors_retained_without_exception(claim, monkeypatch, caplog, fail):
+    before = row(claim)
+    real = hooked(monkeypatch, fail=fail)
+    assert run(claim) == 0
+    monkeypatch.setattr(notices, '_ledger', real)
+    assert row(claim) == before and no_warning(caplog) and swept_count(claim) == 0
+    assert run(claim) == 1  # the error poisoned nothing
+
+
+def test_T4_writer_lock_error_retained(claim, monkeypatch, caplog):
+    before = row(claim)
+    real = hooked(monkeypatch, busy_zero=True)
+    peer = sqlite3.connect(claim[0], timeout=0, isolation_level=None)
+    try:
+        peer.execute('BEGIN IMMEDIATE')
+        assert run(claim) == 0
+    finally:
+        peer.execute('ROLLBACK')
+        peer.close()
+    monkeypatch.setattr(notices, '_ledger', real)
+    assert row(claim) == before and no_warning(caplog) and swept_count(claim) == 0
+    assert run(claim) == 1  # same claim settles once the lock is gone
+
+
+@pytest.mark.parametrize('replacement', [(4, 40), (3, 31), (2, 30), (1, 30)])
+def test_T5_holder_replaced_between_selection_and_transaction(claim, monkeypatch, caplog, replacement):
+    """Selection reads (3,30); a real peer replaces pid and/or start before BEGIN IMMEDIATE."""
+    hooked(monkeypatch, before_begin=lambda: execute(
+        claim, 'UPDATE notices SET holder_pid=?, holder_start=?', replacement))
+    assert run(claim) == 0
+    current = row(claim)
+    assert (current['holder_pid'], current['holder_start'], current['delivered']) == (*replacement, 0)
+    assert current['settled'] is None
+    assert no_warning(caplog) and swept_count(claim) == 0
+
+
+def test_T5_claim_settled_by_peer_before_transaction_not_resettled(claim, monkeypatch, caplog):
+    hooked(monkeypatch, before_begin=lambda: execute(
+        claim, 'UPDATE notices SET delivered=?, holder_pid=NULL, holder_start=NULL, settled=?',
+        (notices.DELIVERED, 'peer')))
+    assert run(claim) == 0
+    assert (row(claim)['delivered'], row(claim)['settled']) == (notices.DELIVERED, 'peer')
+    assert no_warning(caplog) and swept_count(claim) == 0
+
+
+# --- T7: actual _persist plus public collect, two chats ---
+OTHER = 'other-chat'
+
+
+def card():
+    from tui_gateway import kanban_remote_observations as observations
+    task = {'id': 't_expired', 'status': 'blocked', 'title': 'x', 'board': 'default', 'assignee': 'default',
+            'run': {'ended_at': NOW - 90 * HOUR, 'summary': 's'}, 'block_kind': 'needs_input',
+            'sessions': [{'gw': 'macbook', 'profile': 'default', 'session': s, 'rel': 'shepherd'}
+                         for s in (CHAT, OTHER)]}
+    return observations._notice_state(task), task
+
+
+@pytest.fixture
+def two(claim):
+    """Two chats hold dead worker-alias claims; the hub alias is the card still present."""
+    state, task = card()
+    execute(claim, 'DELETE FROM notices WHERE 1=1')
+    for chat in (CHAT, OTHER):
+        execute(claim, 'INSERT INTO notices (session,ref,state,at,delivered,holder_pid,holder_start,notice_key) '
+                       'VALUES (?,?,?,?,0,3,30,?)', (chat, REF, state, NOW - HOUR, f'key-{chat}'))
+    return claim, state, task
+
+
+def seed(claim, state, worker, hub):
+    execute(claim, 'DELETE FROM observations WHERE 1=1')
+    for ref, age in ((REF, worker), (HUB_ALIAS, hub)):
+        execute(claim, 'INSERT INTO observations VALUES (?,?,?,?)',
+                (str(claim[1]), ref, state, None if age is None else NOW - age * HOUR))
+
+
+def custody(claim, state):
+    with contextlib.closing(notices._ledger(claim[0])) as conn:
+        return {r['session']: (r['delivered'], r['settled'], r['holder_pid'])
+                for r in conn.execute('SELECT * FROM notices WHERE ref=? AND state=?', (REF, state))}
+
+
+@pytest.mark.parametrize(('worker', 'hub', 'settled'), [(80, 7, False), (80, None, False), (80, 80, True)])
+def test_T7_real_persist_and_public_collect_two_session_custody(two, tmp_path, worker, hub, settled):
+    from tests.tui_gateway.test_kanban_remote_arrival import _hub
+    from tui_gateway import kanban_remote_observations as observations
+    (ledger, source), state, task = two
+    seed(two[0], state, worker, hub)
+    # actual _persist over PRE-EXISTING aliases is insert-only: no clock is rewritten
+    observations._persist(str(source), [('hub', 'default/default/t_expired', task)], ledger, NOW)
+    with sqlite3.connect(ledger) as conn:
+        clocks = dict(conn.execute('SELECT ref, first_seen FROM observations'))
+    assert clocks == {REF: NOW - worker * HOUR, HUB_ALIAS: None if hub is None else NOW - hub * HOUR}
+    assert notices._settle_stale_claims({HUB_ALIAS: (state, task)}, source, ledger) == (2 if settled else 0)
+    for chat, (delivered, how, _pid) in custody(two[0], state).items():
+        assert (delivered, how) == ((notices.SETTLED, 'expired') if settled else (0, None)), chat
+    # public collect on the hub card, per chat, against a control ledger that never had the worker claims
+    replica = _hub(pathlib.Path(tmp_path), [{'key': 'default/default/t_expired', 'task': task}])
+    control = pathlib.Path(tmp_path) / 'control.db'
+    with contextlib.closing(sqlite3.connect(ledger)) as src, contextlib.closing(sqlite3.connect(control)) as dst:
+        src.backup(dst)
+    execute((control, source), 'DELETE FROM notices WHERE ref=?', (REF,))
+
+    def outcome(path, chat):
+        notices._reset_for_tests()
+        offered = notices.collect(chat, 'default', hub_db=replica, ledger=path, now=NOW)
+        with contextlib.closing(notices._ledger(path)) as conn:
+            rows = conn.execute('SELECT ref, delivered, settled FROM notices WHERE session=? AND ref!=? '
+                                'ORDER BY ref', (chat, REF)).fetchall()
+        return len(offered), [tuple(r) for r in rows]
+    for chat in (CHAT, OTHER):
+        if settled:  # all aliases expired: the hub alias is covered by the settled worker alias (moved)
+            offered, rows = outcome(ledger, chat)
+            assert offered == 0 and all(r[1] == notices.SETTLED for r in rows)
+        else:  # candidate retained the worker claim: public collect behaves exactly as without it
+            assert outcome(ledger, chat) == outcome(control, chat), chat
+            assert custody(two[0], state)[chat] == (0, None, 3)
+
+
+def test_T7_live_holder_keeps_only_its_own_session(two):
+    (ledger, source), state, _task = two
+    seed(two[0], state, 80, 80)
+    execute(two[0], 'UPDATE notices SET holder_pid=2, holder_start=20 WHERE session=?', (OTHER,))
+    assert notices._settle_stale_claims({}, source, ledger) == 1
+    after = custody(two[0], state)
+    assert after[OTHER] == (0, None, 2)
+    assert after[CHAT] == (notices.SETTLED, 'expired', None)
+    with sqlite3.connect(ledger) as conn:
+        assert [r[0] for r in conn.execute('SELECT session FROM swept')] == [CHAT]
+
+
+def test_T7_independent_clocks_per_session_alias_vetoes_all(two):
+    """A young OTHER-session alias claim does not exist in observations: its scope is unproved => keep."""
+    (ledger, source), state, _task = two
+    seed(two[0], state, 80, 80)
+    execute(two[0], 'INSERT INTO notices (session,ref,state,at,delivered,holder_pid,holder_start) '
+                    'VALUES (?,?,?,?,0,3,30)', (CHAT, HUB_ALIAS, state, NOW))  # alias claim, observation present
+    # CHAT's hub alias has an exact expired observation and dead holder: both CHAT claims may settle
+    assert notices._settle_stale_claims({}, source, ledger) == 3
+    execute(two[0], 'DELETE FROM observations WHERE ref=?', (HUB_ALIAS,))
+    execute(two[0], 'UPDATE notices SET delivered=0, settled=NULL, holder_pid=3, holder_start=30')
+    # CHAT's alias claim lacks an observation: its worker claim is kept; OTHER (no alias) still settles
+    assert notices._settle_stale_claims({}, source, ledger) == 1
+    assert custody(two[0], state)[CHAT] == (0, None, 3)
+    assert custody(two[0], state)[OTHER][1] == 'expired'
+
+
+# --- T9: real two-connection races ---
+def test_T9_young_alias_inserted_before_acquisition_vetoes(claim, monkeypatch, caplog):
+    before = row(claim)
+    hooked(monkeypatch, before_begin=lambda: execute(
+        claim, 'INSERT INTO observations VALUES (?,?,?,?)', (str(claim[1]), HUB_ALIAS, STATE, NOW - HOUR)))
+    assert run(claim) == 0
+    assert row(claim) == before and no_warning(caplog) and swept_count(claim) == 0
+
+
+def test_T9_alias_claim_inserted_before_acquisition_vetoes(claim, monkeypatch, caplog):
+    """A peer's new live alias claim and its expired observation precede the transaction."""
+    def alias():
+        execute(claim, 'INSERT INTO observations VALUES (?,?,?,?)', (str(claim[1]), HUB_ALIAS, STATE, NOW - 80 * HOUR))
+        execute(claim, 'INSERT INTO notices (session,ref,state,at,delivered,holder_pid,holder_start) '
+                       'VALUES (?,?,?,?,0,2,20)', (CHAT, HUB_ALIAS, STATE, NOW))
+    before = row(claim)
+    hooked(monkeypatch, before_begin=alias)
+    assert run(claim) == 0
+    assert row(claim) == before and no_warning(caplog) and swept_count(claim) == 0
+
+
+def test_T9_after_acquisition_peer_alias_waits_then_wins_after_commit(claim, monkeypatch):
+    """A real peer thread inserts a young alias after BEGIN IMMEDIATE: it blocks, then lands after the commit."""
+    outcome, started = [], threading.Event()
+
+    def peer():
+        started.set()
+        with sqlite3.connect(claim[0], timeout=5) as conn:
+            conn.execute('INSERT INTO observations VALUES (?,?,?,?)', (str(claim[1]), HUB_ALIAS, STATE, NOW))
+            outcome.append('inserted')
+    thread = threading.Thread(target=peer)
+
+    def start_once():
+        if not started.is_set():
+            thread.start()
+            started.wait(2)
+            time.sleep(0.3)  # the peer is now waiting on the held write lock
+            assert thread.is_alive() and not outcome
+    hooked(monkeypatch, on_select=start_once)
+    assert run(claim) == 1  # decision made while the young alias could not yet exist
+    thread.join(10)
+    assert outcome == ['inserted']
+    assert row(claim)['settled'] == 'expired'
+    with sqlite3.connect(claim[0]) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM observations WHERE ref=?', (HUB_ALIAS,)).fetchone()[0] == 1
+    assert run(claim) == 0
+
+
+def test_T9_after_acquisition_rollback_releases_peer(claim, monkeypatch):
+    outcome = []
+
+    def peer():
+        with sqlite3.connect(claim[0], timeout=5) as conn:
+            conn.execute('INSERT INTO observations VALUES (?,?,?,?)', (str(claim[1]), HUB_ALIAS, STATE, NOW))
+            outcome.append('inserted')
+    thread = threading.Thread(target=peer)
+
+    def start():
+        if not thread.is_alive() and not outcome:
+            thread.start()
+            time.sleep(0.2)
+
+    def fail(*args):
+        raise sqlite3.OperationalError('injected')
+    monkeypatch.setattr(notices, '_swept_row', fail)
+    hooked(monkeypatch, on_select=start)
+    before = row(claim)
+    assert run(claim) == 0
+    thread.join(10)
+    assert outcome == ['inserted'] and row(claim) == before
