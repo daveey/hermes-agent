@@ -62,5 +62,9 @@ def test_legacy_push_capability_status(tmp_path, monkeypatch, cap_status):
         posted = any(m == 'POST' and p.endswith('/ops') for m, p in seen)
         print(f'\nPROBE status={cap_status} error={results[0].error!r} posted={posted} pulled={pulled} pending={pending}')
         assert pulled, f'optional probe prevented healthy pull: {results[0].error!r}'
+        if cap_status in (200, 404, 410):
+            assert posted and pending == 0, 'legacy ops must be sent and the outbox drained'
+        else:
+            assert not posted and pending > 0, 'a refusing probe must retain custody of the pending row'
     finally:
         hub.close(); server.shutdown(); t.join(5); server.server_close(); conn.close()
