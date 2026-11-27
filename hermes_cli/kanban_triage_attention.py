@@ -69,6 +69,20 @@ def _obj(value):
     return value if isinstance(value, dict) else {}
 
 
+def _event_order(event):
+    """Display chronology: timestamp, consistent UUIDv7 precision, then stable ID.
+
+    Same-second UUID order follows kanban_sync_divergence; backfilled UUIDs do
+    not represent origin time. This does not grant lifecycle authority.
+    """
+    from hermes_cli.kanban_shared_blocker_fence import consistent_uid_milliseconds
+
+    at = event['created_at']
+    ms = consistent_uid_milliseconds(event.get('uid'), int(at))
+    identity = event.get('id')
+    return at, at * 1000 if ms is None else ms, identity if type(identity) is int else 0
+
+
 def current_entry(row):
     """First event in the current consecutive triage episode, else unknown.
 
@@ -79,13 +93,15 @@ def current_entry(row):
         return None
     if 'triage_entered_at' in row:
         return _epoch(row['triage_entered_at'])
+    events = [event for event in row.get('events') or () if isinstance(event, dict)
+              and landing(event.get('kind'), _obj(event.get('payload'))) is not None]
+    # Imported histories have arrival IDs, not lifecycle order. An invalid lifecycle
+    # clock cannot be positioned safely; do not sort it before an exit and invent age.
+    if any(_epoch(event.get('created_at')) is None for event in events):
+        return None
     phase, entered = None, None
-    for event in row.get('events') or ():
-        if not isinstance(event, dict):
-            continue
+    for event in sorted(events, key=_event_order):
         landed = landing(event.get('kind'), _obj(event.get('payload')))
-        if landed is None:
-            continue
         if landed == 'triage' and phase != 'triage':
             entered = _epoch(event.get('created_at'))
         elif landed != 'triage':
@@ -123,17 +139,21 @@ def annotate(conn, rows):
     # so no schema probe. A board without the event columns reads as unknown entry, never a fabricated age.
     if targets:
         try:
-            found = conn.execute(
-                'SELECT task_id, kind, created_at, payload FROM task_events '
+            cursor = conn.execute(
+                'SELECT * FROM task_events '
                 'WHERE task_id IN (SELECT value FROM json_each(?)) '
                 'AND kind IN (SELECT value FROM json_each(?)) ORDER BY id',
-                (json.dumps(sorted(targets)), json.dumps(LIFECYCLE_KINDS))).fetchall()
+                (json.dumps(sorted(targets)), json.dumps(LIFECYCLE_KINDS)))
+            # Legacy unsynced schemas lack uid. Capture optional portable identity
+            # without another schema query or turning those working boards unknown.
+            columns = [column[0] for column in cursor.description]
+            found = [dict(zip(columns, values)) for values in cursor.fetchall()]
         except sqlite3.OperationalError as exc:
             if 'no such' not in str(exc):
                 raise
             found = ()
-        for tid, kind, at, payload in found:
-            events[str(tid)].append({'kind': kind, 'created_at': at, 'payload': payload})
+        for event in found:
+            events[str(event['task_id'])].append(event)
     for row in rows:
         row['triage_entered_at'] = current_entry({'status': row.get('status'), 'events': events.get(str(row['id']), ())})
     return rows

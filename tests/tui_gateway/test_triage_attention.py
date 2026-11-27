@@ -18,6 +18,10 @@ STOPPED = {'disposition': {'reason': 'scope_stopped'}}  # what kanban_retained_s
 
 def hold(tid, entered, payload=None):
     with contextlib.closing(kbc.connect()) as conn:
+        # This fixture creates through the real writer, then installs an older test
+        # episode. Its creation must precede that episode in origin chronology too.
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind='created' AND created_at>=?",
+                     (entered - 1, tid, entered))
         conn.execute("UPDATE tasks SET status='triage',block_kind='decision_pending' WHERE id=?", (tid,))
         conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'decision_retained',?,?)",
                      (tid, entered, json.dumps(payload or {})))
@@ -45,12 +49,21 @@ def test_board_to_canonical_status_and_detached_count(db, monkeypatch, age, red)
     assert 'needs_you' not in row
 
 
+@pytest.mark.parametrize('imported', [False, True], ids=['local_order', 'rehomed_arrival_order'])
 @pytest.mark.parametrize('payload', [None, STOPPED], ids=['held', 'retained_stop'])
-def test_natural_threshold_refreshes_existing_canonical_without_card_mutation(db, monkeypatch, payload):
+def test_natural_threshold_refreshes_existing_canonical_without_card_mutation(db, monkeypatch, payload, imported):
     now = [1_800_000_000.]
     monkeypatch.setattr(fanout.time, 'time', lambda: now[0])
     tid = helpers._card(done=False)
     hold(tid, now[0] - 599, payload)
+    if imported:
+        # Prior-home rows can arrive after the destination already has the hold.
+        # Real reader/adapter/fanout must not mistake arrival IDs for episode order.
+        with contextlib.closing(kbc.connect()) as conn:
+            conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'spawned',?,'{}')",
+                         (tid, now[0] - 620))
+            conn.commit()
+        activity._reset_cache_for_tests()
     opener = helpers._opener(db)
     helpers.so.refresh_outcome(helpers.CHAT, 'card_change', db=db)
     first = fanout.card_change_pass(session_db=opener)
