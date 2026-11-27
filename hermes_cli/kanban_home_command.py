@@ -30,6 +30,7 @@ def install(conn, table: str) -> None:
     # REPLACE may delete a conflicting row without firing its DELETE trigger.
     # Include all unique identities, not just the primary request identifier.
     identities = []
+    identity_columns = set()
     for index in conn.execute(f'PRAGMA index_list({table})'):
         if not index[2]:
             continue
@@ -37,9 +38,20 @@ def install(conn, table: str) -> None:
         columns = [row[2] for row in conn.execute(f'PRAGMA index_info({quoted})')]
         if not columns or any(column is None for column in columns) or index[4]:
             raise ValueError('unsupported command epoch identity')
+        identity_columns.update(columns)
         identities.append(' AND '.join(f'"{col}"=NEW."{col}"' for col in columns))
     if not identities:
         raise ValueError('command epoch identity missing')
+    # No command writer rekeys a captured request. Refuse identity changes before
+    # UPDATE OR REPLACE can implicitly delete a different epoch-bearing row.
+    changed = ' OR '.join(f'NEW."{col}" IS NOT OLD."{col}"' for col in sorted(identity_columns))
+    identity_name = f'home_epoch1_{table}_identity'
+    identity_sql = (f'CREATE TRIGGER {identity_name} BEFORE UPDATE ON {table} WHEN {changed} '
+                    "BEGIN SELECT RAISE(ABORT,'captured command identity is immutable'); END")
+    stored = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (identity_name,)).fetchone()
+    if not stored or stored[0] != identity_sql:
+        conn.execute(f'DROP TRIGGER IF EXISTS {identity_name}')
+        conn.execute(identity_sql)
     conflict = ' OR '.join(f'({identity})' for identity in identities)
     # SQLite hides the conflict mode from triggers. INSERT OR IGNORE must stay a
     # no-op, while INSERT OR REPLACE must not swap an epoch. So BEFORE INSERT

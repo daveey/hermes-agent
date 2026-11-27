@@ -93,11 +93,18 @@ def clear_stale_worker_start(conn) -> int:
         return 0
     stale = ('worker_started_at IS NOT NULL AND worker_pid IS NULL AND claim_lock IS NULL '
              f'AND current_run_id IS NULL AND id IN ({_STOPPED})')
-    if not conn.execute(f'SELECT 1 FROM tasks WHERE {stale} LIMIT 1').fetchone():
+    from hermes_cli.kanban_home_transfer import frozen
+
+    def candidates():
+        return [r[0] for r in conn.execute(f'SELECT id FROM tasks WHERE {stale}') if not frozen(conn, r[0])]
+
+    if not candidates():
         return 0
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn, allow_nested=True):
-        return conn.execute(f'UPDATE tasks SET worker_started_at=NULL WHERE {stale}').rowcount
+        # Re-select under the writer: custody can change after the idle read.
+        return sum(conn.execute(f'UPDATE tasks SET worker_started_at=NULL WHERE id=? AND {stale}',
+                                (task,)).rowcount for task in candidates())
 
 
 def installed(conn) -> bool:

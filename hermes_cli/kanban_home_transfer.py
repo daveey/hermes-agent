@@ -187,6 +187,12 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
                                nonce=nonce, expected_version=expected_version)
     conn.execute("SAVEPOINT home_prepare")
     try:
+        # The administrative stop fence forbids the eventual source-home stamp.
+        # Refuse before freeze/Board commit, never relax that independent fence.
+        from hermes_cli.kanban_stop_ended import KIND
+        if conn.execute('SELECT 1 FROM task_events WHERE task_id=? AND kind=? LIMIT 1',
+                        (task_id, KIND)).fetchone():
+            raise ValueError('home preparation refuses an administratively stopped task')
         _install(conn)
         old = conn.execute(f"SELECT task_id,source,destination,nonce,expected_version FROM {_TABLE} WHERE task_id=?",
                            (task_id,)).fetchone()
@@ -286,7 +292,7 @@ def mutable_writer(conn: sqlite3.Connection, task_id: str):
     if not conn.in_transaction:
         raise ValueError('home custody check requires writer transaction')
     if frozen(conn, task_id):
-        raise ValueError('home transfer pending')
+        raise ValueError('home transfer custody is frozen')
     yield
 
 
