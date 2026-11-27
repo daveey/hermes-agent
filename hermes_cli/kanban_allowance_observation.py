@@ -140,11 +140,14 @@ def stuck(conn, task_id, *, deadline: float | None = None) -> Held | None:
         return None
     now = time.monotonic()
     deadline = min(now + READ_SECONDS, deadline) if deadline is not None else now + READ_SECONDS
+    # Bind the reading to the coordinates it was asked about, taken BEFORE the read: a budget or Board written
+    # while the reply is in flight (a human release) must invalidate it, never be adopted by it.
+    state = sync.sync_state(conn)
+    budget = _budget(conn, task_id)
     seen = board_state(conn, task_id, deadline=deadline)
-    if not seen:
+    if not seen or not state:
         return None
-    return Held(sync.sync_state(conn)["board_id"], _budget(conn, task_id), seen["review_uid"], seen["state"],
-                deadline)
+    return Held(state["board_id"], budget, seen["review_uid"], seen["state"], deadline)
 
 
 def still_stuck(conn, task_id, held: Held | None) -> bool:

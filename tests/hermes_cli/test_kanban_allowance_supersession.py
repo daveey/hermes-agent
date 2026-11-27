@@ -1,6 +1,7 @@
 """Only a human operator's canonical renewal replaces the Board's reviewer allowance; everything else holds."""
 from contextlib import contextmanager
 import json
+import sys
 import time
 from types import SimpleNamespace
 
@@ -250,6 +251,47 @@ def test_still_stuck_is_invalidated_by_any_newer_budget_board_or_expiry(primary,
     fixtures._override(primary, tid, runs=10, runs_basis=fixtures.allowance.BASIS, review_uid="successor")
     assert not observation.still_stuck(primary, tid, observation.Held(
         held.board, observation._budget(primary, tid), "r", "active", time.monotonic() + 5))
+
+
+@pytest.mark.parametrize("change", ["budget", "board"])
+def test_a_reply_in_flight_across_a_newer_budget_or_board_never_triages(primary, monkeypatch, change):
+    """The reading binds the coordinates taken before the read: a human release (or Board rebind) that lands
+    while an older held reply is in flight invalidates it instead of being adopted by it."""
+    tid, _, _ = _decided(primary, monkeypatch)
+    real = observation.board_state
+
+    def release_during_read(conn, task_id, **kwargs):
+        seen = real(conn, task_id, **kwargs)
+        if change == "budget":
+            _generic(conn, task_id, runs=3, by="human-release")
+        else:
+            with fixtures.kbc.write_txn(conn):
+                conn.execute("UPDATE kanban_sync_state SET board_id='rebound'")
+        return seen
+
+    monkeypatch.setattr(observation, "board_state", release_during_read)
+    before = observation._budget(primary, tid)
+    stale = observation.stuck(primary, tid)
+    assert stale is not None and stale.budget == before
+    assert not observation.still_stuck(primary, tid, stale)
+    assert not maintenance.triage_stuck(primary, tid, stale)
+    assert kb.get_task(primary, tid).status == "ready"
+
+
+def test_a_reading_begun_without_sync_identity_is_never_stuck(primary, monkeypatch):
+    """No identity before the read means nothing to bind it to, even if one appears while it is in flight."""
+    tid, _, _ = _decided(primary, monkeypatch)
+    real = fixtures.sync.sync_state
+    calls = []
+
+    def appearing(conn):
+        caller = sys._getframe(1).f_code.co_name
+        calls.append(caller)
+        return None if caller == "stuck" else real(conn)
+
+    monkeypatch.setattr(fixtures.sync, "sync_state", appearing)
+    assert observation.stuck(primary, tid) is None
+    assert "stuck" in calls and "board_state" in calls  # the in-flight read did see an identity
 
 
 @pytest.mark.parametrize("state", ["active", "invalidated"])

@@ -607,3 +607,47 @@ def test_generic_budget_over_active_allowance_is_triaged_not_ready_looped(compos
         assert claim(pool.conn, task, ttl_seconds=900, claimer="fixture:cleared") is not None, sync.pop_claim_deferral(task)
     finally:
         maintenance._CURSORS.clear()
+
+
+def test_stale_held_reply_cannot_retriage_a_completed_human_release(composed, monkeypatch, capsys):
+    """Review 6083677847: an active-allowance reply delayed across another observer's triage and the human
+    release must not bind to the release's newer budget and put the released card back into triage."""
+    from hermes_cli import kanban_allowance_maintenance as maintenance
+    from hermes_cli import kanban_allowance_observation as observation
+    from hermes_cli import kanban_spend_budget as budget
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    home, _pool, task = composed
+    home.round()
+    home.enter()
+    seen = home.conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id=?", (task,)).fetchone()[0]
+    budget.set_override(home.conn, task, runs=40, cache_read_tokens=0, by="fixture-operator",
+                        reason="generic budget", seen=seen)
+    home.round()
+    monkeypatch.setattr(reviewer, "settings", lambda cfg=None: (False, 2))
+    earlier = observation.stuck(home.conn, task)
+    assert earlier is not None
+    original = client.Hub.reviewer_allowance
+    interleaved = []
+
+    def read_then_release(hub, board, tid):
+        reply = original(hub, board, tid)
+        if not interleaved:
+            interleaved.append(True)
+            assert maintenance.triage_stuck(home.conn, task, earlier)
+            assert _cli_release(monkeypatch, home, task, "--runs", "3") == 0
+            capsys.readouterr()
+            home.round()
+            home.enter()
+            assert original(hub, board, tid)["allowance"] is None
+            assert kb.get_task(home.conn, task).status == "ready"
+        return reply
+
+    maintenance._CURSORS.clear()
+    try:
+        monkeypatch.setattr(client.Hub, "reviewer_allowance", read_then_release)
+        stale = observation.stuck(home.conn, task)
+        assert interleaved
+        assert not maintenance.triage_stuck(home.conn, task, stale), "stale pre-release reply undid the human release"
+        assert kb.get_task(home.conn, task).status == "ready"
+    finally:
+        maintenance._CURSORS.clear()
