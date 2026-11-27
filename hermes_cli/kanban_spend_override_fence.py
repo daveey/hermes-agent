@@ -13,6 +13,20 @@ from hermes_cli import kanban_release_comments as comments
 from hermes_cli.kanban_sync_divergence import _event_order
 
 
+class StopDecisionRequired(ValueError):
+    """A standalone limit write cannot settle a restricted-history stop."""
+
+
+def require_decision(conn, task_id):
+    """Inside the budget writer: release owns its composition; standalone CLI edits do not."""
+    from hermes_cli import kanban_spend_decision as decision
+    if decision.pending(conn, task_id) and decision.restricted_floor(conn, task_id) is not None:
+        raise StopDecisionRequired(
+            f"stop_decision_required: {task_id} still needs a stop decision; no budget was changed. "
+            f"Use `hermes kanban release {task_id}` from the owning chat or a human terminal "
+            "to validate and record the decision. Its --runs specifies additional runs, not an absolute limit.")
+
+
 def check(conn, task_id, *, seen=None, board=None):
     """Under the budget writer lock; return the latest stop identity, or None.
 

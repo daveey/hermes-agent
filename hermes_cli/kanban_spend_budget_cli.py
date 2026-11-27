@@ -11,6 +11,8 @@ An ordinary pending spend stop uses a fresh window starting at promote. Until th
 the printed spend is historical, not deducted from that fresh allowance. Other
 limits include recorded spend in the current window, so one at or below that spend is refused (it would
 stop the card at once); restricted history never resets.
+An undecided restricted-history stop refuses standalone changes: use ``release`` to record its decision,
+not a limit-only write that leaves ``stop_undecided`` in force. Reads remain available.
 """
 from __future__ import annotations
 
@@ -154,6 +156,7 @@ def command(args: argparse.Namespace) -> int:
         if changing:
             from hermes_cli.kanban_comment_writer import cli_comment_writer
             from hermes_cli.kanban_release_comments import UNREAD_EXIT, UnreadComments
+            from hermes_cli.kanban_spend_override_fence import StopDecisionRequired
             writer = cli_comment_writer()
             seen, board = getattr(args, 'seen_comment_id', None), getattr(args, 'board', None)
             carried: dict = {}
@@ -164,7 +167,12 @@ def command(args: argparse.Namespace) -> int:
                 seen, carried = gate
             try:
                 ksb.set_override(conn, tid, runs=runs, cache_read_tokens=cache, by=_actor(), reason=args.reason,
-                                 seen=seen, board=board, writer_kind=writer[0], **carried)
+                                 seen=seen, board=board, writer_kind=writer[0], standalone=True, **carried)
+            except StopDecisionRequired as exc:
+                if getattr(args, "json", False):
+                    print(json.dumps({"ok": False, "error": "stop_decision_required", "message": str(exc)}))
+                    return 1
+                return _err(str(exc))
             except UnreadComments as exc:
                 return _err(str(exc), UNREAD_EXIT)
         lim = ksb.card_limits(conn, tid, ksb.limits())

@@ -242,10 +242,12 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
                  cache_read_tokens: Optional[int] = None, by: str, reason: str,
                  seen: Optional[int] = None, board: Optional[str] = None,
                  writer_kind: Optional[str] = None, cache_read_writer_kind: Optional[str] = None,
-                 runs_writer_kind: Optional[str] = None) -> dict:
+                 runs_writer_kind: Optional[str] = None, standalone: bool = False) -> dict:
     """Give ``task_id`` its own limits (0 = no limit; None = the board's), recorded as a ``spend_budget_set``
     event and a comment naming ``by`` and ``reason``. Both None clears the override. Replacing a spend-stop
     decision requires ``seen`` to acknowledge its comment, checked atomically even after promotion.
+    ``standalone`` fences CLI edits on undecided restricted stops under this same writer; the validated
+    release composition leaves it unset because it records the decision separately.
     For cards meant to run indefinitely (standing shepherds), set explicitly, never inferred from a title."""
     from hermes_cli import kanban_db as kb
 
@@ -269,7 +271,9 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
     with kb.write_txn(conn):
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
             raise ValueError(f"unknown task {task_id}")
-        from hermes_cli.kanban_spend_override_fence import check
+        from hermes_cli.kanban_spend_override_fence import check, require_decision
+        if standalone:
+            require_decision(conn, task_id)
         if episode := check(conn, task_id, seen=seen, board=board):
             payload['episode'] = episode
         window = limit_window(conn, task_id)
