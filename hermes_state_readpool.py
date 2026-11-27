@@ -226,8 +226,11 @@ class _PathReadBudget:
         )
 
     def _acquire_path_permit(self, requester: "SessionDB") -> bool:
+        # Checkout's queue miss and this permit attempt are not atomic: a reader
+        # may return to the requester's own pool between them. Reclaim it too;
+        # excluding the requester falsely degrades while an idle permit exists.
         return self.permits.acquire(blocking=False) or (
-            self.reclaim_idle(exclude=requester) and self.permits.acquire(blocking=False)
+            self.reclaim_idle() and self.permits.acquire(blocking=False)
         )
 
     def reclaim_idle(self, exclude: "Optional[SessionDB]" = None) -> bool:
