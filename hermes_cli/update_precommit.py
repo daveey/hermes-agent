@@ -123,9 +123,8 @@ def supervise(command: list[str], deadline: float, env: dict[str, str]) -> int:
         return REFUSED_EXIT
     parent, child = socket.socketpair()
     with parent, child:
-        # detached-spawn: ok -- awaited dedicated updater; only uncommitted preparation is cancellable
         proc = subprocess.Popen([*command, str(child.fileno()), repr(deadline)], env=env,
-                                pass_fds=(child.fileno(),), start_new_session=True)
+                                pass_fds=(child.fileno(),), start_new_session=True)  # detached-spawn: ok -- awaited; precommit group killed on timeout
         child.close()
         committed = False
         cancelling = False
