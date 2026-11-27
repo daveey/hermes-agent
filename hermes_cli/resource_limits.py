@@ -6,7 +6,8 @@ import ctypes
 import logging
 import os
 import socket
-import subprocess
+import stat
+import sys
 import threading
 import time
 from collections import Counter, deque
@@ -100,58 +101,106 @@ _fd_pid = os.getpid()
 _fd_lock = threading.Lock()
 
 
-def _fd_snapshot(soft: int) -> tuple[int, dict[str, int]]:
-    """Count actual entries, then classify only above 25%; closed/racing entries are harmless."""
-    for directory in ('/proc/self/fd', '/dev/fd'):
-        try:
-            names = os.listdir(directory)
-            break
-        except FileNotFoundError:
-            continue
+def _fd_kind(name, directory, platform):
+    if platform == 'darwin':
+        import fcntl
+        fd = int(name)
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISSOCK(mode):
+            return 'socket'
+        if stat.S_ISFIFO(mode):
+            return 'pipe'
+        target = os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, b'\0' * 1024)).split('\0', 1)[0]
     else:
-        raise OSError('no process fd directory')
+        target = os.readlink(f'{directory}/{name}')
+    target = target.removesuffix(' (deleted)')
+    if '/.resource-leases/' in target:
+        return 'resource-leases'
+    if target.endswith(('.db', '-wal', '-shm')):
+        return 'sqlite'
+    if target.startswith(('socket:', 'socket[')):
+        return 'socket'
+    if target.startswith(('pipe:', 'pipe[')):
+        return 'pipe'
+    return 'other'
+
+
+def _fd_snapshot(soft: int, *, clock=None, platform=None) -> tuple[int, dict]:
+    """Bound classification by both elapsed work and descriptors; tolerate close races."""
+    clock = clock or time.monotonic
+    platform = platform or sys.platform
+    directory = '/dev/fd' if platform == 'darwin' else '/proc/self/fd'
+    names = os.listdir(directory)
+    count = len(names)
+    if count <= soft * .25:
+        return count, {}
     census: Counter[str] = Counter()
-    if len(names) > soft * 0.25:
-        for name in names:
-            try:
-                target = os.readlink(f'{directory}/{name}').removesuffix(' (deleted)')
-            except OSError:
-                continue
-            if '/.resource-leases/' in target:
-                kind = 'resource-leases'
-            elif target.endswith(('.db', '-wal', '-shm')):
-                kind = 'sqlite'
-            elif target.startswith(('socket:', 'socket[')):
-                kind = 'socket'
-            elif target.startswith(('pipe:', 'pipe[')):
-                kind = 'pipe'
-            else:
-                kind = 'other'
-            census[kind] += 1
-    return len(names), dict(census)
+    started, examined = clock(), 0
+    for name in names:
+        if examined >= 2000 or clock() - started >= .5:
+            break
+        examined += 1
+        try:
+            kind = _fd_kind(name, directory, platform)
+        except (OSError, ValueError):
+            kind = 'other'  # Closed/racing descriptors are still part of sampled count.
+        census[kind] += 1
+    return count, dict(classes=dict(census), partial=examined < count,
+                       examined=examined, coverage=examined / count if count else 1.0)
 
 
 def _fd_core_head() -> str:
-    from hermes_cli._startup_fast import project_root_str
-    try:
-        return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=project_root_str(),
-                              capture_output=True, text=True, encoding='utf-8', errors='replace',
-                              timeout=2, check=True).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return 'unknown'
+    # This is the loaded revision, not the possibly updated checkout on disk.
+    from gateway.code_skew import _boot_fingerprint, _process_boot_fingerprint
+    fingerprint = _boot_fingerprint or _process_boot_fingerprint()
+    return fingerprint.rsplit(':', 1)[-1] if fingerprint else 'unknown'
 
 
-def _notify_fd_incident(sample: dict, *, probe: bool = False) -> dict:
+def _notify_fd_incident(sample: dict, *, probe: bool = False, probe_board=None) -> dict:
     from hermes_cli.fd_headroom_incident import report
-    return report(sample, probe=probe)
+    return report(sample, probe=probe, probe_board=probe_board)
 
 
 _fd_status: dict = {}
+_fd_incident: dict = {}
+_fd_config_warning: float | None = None
+_FD_PUBLIC_FIELDS = frozenset(('state', 'sampled_at', 'count', 'soft', 'hard', 'ratio',
+                              'last_card_id', 'create_state', 'failing_since', 'error_class', 'skipped'))
 
 
 def fd_headroom_status() -> dict:
-    """Latest census and incident-delivery state for existing runtime status readers."""
-    return dict(_fd_status)
+    """Public health boundary: never export census paths, delivery payloads or error text."""
+    return {key: value for key, value in _fd_status.items() if key in _FD_PUBLIC_FIELDS}
+
+
+_fd_thread: threading.Thread | None = None
+_fd_request_lock = threading.Lock()
+
+
+def request_fd_headroom(*, role: str) -> None:
+    """Nonblocking service tick: retain one worker, count overlap instead of queueing work."""
+    global _fd_thread
+    try:
+        with _fd_request_lock:
+            if _fd_thread is not None and _fd_thread.is_alive():
+                _fd_status['skipped'] = _fd_status.get('skipped', 0) + 1
+                return
+            import contextvars
+            scope = contextvars.copy_context()
+            def run():
+                try:
+                    if role == 'gateway':
+                        gateway_fd_headroom_tick()
+                    else:
+                        check_fd_headroom(role=role)
+                except Exception as exc:  # health: allow BLE001 -- status publication cannot kill the worker
+                    logger.warning('fd-headroom: tick failed: %s', exc)
+                    _fd_status.update(error_class=type(exc).__name__)
+            _fd_thread = threading.Thread(target=scope.run, args=(run,), name='fd-headroom', daemon=True)
+            _fd_thread.start()
+    except Exception as exc:  # health: allow BLE001 -- thread exhaustion must not kill a server tick
+        _fd_status.update(error_class=type(exc).__name__)
+        logger.warning('fd-headroom: could not schedule check: %s', exc)
 
 
 def gateway_fd_headroom_tick() -> None:
@@ -163,38 +212,68 @@ def gateway_fd_headroom_tick() -> None:
 
 
 def check_fd_headroom(config: Mapping[str, Any] | None = None, *, role: str = 'backend',
-                      now: float | None = None, probe: bool = False) -> dict | None:
-    """Due-gated, never-raising own-process census/rescue. Call from existing service ticks.
+                      now: float | None = None, wall_now: float | None = None,
+                      probe: bool = False, probe_board: str | None = None) -> dict | None:
+    """Due-gated own-process check. Service callers schedule it off-loop, outside board locks.
 
-    Samples cover 30 minutes; the endpoint slope projects time to the current soft limit.
-    A host-shared reporter serializes incident cards across profiles and processes. ``probe``
-    uses a separate incident namespace and [probe] title, never a production incident.
+    One in flight per process; an overlapping tick is counted, never queued. The reporter
+    additionally serializes the host/profile/role identity across processes.
     """
-    try:
-        with _fd_lock:
-            return _check_fd_headroom(config, role, time.monotonic() if now is None else now, probe)
-    except Exception:  # health: allow BLE001 -- diagnostics must never escape a service tick
-        logger.debug('fd-headroom: check failed', exc_info=True)
+    if not _fd_lock.acquire(blocking=False):
+        _fd_status['skipped'] = _fd_status.get('skipped', 0) + 1
         return None
+    try:
+        return _check_fd_headroom(config, role, time.monotonic() if now is None else now,
+                                  time.time() if wall_now is None else wall_now, probe, probe_board)
+    except Exception as exc:  # health: allow BLE001 -- diagnostics must never escape a service tick
+        _fd_status.update(error_class=type(exc).__name__)
+        logger.warning('fd-headroom: check failed: %s', exc)
+        return None
+    finally:
+        _fd_lock.release()
 
 
-def _check_fd_headroom(config, role, now, probe):
-    global _fd_last_check, _fd_pid
+def _raise_fd_soft(sample, maximum):
+    soft, hard = sample['soft'], sample['hard']
+    target = min(maximum, soft * 4)
+    if hard != _resource.RLIM_INFINITY:
+        target = min(hard, target)
+    sample['state'] = 'capped'
+    if target <= soft:
+        sample.update(error_class='LimitCap', raise_error='hard or max_soft cap')
+        return
+    try:
+        _resource.setrlimit(_resource.RLIMIT_NOFILE, (target, hard))
+        observed, observed_hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+        if observed != target or observed_hard != hard:
+            raise OSError('soft limit readback did not confirm target')
+        sample.update(state='raised', raised=f'fd-headroom: raised soft {soft}→{observed}')
+        logger.warning('%s', sample['raised'])
+    except (OSError, ValueError, AttributeError) as exc:
+        sample.update(error_class=type(exc).__name__, raise_error=str(exc))
+
+
+def _check_fd_headroom(config, role, now, wall, probe, probe_board):
+    global _fd_last_check, _fd_pid, _fd_config_warning, _fd_incident
+    from hermes_cli.fd_headroom_config import validated
     if _resource is None:
         return None
     if config is None:
         from hermes_cli.config import load_config_readonly
         config = load_config_readonly()
-    settings = {**DEFAULT_CONFIG['runtime']['fd_headroom'], **config.get('runtime', {}).get('fd_headroom', {})}
-    if settings['enabled'] is not True:
+    settings, errors = validated(config)
+    if not settings['enabled']:
         return None
     if _fd_pid != os.getpid():
         _fd_pid, _fd_last_check = os.getpid(), None
         _fd_samples.clear()
-    interval = max(1.0, float(settings['interval_seconds']))
-    if _fd_last_check is not None and now - _fd_last_check < interval:
+        _fd_incident = {}
+    if _fd_last_check is not None and now - _fd_last_check < settings['interval_seconds']:
         return None
     _fd_last_check = now
+    if errors and (_fd_config_warning is None or now - _fd_config_warning >= 3600):
+        logger.warning('fd-headroom: invalid config keys %s; using defaults', errors)
+        _fd_config_warning = now
     soft, hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
     if soft <= 0 or soft == _resource.RLIM_INFINITY:
         return None
@@ -203,36 +282,39 @@ def _check_fd_headroom(config, role, now, probe):
         _fd_samples.popleft()
     _fd_samples.append((now, count))
     elapsed = now - _fd_samples[0][0]
-    slope = (count - _fd_samples[0][1]) / elapsed if elapsed > 0 else 0.0
-    predicted = slope > 0 and (soft - count) / slope <= float(settings['horizon_hours']) * 3600
-    warn = count >= soft * float(settings['warn_ratio']) or predicted
+    slope = ((count - _fd_samples[0][1]) * 60 / elapsed
+             if len(_fd_samples) >= 4 and elapsed >= 1200 else 0.0)
+    predicted = slope > 0 and (soft - count) / slope <= settings['horizon_hours'] * 60
+    warn = count >= soft * settings['warn_ratio'] or predicted
     sample = dict(host=socket.gethostname(), pid=os.getpid(), role=role, count=count,
-                  soft=soft, hard=hard, census=census, slope=slope, core=_fd_core_head(), raised='')
-    if count >= soft * float(settings['raise_ratio']):
-        target = soft * 4 if hard == _resource.RLIM_INFINITY else min(hard, soft * 4)
-        if target > soft:
-            try:
-                _resource.setrlimit(_resource.RLIMIT_NOFILE, (target, hard))
-                sample['raised'] = f'fd-headroom: raised soft {soft}→{target}'
-            except (OSError, ValueError) as exc:
-                sample['raised'] = f'fd-headroom: raise failed: {exc}'
-            logger.warning('%s', sample['raised'])
-    sample['triggered'] = bool(warn or sample['raised'])
-    incident = _fd_status.get('incident', {})
-    if sample['triggered'] or incident:
+                  soft=soft, hard=hard, census=census, slope=slope, core=_fd_core_head(), raised='',
+                  state='warn' if warn else 'ok', triggered=bool(warn), error_class=None)
+    if count >= soft * settings['raise_ratio']:
+        _raise_fd_soft(sample, settings['max_soft'])  # Before any card I/O; warn uses original sample.
+    if (warn or _fd_incident.get('envelope') or _fd_status.get('last_card_id')
+            or _fd_status.get('create_state') == 'failing'):
         try:
-            incident = _notify_fd_incident(sample, probe=probe) or {}
-        except Exception as exc:  # health: allow BLE001 -- even unwritable reporter state must not hide the census
-            incident = {**incident, 'error': str(exc)[:500],
-                        'failure_since': incident.get('failure_since', time.time())}
+            kwargs = {'probe': probe}
+            if probe_board is not None:
+                kwargs['probe_board'] = probe_board
+            _fd_incident = _notify_fd_incident(sample, **kwargs) or {}
+        except Exception as exc:  # health: allow BLE001 -- even unwritable reporter state cannot hide census
+            _fd_incident.setdefault('failing_since', wall)
+            _fd_incident.update(error=str(exc), error_class=type(exc).__name__)
     from hermes_cli.fd_headroom_incident import failure_note
-    note = failure_note(incident)
-    _fd_status.update(sample, sampled_at=time.time(), ratio=count / soft, incident=incident,
-                      last_card_id=incident.get('task_id'), create_error=incident.get('error'),
-                      failure_since=incident.get('failure_since'), card_error=note)
-    log = logger.warning if warn or note else logger.info
-    log('fd-headroom: host=%s pid=%s role=%s count=%s soft=%s hard=%s census=%s slope=%.6f fd/s core=%s %s',
-        sample['host'], sample['pid'], role, count, soft, hard, census, slope, sample['core'], note)
+    note = failure_note(_fd_incident, now=wall)
+    _fd_status.update(state='config_error' if errors else sample['state'], sampled_at=wall,
+                      count=count, soft=soft, hard=hard, ratio=count / soft,
+                      last_card_id=_fd_incident.get('task_id'),
+                      create_state='failing' if _fd_incident.get('error') else 'ok',
+                      failing_since=_fd_incident.get('failing_since'),
+                      error_class='ConfigError' if errors else (
+                          sample['error_class'] or _fd_incident.get('error_class')))
+    if warn or note:
+        logger.warning('fd-headroom: host=%s pid=%s role=%s count=%s soft=%s hard=%s '
+                       'census=%s slope=%.6f fd/min core=%s %s %s', sample['host'], sample['pid'],
+                       role, count, soft, hard, census, slope, sample['core'],
+                       sample.get('raise_error', ''), note)
     return sample
 
 

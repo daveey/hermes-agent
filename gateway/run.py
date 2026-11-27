@@ -4302,7 +4302,8 @@ def _start_gateway_housekeeping(
     from gateway.run_profile_reconcile import _mcp_config_reconciler, profile_scoped_chore
     from gateway.run_housekeeping_disk import housekeeping_gone_board_handles, housekeeping_media_caches, maybe_post_auto_prune_prompt
     from hermes_cli.plugins_idle_tasks import IdleTaskFence
-    from hermes_cli.resource_limits import gateway_fd_headroom_tick
+    from hermes_cli.resource_limits import request_fd_headroom
+    request_fd_headroom(role='gateway')  # Before potentially slow housekeeping chores.
     prune_worker = CheckpointPruneWorker(logger, start=process_ownership.start_writer)
     chores: list[tuple[int, str, Any]] = [
         # First stamp thread liveness (#113372), then request a coalesced loop-side recount.
@@ -4336,7 +4337,7 @@ def _start_gateway_housekeeping(
         # Per served profile: plugins dir, last-run marker and plugins.auto_apply are all the
         # profile's own (get_hermes_home()/load_config_readonly() bind to the scope).
         (1, "Plugin update check", profile_scoped_chore(runner, _housekeeping_plugin_update_check)),
-        (1, "FD headroom", gateway_fd_headroom_tick),
+        (1, "FD headroom", lambda: request_fd_headroom(role='gateway')),
         (1, "Deferred FTS retry tick", _housekeeping_deferred_fts_retry),
         (1, "FTS backfill tick", _housekeeping_fts_backfill),
         (1, "gateway housekeeping memory trim", _housekeeping_memory_trim),

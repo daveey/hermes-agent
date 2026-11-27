@@ -828,10 +828,10 @@ async def _dashboard_selftest_once() -> None:
 
 async def _dashboard_selftest_loop() -> None:
     """Periodic self-test driver started from the lifespan."""
-    from hermes_cli.resource_limits import check_fd_headroom
+    from hermes_cli.resource_limits import request_fd_headroom
     while True:
-        # Same lifespan for cmd_dashboard and direct _start_server_runtime; never block the loop.
-        await asyncio.to_thread(check_fd_headroom, role='backend')
+        # Same lifespan for both launch paths; an in-flight check never delays the next tick.
+        request_fd_headroom(role='backend')
         await asyncio.sleep(_DASHBOARD_SELFTEST_INTERVAL_SECONDS)
         # OAuth-gated binds don't honour the session token; the probe would false-alarm 401.
         if getattr(app.state, "auth_required", False):

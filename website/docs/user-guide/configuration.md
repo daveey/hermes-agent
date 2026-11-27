@@ -279,19 +279,30 @@ runtime:
     raise_ratio: 0.75
     horizon_hours: 6
     interval_seconds: 300
+    max_soft: 262144
 ```
 
-`fd-headroom:` census logs include the process count and limits. Above 25% usage,
-readlink targets are counted as resource-leases, sqlite, socket, pipe or other;
-paths themselves are not published. A warning fires at `warn_ratio` or when the
-last 30 minutes' growth projects exhaustion within `horizon_hours`. The hub default
-board receives one portable incident card per host, with at most one update per hour.
-Failed deliveries back off for an hour; prolonged failure appears in warnings and
-runtime status (`gateway_state.json` or dashboard health's `fd_headroom` field).
-At `raise_ratio`, Hermes raises only its own soft limit to four times the current
-value, clamped to the existing hard limit. This never changes `runtime.nofile_soft_limit`,
-the hard limit, another process or service configuration. Set `enabled: false` to
-turn off monitoring and this in-process rescue.
+`fd-headroom:` warning logs include the process count and limits, loaded core,
+and a bounded census. Above 25% usage, descriptors are counted as resource-leases,
+sqlite, socket, pipe or other (Linux readlink; macOS fstat/F_GETPATH). Classification
+stops at 2,000 descriptors or 0.5 seconds and reports partial coverage. A warning
+fires at `warn_ratio` or when endpoint growth over the last 30 minutes projects
+exhaustion within `horizon_hours`; growth needs four samples spanning 20 minutes.
+The hub default board receives one portable card per host/profile/role incident,
+with at most one comment per hour. Failed delivery retries each tick using the
+same durable key; failed reads never start a new incident. Delivery errors are
+logged hourly, with prolonged failures reflected in warnings and runtime status
+(`gateway_state.json` or dashboard health's `fd_headroom` field). Public status
+exposes only counts, timestamps, enums, card ID and error class, not private text.
+
+At `raise_ratio`, the same pre-raise sample warns and raises only this process's
+soft limit to min(hard, `max_soft`, four times soft). A readback must confirm the
+raise; denied or capped changes continue monitoring in state `capped`. This never
+changes `runtime.nofile_soft_limit`, the hard limit, another process or service
+configuration. Checks run off-loop with one worker in flight and count skipped
+overlapping ticks. Invalid values fall back to their defaults with `config_error`:
+ratios must satisfy 0 < warn < raise < 1, horizon > 0, interval ≥ 30 seconds, and
+max_soft ≥ 1024. Set `enabled: false` to disable monitoring and in-process rescue.
 
 On Linux with glibc, the gateway, `hermes serve` and `hermes dashboard` also cap the number of
 malloc arenas the process may create:

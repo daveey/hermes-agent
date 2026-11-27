@@ -1,55 +1,38 @@
-"""Host-shared, durable FD incident coalescing through the existing hub courier."""
+"""Host/profile/role FD incidents: frozen delivery under a separate, nonblocking file lock."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import subprocess
 import time
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hermes_constants import get_default_hermes_root
+from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 HOUR = 3600
 
 
-def _path(probe: bool) -> Path:
-    return get_default_hermes_root() / 'runtime' / ('fd-headroom-probe.json' if probe else 'fd-headroom.json')
+def _profile():
+    from hermes_cli.profiles import current_profile_name
+    return current_profile_name(default='default')
 
 
-def _run(argv):
-    result = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                            errors='replace', timeout=12, check=False)
-    if result.returncode not in (0, 3):
-        raise OSError(f'courier exit {result.returncode}: {result.stderr[-300:]}')
-    return result.stdout
-
-
-def _courier():
-    from hermes_cli import kanban_capability_registry as registry, kanban_placement as placement
-    return registry.hub_cli_path(placement.config().get('hub_cli'))
-
-
-def _rows(cli, run):
-    rows = json.loads(run([cli, 'tasks', '--gw', 'hub', '--json', '--all']))
-    if not isinstance(rows, list):
-        raise ValueError('invalid hub card inventory')
-    return rows
-
-
-def _pending_task(request_id):
-    from hermes_cli import kanban_placement as placement
-    return placement.remote_task_id(request_id), placement.remote_state(request_id)
+def _path(sample, probe):
+    identity = ':'.join((sample['host'], sample.get('profile') or _profile(), sample['role']))
+    tag = hashlib.sha256(identity.encode()).hexdigest()[:24]
+    return get_hermes_home() / 'state' / 'fd_headroom' / f'{"probe-" if probe else ""}{tag}.json'
 
 
 def _load(path):
     try:
         value = json.loads(path.read_text(encoding='utf-8-sig'))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
+    if not isinstance(value, dict):
+        raise ValueError('invalid fd incident state')
+    return value  # Malformed/unreadable state must not silently mint a new incident.
 
 
 def _save(path, state):
@@ -58,17 +41,45 @@ def _save(path, state):
     temporary.replace(path)
 
 
-def report(sample: dict, *, probe=False, now=None, run=None, cli=None) -> dict:
-    """Serialize across server processes/profiles, reserve before sending, and back off errors.
+def _new_envelope(sample, state, wall, probe, board):
+    profile = sample.get('profile') or _profile()
+    # Unique even if an old card closed within the clock's timestamp precision.
+    stamp = max(wall, state.get('incident_started_at', wall - 1) + .000001)
+    started = datetime.fromtimestamp(stamp, UTC).isoformat()
+    namespace = 'fd-headroom-probe' if probe else 'fd-headroom'
+    key = f'{namespace}:{sample["host"]}:{profile}:{sample["role"]}:{started}'
+    classes = sample['census'].get('classes', {})
+    top = max(classes, key=classes.get, default='other')
+    title = (f'{"[probe] " if probe else ""}fd headroom: {sample["host"]} {sample["role"]} '
+             f'at {sample["count"]}/{sample["soft"]} fds ({top})')
+    body = ('Process FD headroom warning.\n\n' + json.dumps(sample, sort_keys=True) +
+            '\n\nInvestigate descriptor growth and the loaded core. Never signal/restart production '
+            'services, change configured nofile limits or raise a hard limit for this alert. '
+            'The guard may have raised only its own soft limit; see raised above.')
+    args = dict(title=title, body=body, assignee='default', idempotency_key=key, runs_on=['pool:worker'])
+    if probe:
+        args['initial_status'] = 'blocked'  # Defense in depth, not a substitute for isolated board.
+    state.clear()
+    state.update(incident_started_at=stamp, task_id=None, last_comment_at=wall,
+                 envelope=dict(id=key, to_gw='hub', coll='tasks', key=f'default/{board}/new',
+                               action='create', args=args))
 
-    An uncertain create keeps the SAME frozen request; it is never treated as an unreadable
-    card. Completed probe incidents retain their one-hour suppression even after archiving.
+
+def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None,
+           state_path: Path | None = None) -> dict:
+    """One serial 20s delivery per tick. Unknown create/read outcomes preserve the incident.
+
+    Probe callers must discover a board without a dispatcher before supplying its slug.
+    Never permit the production default board, including for a blocked probe.
     """
     import fcntl
+    if probe and (not probe_board or probe_board == 'default'):
+        raise ValueError('probe requires an explicitly verified non-default isolated board')
+    board = probe_board if probe else 'default'
     from hermes_state_guard import _in_test_context
-    if run is None and _in_test_context():
-        return {'error': 'test process: courier disabled'}
-    path = _path(probe)
+    if client is None and _in_test_context():
+        return {'error': 'test process: delivery disabled', 'error_class': 'TestContext'}
+    path = state_path or _path(sample, probe)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix('.lock').open('a') as lock:
         try:
@@ -79,83 +90,62 @@ def report(sample: dict, *, probe=False, now=None, run=None, cli=None) -> dict:
         wall = time.time() if now is None else now
         if sample.get('raised'):
             state['raises'] = (state.get('raises', []) + [sample['raised']])[-8:]
-        if wall < state.get('next_attempt', 0):
-            _save(path, state)
-            return state
+        transport = client
         try:
-            _report(sample, state, wall, probe, run or _run, cli or _courier(), path)
-        except Exception as exc:  # health: allow BLE001 -- a failed alert is visible, never fatal to the tick
-            state.setdefault('failure_since', wall)
-            state.update(error=str(exc)[:500], next_attempt=wall + HOUR)
-            logger.warning('fd-headroom: card create/report failed: %s', state['error'])
+            if transport is None:
+                from hermes_cli.fd_headroom_transport import Client
+                transport = Client()
+            _report(sample, state, wall, probe, board, transport, path)
+            state.pop('error', None)
+            state.pop('error_class', None)
+            state.pop('failing_since', None)
+        except Exception as exc:  # health: allow BLE001 -- diagnostic delivery cannot kill a service tick
+            state.setdefault('failing_since', wall)
+            state.update(error=str(exc)[:1000], error_class=type(exc).__name__)
+            if wall - state.get('last_error_log_at', -HOUR) >= HOUR:
+                logger.warning('fd-headroom: card create/report failed: %s', exc)
+                state['last_error_log_at'] = wall
+        finally:
+            if transport is not None:
+                transport.close()
         _save(path, state)
         return state
 
 
-def _report(sample, state, now, probe, run, cli, path):
-    rows = _rows(cli, run)
+def _report(sample, state, wall, probe, board, client, path):
     tid = state.get('task_id')
-    pending = state.get('pending')
-    if pending:
-        found = next((r for r in rows if r.get('idempotency_key') == pending['id']), None)
-        if found:
-            tid = found['id']
-        else:
-            tid, status = _pending_task(pending['id'])
-            if not tid:
-                if status in {'rejected', 'failed', 'expired'}:
-                    state.pop('pending', None)
-                    raise OSError(f'card create rejected: {status}')
-                # Exact immutable replay only, after the hourly backoff (including lost acknowledgements).
-                if now >= pending['retry_at']:
-                    pending['retry_at'] = now + HOUR
-                    _save(path, state)
-                    run(pending['argv'])
+    if tid:
+        row = client.read(tid, board)  # Failed read propagates; never confused with absence.
+        opened = row is not None and row['status'] not in {'done', 'archived'}
+        if opened:
+            if not sample.get('triggered') and not state.get('raises'):
                 return
-        state.update(task_id=tid)
-        state.pop('pending', None)
-    row = next((r for r in rows if r.get('id') == tid), None)
-    opened = tid and row and row.get('status') not in {'done', 'archived'}
-    text = json.dumps({**sample, 'raises': state.get('raises', [])}, sort_keys=True)
-    if opened:
-        if not sample.get('triggered', True) and not state.get('raises'):
+            if wall - state['last_comment_at'] < HOUR:
+                return
+            state['last_comment_at'] = wall
+            _save(path, state)  # Reserve the hour before ambiguous side effects.
+            text = json.dumps({**sample, 'raises': state.get('raises', [])}, sort_keys=True)
+            client.comment(dict(id=f'{state["envelope"]["id"]}:comment:{int(wall)}',
+                                to_gw='hub', coll='tasks', key=f'default/{board}/{tid}',
+                                action='comment', args={'text': f'fd-headroom: {text}'}))
+            state['raises'] = []
             return
-        if now - state.get('commented_at', state.get('filed_at', 0)) < HOUR:
+        # Only successful done/archived/missing evidence permits a new key.
+        if not sample.get('triggered'):
             return
-        state.update(commented_at=now)
-        _save(path, state)  # reserve the hour even when the acknowledgement is lost
-        run([cli, 'request', 'hub', 'tasks', f'default/default/{tid}', 'comment',
-             '--arg', f'text=fd-headroom: {text}', '--id', f'fd-headroom:{tid}:{int(now)}'])
-        state['raises'] = []
-    else:
-        if not sample.get('triggered', True):
+        _new_envelope(sample, state, wall, probe, board)
+    elif not state.get('envelope'):
+        if not sample.get('triggered'):
             return
-        if probe and now - state.get('filed_at', -HOUR) < HOUR:
-            return
-        key = f'fd-headroom:{sample["host"]}:{uuid.uuid4().hex}'
-        top = max(sample['census'], key=sample['census'].get, default='other')
-        title = (f'fd headroom: {sample["host"]} {sample["role"]} at '
-                 f'{sample["count"]}/{sample["soft"]} fds ({top})')
-        body = (f'Process FD headroom warning.\n\n{ text }\n\n'
-                'Investigate descriptor growth and the installed core. Never signal/restart production '
-                'services, change configured nofile limits or raise a hard limit for this alert. '
-                'The guard may have raised only its own soft limit; see raised above.')
-        argv = [cli, 'create-task', 'hub', ('[probe] ' if probe else '') + title,
-                '--body', body, '--assignee', 'default', '--board', 'default', '--origin-session', '',
-                '--id', key, '--option', f'idempotency_key={json.dumps(key)}',
-                '--option', 'runs_on=["pool:worker"]']
-        if probe:
-            argv += ['--option', 'initial_status="blocked"']
-        state.update(pending={'id': key, 'argv': argv, 'retry_at': now + HOUR}, task_id=None,
-                     filed_at=now, commented_at=now)
-        _save(path, state)  # persist frozen envelope BEFORE any possible external write
-        run(argv)
-    state.pop('error', None)
-    state.pop('failure_since', None)
+        _new_envelope(sample, state, wall, probe, board)
+    _save(path, state)  # Persist immutable intent BEFORE a potentially uncertain create.
+    tid = client.create(state['envelope'])
+    if tid:
+        state['task_id'] = tid
 
 
 def failure_note(state: dict, now=None) -> str:
-    since = state.get('failure_since')
+    since = state.get('failing_since')
     if since is not None and (time.time() if now is None else now) - since >= HOUR:
         stamp = datetime.fromtimestamp(since, UTC).isoformat()
         return f'card create failing since {stamp}: {state.get("error", "unknown")}'
