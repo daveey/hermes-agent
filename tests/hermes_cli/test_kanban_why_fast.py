@@ -97,7 +97,7 @@ def test_snapshot_reader_fallbacks_and_parity(board, monkeypatch):
         assert fast.read_answer(path, tid) is None
 
 
-@pytest.mark.parametrize("current_status", ["running", "done", "scheduled", "archived"])
+@pytest.mark.parametrize("current_status", ["running", "done", "scheduled", "archived", None])
 def test_canonical_reader_rejects_changed_status_like_fast_reader(board, monkeypatch, current_status):
     """A worker can claim after the hub tick; the saved ready stop is no longer current."""
     from hermes_cli import kanban_why_fast as fast
@@ -112,13 +112,19 @@ def test_canonical_reader_rejects_changed_status_like_fast_reader(board, monkeyp
         first = fast.read_answer(path, tid)
         assert first is not None and first["status"] == "ready"
         assert cli.why(conn, tid)["source"] == "snapshot"
-        conn.execute("UPDATE tasks SET status=? WHERE id=?", (current_status, tid))
+        if current_status is None:
+            conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
+        else:
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (current_status, tid))
         conn.commit()
         assert fast.read_answer(path, tid) is None
         assert governors.card(conn, tid) is None
         answer = cli.why(conn, tid)
-        assert answer["source"] == "dry_run"
-        assert answer["status"] == current_status
+        if current_status is None:
+            assert answer.get("error")
+        else:
+            assert answer["source"] == "dry_run"
+            assert answer["status"] == current_status
         assert governors.snapshot_path(conn).read_bytes() == original
 
 
