@@ -103,6 +103,8 @@ def saved(conn, intent_uid):
 
 
 def freeze(conn, proof, *, delivery_uid, application_version=1):
+    if type(application_version) is not int or application_version not in (1, 2):
+        raise ValueError('unsupported application version')
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_sync import uuid7
     install(conn)

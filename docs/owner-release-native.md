@@ -267,6 +267,41 @@ synthetic: these are **not** composed CLI/socket/DO/HOME/executor or deployment
 proof. Authenticated executor proof transfer and full composition remain required
 before capability advertisement or live recovery.
 
+### Application v2 rollout and rollback contract (not activation approval)
+
+Deploy readers before writers: Board final-application validation and authenticated
+historical GET, HOME/origin private-certificate readers, and executor transfer
+readers must understand both v1 and v2 before a Board advertises
+`owner_release_application: 2`. In the HOME transport path, that strict integer
+capability gates new v2 freezing and every v2 POST. Missing or non-integer advertisement selects v1 only
+for a new, unfrozen proposal; it never rewrites a retained proposal or wire.
+Keep the separate native `owner_release` advertisement absent until composed
+transport, independent review, deployment readback and the existing recovery gates
+are complete. This document does not authorize a signer, principal, key, counter,
+governance activation or live release.
+
+`prepare` and `freeze` default to v1; their optional `application_version` accepts
+only integer 1 or 2, never booleans, floats or strings. A valid replay returns its
+exact immutable original version even if the caller requests the other supported
+version. V2 adds exactly `accounting = {semantics: core_home_ordinary_v1,
+spent_runs: N}` to the proposal, where N is a safe nonnegative integer captured
+from the single actual ordinary HOME budget-plan invocation. The trial still
+rolls back all effects. The nested application receipt remains v1. The final v2
+certificate replaces v1's `allowance` field with exactly either
+`governance = {state: ungoverned}` or `{state: governed, allowance: ...}`; governed
+allowance validation remains mandatory. V2 accounting is not a new grant or reset
+of cumulative spend, and ungoverned is not a waiver of existing independent holds.
+
+For rollback, withdraw v2 advertisement before stopping new v2 sends, but retain
+v2 readers and historical GET support for already-frozen or committed records.
+Verified completed local history and authenticated remote history resolve without
+current advertisement. After remote 404, an unadvertised saved v2 stays held with
+its exact UID/digest and sends nothing: never downgrade, remint or replay effects.
+Capability failure also holds new v2 sends, not already-verifiable history. Do not
+roll back to v1-only readers while any v2 custody remains; preserve immutable
+journals, receipts and private materialization rather than deleting or converting
+them. Rollback does not clear a later stop or confer executor permission.
+
 ### Original native completed-result custody
 
 The captured original parent now resolves a saved completed result or, for a frozen

@@ -57,6 +57,15 @@ def test_v2_final_governance_union(canonical, governed):
     assert final.validate(value, op) == value
 
 
+def test_v2_unknown_governance_cannot_borrow_valid_allowance(canonical):
+    op = canonical['operation']
+    op['proposal'].update(version=2, accounting={'semantics':'core_home_ordinary_v1','spent_runs':0})
+    allowance = canonical.pop('allowance')
+    canonical.update(version=2, governance={'state':'unknown','allowance':allowance})
+    with pytest.raises(ValueError, match='^canonical application governance differs$'):
+        final.validate(canonical, op)
+
+
 @pytest.mark.parametrize('bad', [True, 2.0, '2', 0, 3])
 def test_proposal_version_strict(canonical, bad):
     p = canonical['operation']['proposal']
@@ -73,7 +82,7 @@ def test_accounting_spent_strict(canonical, bad):
         prepared._validate(p)
 
 
-@pytest.mark.parametrize('bad', [{}, {'state': 'unknown'}, {'state':'ungoverned','allowance':{}}, {'state':'governed'}, {'state':'ungoverned','extra':1}])
+@pytest.mark.parametrize('bad', [{}, {'state': 'unknown'}, {'state':'unknown','allowance':{}}, {'state':'ungoverned','allowance':{}}, {'state':'governed'}, {'state':'ungoverned','extra':1}])
 def test_governance_exact(canonical, bad):
     p = canonical['operation']['proposal']
     p.update(version=2, accounting={'semantics': 'core_home_ordinary_v1', 'spent_runs': 0})
@@ -268,3 +277,73 @@ def test_missing_remote_v2_with_refused_capability_never_sends(assembly, monkeyp
     with pytest.raises(ValueError, match='application v2'):
         home._process(a.conn, hub, row, 'home', 'example')
     assert hub.posts == [] and final.saved(a.conn, 'intent-1') == wire
+
+
+@pytest.mark.parametrize('version', [True, False, 1.0, 2.0, '1', '2', None, 0, 3])
+@pytest.mark.parametrize('entrypoint', ['prepare', 'freeze'])
+def test_new_version_api_rejects_non_integer_selection(assembly, version, entrypoint):
+    a = assembly
+    final.install(a.conn)
+    before = snapshot(a)
+    call = prepared.prepare if entrypoint == 'prepare' else final.freeze
+    with pytest.raises(ValueError, match='^unsupported application version$'):
+        call(a.conn, a.proof, delivery_uid='delivery-1', application_version=version)
+    assert snapshot(a) == before
+    assert prepared.verified_prepared(a.conn, 'intent-1') is None
+    assert final.saved(a.conn, 'intent-1') is None
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_v1_freeze_preserves_legacy_prepare_call_seam(assembly, monkeypatch, explicit):
+    a = assembly
+    original = prepared.prepare
+    calls = []
+    def legacy(conn, proof, *, delivery_uid):
+        calls.append(delivery_uid)
+        return original(conn, proof, delivery_uid=delivery_uid)
+    monkeypatch.setattr(prepared, 'prepare', legacy)
+    kwargs = {'application_version': 1} if explicit else {}
+    wire = final.freeze(a.conn, a.proof, delivery_uid='delivery-1', **kwargs)
+    assert wire is not None
+    assert calls == ['delivery-1']
+    assert wire['proposal']['version'] == 1
+    assert 'accounting' not in wire['proposal']
+    assert final.freeze(a.conn, a.proof, delivery_uid='delivery-1', application_version=2) == wire
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_v2_requires_exactly_one_observation_and_restores_context(assembly, monkeypatch, count):
+    from hermes_cli import kanban_release_assemble as assemble
+    a = assembly
+    original = assemble._budget
+    def altered(conn, body, seen):
+        result = original(conn, body, seen)
+        capture = assemble._BUDGET_OBSERVATION.get()
+        assert capture is not None
+        capture[:] = capture * count
+        return result
+    monkeypatch.setattr(assemble, '_budget', altered)
+    outside = [99]
+    token = assemble._BUDGET_OBSERVATION.set(outside)
+    before = snapshot(a)
+    try:
+        with pytest.raises(ValueError, match='^proposal requires exactly one real budget observation$'):
+            prepared.prepare(a.conn, a.proof, delivery_uid='delivery-1', application_version=2)
+        assert assemble._BUDGET_OBSERVATION.get() is outside
+        assert outside == [99]
+        assert snapshot(a) == before
+        assert prepared.verified_prepared(a.conn, 'intent-1') is None
+    finally:
+        assemble._BUDGET_OBSERVATION.reset(token)
+
+
+@pytest.mark.parametrize('field,bad', [('runs', True), ('used', 0.0), ('remaining', 0),
+    ('remaining', 9007199254740992), ('window_uid', ''), ('episode_uid', 'other')])
+def test_v2_governed_still_validates_allowance(canonical, field, bad):
+    op = canonical['operation']
+    op['proposal'].update(version=2, accounting={'semantics':'core_home_ordinary_v1','spent_runs':0})
+    allowance = canonical.pop('allowance')
+    allowance[field] = bad
+    canonical.update(version=2, governance={'state':'governed','allowance':allowance})
+    with pytest.raises(ValueError, match='^canonical application protected allowance differs$'):
+        final.validate(canonical, op)
