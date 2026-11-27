@@ -53,7 +53,7 @@ from hermes_state_guard import (
     _STATE_DB_GUARD_BYPASS_ENV, _in_test_context, _is_production_state_db, _real_platform_state_root,
     _register_test_instance, _set_last_init_error, get_last_init_error,
 )
-from hermes_state_readpool import _READ_POOL_MAX, _proc_fd_targets, _read_budget_for, note_read_pool_exhausted
+from hermes_state_readpool import _READ_POOL_MAX, _proc_fd_targets, _read_budget_for
 from hermes_state_sessions import SessionSessionsMixin
 from hermes_state_fts import SessionFtsSetupMixin
 from hermes_state_fts_online import SessionFtsOnlineRecoveryMixin
@@ -938,7 +938,6 @@ class SessionDB(
                 return None
         # Permit BEFORE the open: openers race for permits, not descriptors.
         if not self._read_budget.acquire(self):
-            note_read_pool_exhausted(self.db_path)
             return None
         lease = self._profile_lease
         if lease is not None and not lease.retain_reader():

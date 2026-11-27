@@ -24,7 +24,9 @@ def db(tmp_path):
 
 def _exhaust(monkeypatch, db):
     monkeypatch.setattr(db, "_wal_active", True)
-    monkeypatch.setattr(db._read_budget, "acquire", lambda requester: False)
+    monkeypatch.setattr(hermes_state_readpool, "_fd_headroom_ok", lambda: True)
+    # Exhaust the real per-path gate, preserving the process-permit acquire/release pair.
+    monkeypatch.setattr(db._read_budget, "_acquire_path_permit", lambda requester: False)
 
 
 def test_pool_exhaustion_warns_once_per_window_with_a_count(db, monkeypatch, caplog):

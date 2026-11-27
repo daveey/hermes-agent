@@ -203,12 +203,15 @@ class _PathReadBudget:
             global _read_open_denied_fd_headroom
             with _read_budgets_lock:
                 _read_open_denied_fd_headroom += 1
+            note_read_pool_exhausted(requester.db_path, reason="fd_headroom")
             return False
         if not self._acquire_process_permit():
+            note_read_pool_exhausted(requester.db_path, reason="process_ceiling")
             return False
         if self._acquire_path_permit(requester):
             return True
         _process_read_permits.release()
+        note_read_pool_exhausted(requester.db_path, reason="path_ceiling")
         return False
 
     def release(self) -> None:
@@ -284,7 +287,7 @@ _pool_exhaustion_warned_at: dict[str, float] = {}
 _pool_exhaustion_suppressed: dict[str, int] = {}
 
 
-def note_read_pool_exhausted(db_path) -> None:
+def note_read_pool_exhausted(db_path, *, reason="unknown") -> None:
     """Log (rate-limited) that a read degraded to the locked writer connection for ``db_path``."""
     key = str(db_path)
     now = time.monotonic()
@@ -296,10 +299,11 @@ def note_read_pool_exhausted(db_path) -> None:
         _pool_exhaustion_warned_at[key] = now
         suppressed = _pool_exhaustion_suppressed.pop(key, 0)
     logger.warning(
-        "read pool at capacity (%d) for %s; serving this read from the locked writer connection, so it waits "
-        "behind every in-flight write%s. Sustained, this means long writes or slow storage (a network "
-        "filesystem) are holding readers too. Logged at most once per %.0fs per database.",
-        _READ_POOL_MAX, db_path,
+        "read pool at capacity (path limit %d) for %s; reason=%s; serving this read from the locked writer "
+        "connection%s. This is descriptor admission denial, not proof of long writes or slow storage. "
+        "Logged at most once per %.0fs per database; the reason names the current denial and the count "
+        "includes all denial reasons.",
+        _READ_POOL_MAX, db_path, reason,
         f" ({suppressed} more reads since the last warning)" if last is not None else "",
         _POOL_EXHAUSTION_WARN_INTERVAL_S,
     )
