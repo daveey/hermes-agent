@@ -57,6 +57,8 @@ def test_probe_archive_then_immediate_second_process_is_suppressed(courier):
     _, rows, creates, _ = courier
     report(courier, 0, probe=True)
     assert creates[0][3].startswith('[probe]')
+    assert 'initial_status="blocked"' in creates[0]
+    assert 'triage=true' not in creates[0]
     rows[0]['status'] = 'archived'
     report(courier, 1, probe=True)
     assert len(creates) == 1

@@ -145,7 +145,7 @@ def _report(sample, state, now, probe, run, cli, path):
                 '--id', key, '--option', f'idempotency_key={json.dumps(key)}',
                 '--option', 'runs_on=["pool:worker"]']
         if probe:
-            argv += ['--option', 'triage=true']
+            argv += ['--option', 'initial_status="blocked"']
         state.update(pending={'id': key, 'argv': argv, 'retry_at': now + HOUR}, task_id=None,
                      filed_at=now, commented_at=now)
         _save(path, state)  # persist frozen envelope BEFORE any possible external write
