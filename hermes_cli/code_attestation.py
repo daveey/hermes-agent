@@ -11,7 +11,7 @@ import dis
 import _imp
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -852,8 +852,16 @@ class Attestation:
         return self._owner_path(Path(filename).resolve())
 
     def _owner_path(self, path):
+        # POSIX containment is an exact parts-prefix comparison. pathlib's
+        # is_relative_to builds/searches every ancestor for each component root;
+        # a module outside all plugins pays that cost for every installed plugin.
+        # Keep Windows' case-folding/drive semantics on its existing pathlib path.
+        parts = path.parts if isinstance(path, PurePosixPath) else None
         for component, (root, kind, digests) in self._components.items():
-            if path.is_relative_to(root):
+            contained = (path.anchor == root.anchor and parts[:len(root.parts)] == root.parts
+                         if parts is not None and isinstance(root, PurePosixPath)
+                         else path.is_relative_to(root))
+            if contained:
                 return component, kind, path, path.relative_to(root).as_posix(), digests
         return None
 
