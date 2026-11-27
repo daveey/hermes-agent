@@ -65,8 +65,16 @@ def ensure_outcome_hooks() -> None:
         logging.getLogger(__name__).warning("outcome refresh: plugin load failed", exc_info=True)
 
 
+def _foreground_refresh(db, sid):
+    from hermes_cli.kanban_counts_agreement import foreground_counts
+    from hermes_state_outcome import refresh_outcome
+
+    with foreground_counts():
+        return refresh_outcome(sid, "manual", db=db)
+
+
 def cmd_outcome(db, args):
-    from hermes_state_outcome import get_outcome, refresh_outcome
+    from hermes_state_outcome import get_outcome
 
     ack = getattr(args, "ack_subagent", [])
     if args.refresh or ack:
@@ -82,7 +90,7 @@ def cmd_outcome(db, args):
         except ValueError as exc:
             print(str(exc))
             return 1
-    outcome = refresh_outcome(sid, "manual", db=db) if args.refresh or ack else get_outcome(sid, db=db)
+    outcome = _foreground_refresh(db, sid) if args.refresh or ack else get_outcome(sid, db=db)
     stripe = _stripe_report(db, sid)
     if args.json:
         print(json.dumps({"session_id": sid, "outcome": outcome, "desktop_stripe": stripe,
@@ -144,13 +152,13 @@ def _done_named(ids: list[str], sid: str, cron_items, watch_items) -> list[tuple
 
 def audit_rows(db, *, refresh: bool = False, limit: int = AUDIT_DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """``{id, title, kind, reason, age_h, on, items}`` per sidebar row (``age_h`` = hours since last activity)."""
-    from hermes_state_outcome import _cron_items, _lineage_ids, _watch_items, refresh_outcome
+    from hermes_state_outcome import _cron_items, _lineage_ids, _watch_items
 
     if refresh:
         ensure_outcome_hooks()
     now, out = time.time(), []
     for row in sidebar_rows(db, limit):
-        outcome = refresh_outcome(row["id"], "manual", db=db) if refresh else row.get("outcome")
+        outcome = _foreground_refresh(db, row["id"]) if refresh else row.get("outcome")
         outcome = outcome or {}
         named = _done_named(_lineage_ids(db, row["id"]), row["id"], _cron_items, _watch_items) \
             if outcome.get("kind") == "done" else []

@@ -17,11 +17,32 @@ from __future__ import annotations
 import functools
 import logging
 import threading
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from collections.abc import Callable, Hashable
 
 logger = logging.getLogger(__name__)
 
 WAIT_S = 1.0
+FOREGROUND_WAIT_S = 30.0
+_foreground_deadline: ContextVar[float | None] = ContextVar("count_agreement_deadline", default=None)
+
+
+@contextmanager
+def foreground_counts():
+    """Finite readers cannot rely on a passive callback after returning/printing.
+
+    Share one 30s count-wait budget across a refresh's fence retries, and return unknown
+    on exhaustion/errors as usual. Live controls keep their 1s bound and deferred retry.
+    This context is per refresh, not a process-global change to interactive workers.
+    """
+    token = _foreground_deadline.set(time.monotonic() + FOREGROUND_WAIT_S)
+    try:
+        yield
+    finally:
+        _foreground_deadline.reset(token)
+
 
 
 class _Flight:
@@ -115,6 +136,10 @@ def agreed_counts(wait_s: float = WAIT_S, *, key: Hashable | None = None,
                 if _flights.get(scope) is flight:
                     del _flights[scope]
             raise
+    deadline = _foreground_deadline.get()
+    if deadline is not None:
+        wait_s = max(0.0, deadline - time.monotonic())
+        on_published = None  # no late projection write racing the finite reader's result
     flight.done.wait(max(0.0, wait_s))
     with _lock:
         if not flight.done.is_set():
