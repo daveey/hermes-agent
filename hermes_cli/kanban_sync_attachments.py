@@ -84,6 +84,13 @@ def _publish_file(path, data):
             temporary.unlink(missing_ok=True)
 
 
+def _stale_row_ok(conn, uid):
+    # A storage echo/deletion is an ordinary successful no-op, but a UID that
+    # moved to a frozen recipient must remain deferred for that recipient.
+    current = conn.execute("SELECT task_id FROM task_attachments WHERE uid=?", (uid,)).fetchone()
+    return current is None or not frozen(conn, current["task_id"])
+
+
 def _record_local(conn, row, path, key, *, data=None):
     # stored_path is local-only. Suppress echo of the service's verified receipt.
     # A deleted/rebound row must not be resurrected after network I/O.
@@ -101,7 +108,7 @@ def _record_local(conn, row, path, key, *, data=None):
         # A concurrent pull may already have applied the storage receipt. Changed
         # or deleted rows need no stale local write; they are not a custody refusal.
         if current is None:
-            return True
+            return _stale_row_ok(conn, row["uid"])
         if current["stored_path"] == str(path) and current["blob_key"] == key:
             return True
     with write_txn(conn):
@@ -112,7 +119,7 @@ def _record_local(conn, row, path, key, *, data=None):
                                (row["uid"], row["id"], row["task_id"], row["size"], row["filename"],
                                 row["created_at"], row["blob_key"])).fetchone()
         if current is None:
-            return True
+            return _stale_row_ok(conn, row["uid"])
         if data is not None:
             # Byte publication and local metadata share the custody reservation.
             # No network is performed under this writer lock.

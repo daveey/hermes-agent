@@ -49,7 +49,9 @@ def test_network_callback_real_other_connection_cannot_abort_peer_or_stamp_rebou
                     if change != 'deleted':
                         support.freeze(other, 't_new' if change == 'rebound' else 't_A', 'pending')
                 return data
-        assert attachments.transfer_pending(c, Hub(), 'default', limit=2) == 1
+        # A vanished unfrozen row is a successful no-op (the upload/storage-echo
+        # contract); a UID rebound onto a frozen recipient remains deferred.
+        assert attachments.transfer_pending(c, Hub(), 'default', limit=2) == (2 if change == 'deleted' else 1)
     assert calls == ['attachment_t_A', 'attachment_t_B']
     assert c.execute("SELECT stored_path FROM task_attachments WHERE task_id='t_B'").fetchone()[0]
     assert c.execute("SELECT 1 FROM kanban_attachment_retry WHERE uid='attachment_t_A'").fetchone() is None
