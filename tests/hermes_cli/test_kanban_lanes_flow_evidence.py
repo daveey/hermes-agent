@@ -30,6 +30,29 @@ def test_actual_scheduled_event_supplies_awaiting(conn, configured, kind, step):
     assert card(conn, tid)["step"] == step
 
 
+def test_continued_park_supplies_newest_awaiting(conn, configured):
+    """A kanban_continue park records its wait on a 'continued' event; it must win
+    over an older 'scheduled' park so the strip shows the card's current wait."""
+    tid = base._ready_in(conn, "babybear", "ci")
+    conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+    kb._append_event(conn, tid, "scheduled", {"wake_at": 1})
+    kb._append_event(conn, tid, "continued", {"status": "scheduled",
+                                              "awaiting": {"kind": "ci", "ref": URL}})
+    conn.commit()
+    got = card(conn, tid)
+    assert got["wait"] == "ci"
+    assert got["step"] == "ci"
+
+
+def test_continued_to_ready_is_not_a_park(conn, configured):
+    tid = base._ready_in(conn, "babybear", "deploy")
+    conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+    kb._append_event(conn, tid, "scheduled", {"awaiting": {"kind": "deploy", "ref": URL}})
+    kb._append_event(conn, tid, "continued", {"status": "ready", "awaiting": {"kind": "ci"}})
+    conn.commit()
+    assert card(conn, tid)["wait"] == "deploy"
+
+
 def test_changes_requested_invalidates_old_review(conn, configured):
     tid = base._ready_in(conn, "babybear", "rework")
     kb._append_event(conn, tid, "review_requested", {})

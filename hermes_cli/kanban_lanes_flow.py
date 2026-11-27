@@ -257,9 +257,13 @@ def _blockers(conn, task_id: str) -> list:
 def _awaiting(task, events=()) -> Optional[dict]:
     if task["status"] != "scheduled":
         return None
+    # [daveey] kanban_continue parks write a 'continued' event (status=scheduled)
+    # carrying the awaiting; the newest park of either kind is the current wait.
     for event in reversed(events):
-        if event["kind"] == "scheduled":
-            data = _payload(dict(event)).get("awaiting")
+        payload = _payload(dict(event))
+        if event["kind"] == "scheduled" or (
+                event["kind"] == "continued" and payload.get("status") == "scheduled"):
+            data = payload.get("awaiting")
             return data if isinstance(data, dict) else None
     return None
 
