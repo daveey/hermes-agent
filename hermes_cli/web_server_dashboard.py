@@ -1101,6 +1101,13 @@ def _mount_plugin_api_routes():
     user's intent. (#46435, GHSA-mcfc-hp25-cjv7)
     """
     from hermes_cli.web_server import _get_dashboard_plugins, app
+    from hermes_cli.web_boot_services import _defer_plugin_api_sweep
+    if _defer_plugin_api_sweep:
+        from hermes_cli.fact_plugin_mount import lifecycles
+        lifecycles(app)  # Shutdown must fence even a sweep that has not started.
+        _register_plugin_api_fallback(app)
+        app.state.plugin_api_sweep_owed = True
+        return
     try:
         from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
         enabled_set = _get_enabled_set()
@@ -1206,7 +1213,7 @@ def _register_plugin_api_fallback(app) -> None:
                          include_in_schema=False)
 
 
-def _mount_one_plugin_api(app, plugin: dict[str, Any], enabled_set: set, disabled_set: set) -> bool:
+def _mount_one_plugin_api(app, plugin: dict[str, Any], enabled_set: set, disabled_set: set, *, deferred_routes=None) -> bool:
     """Mount one plugin's backend API routes on ``app`` if its trust gates pass.
 
     Returns True when routes were added. Callers must hold ``_plugin_api_mount_lock``.
@@ -1263,7 +1270,7 @@ def _mount_one_plugin_api(app, plugin: dict[str, Any], enabled_set: set, disable
             return False
         from hermes_cli.fact_plugin_mount import include_router
         include_router(
-            app, mod, api_path,
+            app, mod, api_path, deferred_routes=deferred_routes,
             prefix=f"/api/plugins/{plugin['name']}",
             dependencies=[Depends(_plugin_route_secret_scope)],
         )

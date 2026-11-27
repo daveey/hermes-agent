@@ -19,6 +19,9 @@ def prepare_and_run_server(args, *, headless, prepare_runtime, prepare_auth, boo
 
 
 def run_server(args, *, headless, owner, prepare_auth, bootstrap, mcp_after_bind):
+    if headless:
+        from hermes_cli.web_boot_services import defer_plugin_api_sweep
+        defer_plugin_api_sweep()
     from hermes_cli.web_server import start_server
 
     # TTY-only interactive auth setup; noninteractive callers retain fail-closed

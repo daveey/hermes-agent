@@ -124,7 +124,7 @@ async def lifespan(app):
             await asyncio.to_thread(registry.close)
 
 
-def include_router(app, module, api_path, **kwargs):
+def include_router(app, module, api_path, *, deferred_routes=None, **kwargs):
     """Start before route publication; on publication failure drain this handle."""
     registry = getattr(app.state, "fact_plugin_lifecycles", None)
     if registry is None and getattr(module, "start_legacy", None) is not None:
@@ -135,6 +135,11 @@ def include_router(app, module, api_path, **kwargs):
     original_lifespan = app.router.lifespan_context
     try:
         app.include_router(module.router, **kwargs)
+        if deferred_routes is not None:
+            fresh = app.router.routes[len(routes):]
+            app.router.routes[:] = routes
+            app.router.lifespan_context = original_lifespan
+            deferred_routes.append((api_path, fresh, module.router.lifespan_context))
     except BaseException:
         # The mount caller serializes router edits. FastAPI may append several
         # routes before a later one fails, or compose a router lifespan.

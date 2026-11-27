@@ -1,8 +1,24 @@
 """Bind native display surfaces before standalone service warmup, fail closed elsewhere."""
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+import logging
+import sys
+import time
 
 from starlette.responses import JSONResponse
+
+_log = logging.getLogger(__name__)
+_defer_plugin_api_sweep = False
+
+
+def defer_plugin_api_sweep():
+    """Only a headless launcher before web_server import may defer the sweep."""
+    global _defer_plugin_api_sweep
+    if 'hermes_cli.web_server' in sys.modules:
+        return False
+    _defer_plugin_api_sweep = True
+    return True
+
 
 _DISPLAY_PATHS = frozenset(('/api/health', '/api/profiles/sessions',
                             '/api/profiles/sessions/sidebar', '/api/profiles/sessions/stamps'))
@@ -29,12 +45,64 @@ class BootServicesMiddleware:
         await self.app(scope, receive, send)
 
 
+def _sweep_plugin_apis(app):
+    """Prepare routes off-loop, retaining lifecycle custody but not publication."""
+    from hermes_cli import web_server_dashboard as dashboard
+    from hermes_cli.plugins_cmd import _get_disabled_set, _get_enabled_set
+    from hermes_cli.web_server import _get_dashboard_plugins
+    wall, cpu = time.perf_counter(), time.thread_time()
+    pending = []
+    with dashboard._launch_profile_scope():
+        enabled, disabled = _get_enabled_set(), _get_disabled_set()
+        for plugin in _get_dashboard_plugins():
+            with dashboard._plugin_api_mount_lock:
+                captured = []
+                before = list(app.router.routes)
+                if dashboard._mount_one_plugin_api(app, plugin, enabled, disabled, deferred_routes=captured):
+                    if not captured:  # Hosted proxy routes have no in-process router lifespan.
+                        captured.append((None, app.router.routes[len(before):], None))
+                        app.router.routes[:] = before
+                    pending.extend((plugin['name'], *entry) for entry in captured)
+    _log.info('Deferred plugin API sweep: mounted=%d wall=%.3fs thread_cpu=%.3fs',
+              len(pending), time.perf_counter() - wall, time.thread_time() - cpu)
+    return pending
+
+
+@asynccontextmanager
+async def _services_with_plugin_apis(app, services):
+    owed = getattr(app.state, 'plugin_api_sweep_owed', False)
+    # Legacy start launches kanban-board-prewarm BEFORE services' hold_bind_for_prewarm joins it.
+    pending = await asyncio.to_thread(_sweep_plugin_apis, app) if owed else []
+    async with services(app), AsyncExitStack() as stack:
+        fresh = []
+        for name, api_path, routes, context in pending:
+            try:
+                if context is not None:
+                    await stack.enter_async_context(context(app))
+            except Exception:  # health: allow BLE001 -- third-party lifespan failure must not prevent other plugins from starting
+                _log.warning('Failed to enter plugin %s router lifespan', name, exc_info=True)
+                registry = getattr(app.state, 'fact_plugin_lifecycles', None)
+                if registry is not None:
+                    registry.stop(api_path)
+                continue
+            fresh.extend(routes)
+        if owed:
+            from hermes_cli.web_server_dashboard import _plugin_api_hot_mount
+            routes = app.router.routes
+            at = next((i for i, route in enumerate(routes)
+                       if getattr(route, 'endpoint', None) is _plugin_api_hot_mount), len(routes))
+            routes[:] = routes[:at] + fresh + routes[at:]
+            app.openapi_schema = None
+            app.state.plugin_api_sweep_owed = False
+        yield
+
+
 @asynccontextmanager
 async def services_lifespan(app, services):
     listener = getattr(app.state, 'http_listener_ready', None)
     if (listener is None or getattr(app.state, 'sessions_facts', None) is None
             or getattr(app.state, 'gateway_runner', None) is not None):
-        async with services(app):
+        async with _services_with_plugin_apis(app, services):
             yield
         return
     ready, stop = asyncio.Event(), asyncio.Event()
@@ -42,7 +110,7 @@ async def services_lifespan(app, services):
 
     async def warm():
         await listener.wait()
-        async with services(app):
+        async with _services_with_plugin_apis(app, services):
             ready.set()
             await stop.wait()
 
