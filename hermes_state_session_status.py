@@ -79,7 +79,6 @@ def _verdict(snapshot: dict, coverage: dict, generation: int, failures: list[dic
     turn = snapshot.get("turn") or {}
     own_turn = turn.get("generation") == generation
     asks = snapshot.get("asks") or []
-
     if snapshot.get("muted"):
         return {"kind": "muted", "presentation": {"stripe": "blocked", "reason_codes": ["muted"]}}
     if asks:
@@ -147,7 +146,8 @@ def reduce_status(snapshot: dict[str, Any], *, previous: dict | None = None) -> 
              **_verdict(snapshot, coverage, generation, failures)}
     overdue = [item for item in snapshot.get('work') or ()
                if item.get('kind') == 'card' and item.get('state') == 'triage_overdue']
-    if overdue and not snapshot.get('asks'):
+    # Operational attention never beats a user mute or a human ask (both decided in _verdict).
+    if overdue and not snapshot.get('asks') and value.get('kind') != 'muted':
         value['presentation'] = {'stripe': 'stuck', 'reason_codes': list(dict.fromkeys([
             *value['presentation']['reason_codes'], 'triage_overdue']))}
         value.setdefault('on', deepcopy(overdue))

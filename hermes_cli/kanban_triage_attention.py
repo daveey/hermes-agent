@@ -11,14 +11,48 @@ _FIXED = {
     'spend_budget_triaged': 'triage', 'spend_budget_held': 'triage', 'decision_retained': 'triage',
     'contained': 'triage', 'gave_up': 'triage', 'supervisor_escalated': 'triage',
     'decision_protected_stopped': 'triage', 'block_loop_detected': 'triage', 'agent_block_escalated': 'triage',
+    # kanban_block_policy recheck sweep (blocked -> triage) and kanban_refusal_fallback/kanban_retain's
+    # pending-spend-decision safety stop (ready -> triage).
+    'ask_rechecked': 'triage', 'decision_hold_restricted': 'triage',
+    # kanban_stop_ended's local-shadow administrative stop (ended run -> triage).
+    'administrative_stop_restricted': 'triage',
     'claimed': 'running', 'spawned': 'running', 'unblocked': 'ready', 'triage_swept': 'ready',
     'scheduled': 'scheduled', 'continued': 'scheduled', 'blocked': 'blocked',
     'completed': 'done', 'archived': 'archived', 'review_requested': 'review',
-    'specified': 'todo', 'decomposed': 'todo',
+    'specified': 'todo', 'decomposed': 'todo', 'dependency_wait': 'todo',
 }
-_PAYLOAD = {'created', 'status', 'reopened', 'no_progress_escalated'}
+_PAYLOAD = {'created', 'status', 'reopened', 'no_progress_escalated',
+            # Wakes and reopens record their own landing only in the payload.
+            'condition_met', 'continuation_woken', 'review_reopened', 'changes_requested'}
 _PROMOTED = {'promoted', 'promoted_manual', 'unblocked'}
-LIFECYCLE_KINDS = tuple(sorted(set(_FIXED) | _PAYLOAD | _PROMOTED))
+# Writers that record their landing in ``payload.status`` (as kanban_sync_divergence._landing reads it): the
+# recorded status wins over the kind's default. ``block_task``/``route_block`` land an exhausted budget or a
+# workspace-source refusal loop in ``triage`` under a ``blocked`` event; ``continue_task`` records its landing.
+_RECORDED = {'blocked', 'continued', 'scheduled', 'block_loop_detected', 'dependency_wait'}
+# ``blocked`` events written before block_task recorded a landing: these re-kinds landed ``triage``.
+_TRIAGE_REKINDS = frozenset({'continuation_exhausted', 'goal_unachievable'})
+_STATUSES = frozenset({'triage', 'todo', 'ready', 'running', 'blocked', 'scheduled', 'review', 'done', 'archived'})
+# kanban_transfer.import_board parks dir/worktree cards in triage and records it only as ``parked``.
+_IMPORTED = 'imported'
+LIFECYCLE_KINDS = tuple(sorted(set(_FIXED) | _PAYLOAD | _PROMOTED | {_IMPORTED}))
+
+
+def landing(kind, payload):
+    """Status one lifecycle event left the card in, else None (not a lifecycle move)."""
+    if kind == _IMPORTED:
+        return 'triage' if payload.get('parked') is True else None
+    recorded = payload.get('status')
+    recorded = recorded if recorded in _STATUSES else None
+    if kind in _PROMOTED:
+        return recorded or 'ready'
+    if kind in _PAYLOAD:
+        return recorded
+    if kind in _RECORDED and recorded:
+        return recorded
+    if kind == 'blocked' and payload.get('rekind_reason') in _TRIAGE_REKINDS \
+            and not payload.get('shared_blocker_probe'):
+        return 'triage'
+    return _FIXED.get(kind or '')
 
 
 def _epoch(value):
@@ -48,16 +82,14 @@ def current_entry(row):
     for event in row.get('events') or ():
         if not isinstance(event, dict):
             continue
-        kind, payload = event.get('kind'), _obj(event.get('payload'))
-        landing = (payload.get('status', 'ready') if kind in _PROMOTED else
-                   payload.get('status') if kind in _PAYLOAD else _FIXED.get(kind or ''))
-        if landing is None:
+        landed = landing(event.get('kind'), _obj(event.get('payload')))
+        if landed is None:
             continue
-        if landing == 'triage' and phase != 'triage':
+        if landed == 'triage' and phase != 'triage':
             entered = _epoch(event.get('created_at'))
-        elif landing != 'triage':
+        elif landed != 'triage':
             entered = None
-        phase = landing
+        phase = landed
     return entered if phase == 'triage' else None
 
 

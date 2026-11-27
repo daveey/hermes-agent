@@ -68,7 +68,6 @@ describe('SessionStatusDot published status', () => {
       reason: 'empty',
       presentation: { stripe: 'none', reason_codes: ['never_started'] }
     }
-
     const { container } = mount({ kind: 'unresolved', status })
     const dot = container.querySelector('[data-session-status-dot]')!
 

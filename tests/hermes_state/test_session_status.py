@@ -54,6 +54,13 @@ def reduce(value, previous=None):
     ({"started": False, "turn": {"state": "never_started", "generation": 7}}, "unresolved", "none"),
     ({"turn": {"state": "failed", "generation": 7}}, "unresolved", "attention"),
     ({"turn": {"state": "pending", "generation": 7}}, "unresolved", "attention"),
+    # Overdue triage is operational red, never above a user mute or a human ask.
+    ({"work": [{"id": "t1", "kind": "card", "state": "triage_overdue"}]}, "waiting", "stuck"),
+    ({"work": [{"id": "t1", "kind": "card", "state": "triage_overdue"}], "muted": True}, "muted", "blocked"),
+    ({"work": [{"id": "t1", "kind": "card", "state": "triage_overdue"}], "muted": True,
+      "asks": [{"id": "ask"}]}, "muted", "blocked"),
+    ({"work": [{"id": "t1", "kind": "card", "state": "triage_overdue"}], "asks": [{"id": "ask"}]},
+     "decision", "stuck"),
 ])
 def test_precedence(changes, kind, stripe):
     out = reduce(snapshot(**changes))
@@ -62,6 +69,12 @@ def test_precedence(changes, kind, stripe):
     assert out["identity"] == IDENTITY
     assert out["generation"] == 7
     assert out["revision"] == 1
+
+
+def test_muted_overdue_triage_keeps_mute_presentation():
+    out = reduce(snapshot(muted=True, work=[{"id": "t1", "kind": "card", "state": "triage_overdue"}]))
+    assert out["presentation"] == {"stripe": "blocked", "reason_codes": ["muted"]}
+    assert "on" not in out or all(item.get("state") != "triage_overdue" for item in out["on"])
 
 
 @pytest.mark.parametrize("defect", ["missing", "unknown", "epoch", "generation", "inconsistent", "expired"])

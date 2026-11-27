@@ -84,3 +84,86 @@ def test_detached_markers_dedupe_aliases_and_do_not_double_count_human_asks():
     attention.project(row, markers | {(key, 'blocked', False)}, now=NOW)
     assert 'kanban_triage_attention' not in row
     assert row['needs_you'] == []
+
+
+# Every real triage writer's entry event, as the writer records it (kind + payload). Each starts a card that
+# was created ready, claimed and then blocked, so a missed entry keeps the prior non-triage phase.
+_WRITER_ENTRIES = [
+    ('kanban_block_policy recheck sweep', 'ask_rechecked', {}),
+    ('kanban_block_policy agent escalation', 'agent_block_escalated', {}),
+    ('kanban_refusal_fallback pending spend decision', 'decision_hold_restricted', {'episode': 'e1'}),
+    ('kanban_protect_stopped', 'decision_protected_stopped', {'version': 1}),
+    ('kanban_stop_ended local-shadow stop', 'administrative_stop_restricted', {'version': 1}),
+    ('kanban_retain', 'decision_retained', {'status': 'triage'}),
+    ('kanban_spend_budget over budget', 'spend_budget_triaged', {}),
+    ('kanban_spend_budget pending decision', 'spend_budget_held', {'status': 'triage'}),
+    ('kanban_no_progress', 'no_progress_escalated', {'status': 'triage'}),
+    ('kanban_block_routing', 'supervisor_escalated', {}),
+    ('kanban_failure_accounting / review admission', 'gave_up', {'reason_code': 'worker_failures_exhausted'}),
+    ('kanban_containment_lifecycle', 'contained', {'version': 1}),
+    ('route_block loop', 'block_loop_detected', {'status': 'triage'}),
+    ('block_task exhausted budget / source refusal block', 'blocked', {'status': 'triage'}),
+    ('legacy block_task re-kind', 'blocked', {'rekind_reason': 'continuation_exhausted'}),
+    ('kanban_transfer import of a dir/worktree card', 'imported', {'board': 'b', 'parked': True}),
+]
+
+
+def _history(kind, payload, at):
+    return [event('created', 1, status='ready'), event('claimed', 2), event('blocked', 3),
+            event(kind, at, **payload)]
+
+
+@pytest.mark.parametrize('label,kind,payload', _WRITER_ENTRIES, ids=[w[0] for w in _WRITER_ENTRIES])
+def test_every_real_triage_writer_starts_an_episode(label, kind, payload):
+    row = {'status': 'triage', 'events': _history(kind, payload, NOW - 7200)}
+    assert attention.current_entry(row) == NOW - 7200, label
+    assert attention.overdue(row, now=NOW)
+    assert not attention.overdue({**row, 'events': _history(kind, payload, NOW - 600)}, now=NOW)
+
+
+@pytest.mark.parametrize('kind,payload', [
+    ('blocked', {'status': 'blocked'}), ('blocked', {}), ('imported', {'parked': False}),
+    ('continued', {'status': 'ready'}), ('condition_met', {'status': 'ready'}),
+    ('dependency_wait', {}),
+])
+def test_recorded_landing_wins_over_kind_default(kind, payload):
+    events = [event('contained', NOW - 7200), event(kind, NOW - 3000, **payload),
+              event('decision_retained', NOW - 30)]
+    assert attention.current_entry({'status': 'triage', 'events': events}) == (
+        NOW - 7200 if kind == 'imported' else NOW - 30)
+
+
+def test_annotate_reads_every_writer_entry_from_the_event_table():
+    import json
+    import sqlite3
+    conn = sqlite3.connect(':memory:')
+    conn.execute('CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, run_id INTEGER, kind TEXT, '
+                 'payload TEXT, created_at INTEGER)')
+    rows = []
+    for index, (_, kind, payload) in enumerate(_WRITER_ENTRIES):
+        tid = f't{index}'
+        rows.append({'id': tid, 'status': 'triage'})
+        for item in _history(kind, payload, NOW - 7200):
+            conn.execute('INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?,?,?,?)',
+                         (tid, item['kind'], json.dumps(item['payload']), item['created_at']))
+    annotated = attention.annotate(conn, rows)
+    assert [row['triage_entered_at'] for row in annotated] == [NOW - 7200] * len(_WRITER_ENTRIES)
+
+
+def test_literal_triage_writers_are_all_registered():
+    """A new ``SET status='triage'`` writer must add its entry event here (and to the map) or this fails."""
+    import pathlib
+    import re
+    root = pathlib.Path(attention.__file__).resolve().parent
+    writers = {path.name for path in root.glob('*.py')
+               if re.search(r"SET status\s*=\s*'triage'", path.read_text(encoding='utf-8'))}
+    registered = {
+        'kanban_allowance_maintenance.py', 'kanban_block_policy.py', 'kanban_block_routing.py',
+        'kanban_containment_lifecycle.py', 'kanban_failure_accounting.py', 'kanban_no_progress.py',
+        'kanban_protect_stopped.py', 'kanban_refusal_fallback.py', 'kanban_retain.py',
+        'kanban_review_admission.py', 'kanban_spend_budget.py', 'kanban_stop_ended.py', 'kanban_transfer.py',
+    }
+    assert writers == registered
+    for _, kind, payload in _WRITER_ENTRIES:
+        assert attention.landing(kind, payload) == 'triage'
+        assert kind in attention.LIFECYCLE_KINDS

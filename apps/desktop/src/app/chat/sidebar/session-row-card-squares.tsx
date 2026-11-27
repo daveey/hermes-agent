@@ -102,13 +102,18 @@ export function aggregateCardColours(sessions: SessionInfo[]): ReturnType<typeof
 export const runningCardCount = (session: SessionInfo): number =>
   sessionCardColours(session, 0).find(item => item.colour === 'blue')?.count ?? 0
 
+const overdueTriageCount = (session: SessionInfo): number =>
+  hasFreshKanbanObservation(session) ? (session.kanban_triage_attention?.count ?? 0) : 0
+
 export function BackgroundCardSquares({ sessions }: { sessions: SessionInfo[] }) {
   const tick = useStore($kanbanObservationTick)
   // The input can stay unchanged while freshness expires. Do not hide its retained work.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const colours = useMemo(() => aggregateCardColours(sessions), [sessions, tick])
 
-  return <CardSquares attention={sessions.some(s => hasFreshKanbanObservation(s) && Boolean(s.kanban_triage_attention?.count))} colours={colours} counts />
+  return (
+    <CardSquares attention={sessions.reduce((sum, s) => sum + overdueTriageCount(s), 0)} colours={colours} counts />
+  )
 }
 
 const trailingColours = (session: SessionInfo, executionUnknown: number) =>
@@ -124,17 +129,22 @@ export function SessionRowCardSquares({
   const counts = useContext(CardCountsContext)
   const colours = counts ? backgroundCardColours(session) : trailingColours(session, executionUnknown)
 
-  return counts ? <BackgroundCardSquares sessions={[session]} /> : <CardSquares attention={hasFreshKanbanObservation(session) && Boolean(session.kanban_triage_attention?.count)} colours={colours} />
+  return counts ? (
+    <BackgroundCardSquares sessions={[session]} />
+  ) : (
+    <CardSquares attention={overdueTriageCount(session)} colours={colours} />
+  )
 }
 
 export function CardSquares({
   colours,
   counts = false,
-  attention = false
+  attention = 0
 }: {
   colours: ReturnType<typeof sessionCardColours>
   counts?: boolean
-  attention?: boolean
+  /** How many of the red cards are overdue triage rather than human asks. */
+  attention?: number
 }) {
   const { t } = useI18n()
 
@@ -143,10 +153,19 @@ export function CardSquares({
   }
 
   const label = colours
-    .map(
-      ({ colour, count }) =>
-        `${colour === 'unknown' ? t.messaging.unknown : t.sidebar.row.cardColours[colour === 'red' && attention ? 'amber' : colour]} ${count}`
-    )
+    .flatMap(({ colour, count }) => {
+      if (colour === 'unknown') {
+        return [`${t.messaging.unknown} ${count}`]
+      }
+
+      // Red also paints overdue triage (agent attention); keep the human asks' own label beside it.
+      const aged = colour === 'red' ? Math.min(count, Math.max(0, attention)) : 0
+
+      return [
+        ...(count - aged > 0 ? [`${t.sidebar.row.cardColours[colour]} ${count - aged}`] : []),
+        ...(aged > 0 ? [`${t.sidebar.row.cardColours.amber} ${aged}`] : [])
+      ]
+    })
     .join(' · ')
 
   return (
