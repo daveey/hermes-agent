@@ -526,6 +526,7 @@ def _prune_remote_absent(snapshot, committed):
     if committed:
         for chat in _remote_absent.keys() - snapshot.keys():
             del _remote_absent[chat]
+        _remote_absent_warned.intersection_update((chat, entry) for chat, entry in snapshot.items())
 
 
 def _remote_unchanged(chat, previous, snapshot, health_generation, absent_due):

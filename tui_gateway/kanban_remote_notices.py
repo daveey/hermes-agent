@@ -1252,7 +1252,8 @@ def _settle_stale_claims(states: dict, path, ledger, *, now=None) -> int:
     ``stale`` in the same transaction. Its text is never delivered: it describes a state the card is no longer in,
     so it never counts as DELIVERED (that means "in the transcript"; row 842 was re-settled as delivered=1 with
     swept reason=delivered after 9eb41135c6). A live holder, a card still in that state (the re-offer path owns
-    it) and a card missing from the replica (partial sync) are left alone. Never raises.
+    it) are left alone. Missing cards settle only with same-source/key observations proving every alias
+    expired; unknown or young observations and live alias holders retain the claim. Never raises.
     """
     from tui_gateway.remote_sweep_projection import CompactTask
     from tui_gateway.kanban_remote_expired_claims import settle_absent

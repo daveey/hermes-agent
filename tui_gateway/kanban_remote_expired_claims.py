@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+from pathlib import Path
 
 
 def _key(ref):
@@ -64,6 +65,7 @@ def settle_absent(conn, selected, states, source, now):
 
     committed = False
     try:
+        source = str(Path(source).resolve())  # observation producers use canonical replica identity
         conn.execute('BEGIN IMMEDIATE')
         row = conn.execute('SELECT session,ref,state,holder_pid,holder_start,notice_key,delivered FROM notices '
                            'WHERE session=? AND ref=? AND state=?',

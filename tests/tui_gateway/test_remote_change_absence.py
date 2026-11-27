@@ -144,7 +144,7 @@ def test_new_health_generation_uses_cached_absence_without_lookup(absent):
 @pytest.mark.parametrize('failure', ['raise', 'none', 'healthy'])
 def test_A2_real_finder_reports_open_failures(monkeypatch, failure):
     from tui_gateway import server
-    monkeypatch.setattr(server, '_readopt_wake_profiles', lambda: [None, 'second'])
+    monkeypatch.setattr('tui_gateway.kanban_chat_hosting.profile_roster', lambda: ([None, 'second'], True))
     class Store:
         def get_session(self, chat):
             return None

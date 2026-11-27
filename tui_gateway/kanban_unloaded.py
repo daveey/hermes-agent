@@ -234,10 +234,12 @@ def find_session_db(chat_id: str) -> Iterator[tuple[Any, Optional[str]]]:
     raised by the caller's block propagates unchanged (it is never caught here: catching at the ``yield`` and
     yielding again turns it into "generator didn't stop after throw()", kanban-e5babca565)."""
     from tui_gateway import server
+    from tui_gateway.kanban_chat_hosting import profile_roster
+    profiles, complete = profile_roster()
     with contextlib.ExitStack() as stack:
         found: tuple[Any, Optional[str]] = (None, None)
-        unavailable = False
-        for profile in server._readopt_wake_profiles():
+        unavailable = not complete
+        for profile in profiles:
             scope = contextlib.ExitStack()
             try:
                 db = scope.enter_context(server._profile_db({"profile": profile} if profile else None, writer=True))
