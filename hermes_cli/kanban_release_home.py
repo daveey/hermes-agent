@@ -125,6 +125,7 @@ def _process(conn, hub, row, own, board):
 
 def tick(conn, rep, own, board):
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_release import Refusal
     from hermes_cli.kanban_sync_client import HubError
     queue.intake(conn, rep, board, own)
     if not queue.exists(conn):
@@ -155,7 +156,7 @@ def tick(conn, rep, own, board):
             row = conn.execute(f"SELECT * FROM {queue.TABLE} WHERE delivery_uid=?", (row["delivery_uid"],)).fetchone()
             try:
                 _process(conn, hub, row, own, board)
-            except (ValueError, OSError, HubError, sqlite3.Error) as exc:
+            except (Refusal, ValueError, OSError, HubError, sqlite3.Error) as exc:
                 _log.info("HOME release %s remains held: %s", row["delivery_uid"], exc)
     finally:
         hub.close()

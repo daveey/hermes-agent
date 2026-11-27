@@ -297,10 +297,29 @@ v2 readers and historical GET support for already-frozen or committed records.
 Verified completed local history and authenticated remote history resolve without
 current advertisement. After remote 404, an unadvertised saved v2 stays held with
 its exact UID/digest and sends nothing: never downgrade, remint or replay effects.
-Capability failure also holds new v2 sends, not already-verifiable history. Do not
+Capability failure also holds new v2 sends, not already-verifiable history. A
+retained v2 PREPARED proposal without a final wire must refuse before freezing if
+advertisement disappears; a newly frozen wire rechecks advertisement before POST.
+Neither cut may downgrade or replace the retained proposal/wire. Do not
 roll back to v1-only readers while any v2 custody remains; preserve immutable
 journals, receipts and private materialization rather than deleting or converting
 them. Rollback does not clear a later stop or confer executor permission.
+
+Ordinary budget refusal (for example an already-reached human/unknown cache cap)
+is isolated at the HOME queue's per-delivery boundary. The rollback leaves no
+PREPARED/final effect, release or APPLIED permission; historical consumption stays
+`consumed_pending_apply`. Its checked cursor advances so another healthy intent
+can progress. Catching that typed refusal is not authorization to lift the cap.
+
+`test_owner_release_composed_v2_accounting.py` additionally exercises real native
+CLI/socket, enrolled loopback Board, HOME and foreign executor paths without a
+HOME signer. Capability READ overlays are explicit and production remains
+unadvertised. Accounting cases insert labelled fixture usage on a real retained
+run: they prove reducer/transport parity, not real model spending. Scope/safety/
+containment ingress controls are ordering proof, not unmasked final-clause kills.
+The lost-POST-reply case commits on the real DO, withholds first reconciliation,
+then resolves that exact remote history after advertisement withdrawal without a
+second POST. These fixture proofs are not deployment or live-root recovery.
 
 ### Original native completed-result custody
 
