@@ -180,7 +180,7 @@ def test_finite_seed_never_calls_late_import_bootstrap_provenance(tmp_path):
     assert set(result['expected']) == {
         'hermes_cli.main', 'hermes_bootstrap', 'hermes_cli', 'hermes_cli._early_recovery',
         'hermes_cli.git_fingerprint', 'hermes_cli.code_attestation', 'hermes_cli.local_work',
-        'hermes_cli._launch_template'}
+        'hermes_cli._launch_template', 'hermes_cli.code_inventory_diagnostics'}
     assert all(r['kind'] == 'trusted_bootstrap_seed' for r in result['seed'])
     assert result['identity']['binary_sha256']
 
