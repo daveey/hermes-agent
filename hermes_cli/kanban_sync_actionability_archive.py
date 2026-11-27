@@ -21,7 +21,7 @@ def _history(events, archive):
     identities = {}
     for event in lifecycle:
         data = event['payload'].get('_recovery_history_v1')
-        if data is not None and (not isinstance(data, dict)
+        if '_recovery_history_v1' in event['payload'] and (not isinstance(data, dict)
                 or not isinstance(data.get('identity'), str) or not data['identity']
                 or not isinstance(data.get('predecessors'), list)
                 or any(not isinstance(p, str) or not p for p in data['predecessors'])

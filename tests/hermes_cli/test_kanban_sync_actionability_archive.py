@@ -25,6 +25,67 @@ def archived(completed, request):
     return live, shadow, op
 
 
+@pytest.mark.parametrize('copies', ['live', 'shadow', 'both'])
+@pytest.mark.parametrize('entry', ['audit', 'diff'])
+def test_explicit_null_history_fails_closed_at_audit_and_diff(archived, copies, entry):
+    from hermes_cli.kanban_sync_client import diff
+
+    live, shadow, op = archived
+    for name, conn in [('live', live), ('shadow', shadow)]:
+        # A connected earlier event reaches predecessor traversal, not a fork check.
+        payload = {'_recovery_history_v1': None}
+        conn.execute("INSERT INTO task_events VALUES (4,'prior','t_card','reclaimed',128,?,NULL,NULL)",
+                     (json.dumps(payload if copies in (name, 'both') else {}),))
+        row = conn.execute("SELECT payload FROM task_events WHERE kind='archived'").fetchone()
+        archive = json.loads(row[0])
+        archive['_recovery_history_v1']['predecessors'].append('prior')
+        conn.execute("UPDATE task_events SET payload=? WHERE kind='archived'", (json.dumps(archive),))
+    before = [list(c.iterdump()) for c in (live, shadow)]
+    if entry == 'audit':
+        assert not audit.audited_rejection(live, shadow, op)
+    else:
+        report = diff(live, shadow, 'macbook')
+        assert not report['clean'], report
+        assert report['rejected_ops'] == 1
+        assert report['audited_retain_rejections'] == []
+    assert [list(c.iterdump()) for c in (live, shadow)] == before
+
+
+@pytest.mark.parametrize('change', ['valid', 'source-status', 'predecessor-order',
+                                  'duplicate-identity', 'duplicate-run-uid', 'source-order'])
+def test_archive_independent_proof_guards(archived, change):
+    live, shadow, op = archived
+    for conn in (live, shadow):
+        row = conn.execute("SELECT payload FROM task_events WHERE kind='archived'").fetchone()
+        payload = json.loads(row[0])
+        meta = payload['_recovery_history_v1']
+        if change == 'source-status':
+            payload['source_status'] = 'archived'
+        elif change in ('valid', 'predecessor-order', 'duplicate-identity'):
+            # Valid connected graph: earlier(127) -> later(128) -> archive(130).
+            # Reverse only the edge, or collide only its portable identity.
+            earlier = {'_recovery_history_v1': {'identity': 'earlier', 'predecessors': []}}
+            later = {'_recovery_history_v1': {'identity': 'later', 'predecessors': ['earlier']}}
+            if change == 'predecessor-order':
+                earlier['_recovery_history_v1']['predecessors'] = ['later']
+                later['_recovery_history_v1']['predecessors'] = []
+            if change == 'duplicate-identity':
+                earlier['_recovery_history_v1']['identity'] = 'later'
+                later['_recovery_history_v1']['predecessors'] = []
+            for eid, uid, second, event in [(4, 'e1', 127, earlier), (5, 'e2', 128, later)]:
+                conn.execute("INSERT INTO task_events VALUES (?,?,'t_card','reclaimed',?,?,NULL,NULL)",
+                             (eid, uid, second, json.dumps(event)))
+            meta['predecessors'].append('earlier' if change == 'predecessor-order' else 'later')
+        elif change == 'duplicate-run-uid':
+            conn.execute("INSERT INTO task_runs SELECT 10,uid,task_id,status,outcome,started_at,ended_at FROM task_runs WHERE id=9")
+        elif change == 'source-order':
+            # Immutable custody binds a source UID, not a selectable source kind.
+            # A non-transition source must independently precede withdrawal.
+            conn.execute("UPDATE task_events SET kind='heartbeat',created_at=131 WHERE uid='source'")
+        conn.execute("UPDATE task_events SET payload=? WHERE kind='archived'", (json.dumps(payload),))
+    assert audit.audited_rejection(live, shadow, op) is (change == 'valid')
+
+
 def test_archive_is_read_only_supersession_not_success_or_delivery(archived):
     from hermes_cli.kanban_rejected_retain_retirement import retire
     from hermes_cli.kanban_sync_client import diff
