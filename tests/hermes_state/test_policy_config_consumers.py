@@ -68,6 +68,9 @@ def test_interned_prepared_update_retires_previous_blob(interned):
         _commit_policy(db, conn, sid, {'snapshot': snapshot, 'policy': changed})
     db._execute_write(update)
     assert local_receipt(db, sid)['policy'] == changed
+    with db._read_ctx() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM state_meta WHERE key GLOB ?',
+                            (REF_PREFIX + '*',)).fetchone()[0] == 1
     db._execute_write(lambda conn: release_receipts(conn, [sid]))
     _assert_no_blobs(db)
 
