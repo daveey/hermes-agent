@@ -18,7 +18,8 @@ def source_for_key(board, key, *, replica_only=False):
     for path in paths:
         if not path.exists():
             continue
-        if replica_only:
+        # Absence and newest-card selection also depend on a current shadow.
+        if path == shadow:
             state = wait._query(path, 'select pulled_at from kanban_sync_state limit 1')
             pulled = state[0][0] if state else None
             if not isinstance(pulled, (int, float)) or not 0 <= time.time() - pulled <= FRESH_SECONDS:

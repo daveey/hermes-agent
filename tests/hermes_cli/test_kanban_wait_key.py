@@ -112,12 +112,47 @@ def test_restricted_hub_key_uses_only_fresh_board_shadow(cards, tmp_path, monkey
         assert wait.check_remote('hub', 'key', KEY, since=('done',))[0] == 1
 
 
+@pytest.mark.parametrize('age', [0, 100000])
+@pytest.mark.parametrize('observation', ['done', 'absent', 'newer-running', 'older-done'])
+@pytest.mark.parametrize('remote', [False, True])
+def test_local_and_successful_ssh_shadow_freshness(cards, tmp_path, monkeypatch, age, observation, remote):
+    import time
+    from hermes_cli import kanban_sync_client
+    shadow = tmp_path / 'shadow.db'
+    with sqlite3.connect(shadow) as db:
+        db.executescript('CREATE TABLE tasks(id TEXT,status TEXT,idempotency_key TEXT,created_at INTEGER);'
+                         'CREATE TABLE kanban_sync_state(pulled_at REAL);')
+        db.execute('INSERT INTO kanban_sync_state VALUES(?)', (time.time() - age,))
+        if observation != 'absent':
+            put(db, 'running' if observation == 'newer-running' else 'done', created=2)
+    if observation == 'newer-running':
+        put(cards, 'done', tid='live-old', created=1)
+    elif observation == 'older-done':
+        put(cards, 'running', tid='live-new', created=3)
+    monkeypatch.setattr(kanban_sync_client, 'shadow_path', lambda slug: shadow)
+
+    def ssh(argv, **kwargs):
+        assert not kwargs.get('shell')
+        rc, text = wait.check_local('key', KEY)
+        return subprocess.CompletedProcess(argv, rc, text, '')
+
+    monkeypatch.setattr(wait.subprocess, 'run', ssh)
+    result = wait.check_remote('remote', 'key', KEY) if remote else wait.check_local('key', KEY)
+    expected = 2 if age else (0 if observation == 'done' else 1)
+    assert result[0] == expected, result
+    if age:
+        assert 'stale' in result[1]
+
+
 def test_newer_shadow_card_beats_older_live_card(cards, tmp_path, monkeypatch):
     from hermes_cli import kanban_sync_client
     put(cards, 'done', tid='old', created=1)
     shadow = tmp_path / 'shadow.db'
     cards.backup(db := sqlite3.connect(shadow))
     try:
+        import time
+        db.execute('CREATE TABLE kanban_sync_state(pulled_at REAL)')
+        db.execute('INSERT INTO kanban_sync_state VALUES(?)', (time.time(),))
         put(db, 'running')
     finally:
         db.close()
