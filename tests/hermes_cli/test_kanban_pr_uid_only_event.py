@@ -38,7 +38,10 @@ def test_historical_uid_only_event_does_not_poison_wake(monkeypatch, uid):
         assert prs.active_pr_reason(conn, tid, now + 700) == expected
 
 
-@pytest.mark.parametrize("fault", ["missing-row", "duplicate-uid", "malformed-id", "bad-author", "bad-length"])
+@pytest.mark.parametrize("fault", [
+    "missing-row", "duplicate-uid", "malformed-id", "bad-author", "bad-length",
+    "list-uid", "dict-uid", "numeric-uid",
+])
 def test_uid_only_unreadable_provenance_stays_closed(monkeypatch, fault):
     now = int(time.time())
     monkeypatch.setattr(time, "time", lambda: now)
@@ -56,6 +59,9 @@ def test_uid_only_unreadable_provenance_stays_closed(monkeypatch, fault):
             "bad-author": {"author": None},
             "bad-length": {"len": "19"},
             "duplicate-uid": {},
+            "list-uid": {"comment_uid": ["system-uid"]},
+            "dict-uid": {"comment_uid": {"system-uid": True}},
+            "numeric-uid": {"comment_uid": 7},
         }
         data.update(overrides[fault])
         if fault == "duplicate-uid":
