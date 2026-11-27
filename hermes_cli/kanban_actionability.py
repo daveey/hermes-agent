@@ -185,13 +185,15 @@ def _name_reason(row: dict, facts: dict) -> None:
             'wait_for_named_producer', 'satisfy_dependency', 'repair_lifecycle_contract'):
         return
     awaiting = facts.get('awaiting')
-    if not isinstance(awaiting, dict) or not valid_awaiting(awaiting) or awaiting.get('inferred'):
+    if not isinstance(awaiting, dict) or not valid_awaiting(awaiting):
         return
     from hermes_cli.kanban_wait_info import PREREQUISITE_MAX
-    why = ' '.join(str(awaiting.get('why') or '').split())[:PREREQUISITE_MAX]
+    why = '' if awaiting.get('inferred') else ' '.join(str(awaiting.get('why') or '').split())[:PREREQUISITE_MAX]
+    if not why and awaiting.get('kind') == 'clock':
+        why = 'waiting reason unavailable'
     trigger = blocker['trigger']
     if not why or trigger.startswith('Repair the missing'):
-        return  # nothing recorded, or no trigger to pair it with
+        return  # no semantic reason for a non-clock producer, or no trigger to pair it with
     wake = positive_time(facts.get('wake_at'))
     backstop = (f'; backstop: recorded clock reaches {wake}'
                 if wake and awaiting.get('kind') == 'clock' and 'clock reaches' not in trigger else '')

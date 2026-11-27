@@ -160,6 +160,30 @@ def test_park_reason_survives_cli_schedule_and_show(home, capsys, verb, extra):
     assert shown['actionability']['instruction'].startswith('Waiting on: the cooldown window. Next check:')
 
 
+@pytest.mark.parametrize('awaiting', [{'kind': 'clock'}, {'kind': 'clock', 'why': 'guess', 'inferred': True}])
+def test_legacy_clock_reason_unavailable_in_cli_and_tool_show(home, capsys, awaiting):
+    from tools import kanban_tools as kt
+    tid = _ready()
+    assert _cli()('schedule', tid, COOLDOWN, '--clock-only', *WHY) == 0
+    capsys.readouterr()
+    with _conn() as conn:
+        event = conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND kind='scheduled' ORDER BY id DESC",
+                             (tid,)).fetchone()
+        payload = json.loads(event['payload'])
+        payload['awaiting'] = awaiting
+        payload.pop('actionability_intent', None)
+        conn.execute('UPDATE task_events SET payload=? WHERE id=?', (json.dumps(payload), event['id']))
+        conn.commit()
+    assert _cli()('show', tid, '--json') == 0
+    cli = json.loads(capsys.readouterr().out)
+    tool = json.loads(kt._handle_show({'task_id': tid}))
+    for shown in (cli, tool):
+        a = shown['actionability']
+        assert a['blocker']['prerequisite'] == 'waiting reason unavailable'
+        assert a['blocker']['trigger'].startswith('Recorded clock reaches ')
+        assert a['instruction'].startswith('Waiting on: waiting reason unavailable. Next check: Recorded clock reaches ')
+
+
 def test_park_reason_survives_tool_schedule_and_show(home, capsys):
     from tools import kanban_tools as kt
     tid = _ready()

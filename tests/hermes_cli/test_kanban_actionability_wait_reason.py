@@ -156,16 +156,52 @@ def test_card_park_names_the_card_as_next_actor(tmp_path, monkeypatch):
         assert wait['prerequisite'] == 'its measurement lands'
 
 
-def test_park_without_a_reason_is_unchanged_and_invents_none():
+@pytest.mark.parametrize('awaiting', [{'kind': 'clock'}, {'kind': 'clock', 'why': 'guess', 'inferred': True}])
+def test_park_without_a_reason_reports_unavailable_and_invents_none(awaiting):
     """The writer refuses a new clock park with no why; a legacy or replicated one still reads without a guess."""
     trigger = 'Recorded clock reaches 1000'
     row = project({'task': {'id': 'f', 'status': 'scheduled', 'assignee': 'default'}, 'wake_at': 1000,
-                   'awaiting': {'kind': 'clock'}}, now=1000)
-    assert row['instruction'] == trigger == row['blocker']['prerequisite']
+                   'awaiting': awaiting}, now=1000)
+    assert row['instruction'] == f'Waiting on: waiting reason unavailable. Next check: {trigger}'
+    assert row['blocker']['prerequisite'] == 'waiting reason unavailable'
+    assert row['blocker']['trigger'] == trigger
     for park in ({'awaiting': {'kind': 'clock'}, 'wake_at': WAKE}, {'wake_at': WAKE}):
         wait = _described('scheduled', park=park, since=T0, now=T0 + 10)
         assert 'prerequisite' not in wait and wait['next_actor'] == 'the clock (timed check)'
         assert wait['waiting_on'] == 'the clock until 2027-01-16 08:01 UTC' and 'backstop_at' not in wait
+
+
+@pytest.mark.parametrize('awaiting', [
+    {'kind': 'clock'},
+    {'kind': 'clock', 'why': 'guess', 'inferred': True},
+])
+@pytest.mark.parametrize('probe', [None, 'test -f result'])
+def test_legacy_clock_report_and_show_separate_unavailable_reason(tmp_path, monkeypatch, awaiting, probe):
+    """Seed historical metadata only in a disposable store; do not relax today's writer validation."""
+    with connect(tmp_path / 'kanban.db') as conn:
+        tid = _park(conn, monkeypatch, {'kind': 'clock', 'why': WHY},
+                    **({'wake_check': probe} if probe else {}))
+        event = conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND kind='scheduled' ORDER BY id DESC",
+                             (tid,)).fetchone()
+        payload = json.loads(event['payload'])
+        payload['awaiting'] = awaiting
+        # Historical parks predate creation-intent stamping.
+        payload.pop('actionability_intent', None)
+        conn.execute('UPDATE task_events SET payload=? WHERE id=?', (json.dumps(payload), event['id']))
+        conn.commit()
+        before = list(conn.iterdump())
+        for row in (_row(conn, tid), describe(conn, tid, now=T0 + 10),
+                    fields(conn, kb.get_task(conn, tid))['actionability']):
+            assert row['blocker']['prerequisite'] == 'waiting reason unavailable'
+            trigger = f'Recorded condition probe succeeds: {probe}' if probe else f'Recorded clock reaches {WAKE}'
+            assert row['blocker']['trigger'] == trigger
+            assert row['instruction'].startswith(f'Waiting on: waiting reason unavailable. Next check: {trigger}')
+            assert row['action'] == 'wait_for_named_producer'
+            assert row['owner'] == {'kind': 'assignee', 'refs': ['default']}
+            assert row['violations'] == []
+            assert row['escalation']['at'] == WAKE + 600
+            assert 'waiting reason unavailable' in render(row)
+        assert list(conn.iterdump()) == before
 
 
 def test_writer_refuses_a_clock_park_with_no_reason(tmp_path, monkeypatch):
