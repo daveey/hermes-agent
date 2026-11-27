@@ -10,7 +10,8 @@ from hermes_cli import kanban_session_activity as activity
 
 
 @pytest.mark.parametrize("journal", ["DELETE", "WAL"])
-def test_concurrent_legacy_keys_share_commit_observer(tmp_path, monkeypatch, journal):
+@pytest.mark.parametrize("contended", [False, True])
+def test_concurrent_legacy_keys_share_commit_observer(tmp_path, monkeypatch, journal, contended):
     path = tmp_path / "legacy.db"
     activity._reset_cache_for_tests()
     writer = sqlite3.connect(path)
@@ -27,10 +28,30 @@ def test_concurrent_legacy_keys_share_commit_observer(tmp_path, monkeypatch, jou
                 barrier.wait(timeout=5)
                 return activity._board_content_key(path)
 
+            refused = []
+            if contended:
+                # Exercise real budget expiry, not a widened timeout or mocked
+                # key. Keep the lock held until both probes have returned.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    with rev.probe_lock(path):
+                        futures = [pool.submit(activity._board_content_key, path) for _ in range(2)]
+                        refused = [future.result(timeout=5) for future in futures]
+                assert all(len(key) == 3 for key in refused), refused
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                keys = list(pool.map(lambda _: read(), range(8)))
-            assert all(key == keys[0] for key in keys), keys
-            return keys[0]
+                keys = refused + list(pool.map(lambda _: read(), range(8)))
+            # A healthy observer is shared, but a scheduled reader can exhaust
+            # the production 50ms lock budget under load. That result MUST stay
+            # unknown, not compare equal to a successful commit observation.
+            known = activity._board_content_key(path)
+            assert known[0] == "stat" and len(known) == 4, known
+            for key in keys:
+                if len(key) == 3:
+                    assert key[0] == "stat" and type(key[2]) is object, key
+                    assert key != known
+                    assert sum(other == key for other in keys) == 1
+                else:
+                    assert key == known, keys
+            return known
 
         first = batch()
         writer.execute("UPDATE tasks SET title='two'")
