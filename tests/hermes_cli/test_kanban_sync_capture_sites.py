@@ -128,7 +128,7 @@ def test_reviewed_functions_exist_at_exact_qualified_identity():
     for filename, function, _, _ in sorted(entries):
         module = qualified(filename, "").rstrip(".")
         path = root.joinpath(*module.split(".")).with_suffix(".py")
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
         nodes = tree.body
         for component in function.split("."):
             matches = [node for node in nodes if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))

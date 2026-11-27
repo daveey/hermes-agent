@@ -108,7 +108,7 @@ def test_hard_death_reopens_exact_custody_and_never_resends_accepted_operation(l
             assert peer.receiver.slot['h'] == peer.receiver.slot['a'] == '1'
         proc.kill()
         proc.join(10)
-        assert proc.exitcode == -signal.SIGKILL
+        assert proc.exitcode == -getattr(signal, "SIGKILL", signal.SIGTERM)
         peer.stage = None
         peer.release.set()
         reopened = kbc.connect(path)

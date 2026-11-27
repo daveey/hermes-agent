@@ -58,7 +58,7 @@ def test_direct_legacy_push_while_round_push_in_flight(tmp_path, monkeypatch):
         except RuntimeError as exc:
             outcome = f'{type(exc).__name__}: {exc}'
         print('DIRECT_OUTCOME', outcome)
-        with open(str(tmp_path / 'outcome.txt'), 'w') as fh:
+        with open(str(tmp_path / 'outcome.txt'), 'w', encoding='utf-8') as fh:
             fh.write(outcome)
     finally:
         release.set()

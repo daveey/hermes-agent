@@ -193,7 +193,7 @@ def test_hard_death_preserves_atomic_allocator_source_prune_and_ack_tuple(store,
         assert proc.is_alive()
         proc.kill()
         proc.join(10)
-        assert proc.exitcode == -signal.SIGKILL
+        assert proc.exitcode == -getattr(signal, "SIGKILL", signal.SIGTERM)
         with _reopen(conn, path) as reopened:
             if phase == 'committed':
                 after = journal.snapshot(reopened)
