@@ -1,11 +1,30 @@
 """Requested inventory emits bounded stage totals, never module paths or reasons."""
 from types import ModuleType
 import logging
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from hermes_cli import code_attestation as ca
 from hermes_cli import code_inventory_diagnostics as diagnostics
+
+
+def test_cold_attestation_import_loads_observer_before_ledger_activation(tmp_path):
+    source = '''
+import sys
+sys.path.insert(0, sys.argv[1])
+from hermes_cli import code_attestation as ca
+observer = sys.modules.get('hermes_cli.code_inventory_diagnostics')
+assert observer is not None, 'observer must load before any ledger can activate'
+assert ca.inventory_modules is observer.inventory_modules
+assert 'logging' not in sys.modules, 'observer must not initialize logging'
+'''
+    result = subprocess.run(
+        [sys.executable, '-I', '-S', '-B', '-c', source, str(Path(ca.__file__).parents[1])],
+        cwd=tmp_path, capture_output=True, text=True, check=False, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_actual_inventory_reports_stages_without_changing_module_observation(tmp_path, caplog):

@@ -24,6 +24,10 @@ import time
 from types import CodeType, FunctionType
 from typing import TYPE_CHECKING
 
+# Load the stdlib-only observer before an audit ledger can be activated. A lazy
+# import inside its first inventory would itself change the observed code graph.
+from hermes_cli.code_inventory_diagnostics import inventory_modules
+
 if TYPE_CHECKING:
     from hermes_cli.code_attestation_snapshot import DiagnosticSnapshot
 
@@ -1164,7 +1168,6 @@ class Attestation:
         return inventory_modules(self, deadline=deadline, progress=progress)
 
     def _inventory_modules(self, *, deadline=None):
-        from hermes_cli.code_inventory_diagnostics import inventory_modules
         return inventory_modules(self, deadline=deadline)
 
     def _audit(self, event, args):
