@@ -1596,8 +1596,10 @@ def _prepare_git_command(*, checkout_move=None) -> tuple[bool, list, bool]:
 
     # Before stash/branch logic: npm rewrites package-lock.json non-deterministically and
     # line-ending churn is machine-made dirt; both would otherwise force an autostash every update.
-    _discard_lockfile_churn(git_cmd, _m().PROJECT_ROOT, checkout_move=checkout_move)
-    _normalize_managed_eol(git_cmd, _m().PROJECT_ROOT, checkout_move=checkout_move)
+    from hermes_cli.update_precommit import preparing
+    if not preparing():  # deadline preparation stays read-only until fetch/target validation
+        _discard_lockfile_churn(git_cmd, _m().PROJECT_ROOT, checkout_move=checkout_move)
+        _normalize_managed_eol(git_cmd, _m().PROJECT_ROOT, checkout_move=checkout_move)
 
     origin_url = _m()._get_origin_url(git_cmd, _m().PROJECT_ROOT)
     is_fork = _is_fork(origin_url)
@@ -1932,6 +1934,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 target_ref = held
                 held_message = f"✓ Holding at this build until a newer {channel} release ships."
         _refuse_before_commit_point(git_cmd, target_ref, _windows_gateway_resume)
+        from hermes_cli.update_precommit import deferred_normalization
+        deferred_normalization(git_cmd, _m().PROJECT_ROOT, _moves_for(_windows_gateway_resume))
         # The upstream fetch/compare and the fork merge's off-tree work, before any gateway is paused.
         sync_upstream = is_fork and branch == "main" and not release_sha and not up_to
         _prepare_upstream_sync(git_cmd, _m().PROJECT_ROOT, enabled=sync_upstream, assume_yes=assume_yes,

@@ -975,6 +975,8 @@ def pause_at_commit_point() -> str | None:
     A failed or overlong drain refuses the move. The sticky verdict also fences later
     commit points in the same update; retrying requires a new run. Under ``--force`` a stop that
     has not settled (``StopUnsettled``) refuses as well, before git writes a file."""
+    from hermes_cli.update_precommit import commit_gate
+    commit_gate()  # includes direct branch-switch callers, before any stop/restart custody
     token = _RUN
     if token is None:
         return None

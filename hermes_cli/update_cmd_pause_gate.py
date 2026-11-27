@@ -29,6 +29,8 @@ def _checkout_move(token, *targets, paths=(), revert=False, pause_gate=True):
     # Stash/discard paths can write tracked code even when HEAD will not move.
     # Enter only after the local-changes prompt, but before any tree mutation.
     from hermes_cli import update_cmd_posix_pause as pause
+    from hermes_cli import update_precommit as precommit
+    precommit.commit_gate()
     if pause_gate and (refused := pause.pause_at_commit_point()):
         from hermes_cli.update_cmd import _record_stop
         print(f"↷ Update deferred: {refused}")
@@ -40,9 +42,11 @@ def _checkout_move(token, *targets, paths=(), revert=False, pause_gate=True):
     root = _pause_record.install_root() if pause_id and (targets or paths or revert) else None
     found = _pause_record.tree_state(root) if root else None
     if found is None:  # nothing paused, nothing bound, or not a git checkout: no tree gate to bind
+        precommit.before_checkout_write()
         yield step
         return
     paths = {*paths, *(found["dirty_at_pause"] or [] if revert else ())}
+    precommit.before_checkout_write()  # before the first durable move obligation, not after it
     baselines = token.setdefault("baselines", [])
     move_id = f"{pause_id}@{found['pre_sha']}"
     baseline = next((b for b in baselines if b.get("pre_sha") == found["pre_sha"]

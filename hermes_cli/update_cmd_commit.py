@@ -236,8 +236,12 @@ def arm_commit_point(git_cmd, root: Path, expected_sha: str, **move) -> str | No
     Linux/macOS gateways are paused first: this is every route's first checkout move.
     """
     from hermes_cli.update_cmd_posix_pause import pause_at_commit_point
+    from hermes_cli.update_precommit import commit_gate
+    commit_gate()
     if refused := pause_at_commit_point():
         return refused
+    from hermes_cli.update_precommit import before_checkout_write
+    before_checkout_write()  # expiry after pause must refuse BEFORE durable commit obligations
     try:
         arm_commit_obligations(root, expected_sha)
         arm_tree_move(git_cmd, root, **move)
