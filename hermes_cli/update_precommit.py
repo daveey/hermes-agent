@@ -49,6 +49,11 @@ def parse_deadline(raw: str) -> float:
     return float(deadline)
 
 
+def child_active() -> bool:
+    """True even after the channel closes: this process owns protocol custody."""
+    return _child_deadline is not None
+
+
 def preparing() -> bool:
     return _child_channel is not None and not _committed
 
@@ -94,14 +99,11 @@ def before_checkout_write() -> None:
     global _wrote
     if _child_deadline is None or _wrote:
         return
+    commit_gate()  # discovery may finish while still cancellable; first write cannot
     if clock() >= _child_deadline:
         print(f"↷ Update deferred: {REFUSAL}", flush=True)
         raise SystemExit(REFUSED_EXIT)
     _wrote = True
-
-
-class _PreparationCancelled(BaseException):
-    """A supervisor signal cancels preparation, never committed child custody."""
 
 
 def _terminate_uncommitted(proc: subprocess.Popen) -> None:
@@ -123,29 +125,32 @@ def supervise(command: list[str], deadline: float, env: dict[str, str]) -> int:
         return REFUSED_EXIT
     parent, child = socket.socketpair()
     with parent, child:
-        proc = subprocess.Popen([*command, str(child.fileno()), repr(deadline)], env=env,
-                                pass_fds=(child.fileno(),), start_new_session=True)  # detached-spawn: ok -- awaited; precommit group killed on timeout
-        child.close()
+        proc = None
         committed = False
         cancelling = False
         def interrupted(signum, frame):
             nonlocal cancelling
-            if not committed and not cancelling:
+            if not committed:
                 cancelling = True
-                raise _PreparationCancelled
+            # Flag rather than raise: a signal delivered after OS spawn but
+            # before Popen returns must not lose the child's cleanup handle.
             # Once custody is committed, termination cannot make the caller
             # release its inherited hold while the child is still installing.
         previous = {sig: signal.signal(sig, interrupted)
                     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}  # windows-footgun: ok -- POSIX protocol only
         try:
-            while proc.poll() is None:
+            proc = subprocess.Popen([*command, str(child.fileno()), repr(deadline)], env=env,
+                                    pass_fds=(child.fileno(),), start_new_session=True)  # detached-spawn: ok -- awaited; precommit group killed on timeout
+            child.close()
+            channel_open = True
+            while not cancelling and proc.poll() is None:
                 remaining = cancel_at - clock()
                 if remaining <= 0:
                     break
-                ready, _, _ = select.select([parent], [], [], min(remaining, 0.05))
+                ready, _, _ = select.select([parent] if channel_open else [], [], [], min(remaining, 0.05))
                 if ready:
                     request = parent.recv(1)
-                    if request == b"C" and clock() < cancel_at:
+                    if request == b"C" and not cancelling and clock() < cancel_at:
                         # Set BEFORE send: an ACK whose delivery is uncertain must
                         # never be followed by a parent deadline kill.
                         committed = True
@@ -158,16 +163,16 @@ def supervise(command: list[str], deadline: float, env: dict[str, str]) -> int:
                         break
                     # EOF is not a commitment. A child which closes the channel
                     # but stays alive is still cancellable at the original deadline.
-                    return proc.wait(timeout=max(0.001, cancel_at - clock()))
+                    channel_open = False
             if proc.returncode is not None:
                 return proc.returncode
-        except (OSError, subprocess.TimeoutExpired, _PreparationCancelled):
+        except (OSError, subprocess.TimeoutExpired):
             if committed:
                 return proc.wait()  # health: allow HX006 -- observation failure cannot withdraw committed custody
         finally:
             cancelling = True
             try:
-                if not committed and proc.poll() is None:
+                if proc is not None and not committed and proc.poll() is None:
                     _terminate_uncommitted(proc)
             finally:
                 for sig, handler in previous.items():

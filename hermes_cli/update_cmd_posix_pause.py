@@ -124,19 +124,30 @@ def arm_pause(*, no_gateway_restart: bool, force: bool = False) -> dict | None:
     _RUN = None
     if sys.platform == "win32" or no_gateway_restart:
         return None
-    from hermes_cli import update_pause_record as pause_record
+    from hermes_cli.update_precommit import preparing
     token = _empty_token()
-    try:
-        adopted, claims = pause_record.adopt_orphans()
-        if adopted is not None:
-            token = pause_record.record_pause({**token, "resume_needed": True}, adopted, claims)
-            token["platform"] = "posix"
-    except Exception as exc:  # health: allow BLE001 -- an unreadable record must not block the update; recovery retries it
-        print(f"  ⚠ Could not adopt gateways an earlier update paused: {exc}")
+    if preparing():
+        # Adoption itself acquires restart debt. Keep it out of the cancellable
+        # fetch/list phase; the late pause gate adopts into THIS same token.
+        token["precommit_adoption_pending"] = True
+    else:
+        _adopt_pause(token)
     if force:
         token["force"] = True  # ``hermes update --force``: stop at once, no drain (update_cmd_force_stop)
     _RUN = token
     return token
+
+
+def _adopt_pause(token: dict) -> None:
+    from hermes_cli import update_pause_record as pause_record
+    try:
+        adopted, claims = pause_record.adopt_orphans()
+        if adopted is not None:
+            recorded = pause_record.record_pause({**token, "resume_needed": True}, adopted, claims)
+            token.clear()
+            token.update(recorded, platform="posix")
+    except Exception as exc:  # health: allow BLE001 -- an unreadable record must not block the update; recovery retries it
+        print(f"  ⚠ Could not adopt gateways an earlier update paused: {exc}")
 
 
 def gateways_paused() -> bool:
@@ -975,8 +986,6 @@ def pause_at_commit_point() -> str | None:
     A failed or overlong drain refuses the move. The sticky verdict also fences later
     commit points in the same update; retrying requires a new run. Under ``--force`` a stop that
     has not settled (``StopUnsettled``) refuses as well, before git writes a file."""
-    from hermes_cli.update_precommit import commit_gate
-    commit_gate()  # includes direct branch-switch callers, before any stop/restart custody
     token = _RUN
     if token is None:
         return None
@@ -989,6 +998,17 @@ def pause_at_commit_point() -> str | None:
             except Exception as exc:  # health: allow BLE001 -- the replay builds it again when it runs
                 print(f"  ⚠ Could not prepare the restart environment for {entry['home']}: {exc}")
     return token["posix_pause_verdict"]
+
+
+def _commit_pause_inventory(token: dict) -> str | None:
+    """Read-only discovery ends here; orphan adoption/stop publication owns restart debt."""
+    from hermes_cli.update_precommit import commit_gate
+    commit_gate()
+    if token.pop("precommit_adoption_pending", False):
+        _adopt_pause(token)
+        if held := [u for u in token.get("posix_units") or [] if u.get("stop_unsettled") and unit_stop_pending(u)]:
+            return _abort_unsettled(token, f"{_names(held)} is still stopping from an earlier `hermes update --force`")
+    return None
 
 
 def _pause(token: dict) -> str | None:
@@ -1030,6 +1050,8 @@ def _pause(token: dict) -> str | None:
             return f"gateways that cannot be stopped for the update ({why}); the checkout was not changed"
     for line in notices + more:
         print(line)
+    if refused := _commit_pause_inventory(token):
+        return refused
     from hermes_cli.update_gateway_fence import parked_launchd_launcher
     # Do not acquire restart custody for a job already stopped by the caller's fence.
     supervised = [entry for entry in units + jobs if not parked_launchd_launcher(entry)]

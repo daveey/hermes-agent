@@ -30,7 +30,6 @@ def _checkout_move(token, *targets, paths=(), revert=False, pause_gate=True):
     # Enter only after the local-changes prompt, but before any tree mutation.
     from hermes_cli import update_cmd_posix_pause as pause
     from hermes_cli import update_precommit as precommit
-    precommit.commit_gate()
     if pause_gate and (refused := pause.pause_at_commit_point()):
         from hermes_cli.update_cmd import _record_stop
         print(f"↷ Update deferred: {refused}")

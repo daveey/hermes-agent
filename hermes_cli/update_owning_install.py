@@ -67,6 +67,12 @@ def retarget_to_owning_install(project_root: Path) -> None:
     owner = owning_install_root(project_root)
     if owner is None:
         return
+    # The supervised child cannot hand its checkout/custody gate to an ordinary
+    # nested updater: the supervisor would still consider that install cancellable.
+    from hermes_cli import update_precommit
+    if update_precommit.child_active():
+        print(f"↷ Update deferred: {update_precommit.REFUSAL} (owning-install redirect requires an idle repair)")
+        raise SystemExit(update_precommit.REFUSED_EXIT)
     print(f"⚠ {owner / Path(sys.prefix).name} is running the checkout at {project_root}, not its own code.")
     print(f"→ Updating {owner} with its own updater; this also points its venv back at it.")
     sys.stdout.flush()

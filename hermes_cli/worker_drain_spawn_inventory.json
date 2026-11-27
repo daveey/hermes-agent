@@ -980,6 +980,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/update_precommit.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/update_owning_install.py": {
    "direct": 1,
    "routed": 0,

@@ -1934,12 +1934,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 target_ref = held
                 held_message = f"✓ Holding at this build until a newer {channel} release ships."
         _refuse_before_commit_point(git_cmd, target_ref, _windows_gateway_resume)
-        from hermes_cli.update_precommit import deferred_normalization
-        deferred_normalization(git_cmd, _m().PROJECT_ROOT, _moves_for(_windows_gateway_resume))
         # The upstream fetch/compare and the fork merge's off-tree work, before any gateway is paused.
         sync_upstream = is_fork and branch == "main" and not release_sha and not up_to
         _prepare_upstream_sync(git_cmd, _m().PROJECT_ROOT, enabled=sync_upstream, assume_yes=assume_yes,
                                input_fn=gw_input_fn)
+        from hermes_cli.update_precommit import deferred_normalization
+        deferred_normalization(git_cmd, _m().PROJECT_ROOT, _moves_for(_windows_gateway_resume))
         _plan = _prepare_checkout_for_update(
             git_cmd, branch, current_branch, is_fork=is_fork, assume_yes=assume_yes,
             gateway_mode=gateway_mode, gw_input_fn=gw_input_fn, switch_branch=opts.switch_branch,

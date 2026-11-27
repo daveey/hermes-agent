@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
@@ -85,6 +86,17 @@ def test_expiry_after_first_write_does_not_abandon_install(fork, monkeypatch):
     assert fork.completed[-1]["expected_sha"] == fork.c
 
 
+def test_deadline_child_cannot_redirect_to_unsupervised_updater(monkeypatch, tmp_path, capsys):
+    from hermes_cli import update_owning_install as owning
+    monkeypatch.setattr(precommit, "_child_deadline", precommit.clock() + 60)
+    monkeypatch.setattr(owning, "owning_install_root", lambda _: tmp_path / "owner")
+    monkeypatch.setattr(subprocess, "call", lambda *a, **k: pytest.fail("unsupervised updater spawned"))
+    with pytest.raises(SystemExit) as exc:
+        owning.retarget_to_owning_install(tmp_path)
+    assert exc.value.code == precommit.REFUSED_EXIT
+    assert precommit.REFUSAL in capsys.readouterr().out
+
+
 def _command(fork, mode):
     root = Path(__file__).resolve().parents[2]
     script = str(Path(__file__).resolve())
@@ -118,6 +130,29 @@ def test_real_child_live_apply_success_outlives_deadline_in_custody(fork):
     assert (fork.root.parent / "completed").read_text() == fork.c
 
 
+@pytest.mark.live_system_guard_bypass  # disposable Git fixture, marker-checked driver; no live updater effects
+
+def test_production_command_entry_composes_deadline_and_real_child(fork, tmp_path):
+    source = Path(__file__).resolve().parents[2]
+    (fork.root / ".precommit-fixture").touch()
+    # The marker is fixture infrastructure, not a local edit to stash.
+    helpers.git(fork.root, "add", ".precommit-fixture")
+    helpers.git(fork.root, "commit", "-qm", "fixture marker")
+    before = helpers.head(fork)
+    deadline = precommit.clock() + 10
+    env = dict(os.environ, HERMES_HOME=str(tmp_path / "home"),
+               HERMES_UPDATE_PRECOMMIT_DEADLINE_V1=json.dumps(
+                   {"version": 1, "clock": "CLOCK_MONOTONIC", "deadline": deadline}))
+    result = subprocess.run([sys.executable, str(source / "tests/hermes_cli/precommit_driver.py"),
+        str(source), str(fork.root), "fetch", "update", "--yes", "--up-to", fork.c],
+        env=env, capture_output=True, text=True, encoding="utf-8", timeout=15, check=False)
+    assert result.returncode == precommit.REFUSED_EXIT, result.stdout + result.stderr
+    assert (fork.root.parent / "fetch-entered").exists(), result.stdout + result.stderr
+    assert precommit.clock() < deadline
+    assert helpers.head(fork) == before
+    assert precommit.REFUSAL in result.stdout
+
+
 def test_supervisor_does_not_grant_late_commit(tmp_path):
     code = ("import socket,sys,threading; s=socket.socket(fileno=int(sys.argv[1])); "
             "threading.Event().wait(10); s.sendall(b'C'); "
@@ -125,6 +160,80 @@ def test_supervisor_does_not_grant_late_commit(tmp_path):
     start = precommit.clock()
     assert precommit.supervise([sys.executable, "-c", code], start + 0.2, dict(os.environ)) == precommit.REFUSED_EXIT
     assert precommit.clock() - start < 2
+
+
+def test_signal_during_spawn_keeps_child_cleanup_handle(monkeypatch):
+    real_spawn, children = subprocess.Popen, []
+    def spawn(*args, **kwargs):
+        proc = real_spawn(*args, **kwargs)
+        children.append(proc)
+        signal.raise_signal(signal.SIGTERM)
+        return proc
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    result = precommit.supervise([sys.executable, "-c", "import threading; threading.Event().wait(60)"],
+                                precommit.clock() + 30, dict(os.environ))
+    assert result == precommit.REFUSED_EXIT
+    assert len(children) == 1 and children[0].poll() is not None
+
+
+@pytest.mark.parametrize("message", [b"", b"X"])
+def test_eof_or_invalid_request_never_commits(message, tmp_path):
+    marker = tmp_path / "completed"
+    code = ("import socket,sys,threading; s=socket.socket(fileno=int(sys.argv[1])); "
+            f"s.sendall({message!r}); s.close(); threading.Event().wait(3); "
+            f"open({str(marker)!r}, 'w').write('bad')")
+    assert precommit.supervise([sys.executable, "-c", code], precommit.clock() + 5.5,
+                               dict(os.environ)) == precommit.REFUSED_EXIT
+    assert not marker.exists()
+
+
+def test_signal_after_commit_ack_keeps_custody_until_child_exit(tmp_path):
+    marker = tmp_path / "completed"
+    code = ("import os,signal,socket,sys,threading; s=socket.socket(fileno=int(sys.argv[1])); "
+            "s.sendall(b'C'); assert s.recv(1)==b'Y'; os.kill(os.getppid(),signal.SIGTERM); "
+            "threading.Event().wait(1); "
+            f"open({str(marker)!r}, 'w').write('settled')")
+    deadline = precommit.clock() + 5.5
+    assert precommit.supervise([sys.executable, "-c", code], deadline, dict(os.environ)) == 0
+    assert marker.read_text() == "settled"
+
+
+def test_pause_adoption_waits_until_after_inventory_and_commit_ack(monkeypatch):
+    from hermes_cli import update_cmd_posix_pause as pause, update_pause_record as record
+    events = []
+    monkeypatch.setattr(precommit, "_child_channel", object())
+    monkeypatch.setattr(precommit, "_child_deadline", precommit.clock() + 60)
+    monkeypatch.setattr(record, "adopt_orphans", lambda: events.append("adopt") or (None, []))
+    monkeypatch.setattr(pause, "_discover_systemd", lambda: events.append("inventory") or [])
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_discover_bare", lambda *_: ([], []))
+    monkeypatch.setattr(pause, "_left_running", lambda units, jobs: (units, jobs, []))
+    monkeypatch.setattr(pause, "_deferral_streak", lambda *_: None)
+    monkeypatch.setattr(precommit, "commit_gate", lambda: events.append("ack"))
+    token = pause.arm_pause(no_gateway_restart=False)
+    assert events == [] and token["precommit_adoption_pending"]
+    assert pause.pause_at_commit_point() is None
+    assert events == ["inventory", "ack", "adopt"]
+    assert "precommit_adoption_pending" not in token
+
+
+def test_expired_inventory_never_adopts_or_stops(monkeypatch):
+    from hermes_cli import update_cmd_posix_pause as pause, update_pause_record as record
+    monkeypatch.setattr(precommit, "_child_channel", object())
+    monkeypatch.setattr(precommit, "_child_deadline", precommit.clock() + 60)
+    monkeypatch.setattr(record, "adopt_orphans", lambda: pytest.fail("cancellable phase adopted restart debt"))
+    def inventory():
+        precommit._child_deadline = precommit.clock() - 1
+        return []
+    monkeypatch.setattr(pause, "_discover_systemd", inventory)
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_discover_bare", lambda *_: ([], []))
+    monkeypatch.setattr(pause, "_left_running", lambda units, jobs: (units, jobs, []))
+    monkeypatch.setattr(pause, "_stop_gateways", lambda *_a, **_k: pytest.fail("expired inventory stopped gateway"))
+    pause.arm_pause(no_gateway_restart=False)
+    with pytest.raises(SystemExit) as exc:
+        pause.pause_at_commit_point()
+    assert exc.value.code == precommit.REFUSED_EXIT
 
 
 def _child():
