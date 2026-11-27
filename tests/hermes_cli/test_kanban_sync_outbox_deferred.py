@@ -231,6 +231,11 @@ def test_after_round_details_are_nonadditive(board, monkeypatch):
         assert sync_cpu.step(age.after_round, [result], [("default", path)], awake_fn=lambda: True) == []
         # Inclusive parts of the step: published with outer=False, so they add nothing to the thread's
         # accounted CPU, the step or sync.cpu.total/loop (the collector's total-minus-board value).
+        # Nested ``mark`` parts (kanban_sync_cpu.MARK_PARTS) publish alongside, also outer=False; they are
+        # asserted separately so this list still pins the original detail sequence.
+        part_marks = [d for d in details if d[0].split("after_round.", 1)[1] in sync_cpu.MARK_PARTS]
+        assert all(outer is False for _, outer in part_marks)
+        details = [d for d in details if d not in part_marks]
         assert details == [
             ("sync.detail/after_round.awake", False),
             ("sync.detail/after_round.query_rebaseline", False),

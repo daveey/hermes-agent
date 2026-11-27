@@ -97,17 +97,22 @@ def _sample_full(path: Path) -> Optional[tuple[str, float]]:
     """Original clock, backlog and sendability read for one board that is not structurally empty."""
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_sync_backlog as backlog
-    with kbc.connect_closing(path) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' "
-            "AND (retry_after IS NULL OR retry_after <= ?) ORDER BY created_at, rowid",
-            (int(time.time()),))]
-        if backlog.behind(path):
-            rows, _ = backlog.sendable_before_head(
-                conn, _NoBoardReads(), "", rows, backlog.evidence(path))
-        row = next((r for r in rows if r["retry_after"] is None), None)
-        return (row["op_id"], _since(row["created_at"])) if row else None
+    from hermes_cli import kanban_sync_cpu as sync_cpu
+    with sync_cpu.marked_cm(kbc.connect_closing(path), "full.acquire", "full.close") as conn:
+        return sync_cpu.mark("full.query", _full_query, conn, path, backlog)
+
+
+def _full_query(conn, path, backlog):
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' "
+        "AND (retry_after IS NULL OR retry_after <= ?) ORDER BY created_at, rowid",
+        (int(time.time()),))]
+    if backlog.behind(path):
+        rows, _ = backlog.sendable_before_head(
+            conn, _NoBoardReads(), "", rows, backlog.evidence(path))
+    row = next((r for r in rows if r["retry_after"] is None), None)
+    return (row["op_id"], _since(row["created_at"])) if row else None
 
 
 def _sample(path: Path) -> Optional[tuple[str, float]]:

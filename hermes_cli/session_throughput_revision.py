@@ -18,6 +18,8 @@ import re
 import sqlite3
 from typing import Optional
 
+from hermes_cli import kanban_sync_cpu as _sync_cpu
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -357,18 +359,28 @@ def _install_inner(conn: sqlite3.Connection) -> bool:
 def read_stamp(conn: sqlite3.Connection) -> Optional[tuple]:
     """(schema_version, epoch, rev, nonce, floor) when tracking is fully valid, else None."""
     try:
-        if not _supported_shape(conn) or _tables_exact(conn) is not True or not _triggers_exact(conn):
+        if (not _sync_cpu.mark("stamp.shape", _supported_shape, conn)
+                or _sync_cpu.mark("stamp.tables", _tables_exact, conn) is not True
+                or not _sync_cpu.mark("stamp.triggers", _triggers_exact, conn)):
             return None
-        if not _invariant_ok(conn):
+        if not _sync_cpu.mark("stamp.invariant", _invariant_ok, conn):
             return None
-        row = conn.execute(
-            "SELECT version, epoch, rev, nonce, floor FROM throughput_revision WHERE id = 1").fetchone()
-        if row is None or not anchor_matches(conn, row[2], row[3]):
+        row = _sync_cpu.mark("stamp.row", _stamp_row, conn)
+        if row is None:
             return None
         schema = conn.execute("PRAGMA schema_version").fetchone()[0]
         return (schema, *tuple(row)[1:])
     except sqlite3.Error:
         return None
+
+
+def _stamp_row(conn: sqlite3.Connection):
+    """The stamp row when its ring anchor matches, else None."""
+    row = conn.execute(
+        "SELECT version, epoch, rev, nonce, floor FROM throughput_revision WHERE id = 1").fetchone()
+    if row is None or not anchor_matches(conn, row[2], row[3]):
+        return None
+    return row
 
 
 def anchor_matches(conn: sqlite3.Connection, rev: int, nonce: bytes) -> bool:

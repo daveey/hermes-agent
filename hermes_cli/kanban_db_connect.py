@@ -812,6 +812,7 @@ def _open_configured(path: Path, under_lock, *, check_same_thread: bool = True) 
     WAL setup can take an exclusive lock while SQLite creates sidecars for a
     fresh DB, and concurrent gateway startup threads must not race before
     ``_INITIALIZED_PATHS`` is populated. Closed if anything raises."""
+    from hermes_cli import kanban_sync_cpu as _sync_cpu
     conn = _sqlite_connect(path, check_same_thread=check_same_thread)
     try:
         conn.row_factory = sqlite3.Row
@@ -820,28 +821,32 @@ def _open_configured(path: Path, under_lock, *, check_same_thread: bool = True) 
             # WAL doesn't work on network filesystems; the helper falls back to
             # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
             from hermes_state_wal import apply_wal_with_fallback
-            apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
+            _sync_cpu.mark("acq.wal", apply_wal_with_fallback, conn, db_label=f"kanban.db ({path.name})")
             # A fresh board only becomes WAL here: (re)apply the OFD lock guard now, so a stray
             # in-process close can't strand this handle on a deleted generation. [daveey]
-            _kanban_lockguard.guard(conn)
+            _sync_cpu.mark("acq.guard2", _kanban_lockguard.guard, conn)
             # FULL (not NORMAL): fsync before each checkpoint to narrow the
             # crash window that can leave a b-tree page header torn.
-            conn.execute("PRAGMA synchronous=FULL")
-            conn.execute("PRAGMA wal_autocheckpoint=100")
-            # Bound the WAL file: the periodic explicit checkpoint is PASSIVE
-            # (never truncates), so SQLite trims -wal to this limit on the
-            # writer's natural post-checkpoint reset.
-            conn.execute("PRAGMA journal_size_limit=8388608")
-            conn.execute("PRAGMA foreign_keys=ON")
-            # Zero freed pages so a later torn write can't expose stale cells.
-            conn.execute("PRAGMA secure_delete=ON")
-            # Surface corrupt cells as read errors instead of silent wrong data.
-            conn.execute("PRAGMA cell_size_check=ON")
+            _sync_cpu.mark("acq.pragmas", _configure_pragmas, conn)
             out = under_lock(conn)
     except Exception:
         conn.close()
         raise
     return conn, out
+
+
+def _configure_pragmas(conn):
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA wal_autocheckpoint=100")
+    # Bound the WAL file: the periodic explicit checkpoint is PASSIVE
+    # (never truncates), so SQLite trims -wal to this limit on the
+    # writer's natural post-checkpoint reset.
+    conn.execute("PRAGMA journal_size_limit=8388608")
+    conn.execute("PRAGMA foreign_keys=ON")
+    # Zero freed pages so a later torn write can't expose stale cells.
+    conn.execute("PRAGMA secure_delete=ON")
+    # Surface corrupt cells as read errors instead of silent wrong data.
+    conn.execute("PRAGMA cell_size_check=ON")
 
 
 def _refuse_dead_board_resurrection(path: Path, board: Optional[str]) -> None:

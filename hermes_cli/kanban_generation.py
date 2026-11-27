@@ -245,10 +245,11 @@ def prepare_connection(conn, timeout):
     lets existing readers close without waiting for a native writer's budget.
     """
     from hermes_cli.kanban_lockguard import guard
+    from hermes_cli import kanban_sync_cpu as sync_cpu
 
     conn.execute("PRAGMA busy_timeout=0")
-    guard(conn, strict=True)
-    remember(conn, strict=True)
+    sync_cpu.mark("prepare.guard", guard, conn, strict=True)
+    sync_cpu.mark("prepare.remember", remember, conn, strict=True)
     conn.execute(f"PRAGMA busy_timeout={max(0, int(float(timeout) * 1000))}")
 
 

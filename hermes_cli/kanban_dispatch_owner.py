@@ -19,6 +19,7 @@ def connect_with_identity(path, *, existing_only=False, generation_only=False, *
     from hermes_cli.kanban_db_connect import _dispatch_tick_lock
     from hermes_cli.kanban_generation import lifecycle_access, prepare_connection, recover, retry_open
     from hermes_cli.sqlite_safe_read import connect_tracked, _tracking_factory
+    from hermes_cli import kanban_sync_cpu as _sync_cpu
 
     canonical = Path(path).resolve()
     # Keep guard release outside the tracking close lock, as in the previous
@@ -30,18 +31,19 @@ def connect_with_identity(path, *, existing_only=False, generation_only=False, *
 
     def open_once(remaining):
         key = canonical.with_name(canonical.name + '.generation') if generation_only else canonical
-        with lifecycle_access(canonical, remaining) as lock, _dispatch_tick_lock(
-                key, create_parent=not generation_only) as held:
+        with _sync_cpu.marked_cm(lifecycle_access(canonical, remaining), "acq.lifecycle") as lock, \
+                _sync_cpu.marked_cm(_dispatch_tick_lock(key, create_parent=not generation_only),
+                                    "acq.lifecycle") as held:
             if generation_only and not held:
                 raise sqlite3.OperationalError('database is locked: board generation busy')
-            recover(str(canonical))
+            _sync_cpu.mark("acq.recover", recover, str(canonical))
             # Observer opens must never resurrect an archived/deleted board.
             database = canonical.as_uri() + '?mode=rw' if existing_only else str(canonical)
             options = {**kwargs, 'uri': True} if existing_only else kwargs
-            conn = connect_tracked(database, wait_for_tracking=False, **options)
+            conn = _sync_cpu.mark("acq.connect_tracked", connect_tracked, database, wait_for_tracking=False, **options)
             conn._hermes_lifecycle_lock = lock
             try:
-                prepare_connection(conn, timeout)
+                _sync_cpu.mark("acq.prepare", prepare_connection, conn, timeout)
                 stat = canonical.stat() if held else None
                 conn._dispatch_identity = (stat.st_dev, stat.st_ino) if stat else None
                 conn._dispatch_open_contended = not held

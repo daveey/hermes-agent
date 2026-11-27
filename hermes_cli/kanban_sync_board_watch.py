@@ -41,8 +41,11 @@ def schema_rows(conn: sqlite3.Connection) -> list:
     then the rows statement makes SQLite parse it again. Kept as rows and compared with ``==``:
     hashing them cost four times the read (0.63 ms against 0.16 ms for the hub board's 239
     rows, 2026-11-22)."""
-    return (conn.execute("PRAGMA schema_version").fetchall()
-            + conn.execute("SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY rowid").fetchall())
+    cookie = _sync_cpu.mark("schema.cookie", lambda: conn.execute("PRAGMA schema_version").fetchall())
+    rows = _sync_cpu.mark(
+        "schema.rows",
+        lambda: conn.execute("SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY rowid").fetchall())
+    return cookie + rows
 
 
 def parsed_from(conn: sqlite3.Connection, real: str) -> Optional[list]:
@@ -55,7 +58,7 @@ def parsed_from(conn: sqlite3.Connection, real: str) -> Optional[list]:
     live board the main file's copy never changes after that. Read with a lock-safe ``pread``."""
     if not hasattr(os, "pread"):  # no lock-safe header evidence on this platform: never keep
         return None
-    header = pread_lock_safe(real, 44, 4)
+    header = _sync_cpu.mark("schema.header", pread_lock_safe, real, 44, 4)
     return None if header is None else [header] + schema_rows(conn)
 
 
