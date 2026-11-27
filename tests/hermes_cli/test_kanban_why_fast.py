@@ -97,6 +97,31 @@ def test_snapshot_reader_fallbacks_and_parity(board, monkeypatch):
         assert fast.read_answer(path, tid) is None
 
 
+@pytest.mark.parametrize("current_status", ["running", "done", "scheduled", "archived"])
+def test_canonical_reader_rejects_changed_status_like_fast_reader(board, monkeypatch, current_status):
+    """A worker can claim after the hub tick; the saved ready stop is no longer current."""
+    from hermes_cli import kanban_why_fast as fast
+    from hermes_cli import kanban_governors_cli as cli
+
+    helpers._usage(monkeypatch, [helpers.RESERVE + 7])
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="claimed after recorded stop", assignee="default")
+        helpers._tick(conn)
+        path = governors._db_path(conn)
+        original = governors.snapshot_path(conn).read_bytes()
+        first = fast.read_answer(path, tid)
+        assert first is not None and first["status"] == "ready"
+        assert cli.why(conn, tid)["source"] == "snapshot"
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (current_status, tid))
+        conn.commit()
+        assert fast.read_answer(path, tid) is None
+        assert governors.card(conn, tid) is None
+        answer = cli.why(conn, tid)
+        assert answer["source"] == "dry_run"
+        assert answer["status"] == current_status
+        assert governors.snapshot_path(conn).read_bytes() == original
+
+
 @pytest.mark.parametrize("json_flags", [[], ["--json"]])
 def test_fast_cli_defers_fences_and_unsupported_flags(monkeypatch, tmp_path, json_flags):
     from hermes_cli import kanban_why_fast as fast

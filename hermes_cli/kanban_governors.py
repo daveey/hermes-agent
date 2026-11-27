@@ -955,6 +955,9 @@ def card(conn: Any, task_id: str, *, now: Optional[float] = None) -> Optional[di
     found = (doc.get("cards") or {}).get(task_id) if doc else None
     if doc is None or not isinstance(found, dict):
         return None
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or row[0] != found.get("status"):
+        return None  # A later claim/lifecycle transition invalidates this card's recorded stop.
     age = (time.time() if now is None else now) - float(doc.get("tick_at") or 0)
     known = _BY_ID.get(found.get("governor"))
     return {**found, "task_id": task_id, "board": doc.get("board"), "tick_at": doc.get("tick_at"),
