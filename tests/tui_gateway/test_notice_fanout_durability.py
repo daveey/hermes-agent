@@ -59,7 +59,7 @@ def test_unknown_hosting_keeps_cursor(db, monkeypatch):
 
     @contextlib.contextmanager
     def missing(chat):
-        yield None, None
+        yield helpers.ku.SessionLookup(unavailable=True)
 
     with monkeypatch.context() as m:
         m.setattr(helpers.ku, "chat_hosted_here", lambda chat: False)
@@ -320,7 +320,7 @@ def test_incomplete_action_keeps_cursor(db, monkeypatch, failure):
         if failure == "missing_db":
             @contextlib.contextmanager
             def missing(chat):
-                yield None, None
+                yield helpers.ku.SessionLookup(unavailable=True)
             opener = missing
         elif failure == "stale_write":
             def broken(*args):

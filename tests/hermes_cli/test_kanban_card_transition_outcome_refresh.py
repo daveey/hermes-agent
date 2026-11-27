@@ -131,7 +131,7 @@ def test_refresh_chats_refreshes_the_tip_with_the_card_change_trigger(monkeypatc
 
     @contextlib.contextmanager
     def find(chat):
-        yield (object(), "tip-of-" + chat)
+        yield ku.SessionLookup(object(), "tip-of-" + chat)
 
     monkeypatch.setattr(ku, "find_session_db", find)
     monkeypatch.setattr(notice_fanout, "chat_skip_reason", lambda db, chat: "archived" if chat == "old" else None)

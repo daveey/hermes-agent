@@ -67,6 +67,46 @@ def test_real_projection_stage_exception_custody(remote, monkeypatch, failure):
     assert not any('.lookup.' in key or '.outcome_refresh.' in key for key in rows)
 
 
+@pytest.mark.parametrize('step', ['load', 'lookup', 'refresh', 'ack', 'prints', 'after_poll', 'health'])
+def test_real_stage_failure_entry_and_completed_custody(remote, monkeypatch, step):
+    from contextlib import contextmanager
+    from hermes_cli import fact_links_health
+    from tui_gateway import notice_fanout_state as state
+    remote['cards'] = [dict(board='board', id='card', key='owner/board/card', status='blocked', session='chat')]
+    def fail(*args, **kwargs):
+        raise ValueError(step)
+    @contextmanager
+    def opener(chat):
+        if step == 'lookup':
+            fail()
+        yield remote['db'], chat
+    targets = {'load': (state, 'load_remote'), 'ack': (state, 'ack_remote'),
+               'prints': (nf, '_known_prints'), 'health': (fact_links_health, 'acknowledge')}
+    if step in targets:
+        monkeypatch.setattr(*targets[step], fail)
+    if step == 'refresh':
+        monkeypatch.setattr('hermes_state_outcome.refresh_outcomes_quietly', fail)
+    if step == 'after_poll':
+        remote['polls'][1] = ValueError(step)
+    if step in ('lookup', 'refresh'):
+        assert nf._remote_change_pass(opener).incomplete
+    else:
+        with pytest.raises(ValueError):
+            nf._remote_change_pass(opener)
+    stages = {key.removeprefix('unloaded.diag.card_stage.'): row['runs']
+              for key, row in la.counters().items() if key.startswith('unloaded.diag.card_stage.')}
+    assert stages['projection.complete'] == 1
+    assert stages['remote_flow.' + ('complete' if step in ('lookup', 'refresh') else 'exception')] == 1
+    assert stages.get('lookup.exception', 0) == int(step in ('lookup', 'refresh'))
+    assert stages.get('outcome_refresh.exception', 0) == int(step == 'refresh')
+    assert stages.get('outcome_refresh.complete', 0) == int(step not in ('load', 'lookup', 'refresh'))
+    assert stages.get('certification.exception', 0) == int(step in ('prints', 'after_poll'))
+    assert stages.get('certification.complete', 0) == int(step == 'health')
+    assert stages.get('health.exception', 0) == int(step == 'health')
+    for name in diag.STAGES:
+        assert sum(count for key, count in stages.items() if key.startswith(name + '.')) <= 1
+
+
 def test_stage_labels_bounded_and_parent_resumes_after_failure():
     la.reset()
     with diag.Stage('dispatch'):

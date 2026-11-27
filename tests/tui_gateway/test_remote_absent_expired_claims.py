@@ -60,6 +60,34 @@ def test_T1_expired_absent_claim_settles_once_with_warning(claim, caplog):
     assert all(value in warnings[0].getMessage() for value in (REF, STATE, CHAT, 't_expired'))
 
 
+def test_T1_settlement_clears_real_gate_pending_preserves_healthy_claim(claim, monkeypatch):
+    from types import SimpleNamespace
+    from hermes_cli import kanban_origin
+    from tui_gateway import kanban_unloaded_gates as gates, kanban_replica_observer
+    ledger, source = claim
+    execute(claim, 'INSERT INTO notices (session,ref,state,at,delivered,holder_pid,holder_start) '
+                    'VALUES (?,?,?,?,0,2,20)', ('healthy-chat', 'worker/default/default/t_healthy', STATE, NOW))
+    with sqlite3.connect(ledger) as conn:
+        before = conn.execute('SELECT * FROM notices WHERE session=?', ('healthy-chat',)).fetchone()
+    monkeypatch.setattr(kanban_origin, '_hub_db', lambda: source)
+    monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ('gw',))
+    stamp = SimpleNamespace(ident='source', generation=1, signature=1)
+    monkeypatch.setattr(kanban_replica_observer, 'fingerprint', lambda path: stamp)
+    monkeypatch.setattr(notices, 'ledger_path', lambda: ledger)
+    monkeypatch.setattr(notices, '_woken', set())
+    monkeypatch.setattr(gates, '_replica_token', lambda *args: 1)
+    monkeypatch.setattr(notices, '_sweep_snapshot', lambda *args: ([], {}))
+    gates.reset_for_tests()
+    try:
+        assert gates._remote().pending
+        assert run(claim) == 1
+        assert not gates._remote().pending
+        with sqlite3.connect(ledger) as conn:
+            assert conn.execute('SELECT * FROM notices WHERE session=?', ('healthy-chat',)).fetchone() == before
+    finally:
+        gates.reset_for_tests()
+
+
 @pytest.mark.parametrize(('state_age', 'observation_age', 'settled'), [(80, 7, False), (7, 80, True)])
 def test_T2_observation_not_state_clock(claim, state_age, observation_age, settled):
     execute(claim, 'UPDATE notices SET at=?', (NOW - state_age * HOUR,))
@@ -190,7 +218,19 @@ def test_T9_writer_lock_acquired_before_decisive_read(claim, monkeypatch):
 # ---- additional R5 coverage: T4 errors, T5 holder race, T7 public custody, T9 two-connection races ----
 import pathlib
 import threading
-import time
+
+
+def blocked_peer_insert(claim, ready, outcome):
+    """Prove lock exclusion before attempting the ordinary waiting writer."""
+    with sqlite3.connect(claim[0], timeout=0) as conn:
+        with pytest.raises(sqlite3.OperationalError, match='locked'):
+            conn.execute('INSERT INTO observations VALUES (?,?,?,?)',
+                         (str(claim[1]), HUB_ALIAS, STATE, NOW))
+    ready.set()
+    with sqlite3.connect(claim[0], timeout=5) as conn:
+        conn.execute('INSERT INTO observations VALUES (?,?,?,?)',
+                     (str(claim[1]), HUB_ALIAS, STATE, NOW))
+        outcome.append('inserted')
 
 HUB_ALIAS = 'hub/default/default/t_expired'
 
@@ -432,20 +472,13 @@ def test_T9_alias_claim_inserted_before_acquisition_vetoes(claim, monkeypatch, c
 
 def test_T9_after_acquisition_peer_alias_waits_then_wins_after_commit(claim, monkeypatch):
     """A real peer thread inserts a young alias after BEGIN IMMEDIATE: it blocks, then lands after the commit."""
-    outcome, started = [], threading.Event()
-
-    def peer():
-        started.set()
-        with sqlite3.connect(claim[0], timeout=5) as conn:
-            conn.execute('INSERT INTO observations VALUES (?,?,?,?)', (str(claim[1]), HUB_ALIAS, STATE, NOW))
-            outcome.append('inserted')
-    thread = threading.Thread(target=peer)
+    outcome, ready = [], threading.Event()
+    thread = threading.Thread(target=blocked_peer_insert, args=(claim, ready, outcome))
 
     def start_once():
-        if not started.is_set():
+        if not ready.is_set():
             thread.start()
-            started.wait(2)
-            time.sleep(0.3)  # the peer is now waiting on the held write lock
+            assert ready.wait(2), 'peer did not observe the held writer lock'
             assert thread.is_alive() and not outcome
     hooked(monkeypatch, on_select=start_once)
     assert run(claim) == 1  # decision made while the young alias could not yet exist
@@ -458,18 +491,13 @@ def test_T9_after_acquisition_peer_alias_waits_then_wins_after_commit(claim, mon
 
 
 def test_T9_after_acquisition_rollback_releases_peer(claim, monkeypatch):
-    outcome = []
-
-    def peer():
-        with sqlite3.connect(claim[0], timeout=5) as conn:
-            conn.execute('INSERT INTO observations VALUES (?,?,?,?)', (str(claim[1]), HUB_ALIAS, STATE, NOW))
-            outcome.append('inserted')
-    thread = threading.Thread(target=peer)
+    outcome, ready = [], threading.Event()
+    thread = threading.Thread(target=blocked_peer_insert, args=(claim, ready, outcome))
 
     def start():
-        if not thread.is_alive() and not outcome:
+        if not ready.is_set():
             thread.start()
-            time.sleep(0.2)
+            assert ready.wait(2), 'peer did not observe the held writer lock'
 
     def fail(*args):
         raise sqlite3.OperationalError('injected')
