@@ -39,20 +39,25 @@ def forced(scope: tuple[str, ...], part: str) -> bool:
     return parts is None or part in parts
 
 
-def pass_links(scope: tuple[str, ...], project):
-    """One forced links projection per holder pass. [daveey]
+def pass_links(scope: tuple[str, ...], project, published):
+    """One forced links projection per holder pass, while it is still the published one. [daveey]
 
     ``force_read.links_pass`` is a dict only inside one ``kanban_annotation_host._event_refresh`` scope read. The
     counts and each waiting source (chat-closeout) forced their own ledger projection in that pass: 480 strict
-    projections for 246 forced passes on the hub serve, each under ``_links_lock`` (t_01a20286f9f3f262). The pass is
-    one snapshot, as ``one_annotation_snapshot`` already is for a request: a write during it wakes the holder again.
-    Outside a pass (the memo is None) every forced read still projects; a failed projection is never kept."""
+    projections for 246 forced passes on the hub serve, each under ``_links_lock`` (t_01a20286f9f3f262).
+    Outside a pass (the memo is None) every forced read still projects; a failed projection is never kept.
+
+    The pass's entry is shared only while ``published()`` (the scope's entry in ``_links_cache``) is that same
+    object. Once another thread has published a newer projection the forced read projects again, so a forced read
+    never returns an entry older than the published one. chat-closeout's cross-pass gate relies on that: an entry
+    that is not the one it saw under ``_links_lock`` was projected after it read its inputs (PR #4643 review)."""
     held = getattr(force_read, "links_pass", None)
     if held is None:
         return project()
-    if scope not in held:
-        held[scope] = project()
-    return held[scope]
+    entry = held.get(scope)
+    if entry is None or published() is not entry:
+        entry = held[scope] = project()
+    return entry
 
 
 def revalidatable(fingerprint: tuple, wall: float) -> bool:

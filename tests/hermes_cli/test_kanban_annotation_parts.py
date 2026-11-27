@@ -128,7 +128,13 @@ def test_a_forced_links_read_outside_a_holder_pass_is_never_shared(monkeypatch):
     monkeypatch.setattr(ksa._revalidate.force_read, 'links_pass', None, raising=False)
     monkeypatch.setattr(ksa, '_links_fingerprint', lambda: ('same',))
     published = []
-    monkeypatch.setattr(ksa, '_publish_links', lambda s, f: published.append(s) or (0.0, s, f, [], []))
+    monkeypatch.setattr(ksa, '_links_cache', {})
+
+    def publish(s, f):
+        published.append(s)
+        ksa._links_cache = {**ksa._links_cache, s: (0.0, s, f, [], [])}  # copy-on-publish, as _store_links does
+        return ksa._links_cache[s]
+    monkeypatch.setattr(ksa, '_publish_links', publish)
     first, second = ksa._links_lookup(scope, False), ksa._links_lookup(scope, False)
     assert published == [scope, scope] and first is not second
 
@@ -137,6 +143,29 @@ def test_a_forced_links_read_outside_a_holder_pass_is_never_shared(monkeypatch):
     assert published == [scope] * 3, 'the pass memo is per pass: the earlier unshared reads are not in it'
     monkeypatch.setattr(ksa._revalidate.force_read, 'scope', ('other',))
     assert ksa._links_lookup(('other',), False)[1] == ('other',), "another scope got this scope's projection"
+
+
+def test_a_pass_never_shares_a_links_entry_older_than_the_published_one(world, monkeypatch):
+    """PR #4643 review: chat-closeout's cross-pass gate reads its inputs under ``_links_lock`` and trusts that an
+    entry other than the one published then was projected after that read. A pass memo that outlived another
+    thread's publish handed it the counts part's older entry, which the gate could store for later passes."""
+    seen = {}
+
+    def waiting():
+        seen['counts'] = ksa._links_cache.get(SCOPE)
+        other = threading.Thread(target=lambda: ksa._publish_links(SCOPE, ksa._links_fingerprint()))
+        other.start()  # another strict reader publishes during the pass
+        other.join()
+        seen['newer'] = ksa._links_cache.get(SCOPE)
+        seen['shared'] = ksa._links_lookup(SCOPE, False)
+        seen['again'] = ksa._links_lookup(SCOPE, False)
+        return {}
+    monkeypatch.setattr(ksa, '_waiting_sources', {'fixture': waiting})
+    _refresh()
+    assert seen['counts'] is not None and seen['newer'] is not seen['counts'], 'no publish from another thread'
+    assert seen['shared'] is not seen['counts'], 'the pass shared an entry older than the published one'
+    assert seen['shared'] is not seen['newer'], 'a forced read past a foreign publish must project again'
+    assert seen['again'] is seen['shared'] and world.links == 3, 'the pass shares its own newest projection'
 
 
 def test_a_write_to_one_source_rereads_only_the_parts_that_read_it(world):

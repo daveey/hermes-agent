@@ -1021,7 +1021,7 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
             def project():
                 with _links_lock:
                     return _publish_links(scope, diag.timed("fingerprint", _links_fingerprint))
-            return _revalidate.pass_links(scope, project)
+            return _revalidate.pass_links(scope, project, lambda: _links_cache.get(scope))
         hit = _links_cache.get(scope)
         # A warm display read still precedes ALL fingerprint and lock work.
         if stale_ok and hit is not None:
