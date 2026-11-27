@@ -92,7 +92,7 @@ def test_cold_discovery_skips_resolved_or_identity_only_history(tmp_path, monkey
     warning = sample()
     path = incidents._path(warning, probe)
     path.parent.mkdir(parents=True)
-    for state in ({}, {'error_class': 'ValueError'}, {'task_id': 't_0000000000000001', 'envelope': {}}):
+    for state in ({}, {'error_class': 'ValueError'}, {'task_id': 't_0000000000000001', 'envelope': {'id': 'resolved'}}):
         incidents._save(path, state)
         assert not incidents.has_incident(warning, probe=probe)
     for state in ({'envelope': {'id': 'pending'}}, {'terminal': {'state': 'rejected'}}):

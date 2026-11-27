@@ -347,25 +347,30 @@ def _check_fd_headroom(config, role, now, wall, probe, probe_board):
     if count >= soft * settings['raise_ratio']:
         _raise_fd_soft(sample, settings['max_soft'])  # Before any card I/O; warn uses original sample.
     from hermes_cli.fd_headroom_incident import has_incident
-    if (warn or _fd_incident.get('envelope') or _fd_status.get('last_card_id')
-            or _fd_status.get('create_state') == 'failing' or has_incident(sample, probe=probe)):
-        try:
+    try:
+        if (warn or _fd_incident.get('envelope') or _fd_status.get('last_card_id')
+                or _fd_status.get('create_state') == 'failing' or has_incident(sample, probe=probe)):
             kwargs = {'probe': probe}
             if probe_board is not None:
                 kwargs['probe_board'] = probe_board
             _fd_incident = _notify_fd_incident(sample, **kwargs) or {}
-        except Exception as exc:  # health: allow BLE001 -- even unwritable reporter state cannot hide census
-            _fd_incident.setdefault('failing_since', wall)
-            _fd_incident.update(error=str(exc), error_class=type(exc).__name__)
+    except Exception as exc:  # health: allow BLE001 -- even unreadable discovery cannot hide census
+        _fd_incident.setdefault('failing_since', wall)
+        _fd_incident.update(error=str(exc), error_class=type(exc).__name__)
+    # A definitive receipt is private history, not an active delivery failure on
+    # a healthy sample. Preserve it for audit and producer-qualified rearm.
+    terminal_history = (_fd_incident.get('terminal')
+                        and _fd_incident.get('error_class') == 'TerminalRequest' and not warn)
+    delivery = {} if terminal_history else _fd_incident
     from hermes_cli.fd_headroom_incident import failure_note
-    note = failure_note(_fd_incident, now=wall)
+    note = failure_note(delivery, now=wall)
     _fd_status.update(state='config_error' if errors else sample['state'], sampled_at=wall,
                       count=count, soft=soft, hard=hard, ratio=count / soft,
                       last_card_id=_fd_incident.get('task_id'),
-                      create_state='failing' if _fd_incident.get('error') else 'ok',
-                      failing_since=_fd_incident.get('failing_since'),
+                      create_state='failing' if delivery.get('error') else 'ok',
+                      failing_since=delivery.get('failing_since'),
                       error_class='ConfigError' if errors else (
-                          sample['error_class'] or _fd_incident.get('error_class')))
+                          sample['error_class'] or delivery.get('error_class')))
     if warn or note:
         logger.warning('fd-headroom: host=%s pid=%s role=%s count=%s soft=%s hard=%s '
                        'census=%s slope=%.6f fd/min core=%s %s %s', sample['host'], sample['pid'],
