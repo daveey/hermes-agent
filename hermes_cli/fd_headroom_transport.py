@@ -24,6 +24,14 @@ def _wire_envelope(envelope):
     return {**envelope, 'id': prefix + hashlib.sha256(ident.encode()).hexdigest()}
 
 
+class TerminalRequest(RuntimeError):
+    """The courier ended this exact create; never retry or re-key its incident."""
+
+    def __init__(self, state, result):
+        self.state, self.result = state, result
+        super().__init__(f'fd card request {state}: {result}')
+
+
 class Client:
     """One total 20s budget across request readback/delivery, privately owned connections.
 
@@ -78,7 +86,7 @@ class Client:
             if not isinstance(request, dict):
                 raise ValueError('invalid fd create receipt')
             if request.get('state') in {'rejected', 'failed', 'expired'}:
-                raise RuntimeError(f'fd card request {request["state"]}: {request.get("result")}')
+                raise TerminalRequest(request['state'], request.get('result'))
             from hermes_cli.kanban_placement import _task_id_in
             tid = _task_id_in(request.get('result'))
             if tid:

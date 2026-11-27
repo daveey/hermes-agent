@@ -76,9 +76,10 @@ def _new_envelope(sample, state, wall, probe, board):
     if state.get('state_recovered'):
         body += '\n\nPrior incident state was unreadable; preserved locally for investigation.'
     args = dict(title=title, body=body, assignee='default', idempotency_key=key, runs_on=['pool:worker'])
-    if probe:
-        args['initial_status'] = 'blocked'  # Defense in depth, not a substitute for isolated board.
+    previous_terminal = state.get('last_terminal')
     state.clear()
+    if previous_terminal:
+        state['last_terminal'] = previous_terminal
     state.update(incident_started_at=stamp, task_id=None, last_comment_at=wall,
                  envelope=dict(id=key, to_gw='hub', coll='tasks', key=f'default/{board}/new',
                                action='create', args=args))
@@ -86,10 +87,13 @@ def _new_envelope(sample, state, wall, probe, board):
 
 def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None,
            state_path: Path | None = None) -> dict:
-    """One serial 20s delivery per tick. Unknown create/read outcomes preserve the incident.
+    """One serial 20s delivery per tick. Unknown outcomes preserve the frozen incident.
 
+    Definitive rejected/failed/expired receipts latch locally, without further request I/O.
+    Only a subsequent healthy sample followed by a trigger opens a NEW incident; the
+    last terminal envelope/receipt stays in the local audit, never mutated or resent.
     Probe callers must discover a board without a dispatcher before supplying its slug.
-    Never permit the production default board, including for a blocked probe.
+    Never permit the production default board. Probes are not human asks.
     """
     import fcntl
     if probe and (not probe_board or probe_board == 'default'):
@@ -109,6 +113,15 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
         wall = time.time() if now is None else now
         if sample.get('raised'):
             state['raises'] = (state.get('raises', []) + [sample['raised']])[-8:]
+        if state.get('terminal'):
+            if not sample.get('triggered'):
+                state['terminal_rearmed'] = True
+            if not sample.get('triggered') or not state.get('terminal_rearmed'):
+                _save(path, state)
+                return state  # No identity/transport I/O after a definitive receipt.
+            state['last_terminal'] = {'envelope': state['envelope'], 'receipt': state['terminal']}
+            _new_envelope(sample, state, wall, probe, board)
+        from hermes_cli.fd_headroom_transport import TerminalRequest
         transport = client
         try:
             if transport is None:
@@ -118,6 +131,13 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
             state.pop('error', None)
             state.pop('error_class', None)
             state.pop('failing_since', None)
+        except TerminalRequest as exc:
+            state['terminal'] = {'state': exc.state, 'result': exc.result}
+            state.setdefault('failing_since', wall)
+            state.update(error=str(exc)[:1000], error_class='TerminalRequest')
+            _save(path, state)  # Retain the exact envelope and receipt before logging once.
+            logger.error('fd-headroom: terminal card create state=%s result=%s incident=%s',
+                         exc.state, exc.result, state['envelope']['id'])
         except Exception as exc:  # health: allow BLE001 -- diagnostic delivery cannot kill a service tick
             state.setdefault('failing_since', wall)
             state.update(error=str(exc)[:1000], error_class=type(exc).__name__)
