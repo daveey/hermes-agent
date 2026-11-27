@@ -120,13 +120,14 @@ def test_invalid_config_falls_back_and_marks_status(guard, caplog, key, value, d
     assert limits.fd_headroom_status()['state'] == 'config_error'
 
 
-def test_interval_600_retains_four_sample_trend_and_601_falls_back(guard):
+def test_interval_590_retains_four_sample_trend_and_591_falls_back(guard):
     _, snapshot, notify = guard
-    for now, count in [(0, 100), (600, 140), (1200, 180), (1800, 220)]:
+    for now, count in [(0, 100), (591, 140), (1182, 180), (1773, 220)]:
         snapshot.return_value = (count, {})
-        sample = check(now, settings={'interval_seconds': 600})
-    assert sample is not None and sample['slope'] == 4 and notify.call_count == 1
-    check(2400, settings={'interval_seconds': 601})
+        sample = check(now, settings={'interval_seconds': 590})
+    assert sample is not None and sample['slope'] == pytest.approx(120 * 60 / 1773)
+    assert notify.call_count == 1
+    check(2400, settings={'interval_seconds': 591})
     assert limits.fd_headroom_status()['state'] == 'config_error'
     assert limits._fd_interval == 300
 

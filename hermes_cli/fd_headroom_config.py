@@ -23,7 +23,7 @@ def validated(config):
                 if key in ('warn_ratio', 'raise_ratio'):
                     valid = 0 < value < 1
                 elif key == 'interval_seconds':
-                    valid = 30 <= value <= 600
+                    valid = 30 <= value <= 590
                 elif key == 'max_soft':
                     valid = isinstance(value, int) and value >= 1024
                 else:

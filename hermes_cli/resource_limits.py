@@ -241,7 +241,6 @@ def check_fd_headroom(config: Mapping[str, Any] | None = None, *, role: str = 'b
     One in flight per process; an overlapping tick is counted, never queued. The reporter
     additionally serializes the host/profile/role identity across processes.
     """
-    global _fd_check_warning
     from hermes_cli.config_backend import ConfigBackendUnavailable
     if not _fd_lock.acquire(blocking=False):
         _fd_status['skipped'] = _fd_status.get('skipped', 0) + 1
@@ -251,13 +250,19 @@ def check_fd_headroom(config: Mapping[str, Any] | None = None, *, role: str = 'b
         return _check_fd_headroom(config, role, stamp,
                                   time.time() if wall_now is None else wall_now, probe, probe_board)
     except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- typed config outage is SystemExit
-        _fd_status.update(state='config_error', error_class=type(exc).__name__)
-        if _fd_check_warning is None or stamp - _fd_check_warning >= 3600:
-            logger.warning('fd-headroom: check failed: %s', exc)
-            _fd_check_warning = stamp
+        _fd_check_failed(exc, stamp)
         return None
     finally:
         _fd_lock.release()
+
+
+def _fd_check_failed(exc, stamp, *, config=False):
+    global _fd_check_warning
+    # A resource/sampling failure caps diagnostics, not configuration validity.
+    _fd_status.update(state='config_error' if config else 'capped', error_class=type(exc).__name__)
+    if _fd_check_warning is None or stamp - _fd_check_warning >= 3600:
+        logger.warning('fd-headroom: check failed: %s', exc)
+        _fd_check_warning = stamp
 
 
 def _raise_fd_soft(sample, maximum):
@@ -296,7 +301,12 @@ def _check_fd_headroom(config, role, now, wall, probe, probe_board):
         return None
     if config is None:
         from hermes_cli.config import load_config_readonly
-        config = load_config_readonly()
+        from hermes_cli.config_backend import ConfigBackendUnavailable
+        try:
+            config = load_config_readonly()
+        except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- mark only config reads as config_error
+            _fd_check_failed(exc, now, config=True)
+            return None
     settings, errors = validated(config)
     _fd_interval = settings['interval_seconds']
     if not settings['enabled']:

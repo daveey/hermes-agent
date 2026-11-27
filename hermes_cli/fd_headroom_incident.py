@@ -139,7 +139,7 @@ def _report(sample, state, wall, probe, board, client, path):
     tid = state.get('task_id')
     if tid:
         evidence = client.read(tid, board)  # Failed read propagates; never confused with absence.
-        if evidence['state'] == 'absent':
+        if evidence['state'] in {'never_existed', 'unknown'}:
             state.setdefault('card_unreplicated_since', wall)
             raise PendingVisibility('card not yet replicated')
         state.pop('card_unreplicated_since', None)

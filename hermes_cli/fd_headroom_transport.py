@@ -10,6 +10,8 @@ from hermes_cli import kanban_sync_client as sync
 class Client:
     """One total 20s budget across request readback/delivery, privately owned connections.
 
+    ``never_existed`` or history-floor ``unknown`` Board evidence is inconclusive:
+    retain the acknowledged incident until explicit deletion or live terminal status.
     ``_bounded_call`` closes its connection on success/error/timeout and interrupts stalled
     reads. Persisted incident envelopes make uncertain POSTs safe to retry on the next tick.
     """
@@ -34,7 +36,7 @@ class Client:
                 or type(evidence.get('head')) is not int):
             raise ValueError('invalid authoritative fd incident read')
         state = evidence.get('state')
-        if state in {'absent', 'tombstone'}:
+        if state in {'never_existed', 'deleted', 'unknown'}:
             return {'state': state, 'row': None}
         row = evidence.get('row')
         if state != 'live' or not isinstance(row, dict) or not isinstance(row.get('status'), str):

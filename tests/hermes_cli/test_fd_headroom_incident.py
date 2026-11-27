@@ -43,7 +43,7 @@ def test_two_processes_share_one_card(tmp_path):
 
 
 def test_absent_status_and_closed_recovery_stop_board_reads(monkeypatch, caplog, tmp_path):
-    wall, visibility = [10000.0], ['absent']
+    wall, visibility = [10000.0], ['never_existed']
     monkeypatch.setattr(limits, '_fd_last_check', None)
     monkeypatch.setattr(limits, '_fd_incident', {})
     monkeypatch.setattr(limits, '_fd_status', {})
@@ -73,7 +73,7 @@ def test_absent_status_and_closed_recovery_stop_board_reads(monkeypatch, caplog,
     assert public['create_state'] == 'failing' and public['failing_since'] == 10300
     assert public['error_class'] == 'PendingVisibility'
     assert 'card create failing since' in caplog.text
-    visibility[0], count[0] = 'tombstone', 100
+    visibility[0], count[0] = 'deleted', 100
     limits.check_fd_headroom({}, now=4200)
     assert limits.fd_headroom_status()['last_card_id'] is None
     reads.clear()

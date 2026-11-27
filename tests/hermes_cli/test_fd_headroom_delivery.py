@@ -17,7 +17,7 @@ def delivery(tmp_path):
             return cards[key]['id']
         def read(self, tid, board):
             row = next((row for row in cards.values() if row['id'] == tid), None)
-            return {'state': 'live' if row else 'tombstone', 'row': row}
+            return {'state': 'live' if row else 'deleted', 'row': row}
         def comment(self, envelope):
             comments.append(envelope)
         def close(self):
@@ -35,7 +35,7 @@ def report(delivery, now, **kwargs):
     return incidents.report(sample(), now=now, client=cls(), state_path=path, **kwargs)
 
 
-@pytest.mark.parametrize('closed', ['done', 'archived', 'tombstone'])
+@pytest.mark.parametrize('closed', ['done', 'archived', 'deleted'])
 def test_shared_incident_one_card_hourly_and_new_after_closed(delivery, closed):
     _, cards, creates, comments, path = delivery
     first = report(delivery, 10000)
@@ -46,7 +46,7 @@ def test_shared_incident_one_card_hourly_and_new_after_closed(delivery, closed):
     report(delivery, 13600)
     report(delivery, 13601)
     assert len(comments) == 1
-    if closed == 'tombstone':
+    if closed == 'deleted':
         cards.clear()
     else:
         next(iter(cards.values()))['status'] = closed
@@ -111,7 +111,7 @@ def test_pending_row_visibility_preserves_incident_key(delivery, monkeypatch):
     cls, cards, creates, _, path = delivery
     first = report(delivery, 10000)
     monkeypatch.setattr(sync, 'load_identity', lambda: None)
-    result = {'state': 'absent', 'table': 'tasks', 'uid': first['task_id'], 'head': 4}
+    result = {'state': 'never_existed', 'table': 'tasks', 'uid': first['task_id'], 'head': 4}
     monkeypatch.setattr(sync, '_bounded_call', lambda *a: result)
     for wall in (10300, 10600, 13900):
         client = cls()
@@ -143,11 +143,11 @@ def test_corrupt_primary_quarantines_and_reopens_once(delivery, corrupt, caplog)
     assert caplog.text.count('prior incident state unreadable') == 1
 
 
-@pytest.mark.parametrize('closed', ['done', 'archived', 'tombstone'])
+@pytest.mark.parametrize('closed', ['done', 'archived', 'deleted'])
 def test_healthy_closed_incident_clears_and_stops_polling(delivery, closed):
     cls, cards, creates, comments, path = delivery
     report(delivery, 10000)
-    if closed == 'tombstone':
+    if closed == 'deleted':
         cards.clear()
     else:
         next(iter(cards.values()))['status'] = closed

@@ -38,11 +38,13 @@ def test_request_failure_not_absence_and_pending_reconciles(monkeypatch):
 def test_authoritative_evidence_requires_successful_missing_or_live(monkeypatch):
     from hermes_cli.fd_headroom_transport import Client
     monkeypatch.setattr(sync, 'load_identity', lambda: sync.Identity('http://example.invalid', 'unused', 'worker'))
-    result = {'state': 'absent', 'table': 'tasks', 'uid': 't_0123456789abcdef', 'head': 4}
+    result = {'state': 'never_existed', 'table': 'tasks', 'uid': 't_0123456789abcdef', 'head': 4}
     monkeypatch.setattr(sync, '_bounded_call', lambda *a: result)
-    assert Client().read(result['uid'], 'default') == {'state': 'absent', 'row': None}
-    result['state'] = 'tombstone'
-    assert Client().read(result['uid'], 'default') == {'state': 'tombstone', 'row': None}
+    assert Client().read(result['uid'], 'default') == {'state': 'never_existed', 'row': None}
+    result['state'] = 'deleted'
+    assert Client().read(result['uid'], 'default') == {'state': 'deleted', 'row': None}
     result['state'] = 'unknown'
+    assert Client().read(result['uid'], 'default') == {'state': 'unknown', 'row': None}
+    result['state'] = 'invalid'
     with pytest.raises(ValueError):
         Client().read(result['uid'], 'default')
