@@ -113,10 +113,13 @@ def audited_rejection(live, shadow, op, *, fresh_gateway=None):
         statuses = [conn.execute('SELECT status FROM tasks WHERE id=?', (wire['task'],)).fetchone()
                     for conn in (live, shadow)]
         terminal_history = any(conn.execute(
-            "SELECT 1 FROM task_events WHERE task_id=? AND kind='completed' LIMIT 1",
+            "SELECT 1 FROM task_events WHERE task_id=? AND kind IN ('completed','archived') LIMIT 1",
             (wire['task'],)).fetchone() is not None for conn in (live, shadow))
         if terminal_history or any(row is not None and row[0] in ('done', 'archived') for row in statuses):
-            from hermes_cli.kanban_sync_actionability_terminal import superseded
+            if any(row is not None and row[0] == 'archived' for row in statuses):
+                from hermes_cli.kanban_sync_actionability_archive import superseded
+            else:
+                from hermes_cli.kanban_sync_actionability_terminal import superseded
             return superseded(live, shadow, wire['task'], frozen['source_uids'][0]['uid'])
         comparable = {**frozen, 'source_uids': [{'uid': s['uid']} for s in frozen['source_uids']]}
         # fresh_gateway is supplied only under the refusal report's authenticated
