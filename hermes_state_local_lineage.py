@@ -61,9 +61,10 @@ def _routed_entry(conn, route, tip):
 
 def _commit_local_target(conn, receipt, routed):
     """Store *receipt* and its route's entry *routed* and bump the logical revision, in one transaction."""
+    from hermes_state_policy_config import replace_receipt
     conn.execute("UPDATE gateway_routing SET entry_json=? WHERE scope='' AND session_key=?",
                  (_json(routed), receipt['route']))
-    conn.execute('UPDATE state_meta SET value=? WHERE key=?', (_json(receipt), POLICY_PREFIX + receipt['session_id']))
+    replace_receipt(conn, receipt['session_id'], receipt)
     conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (receipt['session_id'],))
 
 
@@ -81,7 +82,8 @@ def advance_local_target(conn, parent_session_id, child_session_id, *, entry=Non
             raise RuntimeStoreError('storage_unavailable')
         return
     try:
-        receipt = json.loads(raw[0])
+        from hermes_state_policy_config import decode_receipt
+        receipt = decode_receipt(conn, raw[0])
         if (receipt['session_id'] != logical_id or receipt['entry']['session_id'] != parent_session_id
                 or receipt['principal_id'] != parent['user_id'] or receipt['route'] != parent['session_key']):
             raise RuntimeStoreError('storage_unavailable')
@@ -157,7 +159,8 @@ def adopt_untracked_compression(db, *, epoch, session_id, expected):
     def write(conn):
         _epoch(conn, epoch)
         saved = conn.execute('SELECT value FROM state_meta WHERE key=?', (POLICY_PREFIX + session_id,)).fetchone()
-        receipt = json.loads(saved[0])
+        from hermes_state_policy_config import decode_receipt
+        receipt = decode_receipt(conn, saved[0])
         if receipt != expected:
             return
         adoptable = adoptable_compression(conn, receipt)

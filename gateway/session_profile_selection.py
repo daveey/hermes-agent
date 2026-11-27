@@ -90,7 +90,8 @@ def commit_selection(authority, ref, policy, config, model, generation, *, ended
     from agent.model_routing_switch_intent import record_in_transaction, relocate_in_transaction
     from hermes_state_local import POLICY_PREFIX
     from hermes_state_local_lineage import local_physical_target
-    from hermes_state_runtime import _epoch, _json
+    from hermes_state_runtime import _epoch
+    from hermes_state_policy_config import decode_receipt, replace_receipt
     provider = (config.get('model') or {}).get('provider') or ''
     expected = json.loads(json.dumps(asdict(policy)))
     released = json.loads(json.dumps(asdict(released_pick(policy, model)))) if ended else None
@@ -100,14 +101,13 @@ def commit_selection(authority, ref, policy, config, model, generation, *, ended
         receipt = conn.execute('SELECT value FROM state_meta WHERE key=?',
                                (POLICY_PREFIX + ref.session_id,)).fetchone()
         row = conn.execute('SELECT runtime_generation FROM sessions WHERE id=?', (ref.session_id,)).fetchone()
-        saved = json.loads(receipt[0]) if receipt is not None else None
+        saved = decode_receipt(conn, receipt[0]) if receipt is not None else None
         if saved is None or saved['policy'] != expected or row is None or row[0] != generation:
             raise RuntimeStoreError('revision_conflict')
         physical = local_physical_target(conn, ref.session_id)
         if released is not None:
             saved['policy'] = released
-            conn.execute('UPDATE state_meta SET value=? WHERE key=?',
-                         (_json(saved), POLICY_PREFIX + ref.session_id))
+            replace_receipt(conn, ref.session_id, saved)
         # Remember the pick the receipt now holds: after an end that is the RELEASED policy, which the
         # next turn's *expected* is, so an unchanged selection there is not mistaken for a new one.
         current = released if released is not None else expected

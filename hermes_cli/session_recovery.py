@@ -1006,6 +1006,8 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
     fts_keys = tuple(key for key in _GENERATED_META_KEYS if key.startswith("fts_"))
     placeholders = ", ".join("?" for _ in fts_keys)
     with _immediate_transaction(destination):
+        from hermes_state_policy_config import reconcile_recovered_references
+        result['policy_config_references'] = reconcile_recovered_references(destination)
         destination.execute(f"DELETE FROM state_meta WHERE key IN ({placeholders})", fts_keys)
         destination.execute(
             "INSERT INTO state_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

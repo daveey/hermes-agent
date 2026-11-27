@@ -54,7 +54,8 @@ def branch_in_transaction(db, conn, session_id, payload, prepared=None):
                        (POLICY_PREFIX + session_id,)).fetchone()
     if row is None:
         raise RuntimeStoreError('runtime_coordination_required')
-    saved = json.loads(row[0])
+    from hermes_state_policy_config import decode_receipt, store_receipt
+    saved = decode_receipt(conn, row[0])
     target = validate_local_lineage(conn, saved)
     require_idle(db, conn, list({session_id, target}))
     # Late: the routing entry/key are gateway types (the gateway imports this store at module level).
@@ -100,5 +101,5 @@ def branch_in_transaction(db, conn, session_id, payload, prepared=None):
     receipt['picks'] = sorted(picks_on(conn, session_id))
     conn.execute("INSERT INTO gateway_routing(scope,session_key,entry_json,updated_at) VALUES('',?,?,?)",
                  (route, _json(entry.to_dict()), now.timestamp()))
-    conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (POLICY_PREFIX + child, _json(receipt)))
+    store_receipt(conn, child, receipt, intern='config_ref_v1' in json.loads(row[0])['policy'])
     return {session_id}, {'branched_session_id': child, 'copied_messages': len(ids)}

@@ -142,6 +142,41 @@ def store_receipt(conn, session_id, receipt, *, intern=False):
         raise
 
 
+def reconcile_recovered_references(conn):
+    """Rebuild derived refs from recovered owners before any GC can trust them.
+
+    Recovery may salvage receipt/blob/ref rows independently. Ref rows are not
+    evidence of completeness. Validate every surviving receipt before changing
+    any reference; unreadable custody fails the separate-output recovery closed.
+    """
+    if not conn.in_transaction:
+        raise RuntimeStoreError('runtime_coordination_required')
+    present = conn.execute('SELECT 1 FROM state_meta WHERE key GLOB ? OR key GLOB ? LIMIT 1',
+                           (BLOB_PREFIX + '*', REF_PREFIX + '*')).fetchone()
+    if present is None:
+        present = conn.execute(
+            "SELECT 1 FROM state_meta WHERE key GLOB ? AND CASE WHEN json_valid(value) "
+            "THEN json_type(value,'$.policy.config_ref_v1') IS NOT NULL ELSE 0 END LIMIT 1",
+            (POLICY_PREFIX + '*',)).fetchone()
+    if present is None:
+        return 0
+    refs = []
+    for key, raw in conn.execute('SELECT key,value FROM state_meta WHERE key GLOB ?', (POLICY_PREFIX + '*',)):
+        decoded = decode_receipt(conn, raw)
+        digest = _digest(decoded['policy']['config_json']) if _reference(json.loads(raw)) is not None else None
+        if digest is not None:
+            refs.append((REF_PREFIX + digest + ':' + key[len(POLICY_PREFIX):], digest))
+    # The caller's recovery transaction owns all writes; no live-store migration.
+    conn.execute('DELETE FROM state_meta WHERE key GLOB ?', (REF_PREFIX + '*',))
+    conn.executemany('INSERT INTO state_meta(key,value) VALUES(?,?)', refs)
+    return len(refs)
+
+
+def replace_receipt(conn, session_id, receipt):
+    """Replace hydrated values while retaining this owner's storage format."""
+    store_receipt(conn, session_id, receipt, intern=_stored_reference(conn, session_id) is not None)
+
+
 def delete_receipt(conn, session_id):
     """Delete a receipt and its last reference on its owner's delete transaction."""
     digest = _stored_reference(conn, session_id)

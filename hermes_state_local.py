@@ -33,7 +33,8 @@ def commit_local_session(db, *, epoch, receipt):
         old = conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()
         if old is not None:
             try:
-                saved = json.loads(old[0])
+                from hermes_state_policy_config import decode_receipt
+                saved = decode_receipt(conn, old[0])
                 same = all(saved[k] == receipt[k] for k in (
                     'profile_id', 'principal_id', 'request_id', 'session_id', 'route'))
                 same = same and same_create_retry(saved['policy'], receipt['policy']['request_json'], request)
@@ -168,7 +169,12 @@ def retire_local_receipts(conn, session_ids):
     gone += [key for key, value in conn.execute('SELECT key,value FROM state_meta WHERE key GLOB ?',
                                                 (API_DECLARED_PREFIX + '*',)) if value in targets]
     gone += [API_BINDING_PREFIX + sid for sid in targets]
-    conn.executemany('DELETE FROM state_meta WHERE key=?', [(key,) for key in gone])
+    from hermes_state_policy_config import delete_receipt
+    for key in gone:
+        if key.startswith(POLICY_PREFIX):
+            delete_receipt(conn, key[len(POLICY_PREFIX):])
+        else:
+            conn.execute('DELETE FROM state_meta WHERE key=?', (key,))
 
 
 def moved_receipts(conn, target_ids=None):
@@ -193,8 +199,10 @@ def release_receipts(conn, owners):
     """Retire *owners*' local receipts (creation policy and legacy binding): the row they guarded now
     belongs to a messaging lane, which restores it from its route like any other platform session."""
     from hermes_state_local_migration import LEGACY_PREFIX
-    conn.executemany('DELETE FROM state_meta WHERE key IN (?,?)',
-                     [(POLICY_PREFIX + owner, LEGACY_PREFIX + owner) for owner in owners])
+    from hermes_state_policy_config import delete_receipt
+    for owner in owners:
+        delete_receipt(conn, owner)
+        conn.execute('DELETE FROM state_meta WHERE key=?', (LEGACY_PREFIX + owner,))
 
 
 def handoff_head(db, session_id):
