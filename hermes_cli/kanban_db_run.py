@@ -22,6 +22,8 @@ def _end_run(
     is wiped, and :func:`kanban_db_dispatch.reap_terminal_workers` needs them
     to end a worker that survived its own terminal transition."""
     from hermes_cli import kanban_db as _kb
+    from hermes_cli.kanban_origin_forward_run_end import require_settled
+    require_settled(conn, task_id, _kb._current_run_id(conn, task_id), outcome)
     from hermes_cli.kanban_source_receipt import purge
     purge(conn, task_id)  # no pending source receipt outlives the run it was staged for
     now = int(time.time())
