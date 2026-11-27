@@ -5,6 +5,7 @@ source acquisition reads events; clock transitions reuse that captured evidence.
 """
 import json
 import math
+import sqlite3
 
 TRIAGE_AFTER_S = 600
 _FIXED = {
@@ -111,18 +112,23 @@ def annotate(conn, rows):
     Only triage cards need histories. Callers retain this detached result under
     their existing source revision memo; elapsed clock passes never call here.
     """
-    from hermes_cli.kanban_table_columns import table_columns
     rows = list(rows)
     targets = {str(row['id']) for row in rows if row.get('status') == 'triage'}
-    columns = table_columns(conn, 'task_events')
     events = {tid: [] for tid in targets}
-    if targets and {'task_id', 'id', 'kind', 'created_at', 'payload'} <= columns:
-        for item in conn.execute(
+    # One statement per call and none without a triage card: hot membership passes call this per status set,
+    # so no schema probe. A board without the event columns reads as unknown entry, never a fabricated age.
+    if targets:
+        try:
+            found = conn.execute(
                 'SELECT task_id, kind, created_at, payload FROM task_events '
                 'WHERE task_id IN (SELECT value FROM json_each(?)) '
                 'AND kind IN (SELECT value FROM json_each(?)) ORDER BY id',
-                (json.dumps(sorted(targets)), json.dumps(LIFECYCLE_KINDS))):
-            tid, kind, at, payload = item
+                (json.dumps(sorted(targets)), json.dumps(LIFECYCLE_KINDS))).fetchall()
+        except sqlite3.OperationalError as exc:
+            if 'no such' not in str(exc):
+                raise
+            found = ()
+        for tid, kind, at, payload in found:
             events[str(tid)].append({'kind': kind, 'created_at': at, 'payload': payload})
     for row in rows:
         row['triage_entered_at'] = current_entry({'status': row.get('status'), 'events': events.get(str(row['id']), ())})

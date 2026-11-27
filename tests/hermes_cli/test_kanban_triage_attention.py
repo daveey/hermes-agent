@@ -167,3 +167,24 @@ def test_literal_triage_writers_are_all_registered():
     for _, kind, payload in _WRITER_ENTRIES:
         assert attention.landing(kind, payload) == 'triage'
         assert kind in attention.LIFECYCLE_KINDS
+
+
+def test_annotate_costs_one_statement_with_triage_cards_and_none_without():
+    import sqlite3
+    conn = sqlite3.connect(':memory:')
+    conn.execute('CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER)')
+    conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES ('t1', 'contained', '{}', ?)", (NOW - 700,))
+    statements = []
+    conn.set_trace_callback(statements.append)
+    rows = attention.annotate(conn, [{'id': 't1', 'status': 'triage'}, {'id': 't2', 'status': 'ready'}])
+    assert [row['triage_entered_at'] for row in rows] == [NOW - 700, None]
+    assert len(statements) == 1, statements
+    statements.clear()
+    assert attention.annotate(conn, [{'id': 't2', 'status': 'ready'}])[0]['triage_entered_at'] is None
+    assert statements == []
+
+
+def test_annotate_without_an_event_table_is_unknown_not_aged():
+    import sqlite3
+    conn = sqlite3.connect(':memory:')
+    assert attention.annotate(conn, [{'id': 't1', 'status': 'triage'}])[0]['triage_entered_at'] is None
