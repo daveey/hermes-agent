@@ -1335,9 +1335,7 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                 cards = kanban_chat_links.reconciliation_cards()
                 ledger = la.timed("sync.links.ledger_slices", ledger_slices, cards, gateway)
             local = {slug for slug, _path in boards}
-            # Keep closed rows in ledger signatures for existing-board invalidation,
-            # but history alone cannot discover a new link-only board.
-            active = {slug for slug, rows in ledger.items() if any(not row[-1] for row in rows)}
+            active = {slug for slug, rows in ledger.items() if any(not row[-1] for row in rows)}  # History only invalidates existing boards.
             if not skip_unchanged or active - local:
                 created = la.timed("sync.links.ensure_boards", ensure_link_boards, active, gateway)
                 if created:
