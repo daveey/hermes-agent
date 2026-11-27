@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,7 +101,7 @@ def test_unverified_bus_never_returns_unbounded_command(bus_setup, tmp_path, mon
     }
     actions[invalid]()
     report = fake_systemctl(tmp_path, monkeypatch, runtime)
-    monkeypatch.setattr(scope.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(scope, 'time', SimpleNamespace(sleep=lambda _: None))
     with pytest.raises(pr.RestartSafeScopeUnavailable, match='aggregate'):
         scope.bounded_scope(['systemd-run', '--user', '--scope', '--', 'worker'])
     _, env = json.loads(report.read_text())
@@ -117,6 +118,9 @@ def test_pool_rediscovers_bus_appearing_between_attempts(bus_setup, tmp_path, mo
     run = scope.subprocess.run
 
     def record(*args, **kwargs):
+        # subprocess timeout polling uses the shared time module too.
+        import time
+        time.sleep(0)
         calls.append(kwargs['env'])
         return run(*args, **kwargs)
 
@@ -129,7 +133,7 @@ def test_pool_rediscovers_bus_appearing_between_attempts(bus_setup, tmp_path, mo
                 bus.bind(str(runtime / 'bus'))
             delays.append(delay)
 
-        monkeypatch.setattr(scope.time, 'sleep', appear)
+        monkeypatch.setattr(scope, 'time', SimpleNamespace(sleep=appear))
         scope.configure_pool()
     assert delays == [1]
     assert len(calls) == 2
