@@ -125,12 +125,13 @@ def _standing_owner_refusal(conn, creator_task_id: Optional[str], self_gw, *, ho
         return None
     return tool_error(
         f"origin_same_gateway_standing_owner: no card was created and no request was sent. A canonical-home child "
-        f"needs a tracked origin chat, and this card's only owner chat is the standing owner {session!r} on this "
-        f"gateway ({self_gw}): a producer fallback, not a conversation this run can attest, so it is never sent as "
-        f"the origin (retrying here, with any placement or runs_on, hits the same refusal). Move this card to a "
-        f"worker on a different gateway than {self_gw} (kanban_move, or `hermes kanban move <id> --pool`), where the "
-        f"same link is foreign and forwards with this creator's run authority, then repeat the identical "
-        f"kanban_create (same idempotency_key); or have the owning chat file the card.",
+        f"needs a tracked origin chat, and this card has no attestable owner chat: its standing owner {session!r} is "
+        f"on this gateway ({self_gw}), a producer fallback, not a conversation this run can attest, so it is never "
+        f"sent as the origin (retrying here, with any placement or runs_on, hits the same refusal). Move this card "
+        f"to a worker on a different gateway than {self_gw} (kanban_move with runs_on naming that machine, or "
+        f"`hermes kanban move <id> --runs-on machine:<other-gateway> --reason ...`; a bare --pool may land on "
+        f"{self_gw} again), where the same link is foreign and forwards with this creator's run authority, then "
+        f"repeat the identical kanban_create (same idempotency_key); or have the owning chat file the card.",
         code="origin_same_gateway_standing_owner", created=False, standing_owner=session, gateway=self_gw)
 
 

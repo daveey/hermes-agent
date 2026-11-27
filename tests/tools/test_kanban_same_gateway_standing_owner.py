@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from hermes_cli import kanban_creation_home as creation_home
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_owner_chat as owner
@@ -114,6 +115,37 @@ def test_headless_worker_without_owner_keeps_the_hub_refusal(courier, monkeypatc
     assert len(courier) == 1 and out.get('created') is False, out
     assert 'canonical_home_origin_required' in out['error']
     assert out.get('code') != 'origin_same_gateway_standing_owner'
+
+
+def test_creator_with_a_persisted_chat_session_still_sends_that_origin(courier, monkeypatch):
+    """Control for the ``session_id`` guard: the origin exists (the creator's own chat), so the create is valid."""
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title='Shepherd', assignee='default', session_id=helpers.CHAT,
+                                 settle_owner_chat=False)
+        helpers._link(conn, creator, 'here', 'default', STANDING)
+        assert kb.claim_task(conn, creator) is not None
+        conn.commit()
+    monkeypatch.setenv('HERMES_KANBAN_TASK', creator)
+    out = json.loads(tools._handle_create(dict(REQUEST)))
+    assert out.get('code') != 'origin_same_gateway_standing_owner', out
+    assert len(courier) == 1, out
+    assert courier[0][courier[0].index('--origin-session') + 1] == helpers.CHAT
+
+
+def test_non_canonical_remote_create_is_never_pre_refused(courier, monkeypatch):
+    """Control for the ``home is None`` guard: the hub accepts an empty origin for a non-canonical create."""
+    real = creation_home.prepare
+
+    def prepare(view, **kw):
+        _, v, _ = real(view, **kw)
+        return None, v, {'where': 'otherbox'}
+
+    monkeypatch.setattr(creation_home, 'prepare', prepare)
+    _creator('here', STANDING, monkeypatch)
+    out = json.loads(tools._handle_create(dict(REQUEST)))
+    assert out.get('code') != 'origin_same_gateway_standing_owner', out
+    assert len(courier) == 1, out
+    assert '--canonical-home' not in courier[0]
 
 
 def test_origin_lookup_contract_is_unchanged(home):
