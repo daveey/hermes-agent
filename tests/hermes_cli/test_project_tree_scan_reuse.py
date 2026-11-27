@@ -130,6 +130,22 @@ def test_a_config_change_without_a_commit_is_seen(profiles_on_disk, scans):
     assert "worker-chat" in ids and "worker-bot" not in ids, "the store's sidebar policy is part of the key"
 
 
+def _automated(payload) -> dict[str, bool]:
+    return {s["id"]: s["automated"] for p in payload["projects"]
+            for s in (p.get("previewSessions") or []) + (p.get("sessionMembership") or []) if "automated" in s}
+
+
+def test_an_interactive_sources_change_without_a_commit_is_seen(profiles_on_disk, scans):
+    """``interactive_sources`` rides on the policy's ``.interactive``, not its list items: the key must carry it."""
+    home = profiles_on_disk["worker"]
+    _seed_session(home, "worker-chat", source="cli")
+    _seed_session(home, "worker-bot", source="telegram")
+    assert _automated(_tree()).get("worker-bot") is False
+
+    (home / "config.yaml").write_text("sessions:\n  interactive_sources: [cli]\n", encoding="utf-8")
+    assert _automated(_tree()).get("worker-bot") is True, "a policy change via interactive_sources alone is seen"
+
+
 def test_a_commit_during_the_read_is_not_kept(profiles_on_disk, scans, hooks):
     home = profiles_on_disk["worker"]
     _seed_session(home, "worker-chat", source="cli")

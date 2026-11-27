@@ -3,7 +3,12 @@ Bodies are rebound onto server.py's globals at install (method_ctx.bind_module).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .method_ctx import HandlerRegistry, bind_module
+
+if TYPE_CHECKING:
+    from hermes_cli.session_listing import AutomatedSourcePolicy
 
 _registry = HandlerRegistry()
 method = _registry.method
@@ -396,8 +401,8 @@ def _project_tree_excluded_sources() -> list[str]:
     return _PROJECT_TREE_EXCLUDED_SOURCES + [s for s in extra if s not in _PROJECT_TREE_EXCLUDED_SOURCES]
 
 
-def _project_tree_automated_sources() -> list[str]:
-    """This store's ``sessions.automated_sources`` [daveey], read under the caller's home scope
+def _project_tree_automated_sources() -> AutomatedSourcePolicy:
+    """This store's ``sessions.automated_sources`` [daveey] (and ``interactive_sources``), read under the caller's home scope
     like ``_project_tree_excluded_sources`` (the all-profiles tree applies each profile's own)."""
     from hermes_cli.session_listing import automated_session_sources
     from hermes_constants import get_hermes_home
@@ -454,8 +459,11 @@ def _annotate_tree_activity(sessions: list[dict]) -> list[dict]:
 def project_tree_rows_key(session_limit: int) -> tuple:
     """[daveey] Everything besides ``state.db`` that ``project_tree_rows`` reads (this store's config), so a caller
     can keep its answer keyed on the store's commits plus this. Read under the caller's home scope."""
+    from hermes_cli.session_listing import automated_policy_key
+
+    # automated_policy_key, not tuple(policy): the policy's ``.interactive`` (interactive_sources) is not a list item.
     return ("project_tree_rows", session_limit, tuple(_project_tree_excluded_sources()),
-            tuple(_project_tree_automated_sources()))
+            automated_policy_key(_project_tree_automated_sources()))
 
 
 def project_tree_rows(db, session_limit: int) -> list[dict]:
