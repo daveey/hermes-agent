@@ -20,6 +20,8 @@ otherwise opens the default ``SessionDB`` itself.
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import functools
 import json
 import logging
 import sqlite3
@@ -351,6 +353,46 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     return memo[key]
 
 
+# [daveey] The refresh in progress, for the empty card list's count agreement (``kanban_counts_agreement``): where
+# to run it again once a recompute that outlasted the bounded wait settles. ``_agreement_blocking`` marks that
+# deferred run, which is already on the recompute's own thread and may wait for the counts as before.
+_agreement_target: ContextVar[Optional[dict]] = ContextVar("session_outcome_agreement_target", default=None)
+_agreement_blocking: ContextVar[bool] = ContextVar("session_outcome_agreement_blocking", default=False)
+
+
+def _agreement_counts() -> tuple[dict[str, int], dict[str, int]]:
+    from hermes_cli import kanban_session_activity as ksa
+
+    if _agreement_blocking.get():
+        return ksa.active_task_counts(), ksa.blocked_task_counts()
+    from hermes_cli.kanban_counts_agreement import WAIT_S, CountsPending, agreed_counts
+
+    target = _agreement_target.get()
+    if target is None:
+        return agreed_counts(WAIT_S)
+    try:  # one bounded wait per refresh: a fence retry inside it does not wait again
+        return agreed_counts(0.0 if target["pending"] else WAIT_S, key=target["key"], on_published=target["retry"])
+    except CountsPending:
+        target["pending"] = True
+        raise
+
+
+def _deferred_refresh(db_path: Optional[Path], sid: str) -> None:
+    """The chat's refresh again after the count recompute settled (trigger ``card_change``, which carries no
+    turn conclusion). A caller-supplied store is reopened by path: the caller's handle may be closed by now."""
+    token = _agreement_blocking.set(True)
+    try:
+        if db_path is None:
+            refresh_outcomes_quietly([sid], "card_change")
+            return
+        from hermes_state import SessionDB
+
+        with SessionDB(db_path=db_path) as handle:
+            refresh_outcomes_quietly([sid], "card_change", db=handle)
+    finally:
+        _agreement_blocking.reset(token)
+
+
 def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
@@ -362,8 +404,7 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     if not cards:
         # The display list may be a stale-empty projection while the sidebar counts
         # already know about open work. Absence is not completion without agreement.
-        from hermes_cli.kanban_session_activity import active_task_counts, blocked_task_counts
-        active, blocked = active_task_counts(), blocked_task_counts()
+        active, blocked = _agreement_counts()
         if any(active.get(sid, 0) or blocked.get(sid, 0) for sid in ids):
             raise ValueError("kanban card list is empty but sidebar counts retain open work")
     for card in cards:
@@ -988,7 +1029,16 @@ def refresh_outcome(sid: str, trigger: str, *, db: Any = None,
     from hermes_state_session_status_snapshot import refresh
 
     with _db_scope(db) as handle:  # [daveey] also reduces and fence-publishes the canonical ``status`` envelope
-        return refresh(handle, sid, trigger, frozenset(concluding_turn or ()))
+        if _agreement_blocking.get():
+            return refresh(handle, sid, trigger, frozenset(concluding_turn or ()))
+        raw_path = getattr(handle, "db_path", None) if db is not None else None
+        path = Path(raw_path) if isinstance(raw_path, (str, Path)) else None
+        retry = functools.partial(contextvars.copy_context().run, _deferred_refresh, path, sid)
+        token = _agreement_target.set({"key": (str(path), sid), "pending": False, "retry": retry})
+        try:
+            return refresh(handle, sid, trigger, frozenset(concluding_turn or ()))
+        finally:
+            _agreement_target.reset(token)
 
 
 def get_outcome(sid: str, *, db: Any = None) -> Optional[dict[str, Any]]:
