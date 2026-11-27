@@ -117,6 +117,58 @@ def test_batched_pass_statement_count_does_not_grow_with_cards(world, board, mon
     assert len(seen) <= 8 + 4, [s[:90] for s in seen]
 
 
+@pytest.mark.parametrize('explicit', [False, True])
+def test_open_cards_share_upstream_walk_in_one_projection(world, board, monkeypatch, explicit):
+    tasks = seed(world, monkeypatch, ('ready',) * 16)
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title='Shared parent', assignee='default', completion_contract='local-only')
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (parent,))
+        for tid in tasks:
+            conn.execute('INSERT INTO task_links(parent_id,child_id) VALUES (?,?)', (parent, tid))
+    seen = count_board_statements(monkeypatch)
+    def read(flag):
+        monkeypatch.setenv('HERMES_ORIGIN_BATCH_READS', flag)
+        kw = {'home': kb.kanban_db_path('default').parent} if explicit else {}
+        return ledger.project(world[0], replica=None, gateway='owner', profile='default', now=5000, **kw)
+    single = read('0')
+    seen.clear()
+    batched = read('1')
+    assert batched == single and len(batched) == 16
+    assert all(row['blocked_upstream']['id'] == parent for row in batched)
+    graph_reads = [sql for sql in seen if 'task_links' in sql or 'FROM tasks WHERE id=' in sql]
+    assert len(graph_reads) <= 4, graph_reads
+    # Neither the next transaction nor the next projection can reuse graph evidence.
+    with kbc.connect_closing() as conn:
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (parent,))
+    again = read('1')
+    assert again == read('0')
+    assert all('blocked_upstream' not in row and row['upstream']['status'] == 'running' for row in again)
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_batched_upstream_preserves_hashes_cycles_and_independent_answers(world, board, monkeypatch, explicit):
+    tasks = seed(world, monkeypatch, ('ready', 'ready', 'done', 'blocked'))
+    ids = list(tasks)
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title='Shared ancestor', assignee='default', completion_contract='local-only')
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (parent,))
+        conn.executemany('INSERT INTO task_links(parent_id,child_id) VALUES (?,?)',
+                         [(parent, ids[0]), (parent, ids[1]), (ids[0], parent)])
+        bindings = [json.loads(r[0]) for r in conn.execute(
+            'SELECT binding_json FROM origin_creation_intents ORDER BY rowid')]
+    kw = {'home': kb.kanban_db_path('default').parent} if explicit else {}
+    bindings.append(bindings[0])
+    expected = [local.observe_local_binding(b, profile='default', now=5000, **kw) for b in bindings]
+    actual = local.observe_local_bindings(bindings, profile='default', now=5000, **kw)
+    assert actual == expected  # Includes the hash over the entire observed payload, not just public projection.
+    first = next(i for i, b in enumerate(bindings) if b['owner']['task_id'] == ids[0])
+    answer = actual[first]
+    assert answer is not None
+    assert answer['upstream'] == {'id': parent, 'status': 'running'}
+    answer['upstream']['status'] = 'changed by caller'
+    assert actual[-1] == expected[-1]
+
+
 @pytest.mark.parametrize('fault', ['prefetch', 'second_card', 'second_card_value'])
 def test_failed_batched_read_falls_back_to_single_card_reads(world, board, monkeypatch, fault):
     seed(world, monkeypatch, ('ready', 'done', 'blocked', 'archived'))

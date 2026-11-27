@@ -214,7 +214,8 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
     this connection, never an implicitly discovered process-home shadow.
     ``read`` carries this card's rows when the caller already read them in this same transaction
     (``kanban_origin_local._prefetch``): the task row, its markers, its latest completed/archived/withdrawn
-    events and its latest run. Every check below is unchanged; only the keyed reads are skipped.
+    events and its latest run. Optional ``upstream`` is presentation from a shared same-pass graph walk;
+    copy it before hashing so separate obligations never share mutable output. Authority checks are unchanged.
     """
     if not conn.in_transaction:
         raise ValueError('origin_observation_snapshot_required')
@@ -259,7 +260,12 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
     payload = {k: v for k, v in task.items()
                if k not in ('origin_observation', 'withdrawal_notice', 'withdrawal_recipients', 'ask_notice')}
     from hermes_cli.kanban_session_activity_card_details import _add_blocked_upstream
-    if local_only:
+    if read is not None and 'upstream' in read:
+        from copy import deepcopy
+        payload.pop('blocked_upstream', None)
+        payload.pop('upstream', None)
+        payload.update(deepcopy(read['upstream']))
+    elif local_only:
         _add_blocked_upstream(conn, {task['id']: payload}, replica=None)
     else:
         _add_blocked_upstream(conn, {task['id']: payload})

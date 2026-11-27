@@ -114,7 +114,7 @@ def _observe_prefetched(conn, binding: dict, read: dict, *, now: float, explicit
         'markers': [json.loads(raw) for raw in read['markers'].get(task_id, ())],
         'event': event, 'run': read['runs'].get(task_id),
         'archived': read['archived'].get(task_id) if row['status'] == 'archived' and event else None,
-        'withdrawn': read['withdrawn'].get(task_id)})
+        'withdrawn': read['withdrawn'].get(task_id), 'upstream': read['upstream'][task_id]})
 
 
 def observe_local_bindings(bindings: list[dict], *, profile: str, now: float, home=None) -> list[dict | None]:
@@ -141,6 +141,15 @@ def observe_local_bindings(bindings: list[dict], *, profile: str, now: float, ho
                 conn.row_factory = sqlite3.Row
                 conn.execute('BEGIN')
                 read = _prefetch(conn, sorted({bindings[i]['owner']['task_id'] for i in indexes}))
+                # One graph walk shares ancestor reads across this board's same-snapshot cards.
+                from hermes_cli.kanban_session_activity_card_details import _add_blocked_upstream
+                cards = {tid: dict(row) for tid, row in read['tasks'].items()}
+                if home is not None:
+                    _add_blocked_upstream(conn, cards, replica=None)
+                else:
+                    _add_blocked_upstream(conn, cards)
+                read['upstream'] = {tid: {k: card[k] for k in ('blocked_upstream', 'upstream') if k in card}
+                                    for tid, card in cards.items()}
                 while alone:
                     try:
                         out[alone[0]] = _observe_prefetched(conn, bindings[alone[0]], read, now=now,
