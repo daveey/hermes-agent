@@ -194,6 +194,9 @@ _pf86="$(env | sed -n 's/^ProgramFiles(x86)=//p' | head -n1)"
 #   * HERMES_TEST_USER_STEPS_API points tests/hermes_cli/test_web_links_stale.py at a
 #     user-steps plugin_api.py other than ~/code/hermes-mods (a candidate worktree, or
 #     hermes-mods CI running that core regression against its own plugin).
+#   * HERMES_COMPOSED_BOARD_URL / REQUIRED arm the loopback-only owner-release
+#     transport proof and make an unavailable fixture fail instead of silently skip.
+#     Never forward its admin key (the disposable fixture uses a public test key).
 #
 # These are test-infrastructure knobs, not credentials — same class as the
 # HERMES_RUN_SLOW_PET_TESTS / HERMES_E2E_BROWSER / HERMES_RUN_E2E opt-ins
@@ -213,7 +216,8 @@ for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   HERMES_E2E_STRICT_ACCEPTANCE HERMES_E2E_UPGRADE_BASE HERMES_E2E_N1_REF \
   HERMES_E2E_INSTALL_REF HERMES_E2E_GIT_OBJECTS HERMES_E2E_KEEP_ROOT \
   HERMES_TEST_SSH_HOST HERMES_TEST_SSH_USER HERMES_TEST_SSH_PORT \
-  HERMES_TEST_SSH_KEY HERMES_TEST_DOCKER_IMAGE HERMES_TEST_DOCKER_MOUNT_ROOT; do
+  HERMES_TEST_SSH_KEY HERMES_TEST_DOCKER_IMAGE HERMES_TEST_DOCKER_MOUNT_ROOT \
+  HERMES_COMPOSED_BOARD_URL HERMES_COMPOSED_REQUIRED; do
   if [ -n "${!_test_var:-}" ]; then
     TEST_ENV+=("$_test_var=${!_test_var}")
   fi
