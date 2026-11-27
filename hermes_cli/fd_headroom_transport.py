@@ -1,10 +1,26 @@
 """Bounded in-process Kanban client for FD alerts; no subprocess or local board lock."""
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from urllib.parse import quote, urlencode
 
 from hermes_cli import kanban_sync_client as sync
+
+
+def _wire_envelope(envelope):
+    """Retain valid old request IDs; map unrepresentable incident IDs deterministically.
+
+    Courier IDs allow 8..128 ASCII alphanumerics or ._:-, unlike Kanban's
+    idempotency key (which includes an ISO timestamp with a '+' timezone).
+    Do not mutate the frozen intent or its card idempotency key on retries.
+    """
+    ident = envelope['id']
+    if re.fullmatch(r'[A-Za-z0-9._:-]{8,128}', ident):
+        return envelope
+    prefix = 'fd-headroom-probe:' if ident.startswith('fd-headroom-probe:') else 'fd-headroom:'
+    return {**envelope, 'id': prefix + hashlib.sha256(ident.encode()).hexdigest()}
 
 
 class Client:
@@ -44,8 +60,10 @@ class Client:
         return {'state': 'live', 'row': row}
 
     def create(self, envelope):
+        envelope = _wire_envelope(envelope)
         try:
-            response = self._call('GET', '/v2/sync/requests/' + quote(envelope['id'], safe=''))
+            # The deployed route matches raw ._:- characters, not %-encoded IDs.
+            response = self._call('GET', '/v2/sync/requests/' + envelope['id'])
         except sync.HubError as exc:
             # Only the service's typed missing answer permits resending the frozen request.
             import json
@@ -66,4 +84,4 @@ class Client:
         return None
 
     def comment(self, envelope):
-        self._call('POST', '/v2/sync/requests', envelope)
+        self._call('POST', '/v2/sync/requests', _wire_envelope(envelope))
