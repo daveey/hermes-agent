@@ -97,6 +97,28 @@ def test_demand_precedes_older_idle_scope(monkeypatch):
     assert [scope for scope, _ctx in ordered] == list(reversed(scopes))
 
 
+def test_aged_out_demand_sorts_as_idle(monkeypatch):
+    from hermes_cli.kanban_annotation_fairness import stalest_first
+
+    scopes = [('home', name) for name in ('stale-demand', 'demanded')]
+    ages = {scopes[0]: host.DEMAND_WINDOW_S + 1, scopes[1]: 0}
+    monkeypatch.setattr(host._disk, 'demand_age', lambda scope: ages[scope])
+    monkeypatch.setattr(host._disk, 'published_read_at', lambda scope: 1 if scope == scopes[0] else 100)
+    ordered = stalest_first([(scope, contextvars.copy_context()) for scope in scopes])
+    assert [scope for scope, _ctx in ordered] == list(reversed(scopes))
+
+
+@pytest.mark.parametrize('read_at', [None, 'invalid', float('nan'), float('inf')])
+def test_idle_invalid_publication_stays_idle_and_sorts_oldest(monkeypatch, read_at):
+    from hermes_cli.kanban_annotation_fairness import stalest_first
+
+    scopes = [('home', name) for name in ('invalid-idle', 'valid-idle', 'demanded')]
+    monkeypatch.setattr(host._disk, 'demand_age', lambda scope: 0 if scope == scopes[2] else None)
+    monkeypatch.setattr(host._disk, 'published_read_at', lambda scope: read_at if scope == scopes[0] else 100)
+    ordered = stalest_first([(scope, contextvars.copy_context()) for scope in scopes])
+    assert [scope for scope, _ctx in ordered] == [scopes[2], scopes[0], scopes[1]]
+
+
 def test_gate_runs_in_scope_context(monkeypatch):
     from hermes_cli.kanban_annotation_fairness import stalest_first
 

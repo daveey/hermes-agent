@@ -19,6 +19,46 @@ afterEach(() => {
   resetRowTimersForTests()
 })
 
+it('ignores empty identities rather than retaining an anonymous clock', () => {
+  vi.useFakeTimers({ now: NOW })
+  rememberRowTimers(known({ id: '' }))
+  expect(rowTimers(unknown({ id: '' })).cards).toEqual([])
+})
+
+it('retains only running and blocked cards in the memo itself', () => {
+  vi.useFakeTimers({ now: NOW })
+  rememberRowTimers(known({ kanban_timed_cards: [
+    ...cards,
+    { id: 'blocked', title: 'Blocked', state: 'blocked', since: NOW / 1000 },
+    { id: 'waiting', title: 'Waiting', state: 'waiting', since: NOW / 1000 }
+  ] }))
+  expect(rowTimers(unknown()).cards.map(c => c.state)).toEqual(['running', 'blocked'])
+})
+
+it('known zero deletes evidence without allocating an empty retained entry', () => {
+  vi.useFakeTimers({ now: NOW })
+  rememberRowTimers(known())
+  const writes = vi.spyOn(Map.prototype, 'set')
+  rememberRowTimers(row())
+  expect(writes).not.toHaveBeenCalled()
+  expect(rowTimers(unknown()).confirmedAt).toBe(0)
+})
+
+it('fresh cards are returned directly before any confirmation effect', () => {
+  expect(rowTimers(known({ kanban_timed_more: 3 }))).toEqual({ cards, more: 3, confirmedAt: 0 })
+})
+
+it('old observations shorten retention while nonfinite observations use receipt time', () => {
+  vi.useFakeTimers({ now: NOW })
+  rememberRowTimers(known({ kanban_observed_at: NOW / 1000 - 800 }))
+  expect(rowTimers(unknown()).confirmedAt).toBe(NOW - 800_000)
+  vi.advanceTimersByTime(100_000)
+  expect(rowTimers(unknown()).cards).toEqual([])
+  rememberRowTimers(known({ kanban_observed_at: Number.NaN }))
+  expect(rowTimers(unknown()).confirmedAt).toBe(NOW + 100_000)
+  expect(rowTimers(unknown()).cards).toEqual(cards)
+})
+
 it('offline evidence arriving late cannot renew the original confirmation', () => {
   vi.useFakeTimers({ now: NOW })
   rememberRowTimers(known())
@@ -44,6 +84,13 @@ it('future observation clocks clamp to receipt time and still expire', () => {
   vi.advanceTimersByTime(899_999)
   expect(rowTimers(unknown()).cards).toEqual(cards)
   vi.advanceTimersByTime(1)
+  expect(rowTimers(unknown()).cards).toEqual([])
+})
+
+it('a wall clock stepped back never extends retention', () => {
+  vi.useFakeTimers({ now: NOW })
+  rememberRowTimers(known())
+  vi.setSystemTime(NOW - 3_600_000)
   expect(rowTimers(unknown()).cards).toEqual([])
 })
 
