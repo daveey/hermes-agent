@@ -21,14 +21,14 @@ def mount_env(monkeypatch, tmp_path):
     app = FastAPI()
     plugins, modules = [], {}
     monkeypatch.setattr(server, 'app', app)
-    monkeypatch.setattr(server, '_get_dashboard_plugins', lambda: plugins)
+    monkeypatch.setattr(server, '_get_dashboard_plugins', lambda **kwargs: plugins)  # the hot mount passes force_rescan
     monkeypatch.setattr(plugins_cmd, '_get_enabled_set', lambda: set(modules))
     monkeypatch.setattr(plugins_cmd, '_get_disabled_set', lambda: set())
     monkeypatch.setattr(plugin_isolation, 'import_user_code', lambda path, name: modules[path.parent.name])
     monkeypatch.setattr(dashboard, '_plugin_route_secret_scope', lambda: None)
     lifecycles(app)
 
-    def add(name, router=None, start=None):
+    def add(name, router=None, start=None, source='bundled'):
         folder = tmp_path / name
         folder.mkdir()
         (folder / 'api.py').touch()
@@ -38,7 +38,7 @@ def mount_env(monkeypatch, tmp_path):
         if start is not None:
             module.start_legacy = start
         modules[name] = module
-        plugins.append(dict(name=name, source='bundled', _dir=str(folder), _api_file='api.py'))
+        plugins.append(dict(name=name, source=source, _dir=str(folder), _api_file='api.py'))
         return folder / 'api.py'
 
     return app, dashboard, add
@@ -257,3 +257,144 @@ def test_defer_switch_refuses_an_already_imported_server(monkeypatch):
     monkeypatch.setitem(sys.modules, 'hermes_cli.web_server', object())
     assert boot.defer_plugin_api_sweep() is False
     assert boot._defer_plugin_api_sweep is False
+
+
+def _broken_lifespan_app(mount_env, close):
+    """One plugin whose router lifespan raises on entry beside a healthy one, behind the warm gate."""
+    app, dashboard, add = mount_env
+    calls = []
+
+    @asynccontextmanager
+    async def broken(app):
+        calls.append('enter')
+        raise RuntimeError('broken enter')
+        yield
+
+    def start():
+        calls.append('start')
+        return SimpleNamespace(close=lambda: close(calls))
+
+    add('broken', APIRouter(lifespan=broken), start=start)
+    add('good')
+    dashboard._register_plugin_api_fallback(app)
+    app.add_api_route('/{full_path:path}', lambda: {'shell': True})
+    app.state.plugin_api_sweep_owed = True
+    app.state.http_listener_ready = asyncio.Event()
+    app.state.sessions_facts = object()
+    app.add_middleware(boot.BootServicesMiddleware)
+    return app, dashboard, calls
+
+
+@asynccontextmanager
+async def _no_services(app):
+    yield
+
+
+@pytest.mark.asyncio
+async def test_failed_router_lifespan_is_not_published_by_a_later_request(mount_env):
+    app, dashboard, calls = _broken_lifespan_app(mount_env, lambda calls: calls.append('close'))
+    async with boot.services_lifespan(app, _no_services):
+        app.state.http_listener_ready.set()
+        await asyncio.wait_for(app.state.boot_services_ready.wait(), 3)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            for _ in range(2):
+                # The same answer the fallback gives any plugin API that is not mounted.
+                response = await client.get('/api/plugins/broken/ping')
+                assert (response.status_code, response.json()) == (404, {'detail': 'Not Found'})
+                assert not dashboard._plugin_api_mounted(app, 'broken')
+            assert (await client.get('/api/plugins/good/ping')).status_code == 200
+    # No second import/start: the handle was stopped once and the lifespan was never re-entered.
+    assert calls == ['start', 'enter', 'close']
+
+
+@pytest.mark.asyncio
+async def test_failing_close_of_a_refused_plugin_does_not_fail_warmup(mount_env, caplog):
+    loop_thread = threading.get_ident()
+
+    def close(calls):
+        calls.append('close' if threading.get_ident() != loop_thread else 'close-on-loop')
+        raise RuntimeError('broken close')
+
+    app, dashboard, calls = _broken_lifespan_app(mount_env, close)
+    async with boot.services_lifespan(app, _no_services):
+        app.state.http_listener_ready.set()
+        await asyncio.wait_for(app.state.boot_services_ready.wait(), 3)
+        assert dashboard._plugin_api_mounted(app, 'good')
+        assert not dashboard._plugin_api_mounted(app, 'broken')
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            assert (await client.get('/api/plugins/good/ping')).status_code == 200
+            assert (await client.get('/api/plugins/broken/ping')).status_code == 404
+    assert calls == ['start', 'enter', 'close']
+    assert 'Failed to stop plugin broken after its router lifespan failed' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_hosted_proxy_route_is_withheld_until_services_enter(mount_env, monkeypatch):
+    from hermes_cli import plugin_isolation
+    app, dashboard, add = mount_env
+    add('hosted', source='user')
+    monkeypatch.setattr(plugin_isolation, 'isolation_mode', lambda: plugin_isolation.ISOLATION_HOST)
+    monkeypatch.setattr(dashboard, '_mount_hosted_plugin_api', lambda app, plugin, api_file: app.add_api_route(
+        f"/api/plugins/{plugin['name']}/{{path:path}}", lambda path: {'hosted': path}))
+    dashboard._register_plugin_api_fallback(app)
+    app.add_api_route('/{full_path:path}', lambda: {'shell': True})
+    app.state.plugin_api_sweep_owed = True
+    seen = []
+
+    @asynccontextmanager
+    async def services(app):
+        seen.append(dashboard._plugin_api_mounted(app, 'hosted'))
+        yield
+
+    async with boot.services_lifespan(app, services):
+        assert seen == [False]
+        assert [r.path for r in app.routes][4:] == [
+            '/api/plugins/hosted/{path:path}', '/api/plugins/{name}/{path:path}', '/{full_path:path}']
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            assert (await client.get('/api/plugins/hosted/x')).json() == {'hosted': 'x'}
+
+
+def test_router_lifespan_state_reaches_requests_as_on_the_eager_path(mount_env):
+    from fastapi import Request
+    from fastapi.testclient import TestClient
+    from hermes_cli import web_server as server
+    _, dashboard, add = mount_env
+
+    @asynccontextmanager
+    async def stateful(app):
+        yield {'probe_value': 7}
+
+    def read(request: Request):
+        return {'v': getattr(request.state, 'probe_value', None)}
+
+    router = APIRouter(lifespan=stateful)
+    router.add_api_route('/state', read)
+    add('probe', router)
+    plugin, = server._get_dashboard_plugins()
+    answers = {}
+    for mode in ('eager', 'deferred'):
+        app = FastAPI(lifespan=lambda app: boot.services_lifespan(app, _no_services))
+        app.add_middleware(boot.BootServicesMiddleware)
+        if mode == 'eager':
+            with dashboard._plugin_api_mount_lock:
+                assert dashboard._mount_one_plugin_api(app, plugin, {'probe'}, set())
+        else:
+            app.state.plugin_api_sweep_owed = True
+        dashboard._register_plugin_api_fallback(app)
+        with TestClient(app) as client:
+            response = client.get('/api/plugins/probe/state')
+            answers[mode] = (response.status_code, response.json())
+        assert not getattr(app.state, 'plugin_lifespan_state', None)  # nothing outlives the lifespans
+    assert answers == {'eager': (200, {'v': 7}), 'deferred': (200, {'v': 7})}
+
+
+def test_run_server_logs_when_deferral_does_not_engage(monkeypatch, caplog):
+    from hermes_cli.dashboard_server_start import run_server
+    from hermes_cli.observability import shared_metrics_process
+    monkeypatch.setattr(boot, 'defer_plugin_api_sweep', lambda: False)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.web_server', SimpleNamespace(start_server=lambda **kw: None))
+    monkeypatch.setattr(shared_metrics_process, 'begin_process', lambda *args: None)
+    with caplog.at_level('WARNING'):
+        run_server(SimpleNamespace(host='localhost', port=1, no_open=True), headless=True,
+                   owner=None, prepare_auth=lambda args: None, bootstrap={}, mcp_after_bind=None)
+    assert 'Plugin API sweep was not deferred' in caplog.text

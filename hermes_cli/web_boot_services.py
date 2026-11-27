@@ -42,6 +42,10 @@ class BootServicesMiddleware:
                                             headers={'Retry-After': '1'})
                     await response(scope, receive, send)
                     return
+            # State yielded by plugin router lifespans entered after app startup (deferred sweep).
+            carried = getattr(scope['app'].state, 'plugin_lifespan_state', None)
+            if carried:
+                scope.setdefault('state', {}).update(carried)
         await self.app(scope, receive, send)
 
 
@@ -74,16 +78,34 @@ async def _services_with_plugin_apis(app, services):
     # Legacy start launches kanban-board-prewarm BEFORE services' hold_bind_for_prewarm joins it.
     pending = await asyncio.to_thread(_sweep_plugin_apis, app) if owed else []
     async with services(app), AsyncExitStack() as stack:
-        fresh = []
+        fresh, carried = [], {}
+        if pending:
+            # The eager path hands a router lifespan's yielded state to every request through
+            # FastAPI's merged lifespan. That lifespan has already started here, so the
+            # middleware copies this dict into each request instead; it ends with the lifespans.
+            app.state.plugin_lifespan_state = carried
+            stack.callback(carried.clear)
         for name, api_path, routes, context in pending:
             try:
                 if context is not None:
-                    await stack.enter_async_context(context(app))
+                    state = await stack.enter_async_context(context(app))
+                    if state is not None:
+                        carried.update(state)
             except Exception:  # health: allow BLE001 -- third-party lifespan failure must not prevent other plugins from starting
                 _log.warning('Failed to enter plugin %s router lifespan', name, exc_info=True)
+                # Remembered for the app's life: without it the first request would reach the
+                # hot-mount fallback, import the plugin again and serve it with no lifespan.
+                if not hasattr(app.state, 'plugin_api_refused'):
+                    app.state.plugin_api_refused = set()
+                app.state.plugin_api_refused.add(name)
                 registry = getattr(app.state, 'fact_plugin_lifecycles', None)
                 if registry is not None:
-                    registry.stop(api_path)
+                    try:
+                        # close() is the plugin's own blocking code: keep it off the event loop.
+                        await asyncio.to_thread(registry.stop, api_path)
+                    except Exception:  # health: allow BLE001 -- a third-party close() failure must not fail warmup for the other plugins
+                        # The registry keeps the handle, so shutdown tries the close again.
+                        _log.warning('Failed to stop plugin %s after its router lifespan failed', name, exc_info=True)
                 continue
             fresh.extend(routes)
         if owed:

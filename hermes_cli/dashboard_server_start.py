@@ -21,7 +21,11 @@ def prepare_and_run_server(args, *, headless, prepare_runtime, prepare_auth, boo
 def run_server(args, *, headless, owner, prepare_auth, bootstrap, mcp_after_bind):
     if headless:
         from hermes_cli.web_boot_services import defer_plugin_api_sweep
-        defer_plugin_api_sweep()
+        if not defer_plugin_api_sweep():
+            # Still correct, only slower: the import below mounts every plugin API before the socket handoff.
+            import logging
+            logging.getLogger(__name__).warning(
+                'Plugin API sweep was not deferred: hermes_cli.web_server was imported before the headless launcher')
     from hermes_cli.web_server import start_server
 
     # TTY-only interactive auth setup; noninteractive callers retain fail-closed

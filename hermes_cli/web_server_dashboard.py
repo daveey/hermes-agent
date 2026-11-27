@@ -1145,7 +1145,8 @@ def _try_hot_mount_plugin_api(name: str) -> bool:
     secondary, own, requester_sets = secondary_profile_home() is not None, secondary_plugin(name), _plugin_enable_sets_here()
     with _launch_profile_scope(), _plugin_api_mount_lock:
         enabled_set, disabled_set = _get_enabled_set(), _get_disabled_set()
-        if _plugin_api_mounted(app, name):  # a mounted plugin's unknown subpath: no disk rescan
+        # A mounted plugin's unknown subpath, or one refused at startup: no disk rescan.
+        if _plugin_api_mounted(app, name) or name in getattr(app.state, "plugin_api_refused", ()):
             return False
         plugin = next((p for p in _get_dashboard_plugins(force_rescan=True) if p.get("name") == name), None)
         if secondary:
@@ -1224,6 +1225,11 @@ def _mount_one_plugin_api(app, plugin: dict[str, Any], enabled_set: set, disable
     if not api_file_name:
         return False
     if _plugin_api_mounted(app, plugin.get("name", "")):
+        return False
+    if plugin.get("name") in getattr(app.state, "plugin_api_refused", ()):
+        # Its router lifespan failed in the deferred startup sweep and its handle was stopped:
+        # a later hot mount would start it again and publish routes whose lifespan never ran.
+        _log.debug("Plugin %s: skipping API mount (router lifespan failed at startup)", plugin.get("name", ""))
         return False
     skip = _plugin_api_mount_skip_reason(plugin, enabled_set, disabled_set)
     if skip:
