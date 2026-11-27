@@ -1,4 +1,5 @@
 """Real refusal producer -> persisted snapshot -> row projection. [daveey]"""
+import json
 import time
 
 import pytest
@@ -43,15 +44,25 @@ def test_real_gateway_drain_preserves_refusal_reason(kanban_home, monkeypatch, p
         assert value['non_running_reason']['disposition'] == 'waiting'
 
 
-def test_real_accounting_refusal_reaches_row_and_expires_without_poll_laundering(kanban_home):
+@pytest.mark.parametrize('observed_at', [None, 1795738750.5488636, 1795716833.0280812],
+                         ids=['live-clock', 'occurrence1021', 'occurrence983'])
+def test_real_accounting_refusal_reaches_row_and_expires_without_poll_laundering(kanban_home, observed_at):
     with kbc.connect_closing() as conn:
         tid, context = accounting.released(conn)
-        captured = capacity.capture(conn)
+        captured = capacity.capture(conn, now=observed_at)
+        assert captured is not None
         assert kb.claim_task(conn, tid) is None
         result = dispatch.DispatchResult()
         verdict.claim_refused(result, tid, sync.pop_claim_deferral(tid))
-        now = time.time()
+        now = captured['observed_at'] + 1
         assert capacity.record(conn, result, board='default', machine='fixture', now=now, captured=captured)
+        payload = conn.execute('SELECT payload FROM kanban_capacity_observation WHERE id=1').fetchone()[0]
+        persisted = json.loads(payload)
+        # The protocol persists milliseconds. Binary floating point does not
+        # guarantee seconds -> milliseconds -> seconds is bit-identical; assert
+        # both real boundaries exactly, never a tolerance or a renewed poll time.
+        assert persisted['decision_at_ms'] == captured['observed_at'] * 1000
+        observed_seconds = persisted['decision_at_ms'] / 1000
         value = row_observation(conn, tid, now + 1)
         # A refused claim proves non-execution, not an otherwise missing lifecycle generation.
         assert value['state'] != 'running'
@@ -60,11 +71,13 @@ def test_real_accounting_refusal_reaches_row_and_expires_without_poll_laundering
         assert reason['disposition'] == 'blocked'
         assert reason['actor'] == 'agent'
         assert 'human_request' not in value
-        assert reason['observed_at'] == captured['observed_at']
+        assert reason['observed_at'] == observed_seconds
+        assert reason['valid_until'] == observed_seconds + 180
         stale = row_observation(conn, tid, now + 181)
         assert stale['non_running_reason']['freshness'] == 'unknown'
         assert stale['non_running_reason']['unknown_reason'] == 'dispatcher_evidence_stale'
-        assert stale['non_running_reason']['observed_at'] == captured['observed_at']
+        assert stale['non_running_reason']['observed_at'] == observed_seconds
+        assert conn.execute('SELECT payload FROM kanban_capacity_observation WHERE id=1').fetchone()[0] == payload
         accounting.receipt(context)
         assert kb.claim_task(conn, tid) is not None
         current = row_observation(conn, tid, now + 2)
