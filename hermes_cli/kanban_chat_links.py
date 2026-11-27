@@ -455,18 +455,30 @@ def _stale_uids(board: str, gateway: str, cards: list[dict[str, Any]]) -> set[st
     return stale - fresh
 
 
+def reconciliation_cards() -> list[dict[str, Any]]:
+    """Producer observations, before display deduplication against our own links.
+
+    The visible projection hides locally associated open cards. Using its absence
+    as release authority makes an unreleased link hide its producer, so reconcile
+    releases it; the next projection sees it again and reopens it. Retain the raw
+    origin observations (including stale/released ones) from the SAME cache entry.
+    """
+    from hermes_cli.kanban_session_activity import remote_links_and_origin_rows
+    visible, origins = remote_links_and_origin_rows()
+    return [*visible, *origins]
+
+
 def _plan(conn: sqlite3.Connection, board: str, gateway: str,
           ledger: bool) -> tuple[dict, list, set[str], set[str]]:
     """``(want, rows, profile_board, stale)``: the links this gateway wants in ``conn``, the rows it has
     (read-only), the profile-board card ids whose links it leaves alone (``_profile_board_ids``) and
     the link uids only stale ledger rows want (``_stale_uids``), from ONE ledger read."""
     from hermes_cli import loop_accounting as la
-    from hermes_cli.kanban_session_activity import _remote_links
     want = la.timed("sync.links.local", _local_links, conn, gateway)
     profile_board: set[str] = set()
     stale: set[str] = set()
     if ledger:
-        cards = _remote_links()
+        cards = reconciliation_cards()
         stale = _stale_uids(board, gateway, cards)
         profile_board = la.timed("sync.links.profile_board", _profile_board_ids, board, gateway, cards)
         want.update(la.timed("sync.links.ledger", _ledger_links, board, gateway, cards, profile_board))
@@ -546,7 +558,20 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     added = changed = released = retired = 0
     owner_links = la.timed("sync.links.owner_links", _owner_hub_links, conn, board, gateway)
     with la.pass_("sync.links.write"), write_txn(conn):
+        from hermes_cli.kanban_containment_connections import held
+        held_tasks: dict[str, bool] = {}
+
+        def writable(task_id: str) -> bool:
+            # Check under the writer lock, only for candidate effects. A rejected
+            # containment write is otherwise restored by pull forever. Marker-only
+            # and malformed custody remain held; this is eligibility, not release.
+            if task_id not in held_tasks:
+                held_tasks[task_id] = held(conn, task_id)
+            return not held_tasks[task_id]
+
         for link in owner_links:
+            if not writable(link["task_id"]):
+                continue
             # Insert-only, and only while no row for this card and chat exists (a concurrent write, or a pull that
             # brought the chat gateway's own row in, wins). See ``_owner_hub_links``.
             added += conn.execute(
@@ -556,11 +581,15 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
                 ":chat_gateway AND COALESCE(chat_profile, 'default') = :chat_profile AND chat_session = :chat_session)",
                 link).rowcount
         for uid in placeholders - set(want):
+            if not writable(task_of[uid]):
+                continue
             conn.execute("DELETE FROM task_chat_links WHERE uid = ?", (uid,))
             have.pop(uid)
             retired += 1
         for uid, link in want.items():
             if uid not in have:
+                if not writable(link["task_id"]):
+                    continue
                 conn.execute(
                     "INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, released, "
                     "created_at) VALUES (:uid, :task_id, :chat_gateway, :chat_profile, :chat_session, :kind, :released, "
@@ -569,12 +598,17 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
             elif have[uid] != link["released"]:
                 if have[uid] and not link["released"] and uid in stale:
                     continue  # a stale observation never reopens a released link (``_stale_uids``)
+                if not writable(link["task_id"]):
+                    continue
                 conn.execute("UPDATE task_chat_links SET released = ? WHERE uid = ?", (link["released"], uid))
                 changed += 1
         for uid, was_released in have.items():
             if uid not in want and not was_released and task_of[uid] not in profile_board:
+                if not writable(task_of[uid]):
+                    continue
                 conn.execute("UPDATE task_chat_links SET released = 1 WHERE uid = ?", (uid,))
                 released += 1
+        machine = [link for link in machine if writable(link["task_id"])]
     if machine:
         _write_release_receipt(board, gateway, machine)
     return {"added": added, "changed": changed, "released": released, "retired": retired}

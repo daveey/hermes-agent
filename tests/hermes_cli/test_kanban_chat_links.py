@@ -24,6 +24,15 @@ def kanban_home(tmp_path, monkeypatch):
     return support.kanban_home(tmp_path, monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def synthetic_ledger_view(monkeypatch):
+    # Existing fixtures supply one synthetic view, with no separately hidden origin rows.
+    # New projection/reconcile integration coverage lives in test_kanban_chat_links_oscillation.
+    from hermes_cli import kanban_session_activity as activity
+    monkeypatch.setattr(activity, 'remote_links_and_origin_rows',
+                        lambda stale_ok=False: (activity._remote_links(), []))
+
+
 @pytest.fixture
 def live(kanban_home):
     support.write_sync_config(kanban_home, True)

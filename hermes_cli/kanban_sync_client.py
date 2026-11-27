@@ -1331,9 +1331,8 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
     with diag.source("sync.links"), config_snapshot() as placement, chat_key.pass_reads() as reads:
         ledger: Optional[dict[str, frozenset]] = None
         try:
-            from hermes_cli.kanban_session_activity import _remote_links
             with la.pass_("sync.links.sources"):
-                cards = _remote_links()
+                cards = kanban_chat_links.reconciliation_cards()
                 ledger = la.timed("sync.links.ledger_slices", ledger_slices, cards, gateway)
             local = {slug for slug, _path in boards}
             if not skip_unchanged or set(ledger) - local:
