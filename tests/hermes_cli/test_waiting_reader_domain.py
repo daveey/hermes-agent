@@ -248,18 +248,15 @@ def test_domain_recovery_refuses_borrowed_then_retires(board):
         conn.execute('SELECT 1')
 
 
-def test_domain_recovery_preserves_unfinished_transaction(board):
+def test_domain_borrow_end_rolls_back_unfinished_transaction(board):
+    # A borrow no longer leaks its snapshot: the explicit transaction is ended
+    # on return, so recovery may retire the now-idle reader (no WAL pin).
     with domain.reading(board) as conn:
         conn.execute('BEGIN')
-    try:
-        with pytest.raises(generation.DeletedWalGenerationError):
-            domain.evict(generation._resolved(board))
-        assert conn.in_transaction
-        assert safe.has_live_connection(board)
-    finally:
-        conn.rollback()
+    assert not conn.in_transaction
     domain.evict(generation._resolved(board))
     assert not domain._cache
+    assert not safe.has_live_connection(board)
 
 
 def test_domain_recovery_map_contention_is_nonblocking(board):
