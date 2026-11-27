@@ -4,6 +4,7 @@ import json
 import pytest
 
 from hermes_cli import kanban_sync_actionability_drift as audit
+from tests.hermes_cli.kanban_legacy_command_support import seed_legacy_command
 
 pytest_plugins = ['tests.hermes_cli.test_kanban_sync_actionability_terminal']
 
@@ -159,7 +160,7 @@ def test_archive_portable_inventory_must_match(archived, sql):
 ])
 def test_archive_never_bypasses_original_command_custody(archived, column, value):
     live, shadow, op = archived
-    live.execute(f'UPDATE kanban_actionability_commands SET {column}=?', (value,))
+    seed_legacy_command(live, **{column: value})
     assert not audit.audited_rejection(live, shadow, op)
 
 
