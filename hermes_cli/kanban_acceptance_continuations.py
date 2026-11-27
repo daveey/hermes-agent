@@ -24,8 +24,9 @@ def _body(row):
 
 
 def source_digest(conn, task_id):
-    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    return _body(row) if row is not None and "body" in row.keys() else None
+    cursor = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
+    row, columns = cursor.fetchone(), [c[0] for c in cursor.description]
+    return _body(dict(zip(columns, row))) if row is not None and "body" in columns else None
 
 
 def _scope(row):
