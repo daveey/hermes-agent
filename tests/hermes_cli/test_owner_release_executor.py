@@ -211,6 +211,47 @@ def test_authenticated_reader_feed_and_cache_hash_fences(assembly):
     assert subject.verified_application(a.conn,'intent-1') is None
 
 
+@pytest.mark.parametrize('reader', ['executor', 'renamed-home'])
+def test_renewal_home_alias_cannot_use_public_cache_without_private_proof(assembly, reader):
+    # Synthetic authenticated attestation, as in the neighboring reader tests.
+    # Unlike changing local identity alone, this keeps reader_gateway matching;
+    # only equality with the canonical renewal HOME separates the two cases.
+    a = assembly
+    value = reply(a)
+    att = value['owner_release_applied_v1']
+    att['reader_gateway'] = reader
+    att['renewal']['origin_gateway'] = 'renamed-home'
+    for event in att['events']:
+        event['origin_gateway'] = 'renamed-home'
+    value['row'] = att['events'][-1]
+    assert att['intent']['home'] == 'home' != reader
+    with kb.write_txn(a.conn):
+        a.conn.execute('UPDATE kanban_sync_state SET gateway_id=?', (reader,))
+        # The fixture already has this renewal locally with pending transport;
+        # model its canonical alias stamp too, rather than expecting feed import
+        # to overwrite locally pending history.
+        a.conn.execute('UPDATE task_events SET origin_gateway=? WHERE uid=?',
+                       ('renamed-home', att['renewal']['uid']))
+    rows = changes(value)
+    # Both variants pass real public validation, authenticated cache capture,
+    # and remote apply: no mismatched-reader or missing-public-half veto masks
+    # the renewal-origin HOME fence in verified_application.
+    safe = quarantine.certified_page(a.conn, Hub(a.conn, value), value['board'], rows)
+    assert safe == rows
+    sync.apply_remote_changes(a.conn, safe, new_cursor=500, observers=False)
+    assert subject._cached(a.conn, 'intent-1') is not None
+    assert app.verified_application(a.conn, 'intent-1') is None
+    before = list(a.conn.iterdump())
+    got = subject.verified_application(a.conn, 'intent-1')
+    if reader == 'renamed-home':
+        assert got is None, 'canonical renewal HOME must retain private application proof'
+        assert app.consumer_application(a.conn, 'intent-1') is None
+    else:
+        assert got is not None
+        assert app.consumer_application(a.conn, 'intent-1') == got
+    assert list(a.conn.iterdump()) == before
+
+
 def test_unreadable_pickup_receipt_holds_one_card(assembly,tmp_path,monkeypatch):
     from hermes_cli import kanban_worker_node as worker, kanban_db_connect as kbc
     a=assembly;value=reply(a);foreign(a);rows=changes(value)

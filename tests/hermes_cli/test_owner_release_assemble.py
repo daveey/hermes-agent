@@ -222,3 +222,86 @@ def test_two_appliers_recheck_exact_replay_inside_writer(assembly, monkeypatch):
         raise AssertionError('concurrent exact replay must return its historical winner') from exc
     assert replay == result[0]
     assert a.conn.execute("SELECT COUNT(*) FROM task_events WHERE kind='owner_release_applied'").fetchone()[0] == 1
+
+
+def test_late_real_run_spend_after_record_rolls_back_entire_application(assembly, monkeypatch):
+    # Controlled post-record ledger settlement, not a claim of real concurrent
+    # writes inside SQLite's unique writer. Spend/limits/private readers stay real.
+    from hermes_cli import kanban_release_application as app, kanban_spend_budget as budget
+    a = assembly
+    original = app._record
+    observed = []
+    tables = ('tasks', 'task_runs', 'task_comments', 'task_events', app.TABLE,
+              'kanban_sync_outbox')
+    def whole_cut():
+        return {name: [tuple(r) for r in a.conn.execute(f'SELECT * FROM {name} ORDER BY rowid')]
+                for name in tables}
+    def record_then_settle(conn, **kwargs):
+        original(conn, **kwargs)
+        assert app.verified_application(conn, 'intent-1') is not None
+        lim = budget.card_limits(conn, a.tid, budget.limits())
+        assert lim.runs > 0
+        import time
+        now = int(time.time())
+        since = budget.spend(conn, a.tid).since
+        assert since <= now - budget.MIN_RUN_SECONDS
+        for _ in range(lim.runs):
+            conn.execute("INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome) "
+                         "VALUES (?,'default','continued',?,?,'continued')",
+                         (a.tid, now-budget.MIN_RUN_SECONDS, now))
+        spent = budget.spend(conn, a.tid)
+        assert budget.over(spent, lim) == 'runs'
+        observed.append(spent.runs)
+    before = whole_cut()
+    monkeypatch.setattr(app, '_record', record_then_settle)
+    with pytest.raises(ValueError, match='cumulative spend remains over budget'):
+        apply(a)
+    assert observed
+    assert whole_cut() == before
+    monkeypatch.setattr(app, '_record', original)
+    assert apply(a)['result']['outcome'] == 'released'
+
+
+def _validate_only(a):
+    """Run only the live-gate validator, so a later apply-time veto cannot mask a clause."""
+    from hermes_cli import kanban_release_application as app, kanban_release_assemble as subject
+    with app._writer(a.conn):
+        return subject._validate(a.conn, replica.verified_consumption(a.conn, a.proof['consume']['client_op_id']), 'delivery-1')
+
+
+def test_sole_created_owner_session_admitted_as_task_run_is_never_home_owner(assembly):
+    # Only the owner-vs-run exclusion differs: link-1/chat-1 still exactly matches the actor.
+    a = assembly
+    assert _validate_only(a)
+    with kb.write_txn(a.conn):
+        a.conn.execute("INSERT INTO task_events(uid,task_id,kind,payload,created_at,origin_gateway) VALUES ('run-admit-1',?,'owner_admitted',?,91,'home')",
+                       (a.tid, json.dumps({'session_id': a.proof['intent']['actor']['session']})))
+    assert a.conn.execute("SELECT COUNT(*) FROM task_chat_links WHERE task_id=? AND released=0 AND kind='created'", (a.tid,)).fetchone()[0] == 1
+    before = snapshot(a)
+    with pytest.raises(ValueError, match='never a task run'):
+        _validate_only(a)
+    with pytest.raises(ValueError, match='never a task run'):
+        apply(a)
+    assert snapshot(a) == before
+
+
+def test_pending_containment_alone_vetoes_home_validation_and_apply(assembly):
+    # Deliberately incomplete hold-only marker: proves unresolved custody holds,
+    # not the real containment producer (covered separately by composed ingress).
+    a = assembly
+    assert _validate_only(a)
+    with kb.write_txn(a.conn):
+        a.conn.execute("INSERT INTO task_events(uid,task_id,kind,payload,created_at,origin_gateway) VALUES ('contained-1',?,'contained','{}',91,'home')", (a.tid,))
+    from hermes_cli.kanban_containment_guard import pending
+    from hermes_cli.kanban_stop_ended import stopped_at
+    from hermes_cli.kanban_goal_recovery import current_park
+    from hermes_cli.kanban_resume_requester import open_recovery_card
+    assert pending(a.conn, a.tid)
+    # No sibling hold in the same OR-chain is active, so only containment can refuse.
+    assert stopped_at(a.conn, a.tid) is None and not current_park(a.conn, a.tid) and not open_recovery_card(a.conn, a.tid)
+    before = snapshot(a)
+    with pytest.raises(ValueError, match='containment/admin/recovery'):
+        _validate_only(a)
+    with pytest.raises(ValueError, match='containment/admin/recovery'):
+        apply(a)
+    assert snapshot(a) == before
