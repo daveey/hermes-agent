@@ -207,22 +207,27 @@ def test_close_attempts_the_standby_when_the_active_child_keeps_custody(spawns, 
 
 
 def test_standby_whose_group_does_not_stop_stays_owned_and_is_accounted_once(spawns, monkeypatch):
+    # A stale standby that will not stop no longer fails captures: it stays owned in _retiring,
+    # the capture gets a fresh child, and close() retries the stop.
     children, _ = spawns
     capture = CaptureProcess(command=command(PID_FRAME))
     capture.prepare()
     standby = capture._standby
     monkeypatch.setattr(module, 'STANDBY_MAX_AGE_S', -1)
     tracked = module.stop_owned_group_survivors
-    monkeypatch.setattr(module, 'stop_owned_group_survivors', lambda pid, **kwargs: False)
+    monkeypatch.setattr(module, 'stop_owned_group_survivors',
+                        lambda pid, **kwargs: pid != children[0].pid and tracked(pid, **kwargs))
     before = stat()
-    with pytest.raises(TimeoutError, match='custody retained'):
-        capture('sessions', {})
-    assert capture._standby is standby and capture._child is None and len(children) == 1
-    monkeypatch.setattr(module, 'stop_owned_group_survivors', tracked)
     assert served_by(capture) == children[1].pid
-    assert capture._standby is None
-    assert delta(before, 'runs') == 2 and delta(before, 'skips') == 1
+    assert capture._standby is None and capture._retiring == [standby] and capture._child is None
+    assert served_by(capture) == children[2].pid  # not retried, nor recorded, per capture
+    with pytest.raises(TimeoutError, match='custody retained'):
+        capture.close()
+    assert capture._retiring == [standby]
+    monkeypatch.setattr(module, 'stop_owned_group_survivors', tracked)
     capture.close()
+    assert capture._retiring == [] and children[0].poll() is not None
+    assert delta(before, 'runs') == 3 and delta(before, 'skips') == 1
 
 
 def test_prepare_spawn_failure_leaves_the_reader_usable(spawns):
@@ -404,7 +409,7 @@ def test_close_in_the_handoff_window_retires_the_published_standby_once(spawns):
 
 def test_unkept_standby_whose_group_does_not_stop_stays_owned_for_close(spawns, monkeypatch):
     # prepare() lost the race to close(); its own rollback cannot stop the group. The child must stay
-    # owned (published) so a later close() retries, accounted once, and is never used for a capture.
+    # owned (in _retiring) so a later close() retries, accounted once, and is never used for a capture.
     children, _ = spawns
     capture = CaptureProcess(command=command(PID_FRAME))
     spawn = module.spawn_owned
@@ -419,25 +424,36 @@ def test_unkept_standby_whose_group_does_not_stop_stays_owned_for_close(spawns, 
     before = stat()
     with pytest.raises(TimeoutError, match='custody retained'):
         capture.prepare()
-    assert capture._standby is not None and capture._standby.child is children[0]
+    assert capture._standby is None and [s.child for s in capture._retiring] == [children[0]]
     monkeypatch.setattr(module, 'stop_owned_group_survivors', tracked)
     capture.close()
-    assert capture._standby is None and children[0].poll() is not None
+    assert capture._retiring == [] and children[0].poll() is not None
     assert delta(before, 'runs') == 1 and delta(before, 'skips') == 1
 
 
-def test_standby_whose_retirement_began_is_retired_not_used(spawns, monkeypatch):
+def test_close_attempts_every_retiring_standby_and_raises_the_first_failure(spawns, monkeypatch):
+    # White box: two standbys owned in _retiring (one would come from a failed stop, one published).
     children, stopped = spawns
     capture = CaptureProcess(command=command(PID_FRAME))
     capture.prepare()
-    standby = capture._standby
-    assert standby is not None
-    assert standby.accounted.acquire(blocking=False)  # as a failed or interrupted retirement leaves it
+    first = capture._standby
+    capture._standby = None
+    capture._retiring.append(first)
+    capture.prepare()
+    second = capture._standby
+    assert first is not None and second is not None
+    tracked = module.stop_owned_group_survivors
+    monkeypatch.setattr(module, 'stop_owned_group_survivors',
+                        lambda pid, **kwargs: pid != first.child.pid and tracked(pid, **kwargs))
     before = stat()
-    assert served_by(capture) == children[1].pid != standby.child.pid
-    assert standby.child.poll() is not None and standby.child.pid in stopped
-    assert delta(before, 'runs') == 1 and delta(before, 'skips') == 0  # its record was already taken
+    with pytest.raises(TimeoutError, match='custody retained'):
+        capture.close()
+    assert second.child.poll() is not None and second.child.pid in stopped  # attempted after the failure
+    assert capture._retiring == [first] and capture._standby is None
+    monkeypatch.setattr(module, 'stop_owned_group_survivors', tracked)
     capture.close()
+    assert capture._retiring == [] and len(children) == 2
+    assert delta(before, 'runs') == 2 and delta(before, 'skips') == 2
 
 
 def test_every_spawned_child_is_accounted_exactly_once(spawns, monkeypatch):

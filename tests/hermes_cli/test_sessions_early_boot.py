@@ -239,7 +239,17 @@ process_identity.is_desktop_owned_backend = lambda: False
 isolated_scope.record_launch_scope = lambda **kw: None
 profiles._profile_targets = lambda reason: [('default', '/unused')]
 native.SessionsRuntime = lambda profiles, targets, *, capture_reader: SimpleNamespace(
-    start_background=lambda: None, close=capture_reader.close)
+    start_background=lambda: None, close=lambda: runtime_close(capture_reader))
+import threading
+feed_lock = threading.Lock()  # not re-entrant, like the runtime's FeedLease close lock
+
+def runtime_close(capture_reader):
+    with feed_lock:
+        if window == 'runtime-close' and 'signal' not in events:  # the runtime is closing its feed
+            events.append('signal')
+            os.kill(os.getpid(), signum)
+            events.append('feed-closed')
+        capture_reader.close()
 capture.runtime_command = lambda root, module: [sys.executable, '-I', '-c', 'import sys; sys.stdin.buffer.read()']
 capture._generation = lambda: 'boot'
 events, children, stopped = [], [], []
@@ -250,7 +260,7 @@ def spawned(*args, **kwargs):
     if window.startswith('prepare'):  # the child exists and prepare() has not been handed it yet
         events.append('signal')
         os.kill(os.getpid(), signum)
-        if window != 'prepare':  # a second signal held behind the first: the other one, or the same
+        if window in ('prepare-both', 'prepare-twice'):  # a second signal held behind the first
             events.append('signal')
             os.kill(os.getpid(), other if window == 'prepare-both' else signum)
         events.append('spawned')
@@ -260,6 +270,11 @@ def killing(proc, **kwargs):
     if window == 'close' and 'signal' not in events:  # close() is retiring the standby, still alive
         events.append('signal')
         os.kill(os.getpid(), signum)
+    elif window == 'prepare-then-close' and events.count('signal') == 1:
+        # The signal held during prepare() is being acted on (its close is retiring the standby):
+        # a second, different one lands inside that delivery.
+        events.append('signal')
+        os.kill(os.getpid(), other)
     return kill_tree(proc, **kwargs)
 
 def stopping(pid, **kwargs):
@@ -351,4 +366,26 @@ def test_two_distinct_signals_held_during_prepare_are_both_delivered_in_order(si
 def test_a_repeated_signal_held_during_prepare_is_delivered_once():
     seen = _boot_signal('prepare-twice', signal.SIGTERM, 'returns')
     assert seen['events'] == ['signal', 'signal', 'spawned', 'previous', 'yielded'] and seen['code'] is None
+    _stopped_and_accounted_once(seen)
+
+
+@pytest.mark.platforms('linux')
+@pytest.mark.parametrize('signum', [signal.SIGTERM, signal.SIGINT])
+@pytest.mark.parametrize('handler,code,tail', [('returns', None, ['yielded']), ('exits', 124, [])])
+def test_a_signal_arriving_while_a_held_one_is_delivered_runs_after_it(signum, handler, code, tail):
+    # The second lands inside the first's close (retiring the standby), after the hold of prepare()
+    # ended: it is neither lost nor run inside that close, and runs after the first handler.
+    seen = _boot_signal('prepare-then-close', signum, handler)
+    assert seen['events'] == ['signal', 'spawned', 'signal', 'previous', 'previous-other', *tail]
+    assert seen['code'] == code
+    _stopped_and_accounted_once(seen)
+
+
+@pytest.mark.platforms('linux')
+@pytest.mark.parametrize('signum', [signal.SIGTERM, signal.SIGINT])
+def test_signal_while_the_runtime_closes_does_not_reenter_its_close(signum):
+    # The runtime's close holds a lock that is not re-entrant (FeedLease): a handler that closed
+    # again from inside it would hang. The signal is acted on once that close has returned.
+    seen = _boot_signal('runtime-close', signum, 'exits')
+    assert seen['events'] == ['yielded', 'signal', 'feed-closed', 'previous'] and seen['code'] == 123
     _stopped_and_accounted_once(seen)

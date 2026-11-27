@@ -32,14 +32,7 @@ def adopted_early_owner(state):
             and getattr(state, 'sessions_facts', None) is owner.runtime)
 
 
-def _deliver(stop, pending):
-    """Run ``stop`` for each held signal in order; a raising handler does not cancel the later ones
-    (their exceptions chain, the last one propagates)."""
-    if pending:
-        try:
-            stop(*pending[0])
-        finally:
-            _deliver(stop, pending[1:])
+_EXIT_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
 @contextmanager
@@ -64,51 +57,72 @@ def early_sessions(*, headless, isolated):
     reader = CaptureProcess()
     owner = None
     previous = {}
-    preparing = False
-    held = []
+    # Signal custody. The handler never acts inside a custody step (a spawn whose child prepare()
+    # alone owns, or a close: the reader's, or the runtime's, whose locks are not re-entrant). It
+    # queues the signal instead, and the step that brings ``depth`` back to 0 delivers the queue.
+    # A thread signal mask cannot do this: CPython runs Python handlers on the main thread whichever
+    # thread the kernel picked, so a mask on the main thread alone does not defer them.
+    depth = [0]
+    pending = []  # (signum, frame), arrival order; a repeat of a queued signal collapses into it
+
+    @contextmanager
+    def deferred():
+        depth[0] += 1
+        try:
+            yield
+        finally:
+            depth[0] -= 1
+            # Read after the decrement: a signal queued before it is seen here; one arriving after
+            # it acts at once (and drains the queue itself).
+            if depth[0] == 0:
+                drain()
+
+    def drain():
+        # Each queued signal runs even when an earlier handler raised, as an unqueued second signal
+        # would while the first one's exit unwinds; the last exception propagates, chained.
+        if pending and depth[0] == 0:
+            signum, frame = pending.pop(0)
+            try:
+                act(signum, frame)
+            finally:
+                drain()
 
     def close():
-        (reader if owner is None else owner).close()
+        with deferred():
+            (reader if owner is None else owner).close()
+
+    def act(signum, frame):
+        handler = previous[signum]
+        with deferred():
+            try:
+                close()
+            finally:  # a close that keeps custody still lets the previous handler exit
+                if callable(handler):
+                    handler(signum, frame)
+                else:
+                    raise SystemExit(128 + signum)
 
     def stop(signum, frame):
-        handler = previous[signum]
-        if handler == signal.SIG_IGN:
+        if previous[signum] == signal.SIG_IGN:
             return
-        if preparing:
-            # The standby is mid-spawn: the reader does not own the child yet, so a close() now would
-            # miss it and an exit raised from here would orphan it. Acted on once prepare() returns.
-            held.append((signum, frame))
+        if depth[0]:
+            if all(signum != queued for queued, _ in pending):
+                pending.append((signum, frame))
             return
-        close()
-        if callable(handler):
-            handler(signum, frame)
-        elif handler != signal.SIG_IGN:
-            raise SystemExit(128 + signum)
+        act(signum, frame)
 
     try:
         # signal.signal is illegal off the main thread (serve_update_wait and
         # other cmd_dashboard harnesses). CPython delivers signals to the main
         # thread anyway, so skip rather than abort capture.
         if threading.current_thread() is threading.main_thread():
-            for signum in (signal.SIGTERM, signal.SIGINT):
+            for signum in _EXIT_SIGNALS:
                 try:
                     previous[signum] = signal.signal(signum, stop)
                 except (ValueError, OSError, RuntimeError):
                     previous.pop(signum, None)
-        preparing = True
-        try:
+        with deferred():
             reader.prepare()
-        finally:
-            preparing = False
-            # Every distinct signal held, in arrival order (a repeat of one already held collapses, as
-            # a pending signal does). Each is delivered even when an earlier handler raised: an
-            # unheld second signal would also have run its handler while the first one unwound.
-            pending = []
-            for signum, frame in held:
-                if all(signum != seen for seen, _ in pending):
-                    pending.append((signum, frame))
-            held.clear()
-            _deliver(stop, pending)
         from hermes_cli.sessions_native_startup import SessionsRuntime
         from hermes_cli.web_routers import profiles
 
