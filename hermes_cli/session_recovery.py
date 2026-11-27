@@ -1007,7 +1007,13 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
     placeholders = ", ".join("?" for _ in fts_keys)
     with _immediate_transaction(destination):
         from hermes_state_policy_config import reconcile_recovered_references
-        result['policy_config_references'] = reconcile_recovered_references(destination)
+        from hermes_state_runtime import RuntimeStoreError
+        try:
+            result['policy_config_references'] = reconcile_recovered_references(destination)
+        except RuntimeStoreError as exc:
+            # Preserve fail-closed custody while exposing the recovery API's
+            # typed failure to CLI callers; never leak config payloads in errors.
+            raise SessionRecoveryError('policy config custody could not be verified') from exc
         destination.execute(f"DELETE FROM state_meta WHERE key IN ({placeholders})", fts_keys)
         destination.execute(
             "INSERT INTO state_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
