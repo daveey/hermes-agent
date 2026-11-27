@@ -209,7 +209,9 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
         # Validate under the same write lock, before calling code that can insert
         # a task. Generic exceptions (including postcommit ValueError) prove no
         # such absence and must retain the owner's pending semantics.
-        missing = kb._missing_task_ids(conn, options["parents"])
+        # Same normalisation as create_task (falsy entries are never linked); the
+        # stored immutable envelope keeps its original parents unchanged.
+        missing = kb._missing_task_ids(conn, [p for p in options["parents"] if p])
         if missing:
             from hermes_cli.kanban_dependency_validation import missing_dependency_error
             raise OriginCreateRefused("origin_parent_unknown", str(missing_dependency_error(missing)))

@@ -68,3 +68,28 @@ def test_postcommit_exception_is_pending_and_exact_retry_creates_once(world, mon
     replay = helpers.invoke(world, monkeypatch, capsys)
     assert replay.get('created') is True, replay
     assert _counts() == before
+
+
+def test_empty_parent_entry_still_creates_like_create_task(world, monkeypatch, capsys):
+    """create_task drops falsy parents; the pre-insert check must not refuse them."""
+    world['args']['create']['parents'] = ['']
+    before = _counts()
+    result = helpers.invoke(world, monkeypatch, capsys)
+    assert result.get('created') is True, result
+    after = _counts()
+    assert after['tasks'] == before['tasks'] + 1
+    assert after['task_links'] == before['task_links']
+    assert world['args']['create']['parents'] == ['']
+
+
+def test_mixed_empty_and_missing_parent_rejects_naming_only_missing(world, monkeypatch, capsys):
+    from hermes_cli.kanban_dependency_validation import missing_dependency_error
+
+    world['args']['create']['parents'] = ['', 't_missing_parent']
+    before = _counts()
+    result = helpers.invoke(world, monkeypatch, capsys)
+    assert result.get('status') == 'rejected', result
+    assert result['code'] == 'origin_parent_unknown'
+    assert str(missing_dependency_error(['t_missing_parent'])) in result['error']
+    assert str(missing_dependency_error(['', 't_missing_parent'])) not in result['error']
+    assert _counts() == before
