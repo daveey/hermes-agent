@@ -96,6 +96,57 @@ def test_triggered_terminal_still_reports_failure_without_request_retry(checker,
     assert calls == ['GET']
 
 
+@pytest.mark.parametrize('restart', [False, True])
+@pytest.mark.parametrize('probe', [False, True])
+def test_transient_save_error_clears_after_storage_recovers(checker, monkeypatch, caplog, restart, probe):
+    check, calls = checker
+    first = check(600, 0, probe)
+    path = incidents._path(first, probe)
+    frozen = json.loads(path.read_text())
+    real_save = incidents._save
+    failures = [1]
+    def flaky(path, state):
+        if failures[0]:
+            failures[0] -= 1
+            raise OSError(28, 'fixture transient full disk')
+        return real_save(path, state)
+    monkeypatch.setattr(incidents, '_save', flaky)
+    check(100, 300, probe)
+    failed = json.loads(path.read_text())
+    assert failed['error_class'] == 'OSError'
+    assert limits.fd_headroom_status()['create_state'] == 'failing'
+    if restart:
+        limits._fd_incident = {}
+        limits._fd_status.clear()
+        limits._fd_samples.clear()
+        limits._fd_last_check = None
+        monkeypatch.setattr(incidents, '_producer_token', None)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        for tick in range(2, 38):
+            sample = check(100, tick * 300, probe)
+            assert sample['count'] == 100
+            status = limits.fd_headroom_status()
+            assert status['create_state'] == 'ok'
+            assert status['error_class'] is None and status['failing_since'] is None
+    assert not caplog.records
+    current = json.loads(path.read_text())
+    assert current['terminal'] == frozen['terminal']
+    assert current['envelope'] == frozen['envelope']
+    assert current['error_class'] == 'TerminalRequest'
+    assert current['error'] == frozen['error']
+    assert current['failing_since'] == frozen['failing_since']
+    assert calls == ['GET']
+    monkeypatch.setattr(incidents, '_producer_token', None)
+    with caplog.at_level(logging.WARNING):
+        sample = check(600, 12000, probe)
+    assert sample['triggered']
+    assert limits.fd_headroom_status()['create_state'] == 'failing'
+    assert limits.fd_headroom_status()['error_class'] == 'TerminalRequest'
+    assert 'card create failing since' in caplog.text
+    assert calls == ['GET'], 'recovered history must remain latched for an unqualified birth'
+
+
 @pytest.mark.parametrize('probe', [False, True])
 def test_unreadable_discovery_preserves_healthy_sample(checker, probe):
     check, calls = checker

@@ -143,6 +143,11 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
                     state['terminal_rearmed_by'] = (list(dict.fromkeys([*rearmed, producer])))[-64:]
                     state['terminal_rearmed'] = True  # Legacy diagnostic, not authority.
                 if not sample.get('triggered') or producer not in rearmed:
+                    # A successful local write supersedes any earlier storage fault,
+                    # not the immutable rejection. A current fault still hits except.
+                    terminal = state['terminal']
+                    state.update(error=str(TerminalRequest(terminal['state'], terminal['result']))[:1000],
+                                 error_class='TerminalRequest')
                     _save(path, state)
                     return state  # No identity/transport I/O after a definitive receipt.
                 state['last_terminal'] = {'envelope': state['envelope'], 'receipt': state['terminal']}
