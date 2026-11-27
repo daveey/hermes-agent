@@ -42,7 +42,7 @@ def test_stalest_demanded_scope_first(monkeypatch, tmp_path, native, seconds):
         assert current.get() == scope, 'read publication outside its profile context'
         return ('fingerprint', reads[scope], ()) if reads[scope] is not None else None
 
-    monkeypatch.setattr(host._disk, 'load_host', copy)
+    monkeypatch.setattr(host._disk, 'published_read_at', lambda scope: (copy(scope) or (None, None))[1])
     monkeypatch.setattr(host._disk, 'demand_age', lambda scope, **kw: None if scope == scopes[7] else 0)
     calls = []
 
@@ -62,3 +62,42 @@ def test_stalest_demanded_scope_first(monkeypatch, tmp_path, native, seconds):
     else:
         assert host._holder_pass() == 7
     assert calls == [scopes[i] for i in [3, 6, 5, 4, 2, 1, 0]]
+
+
+def test_priority_read_never_resurrects_retired_profile(monkeypatch, tmp_path):
+    from hermes_cli.kanban_annotation_fairness import stalest_first
+
+    home = tmp_path / 'profiles' / 'retired'
+    scope = (str(home), 'default')
+    monkeypatch.setattr(host._disk, 'enabled', lambda: True)
+    monkeypatch.setattr(host._disk, '_path', lambda scope: home / 'cache' / 'annotation.json')
+    assert stalest_first([(scope, contextvars.copy_context())])
+    assert not home.exists(), 'sorting a retired scope must never recreate its home'
+
+
+@pytest.mark.parametrize('invalid', ['scope', 'version', 'future', 'malformed'])
+def test_priority_header_is_advisory_readonly_metadata(monkeypatch, tmp_path, invalid):
+    import json
+
+    disk = host._disk
+    scope = ('home', 'p')
+    folder = tmp_path / 'publication'
+    folder.mkdir()
+    path = folder / 'annotation.json'
+    header = path.with_suffix('.host.json')
+    monkeypatch.setattr(disk, 'enabled', lambda: True)
+    monkeypatch.setattr(disk, '_path', lambda scope: path)
+    monkeypatch.setattr(disk.time, 'time', lambda: 1000)
+    body = {'version': disk._HOST_VERSION, 'scope': list(scope), 'read_at': 100}
+    header.write_text(json.dumps(body))
+    assert disk.published_read_at(scope) == 100
+    assert sorted(p.name for p in folder.iterdir()) == [header.name]
+    if invalid == 'scope':
+        body['scope'] = ['another']
+    elif invalid == 'version':
+        body['version'] = -1
+    elif invalid == 'future':
+        body['read_at'] = 2000
+    header.write_text('broken' if invalid == 'malformed' else json.dumps(body))
+    assert disk.published_read_at(scope) is None
+    assert sorted(p.name for p in folder.iterdir()) == [header.name]

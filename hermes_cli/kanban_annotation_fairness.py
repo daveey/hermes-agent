@@ -24,8 +24,7 @@ def stalest_first(scopes, *, asleep=None):
         def read_priority():
             age = disk.demand_age(scope)
             demanded = age is not None and 0 <= age <= DEMAND_WINDOW_S
-            copy = disk.load_host(scope, shared=True)
-            read_at = copy[1] if copy is not None else float('-inf')
+            read_at = disk.published_read_at(scope)
             if not isinstance(read_at, (int, float)) or not math.isfinite(read_at):
                 read_at = float('-inf')
             return (not demanded, read_at)

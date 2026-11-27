@@ -245,6 +245,25 @@ def confirm_host(scope: tuple[str, ...], narrow_key: str, verified_at: float, *,
         return False
 
 
+def published_read_at(scope: tuple[str, ...]) -> float | None:
+    """Advisory scheduling metadata only; never acquire custody or create directories.
+
+    The header is atomically replaced by publishers. A stale context may name a
+    renamed/deleted profile, so even a reader's mkdir/lock-file open is unsafe here.
+    This does not certify a usable body or grant display freshness.
+    """
+    if not enabled():
+        return None
+    try:
+        body = json.loads(_path(scope).with_suffix('.host.json').read_text(encoding='utf-8-sig'))
+        if body.get('version') != _HOST_VERSION or body.get('scope') != list(scope):
+            return None
+        read_at = float(body['read_at'])
+        return read_at if read_at <= time.time() else None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def load_host(scope: tuple[str, ...], *, shared: bool = False,
               display_identity: str | None = None, mutation_token: str | None = None,
               header_out: dict | None = None) -> tuple[str, float, tuple] | None:
