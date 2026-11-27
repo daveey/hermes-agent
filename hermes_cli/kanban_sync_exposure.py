@@ -134,7 +134,7 @@ def send(hub, conn, board, ops, *, replay=None, legacy_parents=()):
     substituting credentials after the observation. Unsupported legacy capability
     yields an explicitly unidentified observation, never a complete principal set.
     """
-    from hermes_cli.kanban_sync_client import Hub, HubError
+    from hermes_cli.kanban_sync_client import Hub, HubError, Resync
     if conn.in_transaction:
         raise ValueError('exposure requires a standalone durable commit before I/O')
     root = f'/v2/boards/{quote(board, safe="")}/'
@@ -143,6 +143,9 @@ def send(hub, conn, board, ops, *, replay=None, legacy_parents=()):
     try:
         try:
             capability = transport._call('GET', root + 'replay/capability')
+        except Resync:
+            # A legacy hub answers the optional probe 410; that is "no replay capability", not a cursor rebuild.
+            capability = {}
         except HubError as exc:
             if exc.status not in (404, 405, 501, 503):
                 raise
