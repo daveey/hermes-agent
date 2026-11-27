@@ -555,12 +555,14 @@ class Roller:
             return None
         return parsed if isinstance(parsed, dict) else None
 
-    def unit_active(self, port: int, timeout: float = 15) -> bool:
+    def _unit_state(self, port: int, timeout: float = 15) -> Optional[str]:
         try:
-            state = (self.systemctl("is-active", backend_unit(port), timeout=timeout).stdout or "").strip()
+            return (self.systemctl("is-active", backend_unit(port), timeout=timeout).stdout or "").strip()
         except (OSError, subprocess.SubprocessError):
-            return False
-        return state in ("active", "activating", "reloading")
+            return None
+
+    def unit_active(self, port: int, timeout: float = 15) -> bool:
+        return self._unit_state(port, timeout) in ("active", "activating", "reloading")
 
     def unit_pid(self, port: int, timeout: float = 15) -> int:
         with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError):
@@ -900,6 +902,10 @@ class Roller:
         commit = self.post(port, "/api/health/retirement", {"action": "commit", "token": permit["token"]}) or {}
         if commit.get("ok") is not True:
             return False
+        return self._request_stop(port)
+
+    def _request_stop(self, port: int) -> bool:
+        """A successful asynchronous request is not proof of unit disappearance."""
         try:
             return self.systemctl("stop", "--no-block", backend_unit(port), timeout=15).returncode == 0
         except (OSError, subprocess.SubprocessError):
@@ -909,7 +915,8 @@ class Roller:
         """Backstop for backends that are neither active nor warming and have not retired themselves (a core
         without the superseded watchdog, a lost watchdog thread). After *grace_s* the roller retires one
         through its idle fence, so a live turn is never cut. Only after *hard_s*, a backend that has stayed
-        busy that long is stopped (SIGTERM checkpoints its turns) so the port pool cannot leak forever."""
+        busy that long is stopped (SIGTERM checkpoints its turns) so the port pool cannot leak forever.
+        Returns accepted stop requests, retaining their ages until the unit is confirmed inactive."""
         record = read_active(self.home)
         if record is None:
             return []
@@ -918,25 +925,30 @@ class Roller:
         demoted = self._load_demoted()
         now, stopped = self.wall(), []
         for port in self.ports:
-            if port in live or not self.unit_active(port):
+            if port in live:
                 since.pop(port, None)
                 demoted.pop(port, None)
                 continue
+            state = self._unit_state(port)
+            if state in ("inactive", "failed"):
+                since.pop(port, None)
+                demoted.pop(port, None)
+                continue
+            if state not in ("active", "activating", "reloading"):
+                continue  # deactivating/unknown is not retirement proof; preserve both deadlines
             age = now - since.setdefault(port, now)
             if port in demoted and now - demoted[port] >= min(hard_s, DEMOTED_HARD_S):
                 log(f"backend :{port} demoted {now - demoted[port]:.0f}s ago for not answering; stopping it")
-                with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)
+                if not self._request_stop(port):
+                    continue
             elif age >= hard_s:
                 log(f"backend :{port} still busy {age:.0f}s after it was superseded; stopping it")
-                with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)
+                if not self._request_stop(port):
+                    continue
             elif age >= grace_s and self._retire_fenced(port):
-                log(f"backend :{port} superseded {age:.0f}s ago and idle; retired it through its fence")
+                log(f"backend :{port} superseded {age:.0f}s ago and idle; stop requested through its fence")
             else:
                 continue
-            since.pop(port, None)
-            demoted.pop(port, None)
             stopped.append(port)
         self._save_superseded(since)
         self._save_demoted(demoted)
