@@ -17,12 +17,14 @@ def test_pool_budget_is_configured_before_returning_scoped_command():
     from hermes_cli.kanban_aggregate_scope import bounded_scope, configure_pool
     configure_pool.cache_clear()
     command = ['systemd-run', '--user', '--scope', '--unit=x.scope', '--', 'worker']
+    from tools.process_registry import systemd_user_bus_env
+    env = systemd_user_bus_env()
     with patch('subprocess.run') as run:
         got = bounded_scope(command)
         run.assert_called_once_with(
             ['systemctl', '--user', 'set-property', '--runtime', 'hermes-kanban.slice',
              'MemoryHigh=70%', 'MemoryMax=80%'], check=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10, env=env)
         assert '--slice=hermes-kanban.slice' in got[:got.index('--')]
         assert got[got.index('--') + 1:] == ['worker']
         bounded_scope(command)

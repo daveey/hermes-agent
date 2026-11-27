@@ -17,12 +17,15 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def configure_pool():
     """Set runtime properties; only cache success, never launch unbounded on failure."""
+    from tools.process_registry import systemd_user_bus_env
+
     for attempt, delay in enumerate((1, 3, None), start=1):
         try:
             subprocess.run(
                 ['systemctl', '--user', 'set-property', '--runtime', 'hermes-kanban.slice',
                  'MemoryHigh=70%', 'MemoryMax=80%'], check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
+                env=systemd_user_bus_env())
             return
         except (OSError, subprocess.SubprocessError) as exc:
             stderr = getattr(exc, 'stderr', None) or ''
