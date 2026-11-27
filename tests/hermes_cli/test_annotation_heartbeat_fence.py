@@ -110,7 +110,7 @@ def test_real_holder_rejects_consumed_aba_and_forces_next_read(world, replica, m
         return read(*args, **kwargs)
     monkeypatch.setattr(ksa, '_recompute_all_counts', crossing)
     holders._refresh()
-    assert holders.SCOPE not in parts._seen, 'racing result received a normalized certificate'
+    assert parts.COUNTS not in parts._seen[holders.SCOPE], 'racing result received a normalized certificate'
     holders._refresh()
     assert len(calls) == 2, 'a matching late probe certified the rejected result'
     holders._refresh()

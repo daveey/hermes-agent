@@ -211,9 +211,14 @@ def done(scope: tuple[str, ...], now: dict[str, object] | None) -> None:
     """The read planned with ``now`` completed: its forced parts answered those keys."""
     _seen.pop(scope, None)
     receipt = getattr(now, 'receipt', None)
-    if receipt is not None and not receipt.valid():
-        failed(scope)
-        return  # a racing result cannot authorize heartbeat-normalized suppression
+    if now is not None and receipt is not None and not receipt.valid():
+        from hermes_cli import kanban_annotation_counts as counts
+
+        counts.failed(scope)
+        # Only COUNTS normalized this receipt. Successful independent readers
+        # retain their original pre-read keys; their next probes see any move.
+        # Omission forces COUNTS again without certifying the rejected source.
+        now = {part: key for part, key in now.items() if part != COUNTS}
     if now is not None:
         while len(_seen) >= _MAX_SCOPES:
             del _seen[next(iter(_seen))]

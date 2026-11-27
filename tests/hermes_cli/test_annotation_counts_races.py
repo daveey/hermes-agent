@@ -36,7 +36,7 @@ def test_aba_during_detached_reuse_forces_read_and_refuses_certificate(world, cl
     world.declared.write_text('attention')
     holders._refresh()
     assert fired and world.counts == before + 1
-    assert holders.SCOPE not in parts._seen and holders.SCOPE not in counts._entries
+    assert parts.COUNTS not in parts._seen[holders.SCOPE] and holders.SCOPE not in counts._entries
     holders._refresh()
     assert world.counts == before + 2 and holders.SCOPE in counts._entries
 
