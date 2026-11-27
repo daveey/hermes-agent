@@ -58,6 +58,7 @@ def test_scope_stop_released_by_a_human(board, monkeypatch):
     tid, _, episode = scope.stopped(board, monkeypatch)
     out = run(board, tid, runs=7)
     assert out['outcome'] == 'released' and out['ok'] and out['scope_renewed'] and out['episode'] == episode
+    assert 'allowance_superseded' not in out  # a scope renewal alone retires no Board allowance
     assert status(board, tid) == 'ready'
     assert not decision.pending(board, tid) and not decision.execution_restricted(board, tid)
     body = board.execute('SELECT body FROM task_comments WHERE id=?', (out['mandate_comment'],)).fetchone()[0]

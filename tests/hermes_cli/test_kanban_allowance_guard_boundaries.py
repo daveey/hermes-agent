@@ -293,3 +293,63 @@ def test_canonical_decision_refuses_grant_unknown_and_custom_runs(verdict):
     from hermes_cli import kanban_spend_caused_review as caused_review
     with pytest.raises(ValueError):
         caused_review.validate(verdict, {})
+
+
+# -- a caused stop never reaches the local ordinary grant, and a frozen request resends only while allowed ----
+
+def test_caused_stop_on_a_non_canonical_board_still_takes_the_caused_review(primary, monkeypatch):
+    """Without ``_canonical`` the cause alone routes to the caused review, which refuses off the primary Board;
+    falling through would let the local ordinary grant release a scope stop."""
+    from hermes_cli import kanban_spend_caused_review as caused_review
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    ctx = {"cause": "scope_stopped", "_canonical": False, "_cap": 3, "_corpus": "verbatim progress quote here"}
+    verdict = {"decision": "grant", "runs": 1, "reason": "more", "progress_quote": "verbatim progress quote here"}
+    routed = []
+    monkeypatch.setattr(reviewer, "context", lambda conn, task, episode: ctx)
+    monkeypatch.setattr(reviewer, "state", lambda conn, task, episode: reviewer.STARTED)
+    monkeypatch.setattr(reviewer, "judge", lambda seen: verdict)
+    monkeypatch.setattr(reviewer, "grant", lambda *a, **kw: pytest.fail("local ordinary grant for a caused stop"))
+    monkeypatch.setattr(caused_review, "review", lambda *a: routed.append(a[1:]) or "escalated")
+    assert reviewer.review(primary, "t_caused", "ep") == "escalated"
+    assert routed == [("t_caused", "ep", verdict, ctx)]
+
+
+@pytest.mark.parametrize("stop, cause, refusal, resend", [
+    ({"uid": "ep"}, "scope_stopped", "zero new runs", True),   # a caused stop is not judged by the ordinary refusal
+    ({"uid": "ep"}, None, None, True),                         # an ordinary stop with nothing against it
+    ({"uid": "ep"}, None, "zero new runs", False),             # an ordinary stop the ordinary fences refuse
+    ({"uid": "ep"}, "safety_refusal", None, False),            # an excluded cause, whatever the ordinary fences say
+    (None, None, None, False),                                 # the stop is gone: nothing to read a cause from
+])
+def test_frozen_request_is_resent_only_while_the_stop_is_still_reviewable(primary, monkeypatch, stop, cause,
+                                                                         refusal, resend):
+    from hermes_cli import kanban_spend_caused_review as caused_review
+    from hermes_cli import kanban_spend_decision as decision
+    from hermes_cli import kanban_spend_review_request as journal
+    from hermes_cli import kanban_spend_reviewer as reviewer
+    from hermes_cli import kanban_wake_check as wake_check
+    seen = []
+
+    def canonical(conn, task, episode, fields, cap, *, resend=True):
+        seen.append(resend)
+        raise caused_review.Unconfirmed("readback pending")
+
+    def effective_cause(conn, task, current):
+        assert current is not None, "no stop, no cause read"
+        return cause
+
+    monkeypatch.setattr(journal, "get", lambda conn, task, episode: {"wire": {}})
+    monkeypatch.setattr(decision, "strict_episode", lambda conn, task: stop)
+    monkeypatch.setattr(reviewer, "settings", lambda: (True, 2))
+    monkeypatch.setattr(reviewer, "episode_of", lambda current: current["uid"])
+    monkeypatch.setattr(reviewer, "_disposed", lambda conn, task, episode: False)
+    monkeypatch.setattr(reviewer, "_human_after_stop", lambda conn, task, current: False)
+    monkeypatch.setattr(reviewer, "_refusal", lambda conn, task, episode: refusal)
+    monkeypatch.setattr(reviewer, "state", lambda conn, task, episode: reviewer.STARTED)
+    monkeypatch.setattr(wake_check, "foreign_copy", lambda conn, task: False)
+    monkeypatch.setattr(caused_review, "fenced", lambda conn, task: False)
+    monkeypatch.setattr(caused_review, "grant_count", lambda conn, task: 0)
+    monkeypatch.setattr(caused_review, "effective_cause", effective_cause)
+    monkeypatch.setattr(caused_review, "canonical", canonical)
+    assert caused_review.review(primary, "t_frozen", "ep", None, None) == "pending"
+    assert seen == [resend]
