@@ -72,7 +72,7 @@ def test_coglet_211_pair(monkeypatch):
     assert {c["id"] for c in receipt["checks"]} == {success["id"], skipped["id"]}
 
 
-@pytest.mark.parametrize("fault", ["foreign_app", "stale", "pending", "post_merge", "missing_completion"])
+@pytest.mark.parametrize("fault", ["foreign_app", "stale", "pending", "post_merge"])
 def test_soft_conclusion_cannot_borrow_invalid_success(monkeypatch, fault):
     success = run(1, "success")
     if fault == "foreign_app":
@@ -81,11 +81,16 @@ def test_soft_conclusion_cannot_borrow_invalid_success(monkeypatch, fault):
         success["head_sha"] = "b" * 40
     elif fault == "pending":
         success["status"] = "in_progress"
-    elif fault == "missing_completion":
-        success["completed_at"] = None
     else:
         success.update(started_at="2026-11-27T16:00:00Z", completed_at="2026-11-27T16:01:00Z")
     receipt = collect(monkeypatch, [success, run(2, "skipped")], app=None)
+    assert not receipt["ok"], receipt
+
+
+def test_merged_soft_run_cannot_borrow_success_without_completion(monkeypatch):
+    success = {**run(1, "success"), "completed_at": None}
+    receipt = collect(monkeypatch, [success, run(2, "skipped")])
+    assert receipt["classification"] == "infra", receipt
     assert not receipt["ok"], receipt
 
 
