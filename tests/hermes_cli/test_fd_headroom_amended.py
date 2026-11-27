@@ -120,6 +120,17 @@ def test_invalid_config_falls_back_and_marks_status(guard, caplog, key, value, d
     assert limits.fd_headroom_status()['state'] == 'config_error'
 
 
+def test_interval_600_retains_four_sample_trend_and_601_falls_back(guard):
+    _, snapshot, notify = guard
+    for now, count in [(0, 100), (600, 140), (1200, 180), (1800, 220)]:
+        snapshot.return_value = (count, {})
+        sample = check(now, settings={'interval_seconds': 600})
+    assert sample is not None and sample['slope'] == 4 and notify.call_count == 1
+    check(2400, settings={'interval_seconds': 601})
+    assert limits.fd_headroom_status()['state'] == 'config_error'
+    assert limits._fd_interval == 300
+
+
 def test_ratio_order_falls_back_to_valid_defaults(guard):
     from hermes_cli.fd_headroom_config import validated
     settings, errors = validated({'runtime': {'fd_headroom': {'warn_ratio': .9, 'raise_ratio': .8}}})

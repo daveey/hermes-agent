@@ -13,7 +13,7 @@ def _process_report(path, marker, start):
                 out.write(envelope['id'] + '\n')
             return 't_0123456789abcdef'
         def read(self, tid, board):
-            return {'id': tid, 'status': 'ready'}
+            return {'state': 'live', 'row': {'id': tid, 'status': 'ready'}}
         def close(self):
             pass
     assert start.wait(3)
@@ -40,6 +40,46 @@ def test_two_processes_share_one_card(tmp_path):
             if child.is_alive():
                 child.terminate()
                 child.join(3)
+
+
+def test_absent_status_and_closed_recovery_stop_board_reads(monkeypatch, caplog, tmp_path):
+    wall, visibility = [10000.0], ['absent']
+    monkeypatch.setattr(limits, '_fd_last_check', None)
+    monkeypatch.setattr(limits, '_fd_incident', {})
+    monkeypatch.setattr(limits, '_fd_status', {})
+    limits._fd_samples.clear()
+    monkeypatch.setattr(limits, '_resource', Mock(RLIMIT_NOFILE=7, RLIM_INFINITY=-1,
+                        getrlimit=Mock(return_value=(1000, 10000))))
+    count = [500]
+    monkeypatch.setattr(limits, '_fd_snapshot', lambda _: (count[0], {}))
+    monkeypatch.setattr(limits, '_fd_core_head', lambda: 'a' * 40)
+    creates, reads = [], []
+    class Client:
+        def create(self, envelope):
+            creates.append(envelope)
+            return 't_0123456789abcdef'
+        def read(self, tid, board):
+            reads.append(tid)
+            return {'state': visibility[0], 'row': None}
+        def close(self):
+            pass
+    monkeypatch.setattr(limits, '_notify_fd_incident', lambda s, **kw:
+                        incidents.report(s, now=wall[0], client=Client(), state_path=tmp_path / 'state.json'))
+    for now in (0, 300, 600, 3900):
+        wall[0] = 10000 + now
+        limits.check_fd_headroom({}, now=now, wall_now=wall[0])
+    assert len(creates) == 1 and len(reads) == 3
+    public = limits.fd_headroom_status()
+    assert public['create_state'] == 'failing' and public['failing_since'] == 10300
+    assert public['error_class'] == 'PendingVisibility'
+    assert 'card create failing since' in caplog.text
+    visibility[0], count[0] = 'tombstone', 100
+    limits.check_fd_headroom({}, now=4200)
+    assert limits.fd_headroom_status()['last_card_id'] is None
+    reads.clear()
+    for tick in range(12):
+        limits.check_fd_headroom({}, now=4500 + tick * 300)
+    assert not reads and len(creates) == 1
 
 
 def test_failed_create_warning_and_public_process_status(monkeypatch, caplog, tmp_path):

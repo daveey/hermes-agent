@@ -291,7 +291,13 @@ exhaustion within `horizon_hours`; growth needs four samples spanning 20 minutes
 The hub default board receives one portable card per host/profile/role incident,
 with at most one comment per hour. Failed delivery retries each tick using the
 same durable key; failed reads never start a new incident. Delivery errors are
-logged hourly, with prolonged failures reflected in warnings and runtime status
+logged hourly. An absent Board row is unreplicated, not closed: its original key
+and task ID are retained, with prolonged absence reported as a delivery failure.
+Only a tombstone or a live done/archived row closes an incident; healthy ticks
+stop polling after that close. Unreadable state files are preserved as
+`.corrupt-<unix>` files, logged once, and replaced by a new incident whose card
+notes the recovery. State writes are atomic and fsynced before delivery.
+Prolonged failures are reflected in warnings and runtime status
 (`gateway_state.json` or dashboard health's `fd_headroom` field). Public status
 exposes only counts, timestamps, enums, card ID and error class, not private text.
 
@@ -301,8 +307,11 @@ raise; denied or capped changes continue monitoring in state `capped`. This neve
 changes `runtime.nofile_soft_limit`, the hard limit, another process or service
 configuration. Checks run off-loop with one worker in flight and count skipped
 overlapping ticks. Invalid values fall back to their defaults with `config_error`:
-ratios must satisfy 0 < warn < raise < 1, horizon > 0, interval ≥ 30 seconds, and
+ratios must satisfy 0 < warn < raise < 1, horizon > 0, 30 ≤ interval ≤ 600 seconds, and
 max_soft ≥ 1024. Set `enabled: false` to disable monitoring and in-process rescue.
+The upper cadence bound preserves four samples in the 30-minute growth window.
+Unsupported platforms and configuration outages retain the last validated
+cadence (300 seconds before the first valid config), without a fast retry loop.
 
 On Linux with glibc, the gateway, `hermes serve` and `hermes dashboard` also cap the number of
 malloc arenas the process may create:

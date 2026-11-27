@@ -146,6 +146,62 @@ def test_delay_uses_cached_worker_deadline(monkeypatch):
     assert limits.fd_headroom_delay(60) == 1
 
 
+@pytest.mark.parametrize('role', ['backend', 'gateway'])
+@pytest.mark.parametrize('failure', ['unsupported', 'load', 'backend'])
+def test_unsampled_service_ticks_keep_bounded_deadline(monkeypatch, role, failure, caplog):
+    from hermes_cli import config
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+    clock, starts = [0.0], []
+    monkeypatch.setattr(limits.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(limits, '_fd_last_check', None)
+    monkeypatch.setattr(limits, '_fd_interval', 300)
+    monkeypatch.setattr(limits, '_fd_status', {})
+    monkeypatch.setattr(limits, '_fd_thread', None)
+    monkeypatch.setattr(limits, '_fd_check_warning', None)
+    if failure == 'unsupported':
+        monkeypatch.setattr(limits, '_resource', None)
+    else:
+        def unavailable():
+            if failure == 'backend':
+                raise ConfigBackendUnavailable('unavailable')
+            raise OSError('private config failure')
+        monkeypatch.setattr(config, 'load_config_readonly', unavailable)
+    class InlineThread:
+        def __init__(self, target, args, **kwargs):
+            self.target, self.args = target, args
+        def start(self):
+            starts.append(clock[0])
+            self.target(*self.args)
+        def is_alive(self):
+            return False
+    monkeypatch.setattr(limits.threading, 'Thread', InlineThread)
+    if role == 'gateway':
+        import gateway.run as gateway
+        import gateway.run_delivery_queue_watch as watch
+        stop = threading.Event()
+        monkeypatch.setattr(gateway, '_housekeeping_chore', lambda *a: None)
+        def wait(event, delay, *args, **kwargs):
+            clock[0] += delay
+            if clock[0] >= 60:
+                stop.set()
+        monkeypatch.setattr(watch, 'wait_for_next_tick', wait)
+        gateway._start_gateway_housekeeping(stop, interval=60)
+    else:
+        from hermes_cli import web_server as backend
+        async def sleep(delay):
+            clock[0] += delay
+            if clock[0] >= 60:
+                raise asyncio.CancelledError
+        monkeypatch.setattr(backend.asyncio, 'sleep', sleep)
+        async def exercise():
+            with pytest.raises(asyncio.CancelledError):
+                await backend._dashboard_selftest_loop()
+        asyncio.run(exercise())
+    assert len(starts) <= 2, starts
+    assert caplog.text.count('fd-headroom: check failed') <= 1
+    assert limits.fd_headroom_delay(60) == 60
+
+
 def test_gateway_thread_publishes_public_status(monkeypatch, tmp_path):
     from gateway import status
     monkeypatch.setattr(limits, 'check_fd_headroom', lambda **kw: {'count': 50})

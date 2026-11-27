@@ -40,7 +40,9 @@ def test_authoritative_evidence_requires_successful_missing_or_live(monkeypatch)
     monkeypatch.setattr(sync, 'load_identity', lambda: sync.Identity('http://example.invalid', 'unused', 'worker'))
     result = {'state': 'absent', 'table': 'tasks', 'uid': 't_0123456789abcdef', 'head': 4}
     monkeypatch.setattr(sync, '_bounded_call', lambda *a: result)
-    assert Client().read(result['uid'], 'default') is None
+    assert Client().read(result['uid'], 'default') == {'state': 'absent', 'row': None}
+    result['state'] = 'tombstone'
+    assert Client().read(result['uid'], 'default') == {'state': 'tombstone', 'row': None}
     result['state'] = 'unknown'
     with pytest.raises(ValueError):
         Client().read(result['uid'], 'default')

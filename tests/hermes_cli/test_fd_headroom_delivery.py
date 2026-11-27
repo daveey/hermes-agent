@@ -16,7 +16,8 @@ def delivery(tmp_path):
             cards.setdefault(key, {'id': f't_{len(cards) + 1:016x}', 'status': 'ready'})
             return cards[key]['id']
         def read(self, tid, board):
-            return next((row for row in cards.values() if row['id'] == tid), None)
+            row = next((row for row in cards.values() if row['id'] == tid), None)
+            return {'state': 'live' if row else 'tombstone', 'row': row}
         def comment(self, envelope):
             comments.append(envelope)
         def close(self):
@@ -34,7 +35,7 @@ def report(delivery, now, **kwargs):
     return incidents.report(sample(), now=now, client=cls(), state_path=path, **kwargs)
 
 
-@pytest.mark.parametrize('closed', ['done', 'archived', 'not found'])
+@pytest.mark.parametrize('closed', ['done', 'archived', 'tombstone'])
 def test_shared_incident_one_card_hourly_and_new_after_closed(delivery, closed):
     _, cards, creates, comments, path = delivery
     first = report(delivery, 10000)
@@ -45,7 +46,7 @@ def test_shared_incident_one_card_hourly_and_new_after_closed(delivery, closed):
     report(delivery, 13600)
     report(delivery, 13601)
     assert len(comments) == 1
-    if closed == 'not found':
+    if closed == 'tombstone':
         cards.clear()
     else:
         next(iter(cards.values()))['status'] = closed
@@ -102,6 +103,66 @@ def test_probe_namespace_board_and_separate_state(delivery):
     assert envelope['args']['title'].startswith('[probe]')
     with pytest.raises(ValueError, match='non-default'):
         report(delivery, 11000, probe=True, probe_board='default')
+
+
+def test_pending_row_visibility_preserves_incident_key(delivery, monkeypatch):
+    from hermes_cli.fd_headroom_transport import Client
+    from hermes_cli import kanban_sync_client as sync
+    cls, cards, creates, _, path = delivery
+    first = report(delivery, 10000)
+    monkeypatch.setattr(sync, 'load_identity', lambda: None)
+    result = {'state': 'absent', 'table': 'tasks', 'uid': first['task_id'], 'head': 4}
+    monkeypatch.setattr(sync, '_bounded_call', lambda *a: result)
+    for wall in (10300, 10600, 13900):
+        client = cls()
+        client.read = Client().read
+        pending = incidents.report(sample(), now=wall, client=client, state_path=path)
+        assert pending['incident_started_at'] == first['incident_started_at']
+        assert pending['task_id'] == first['task_id']
+    assert len(creates) == 1
+    assert pending['error_class'] == 'PendingVisibility'
+    assert pending['card_unreplicated_since'] == pending['failing_since'] == 10300
+    assert 'card create failing since' in incidents.failure_note(pending, now=13900)
+    report(delivery, 14200)
+    cards.clear()
+    report(delivery, 14500)
+    assert len(creates) == 2
+
+
+@pytest.mark.parametrize('corrupt', ['', '{"incident_started_at":', '[]'])
+def test_corrupt_primary_quarantines_and_reopens_once(delivery, corrupt, caplog):
+    _, _, creates, _, path = delivery
+    path.write_text(corrupt)
+    recovered = report(delivery, 10000)
+    report(delivery, 10300)
+    quarantined = list(path.parent.glob(path.name + '.corrupt-*'))
+    assert len(quarantined) == 1 and quarantined[0].read_text() == corrupt
+    assert len(creates) == 1
+    assert json.loads(path.read_text())['task_id'] == recovered['task_id']
+    assert 'Prior incident state was unreadable' in creates[0]['args']['body']
+    assert caplog.text.count('prior incident state unreadable') == 1
+
+
+@pytest.mark.parametrize('closed', ['done', 'archived', 'tombstone'])
+def test_healthy_closed_incident_clears_and_stops_polling(delivery, closed):
+    cls, cards, creates, comments, path = delivery
+    report(delivery, 10000)
+    if closed == 'tombstone':
+        cards.clear()
+    else:
+        next(iter(cards.values()))['status'] = closed
+    client = cls()
+    state = incidents.report({**sample(), 'triggered': False}, now=10300,
+                             client=client, state_path=path)
+    assert not state.get('task_id') and not state.get('envelope')
+    client.read = Mock(side_effect=AssertionError('closed incident must not read Board'))
+    for tick in range(12):
+        state = incidents.report({**sample(), 'triggered': False}, now=10600 + tick * 300,
+                                 client=client, state_path=path)
+        assert not state.get('error')
+    client.read.assert_not_called()
+    report(delivery, 14500)
+    assert len(creates) == 2 and not comments
 
 
 def test_identity_includes_profile_role_and_host(monkeypatch, tmp_path):

@@ -165,6 +165,7 @@ def _notify_fd_incident(sample: dict, *, probe: bool = False, probe_board=None) 
 _fd_status: dict = {}
 _fd_incident: dict = {}
 _fd_config_warning: float | None = None
+_fd_check_warning: float | None = None
 _FD_PUBLIC_FIELDS = frozenset(('state', 'sampled_at', 'count', 'soft', 'hard', 'ratio',
                               'last_card_id', 'create_state', 'failing_since', 'error_class', 'skipped'))
 
@@ -226,8 +227,8 @@ def request_fd_headroom(*, role: str) -> None:
 
 def gateway_fd_headroom_tick() -> None:
     """The gateway's existing housekeeping thread owns this process-wide tick."""
-    sample = check_fd_headroom(role='gateway')
-    if sample is not None:
+    check_fd_headroom(role='gateway')
+    if _fd_status:
         from gateway.status import publish_runtime_status
         publish_runtime_status(fd_headroom=fd_headroom_status())
 
@@ -240,15 +241,20 @@ def check_fd_headroom(config: Mapping[str, Any] | None = None, *, role: str = 'b
     One in flight per process; an overlapping tick is counted, never queued. The reporter
     additionally serializes the host/profile/role identity across processes.
     """
+    global _fd_check_warning
+    from hermes_cli.config_backend import ConfigBackendUnavailable
     if not _fd_lock.acquire(blocking=False):
         _fd_status['skipped'] = _fd_status.get('skipped', 0) + 1
         return None
+    stamp = time.monotonic() if now is None else now
     try:
-        return _check_fd_headroom(config, role, time.monotonic() if now is None else now,
+        return _check_fd_headroom(config, role, stamp,
                                   time.time() if wall_now is None else wall_now, probe, probe_board)
-    except Exception as exc:  # health: allow BLE001 -- diagnostics must never escape a service tick
-        _fd_status.update(error_class=type(exc).__name__)
-        logger.warning('fd-headroom: check failed: %s', exc)
+    except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- typed config outage is SystemExit
+        _fd_status.update(state='config_error', error_class=type(exc).__name__)
+        if _fd_check_warning is None or stamp - _fd_check_warning >= 3600:
+            logger.warning('fd-headroom: check failed: %s', exc)
+            _fd_check_warning = stamp
         return None
     finally:
         _fd_lock.release()
@@ -277,6 +283,15 @@ def _raise_fd_soft(sample, maximum):
 def _check_fd_headroom(config, role, now, wall, probe, probe_board):
     global _fd_last_check, _fd_pid, _fd_config_warning, _fd_incident, _fd_interval
     from hermes_cli.fd_headroom_config import validated
+    if _fd_pid != os.getpid():
+        _fd_pid, _fd_last_check = os.getpid(), None
+        _fd_samples.clear()
+        _fd_incident = {}
+    # Reserve the attempt deadline BEFORE every unsupported/config/error exit.
+    # Cached validated cadence bounds retries even when no sample can be taken.
+    if _fd_last_check is not None and now - _fd_last_check < _fd_interval:
+        return None
+    _fd_last_check = now
     if _resource is None:
         return None
     if config is None:
@@ -285,15 +300,7 @@ def _check_fd_headroom(config, role, now, wall, probe, probe_board):
     settings, errors = validated(config)
     _fd_interval = settings['interval_seconds']
     if not settings['enabled']:
-        _fd_last_check = now
         return None
-    if _fd_pid != os.getpid():
-        _fd_pid, _fd_last_check = os.getpid(), None
-        _fd_samples.clear()
-        _fd_incident = {}
-    if _fd_last_check is not None and now - _fd_last_check < settings['interval_seconds']:
-        return None
-    _fd_last_check = now
     if errors and (_fd_config_warning is None or now - _fd_config_warning >= 3600):
         logger.warning('fd-headroom: invalid config keys %s; using defaults', errors)
         _fd_config_warning = now

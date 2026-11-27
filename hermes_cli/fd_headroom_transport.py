@@ -35,11 +35,11 @@ class Client:
             raise ValueError('invalid authoritative fd incident read')
         state = evidence.get('state')
         if state in {'absent', 'tombstone'}:
-            return None
+            return {'state': state, 'row': None}
         row = evidence.get('row')
         if state != 'live' or not isinstance(row, dict) or not isinstance(row.get('status'), str):
             raise ValueError('unavailable authoritative fd incident read')
-        return row
+        return {'state': 'live', 'row': row}
 
     def create(self, envelope):
         try:

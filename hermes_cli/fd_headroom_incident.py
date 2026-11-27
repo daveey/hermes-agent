@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,20 +26,36 @@ def _path(sample, probe):
     return get_hermes_home() / 'state' / 'fd_headroom' / f'{"probe-" if probe else ""}{tag}.json'
 
 
-def _load(path):
+def _load(path, *, recover=True) -> dict:
     try:
         value = json.loads(path.read_text(encoding='utf-8-sig'))
+        if not isinstance(value, dict):
+            raise ValueError('invalid fd incident state')
+        return value
     except FileNotFoundError:
         return {}
-    if not isinstance(value, dict):
-        raise ValueError('invalid fd incident state')
-    return value  # Malformed/unreadable state must not silently mint a new incident.
+    except (ValueError, UnicodeError):
+        if not recover:
+            return {}
+        # Caller holds the identity flock. Preserve the unreadable bytes, once.
+        quarantined = path.with_name(f'{path.name}.corrupt-{time.time_ns()}')
+        path.replace(quarantined)
+        logger.warning('fd-headroom: prior incident state unreadable; preserved at %s', quarantined)
+        return {'state_recovered': True}
 
 
 def _save(path, state):
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(state), encoding='utf-8')
+    with temporary.open('w', encoding='utf-8') as stream:
+        stream.write(json.dumps(state))
+        stream.flush()
+        os.fsync(stream.fileno())
     temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _new_envelope(sample, state, wall, probe, board):
@@ -56,6 +73,8 @@ def _new_envelope(sample, state, wall, probe, board):
             '\n\nInvestigate descriptor growth and the loaded core. Never signal/restart production '
             'services, change configured nofile limits or raise a hard limit for this alert. '
             'The guard may have raised only its own soft limit; see raised above.')
+    if state.get('state_recovered'):
+        body += '\n\nPrior incident state was unreadable; preserved locally for investigation.'
     args = dict(title=title, body=body, assignee='default', idempotency_key=key, runs_on=['pool:worker'])
     if probe:
         args['initial_status'] = 'blocked'  # Defense in depth, not a substitute for isolated board.
@@ -85,7 +104,7 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return _load(path)
+            return _load(path, recover=False)
         state = _load(path)
         wall = time.time() if now is None else now
         if sample.get('raised'):
@@ -112,11 +131,20 @@ def report(sample: dict, *, probe=False, probe_board=None, now=None, client=None
         return state
 
 
+class PendingVisibility(RuntimeError):
+    """Creation was acknowledged, but the Board has not replicated the card yet."""
+
+
 def _report(sample, state, wall, probe, board, client, path):
     tid = state.get('task_id')
     if tid:
-        row = client.read(tid, board)  # Failed read propagates; never confused with absence.
-        opened = row is not None and row['status'] not in {'done', 'archived'}
+        evidence = client.read(tid, board)  # Failed read propagates; never confused with absence.
+        if evidence['state'] == 'absent':
+            state.setdefault('card_unreplicated_since', wall)
+            raise PendingVisibility('card not yet replicated')
+        state.pop('card_unreplicated_since', None)
+        row = evidence.get('row')
+        opened = evidence['state'] == 'live' and row['status'] not in {'done', 'archived'}
         if opened:
             if not sample.get('triggered') and not state.get('raises'):
                 return
@@ -130,7 +158,9 @@ def _report(sample, state, wall, probe, board, client, path):
                                 action='comment', args={'text': f'fd-headroom: {text}'}))
             state['raises'] = []
             return
-        # Only successful done/archived/missing evidence permits a new key.
+        # Only successful done/archived/tombstone evidence permits a new key.
+        state.pop('task_id', None)
+        state.pop('envelope', None)
         if not sample.get('triggered'):
             return
         _new_envelope(sample, state, wall, probe, board)
