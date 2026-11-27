@@ -15,20 +15,22 @@ from urllib.parse import quote
 from hermes_cli.kanban_db_connect import write_txn
 
 
-def task_insert(uid: str, fields: str, uuid: str, clock: str) -> str:
+def task_insert(uid: str, fields: str, uuid: str, clock: str, *, home_generations: str) -> str:
     """New task INSERT only; unresolved predecessors cannot acquire candidates.
 
     A materialized expression samples identity/time once. This is part of the
     original capture INSERT, not a retrofit inferred later from row appearance.
     C has not enabled certification: identity_state deliberately remains NULL.
+    Require the caller's native epoch expression so candidate metadata cannot
+    bypass capture-time pending refusal or lose an already committed epoch.
     """
     eligible = (f"NOT EXISTS (SELECT 1 FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid={uid}) "
                 f"AND NOT EXISTS (SELECT 1 FROM kanban_sync_tombstones WHERE table_name='tasks' AND row_uid={uid}) "
                 f"AND NOT EXISTS (SELECT 1 FROM kanban_sync_parent_envelopes WHERE task_id={uid})")
     return ("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,base_version,hlc,created_at,"
-            "capture_protocol,original_op_id,original_created_at,exposure_history) "
+            "home_generations,capture_protocol,original_op_id,original_created_at,exposure_history) "
             f"WITH capture AS MATERIALIZED (SELECT {uuid} AS id,{clock} AS ms,({eligible}) AS eligible) "
-            f"SELECT id,'tasks',{uid},'upsert',{fields},NULL,'',ms,"
+            f"SELECT id,'tasks',{uid},'upsert',{fields},NULL,'',ms,{home_generations},"
             "CASE WHEN eligible THEN 'capture_candidate1' END,CASE WHEN eligible THEN id END,"
             "CASE WHEN eligible THEN ms END,CASE WHEN eligible THEN "
             "'{\"protocol\":\"exposure1\",\"coverage\":\"candidate\",\"certified\":false,\"exposures\":[]}' END FROM capture;")

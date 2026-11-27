@@ -648,7 +648,8 @@ def _insert_trigger(table: str, columns: list[str]) -> str:
         fields = "json_object(" + ", ".join(f"'{_wire_name(table, c)}', json({_wire_value(table, c, 'NEW')})" for c in columns) + ")"
         if table == 'tasks':
             from hermes_cli.kanban_sync_exposure import task_insert
-            body = task_insert(_row_uid_sql(table, 'NEW'), fields, _UUID7_SQL, _NOW_MS_SQL)
+            body = task_insert(_row_uid_sql(table, 'NEW'), fields, _UUID7_SQL, _NOW_MS_SQL,
+                               home_generations=capture_sql(table, 'NEW'))
         else:
             body = _outbox_insert(table, "upsert", _row_uid_sql(table, "NEW"), fields)
         if table == "task_links":  # add-wins: re-linking clears an earlier removal

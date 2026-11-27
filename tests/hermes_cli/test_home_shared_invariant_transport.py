@@ -1,5 +1,6 @@
 """Shared home invariant: transport partition; run all partitions before review."""
 from tests.hermes_cli import test_home_certification_finalization as certification
+from tests.hermes_cli import test_home_candidate_capture_composition as capture_cases
 from tests.hermes_cli import test_home_shared_consumer_custody as consumer_cases
 from tests.hermes_cli import test_home_review_contracts as contracts
 from tests.hermes_cli import test_review_daily_transfer as daily
@@ -12,6 +13,7 @@ from tests.hermes_cli import test_home_release_landing_race as release_landing
 from tests.hermes_cli import test_kanban_home_source_stop as support
 
 release_board = release_landing.release_board
+capture_board = capture_cases.capture_board
 consumer_board = consumer_cases.consumer_board
 board = support.board
 live = contracts.live
@@ -20,6 +22,8 @@ configured = daily.configured
 person = daily.person
 
 test_unavailable_protocol_never_prepares_or_sends = owner_preflight.test_unavailable_protocol_never_prepares_or_sends
+test_candidate_capture_keeps_epoch_without_certifying_predecessors = capture_cases.test_candidate_capture_keeps_epoch_without_certifying_predecessors
+test_pending_native_task_insert_refuses_atomically_even_when_caught = capture_cases.test_pending_native_task_insert_refuses_atomically_even_when_caught
 test_capable_peer_sees_committed_freeze_and_exact_tuple_retries = owner_preflight.test_capable_peer_sees_committed_freeze_and_exact_tuple_retries
 test_after_prepare_unknown_response_never_unfreezes = owner_preflight.test_after_prepare_unknown_response_never_unfreezes
 test_capability_is_not_reused_for_later_new_preparation = owner_preflight.test_capability_is_not_reused_for_later_new_preparation
