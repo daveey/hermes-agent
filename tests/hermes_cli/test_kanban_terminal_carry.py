@@ -298,7 +298,8 @@ def test_standard_reconciler_captures_release_and_restores_on_reopen(world, monk
     support.write_sync_config(home, True)
     conn = kbc.connect(home / 'live.db')
     sync.ensure_identity(conn, 'default', 'origin')
-    monkeypatch.setattr(activity, '_remote_links', lambda: carry.reconcile_carry([w['card']]))
+    monkeypatch.setattr(activity, 'remote_links_and_origin_rows',
+                        lambda: (carry.reconcile_carry([w['card']]), []))
     try:
         links.reconcile(conn, 'default', 'origin')
         assert conn.execute("SELECT released FROM task_chat_links WHERE kind='shepherd'").fetchone()[0] == 0

@@ -37,6 +37,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(ksc, "shadow_path", lambda slug: tmp_path / "shadow" / f"{slug}.db")
     ledger: list[dict] = []
     monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: list(ledger))
+    # This synthetic ledger is already the complete producer view.
+    monkeypatch.setattr(ksa, "remote_links_and_origin_rows", lambda stale_ok=False: (list(ledger), []))
     ksa._reset_cache_for_tests()
     getattr(links, "_reset_for_tests", lambda: None)()
     yield {"tmp": tmp_path, "home": home, "ledger": ledger, "replicas": replicas}
