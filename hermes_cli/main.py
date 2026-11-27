@@ -2477,9 +2477,9 @@ def cmd_dashboard(args):
     # Apply final nofile policy after routing/re-exec, before web imports/state;
     # this includes isolated Desktop SSH serves. A higher named-profile limit
     # must not leak into the default dashboard, whose lower limit cannot undo it.
-    from hermes_cli.resource_limits import apply_nofile_soft_limit
+    from hermes_cli.resource_limits import apply_server_nofile_policy
 
-    apply_nofile_soft_limit()
+    apply_server_nofile_policy(role='backend')
 
     if _headless_backend:
         # [daveey] Never boot a backend on a tree a core update is about to swap: wait out a live

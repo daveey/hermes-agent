@@ -97,6 +97,7 @@ def apply_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> bool:
 
 _fd_samples: deque[tuple[float, int]] = deque(maxlen=1801)
 _fd_last_check: float | None = None
+_fd_interval = 300.0
 _fd_pid = os.getpid()
 _fd_lock = threading.Lock()
 
@@ -177,6 +178,23 @@ _fd_thread: threading.Thread | None = None
 _fd_request_lock = threading.Lock()
 
 
+def apply_server_nofile_policy(*, role: str) -> None:
+    """Startup floor plus an immediate off-loop sample, before slow service initialization."""
+    apply_nofile_soft_limit()
+    request_fd_headroom(role=role)
+
+
+def fd_headroom_delay(maximum: float) -> float:
+    """Reuse the service timer without running its unrelated chores more frequently.
+
+    Only the worker reads config; the loop reads this bounded, cached deadline.
+    A slow in-flight check is revisited after 1s, never busy-looped or queued.
+    """
+    remaining = (_fd_last_check + _fd_interval - time.monotonic()
+                 if _fd_last_check is not None else 1.0)
+    return min(maximum, max(1.0, remaining))
+
+
 def request_fd_headroom(*, role: str) -> None:
     """Nonblocking service tick: retain one worker, count overlap instead of queueing work."""
     global _fd_thread
@@ -184,6 +202,9 @@ def request_fd_headroom(*, role: str) -> None:
         with _fd_request_lock:
             if _fd_thread is not None and _fd_thread.is_alive():
                 _fd_status['skipped'] = _fd_status.get('skipped', 0) + 1
+                if role == 'gateway':
+                    from gateway.status import publish_runtime_status
+                    publish_runtime_status(fd_headroom=fd_headroom_status())
                 return
             import contextvars
             scope = contextvars.copy_context()
@@ -254,7 +275,7 @@ def _raise_fd_soft(sample, maximum):
 
 
 def _check_fd_headroom(config, role, now, wall, probe, probe_board):
-    global _fd_last_check, _fd_pid, _fd_config_warning, _fd_incident
+    global _fd_last_check, _fd_pid, _fd_config_warning, _fd_incident, _fd_interval
     from hermes_cli.fd_headroom_config import validated
     if _resource is None:
         return None
@@ -262,7 +283,9 @@ def _check_fd_headroom(config, role, now, wall, probe, probe_board):
         from hermes_cli.config import load_config_readonly
         config = load_config_readonly()
     settings, errors = validated(config)
+    _fd_interval = settings['interval_seconds']
     if not settings['enabled']:
+        _fd_last_check = now
         return None
     if _fd_pid != os.getpid():
         _fd_pid, _fd_last_check = os.getpid(), None

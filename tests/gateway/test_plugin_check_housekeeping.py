@@ -17,9 +17,15 @@ def test_plugin_cadence_runs_at_startup_and_each_housekeeping_tick(monkeypatch):
 
     # Stop an unfixed loop after its second sleep, without waiting for tick 60.
     sleeps = []
+    clock = [0.0]
+    monkeypatch.setattr(run.time, 'monotonic', lambda: clock[0])
+    from hermes_cli import resource_limits
+    monkeypatch.setattr(resource_limits, 'request_fd_headroom', lambda **kw: None)
+    monkeypatch.setattr(resource_limits, 'fd_headroom_delay', lambda maximum: maximum)
 
     def wait(timeout=None):
         sleeps.append(timeout)
+        clock[0] += timeout
         if len(sleeps) == 2:
             stop.set()
         return stop.is_set()

@@ -57,6 +57,95 @@ def test_backend_first_tick_dispatches_without_waiting_for_sample(monkeypatch):
     assert calls == [{'role': 'backend'}]
 
 
+def test_backend_short_interval_preserves_selftest_cadence(monkeypatch):
+    from hermes_cli import web_server as backend
+    clock, samples, selftests = [0.0], [], []
+    monkeypatch.setattr(backend.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(limits, 'fd_headroom_delay', lambda maximum: min(30, maximum), raising=False)
+    monkeypatch.setattr(limits, 'request_fd_headroom', lambda **kw: samples.append(clock[0]))
+    async def sleep(seconds):
+        clock[0] += seconds
+        if clock[0] > 90:
+            raise asyncio.CancelledError
+    async def selftest():
+        selftests.append(clock[0])
+    monkeypatch.setattr(backend.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(backend, '_dashboard_selftest_once', selftest)
+    monkeypatch.setattr(backend.app.state, 'auth_required', False, raising=False)
+    async def exercise():
+        with pytest.raises(asyncio.CancelledError):
+            await backend._dashboard_selftest_loop()
+    asyncio.run(exercise())
+    assert samples == [0, 30, 60, 90]
+    assert selftests == [60]
+
+
+def test_gateway_short_interval_does_not_accelerate_chores(monkeypatch):
+    import gateway.run as gateway
+    import gateway.run_delivery_queue_watch as watch
+    clock, samples, chores = [0.0], [], []
+    stop = threading.Event()
+    monkeypatch.setattr(gateway.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(limits, 'fd_headroom_delay', lambda maximum: min(30, maximum), raising=False)
+    monkeypatch.setattr(limits, 'request_fd_headroom', lambda **kw: samples.append(clock[0]))
+    monkeypatch.setattr(gateway, '_housekeeping_chore', lambda *a: chores.append(clock[0]))
+    def wait(*args):
+        clock[0] += args[1]
+        if clock[0] >= 90:
+            stop.set()
+    monkeypatch.setattr(watch, 'wait_for_next_tick', wait)
+    gateway._start_gateway_housekeeping(stop, interval=60)
+    assert sorted(set(samples)) == [0, 30, 60]
+    assert sorted(set(chores)) == [0, 60]
+
+
+def test_gateway_boot_dispatches_before_platform_initialization(monkeypatch):
+    import gateway.code_skew as skew
+    import gateway.run as gateway
+    calls = []
+    class StopStartup(Exception):
+        pass
+    monkeypatch.setattr(limits, 'apply_nofile_soft_limit', lambda: calls.append('floor'))
+    monkeypatch.setattr(skew, 'record_boot_fingerprint', lambda: None)
+    monkeypatch.setattr(skew, 'install_boot_pinned_imports', lambda: None)
+    def request(**kw):
+        calls.append(kw)
+        raise StopStartup
+    monkeypatch.setattr(limits, 'request_fd_headroom', request)
+    async def exercise():
+        with pytest.raises(StopStartup):
+            await gateway.start_gateway()
+    asyncio.run(exercise())
+    assert calls == ['floor', {'role': 'gateway'}]
+
+
+def test_serve_boot_dispatches_before_server(monkeypatch):
+    from tests.hermes_cli import test_resource_limits as regression
+    calls = []
+    monkeypatch.setattr(limits, 'request_fd_headroom', lambda **kw: calls.append(kw))
+    regression.test_serve_startup_applies_limit_before_web_server(monkeypatch)
+    assert calls == [{'role': 'backend'}]
+
+
+def test_dashboard_health_snapshot_excludes_private_fields(monkeypatch):
+    from hermes_cli.web_server import DashboardHealth
+    monkeypatch.setattr(limits, '_fd_status', {'state': 'warn', 'count': 50,
+                        'error_class': 'TimeoutError', 'error': '/private/token',
+                        'envelope': {'body': 'private card text'}})
+    public = DashboardHealth().snapshot()['fd_headroom']
+    assert public == {'state': 'warn', 'count': 50, 'error_class': 'TimeoutError'}
+
+
+def test_delay_uses_cached_worker_deadline(monkeypatch):
+    monkeypatch.setattr(limits, '_fd_interval', 30)
+    monkeypatch.setattr(limits, '_fd_last_check', 100)
+    monkeypatch.setattr(limits.time, 'monotonic', lambda: 110)
+    assert limits.fd_headroom_delay(60) == 20
+    assert limits.fd_headroom_delay(5) == 5
+    monkeypatch.setattr(limits.time, 'monotonic', lambda: 131)
+    assert limits.fd_headroom_delay(60) == 1
+
+
 def test_gateway_thread_publishes_public_status(monkeypatch, tmp_path):
     from gateway import status
     monkeypatch.setattr(limits, 'check_fd_headroom', lambda **kw: {'count': 50})

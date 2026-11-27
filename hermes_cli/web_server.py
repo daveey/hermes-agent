@@ -828,11 +828,15 @@ async def _dashboard_selftest_once() -> None:
 
 async def _dashboard_selftest_loop() -> None:
     """Periodic self-test driver started from the lifespan."""
-    from hermes_cli.resource_limits import request_fd_headroom
+    from hermes_cli.resource_limits import fd_headroom_delay, request_fd_headroom
+    next_selftest = time.monotonic() + _DASHBOARD_SELFTEST_INTERVAL_SECONDS
     while True:
         # Same lifespan for both launch paths; an in-flight check never delays the next tick.
         request_fd_headroom(role='backend')
-        await asyncio.sleep(_DASHBOARD_SELFTEST_INTERVAL_SECONDS)
+        await asyncio.sleep(fd_headroom_delay(max(0.0, next_selftest - time.monotonic())))
+        if time.monotonic() < next_selftest:
+            continue
+        next_selftest = time.monotonic() + _DASHBOARD_SELFTEST_INTERVAL_SECONDS
         # OAuth-gated binds don't honour the session token; the probe would false-alarm 401.
         if getattr(app.state, "auth_required", False):
             continue
@@ -1749,9 +1753,9 @@ def _start_server_runtime(
 
     # Dashboard-mode starts don't route through main.py's `serve` path, which
     # applies the same RLIMIT_NOFILE floor (policy in resource_limits, #81547).
-    from hermes_cli.resource_limits import apply_nofile_soft_limit
+    from hermes_cli.resource_limits import apply_server_nofile_policy
 
-    apply_nofile_soft_limit()
+    apply_server_nofile_policy(role='backend')
 
     import uvicorn
 

@@ -4297,12 +4297,13 @@ def _start_gateway_housekeeping(
     Cadences are ticks of ``interval``; inner gates own the real cadence."""
     from gateway.run_runtime_heartbeat import runtime_heartbeat
     from gateway.run_checkpoint_prune import CHORE_LABEL as PRUNE_LABEL, CheckpointPruneWorker
-    from gateway.run_delivery_queue_watch import DRAIN_LABEL, DeliveryQueueWatch, wait_for_next_tick
+    from gateway.run_delivery_queue_watch import DRAIN_LABEL, DeliveryQueueWatch
     from gateway.runtime_ownership import process_ownership
     from gateway.run_profile_reconcile import _mcp_config_reconciler, profile_scoped_chore
     from gateway.run_housekeeping_disk import housekeeping_gone_board_handles, housekeeping_media_caches, maybe_post_auto_prune_prompt
     from hermes_cli.plugins_idle_tasks import IdleTaskFence
     from hermes_cli.resource_limits import request_fd_headroom
+    from gateway.run_housekeeping_resources import run_due_chores, wait_for_resource_tick
     request_fd_headroom(role='gateway')  # Before potentially slow housekeeping chores.
     prune_worker = CheckpointPruneWorker(logger, start=process_ownership.start_writer)
     chores: list[tuple[int, str, Any]] = [
@@ -4337,7 +4338,6 @@ def _start_gateway_housekeeping(
         # Per served profile: plugins dir, last-run marker and plugins.auto_apply are all the
         # profile's own (get_hermes_home()/load_config_readonly() bind to the scope).
         (1, "Plugin update check", profile_scoped_chore(runner, _housekeeping_plugin_update_check)),
-        (1, "FD headroom", lambda: request_fd_headroom(role='gateway')),
         (1, "Deferred FTS retry tick", _housekeeping_deferred_fts_retry),
         (1, "FTS backfill tick", _housekeeping_fts_backfill),
         (1, "gateway housekeeping memory trim", _housekeeping_memory_trim),
@@ -4358,13 +4358,13 @@ def _start_gateway_housekeeping(
 
     logger.info("Gateway housekeeping started (interval=%ds)", interval)
     tick_count, idle_fence = 0, IdleTaskFence(stop_event)
+    next_chores = time.monotonic()
     try:
         while not stop_event.is_set():
-            tick_count += 1
-            for every, label, fn in chores:
-                if tick_count % every == 0:
-                    _housekeeping_chore(label, fn)
-            wait_for_next_tick(stop_event, interval, queue_watch, _housekeeping_chore)
+            request_fd_headroom(role='gateway')
+            tick_count, next_chores = run_due_chores(
+                tick_count, next_chores, chores, interval, _housekeeping_chore)
+            wait_for_resource_tick(stop_event, next_chores, queue_watch, _housekeeping_chore)
     finally:
         prune_worker.close()
     logger.info("Gateway housekeeping stopped (idle-task runs settled: %s)", idle_fence.close())

@@ -912,6 +912,8 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
     from gateway.code_skew import install_boot_pinned_imports, record_boot_fingerprint
     record_boot_fingerprint()
     install_boot_pinned_imports()
+    from hermes_cli.resource_limits import request_fd_headroom
+    request_fd_headroom(role='gateway')  # Do not wait for platform connects/housekeeping startup.
 
     # Config verdicts come before the duplicate-instance guard: `--replace` must not stop a healthy
     # gateway for a launch that cannot start.
