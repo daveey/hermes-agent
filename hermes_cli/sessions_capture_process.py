@@ -15,11 +15,14 @@ from hermes_cli import loop_accounting as _la
 from hermes_cli._launchers import runtime_command
 from hermes_cli._startup_fast import project_root_str
 from hermes_cli._subprocess_compat import kill_process_tree
+from hermes_cli.git_fingerprint import read_git_revision_fingerprint
 from hermes_cli.process_identity import spawn_owned, stop_owned_group_survivors
 from tools.environments.local import build_subprocess_env
 
 MAX_REQUEST = 16 * 1024
 MAX_RESPONSE = 4 * 1024 * 1024
+# A standby older than this is not used: it imported its code, and leased its dependencies, that long ago.
+STANDBY_MAX_AGE_S = 30
 
 
 class CaptureUnavailable(RuntimeError):
@@ -49,14 +52,73 @@ def _read_exact(fd, count, deadline):
     return bytes(data)
 
 
+def _generation():
+    """Checkout identity, as the code-skew watchdog reads it (``.git`` HEAD/ref files, no git spawn)."""
+    return read_git_revision_fingerprint(Path(project_root_str()))
+
+
+class _Standby:
+    __slots__ = ('child', 'cpu_s', 'generation', 'recorded', 'spawned')
+
+    def __init__(self, child, spawned):
+        self.child, self.spawned, self.generation = child, spawned, _generation()
+        self.cpu_s, self.recorded = None, False
+
+
 class CaptureProcess:
-    """One child at a time; close cancels it, and a later capture gets a fresh child."""
+    """One active child at a time; close cancels it, and a later capture gets a fresh child.
+
+    ``prepare`` may spawn one standby ahead of the first capture; it serves at most one request.
+    """
     def __init__(self, *, seconds=5, max_bytes=MAX_RESPONSE, command=None):
         self.seconds, self.max_bytes = seconds, min(max_bytes, MAX_RESPONSE)
         self.command = command
         self._lock = threading.Lock()
         self._child = None
+        self._standby = None
         self._closed = False
+
+    def _spawn(self):
+        # Resolve installation-bound Python/dependencies, not ambient python/PYTHONPATH.
+        command = self.command or runtime_command(Path(project_root_str()),
+                                                   module='hermes_cli.sessions_capture_worker')
+        return spawn_owned(command, purpose='sessions-canonical-capture',
+                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           env=build_subprocess_env())
+
+    def prepare(self):
+        """Spawn the standby the next capture will use (it imports while it waits for the request).
+        No-op when closed, busy or already prepared; a failed spawn leaves captures spawning fresh."""
+        with self._lock:
+            if self._closed or self._standby is not None or self._child is not None:
+                return
+            spawned = time.monotonic()
+            try:
+                child = self._spawn()
+            except OSError:
+                return
+            try:
+                self._standby = _Standby(child, spawned)
+            except BaseException:
+                _la.record('sessions.capture.child', cpu_s=_child_cpu(child.pid) or 0.0,
+                           wall_s=time.monotonic() - spawned, skipped=True, outer=False)
+                _stop(child)
+                raise
+
+    def _discard_standby(self):
+        """Retire the unused standby (caller holds the lock): one ``skipped`` record, then the same
+        custody as any child. A group that does not stop keeps the standby owned for the next try."""
+        standby = self._standby
+        if standby is None:
+            return
+        if not standby.recorded:
+            # A standby poll() already reaped lost its counters: use the sample taken before that.
+            cpu_s = _child_cpu(standby.child.pid) if standby.child.returncode is None else standby.cpu_s
+            standby.recorded = True
+            _la.record('sessions.capture.child', cpu_s=cpu_s or 0.0, wall_s=time.monotonic() - standby.spawned,
+                       skipped=True, fallback=cpu_s is None, outer=False)
+        _stop(standby.child)
+        self._standby = None
 
     def __call__(self, name, selector):
         return self._request({'name': name, 'selector': selector})
@@ -89,20 +151,24 @@ class CaptureProcess:
         request = json.dumps(value, allow_nan=False).encode('utf-8')
         if len(request) > MAX_REQUEST:
             raise CaptureUnavailable('request_bytes')
-        # Resolve installation-bound Python/dependencies, not ambient python/PYTHONPATH.
-        command = self.command or runtime_command(Path(project_root_str()),
-                                                   module='hermes_cli.sessions_capture_worker')
         with self._lock:
             if self._closed:
                 raise CaptureUnavailable('closed')
             if self._child is not None:
                 raise CaptureUnavailable('busy')
-            try:
-                child = spawn_owned(command, purpose='sessions-canonical-capture',
-                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                    env=build_subprocess_env())
-            except OSError as exc:
-                raise CaptureUnavailable('spawn') from exc
+            child, standby = None, self._standby
+            if standby is not None:
+                standby.cpu_s = _child_cpu(standby.child.pid)  # before poll() can reap a dead one
+                if (standby.child.poll() is None and time.monotonic() - standby.spawned <= STANDBY_MAX_AGE_S
+                        and standby.generation == _generation()):
+                    child, self._standby = standby.child, None
+                else:
+                    self._discard_standby()
+            if child is None:
+                try:
+                    child = self._spawn()
+                except OSError as exc:
+                    raise CaptureUnavailable('spawn') from exc
             self._child = child
         cpu_s, completed = None, False
         try:
@@ -137,17 +203,11 @@ class CaptureProcess:
             if cpu_s is None:
                 cpu_s = _child_cpu(child.pid)  # a failed or cancelled child spent CPU too
             # The child's CPU is outside this process: no thread here may claim it (outer=False).
+            # Lifetime CPU, so a used standby's imports count; wall is this request's (the batch charge).
             _la.record('sessions.capture.child', cpu_s=cpu_s or 0.0, wall_s=time.monotonic() - started,
                        fallback=cpu_s is None, error=not completed,
                        error_kind=None if completed else 'CaptureUnavailable', outer=False)
-            if child.poll() is None:
-                kill_process_tree(child)
-            child.wait(timeout=1)
-            child.stdout.close()
-            if not child.stdin.closed:
-                child.stdin.close()
-            if not stop_owned_group_survivors(child.pid, proc=child, grace=0):
-                raise TimeoutError('sessions child group did not stop; custody retained')
+            _stop(child)
             with self._lock:
                 self._child = None
 
@@ -155,15 +215,30 @@ class CaptureProcess:
         with self._lock:
             self._closed = True
             child = self._child
-        if child is not None:
-            if child.poll() is None:
-                kill_process_tree(child)
-            child.wait(timeout=1)
-            if not stop_owned_group_survivors(child.pid, proc=child, grace=0):
-                raise TimeoutError('sessions child group did not stop; custody retained')
-            with self._lock:
-                if self._child is child:
-                    self._child = None
+        try:
+            if child is not None:  # its own request accounts it
+                if child.poll() is None:
+                    kill_process_tree(child)
+                child.wait(timeout=1)
+                if not stop_owned_group_survivors(child.pid, proc=child, grace=0):
+                    raise TimeoutError('sessions child group did not stop; custody retained')
+                with self._lock:
+                    if self._child is child:
+                        self._child = None
+        finally:
+            with self._lock:  # attempted even when the active child's custody is retained
+                self._discard_standby()
+
+
+def _stop(child):
+    if child.poll() is None:
+        kill_process_tree(child)
+    child.wait(timeout=1)
+    child.stdout.close()
+    if not child.stdin.closed:
+        child.stdin.close()
+    if not stop_owned_group_survivors(child.pid, proc=child, grace=0):
+        raise TimeoutError('sessions child group did not stop; custody retained')
 
 
 def _read_trailer(child, deadline):

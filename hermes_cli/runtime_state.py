@@ -169,14 +169,30 @@ def lease_directory(generation: Path) -> Callable[[], None]:
 
     def release() -> None:
         atexit.unregister(release)
+        with suppress(ValueError):
+            _process_leases.remove(release)
         os.close(fd)
         # Best effort: the collector ignores unlocked lease files, but one per
         # invocation would otherwise accumulate for the life of the generation.
         with suppress(OSError):
             lease.unlink()
 
+    _process_leases.append(release)
     atexit.register(release)
     return release
+
+
+# Leases this process still holds, for a caller that ends the process without running atexit.
+_process_leases: list[Callable[[], None]] = []
+
+
+def release_process_leases() -> int:
+    """Release every lease this process still holds, exactly as its atexit hooks would; returns how many."""
+    released = 0
+    while _process_leases:
+        _process_leases[-1]()  # removes itself
+        released += 1
+    return released
 
 
 def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> list[Path]:

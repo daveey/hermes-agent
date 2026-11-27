@@ -39,6 +39,22 @@ def test_pruner_removes_abandoned_file_while_holding_its_lock(tmp_path, monkeypa
     assert locked_at_delete == [True]
 
 
+@pytest.mark.platforms("any")
+def test_process_leases_release_early_exactly_as_at_exit(tmp_path, monkeypatch):
+    # A process that ends without atexit (the sessions capture worker) releases what it holds.
+    monkeypatch.setattr(runtime_state, "_process_leases", [])
+    first, second = _generation(tmp_path / "one"), _generation(tmp_path / "two")
+    early = runtime_state.lease_directory(first)
+    runtime_state.lease_directory(first)
+    runtime_state.lease_directory(second)
+    early()  # an early release (lease reselection) is no longer held, and is not released twice
+    assert runtime_state.leases_held(first) and runtime_state.leases_held(second)
+    assert runtime_state.release_process_leases() == 2
+    assert not runtime_state.leases_held(first) and not runtime_state.leases_held(second)
+    assert list((first / ".leases").iterdir()) == [] == list((second / ".leases").iterdir())
+    assert runtime_state.release_process_leases() == 0
+
+
 @pytest.mark.platforms("windows")
 def test_pruner_keeps_a_windows_creator_before_its_first_lock(tmp_path, monkeypatch):
     generation = _generation(tmp_path / "generation")

@@ -48,17 +48,21 @@ def early_sessions(*, headless, isolated):
     assert_backend_home(isolated=isolated)
     restore_user_proxy_env()
     record_launch_scope(isolated=isolated, desktop_owned=is_desktop_owned_backend())
-    from hermes_cli.sessions_native_startup import SessionsRuntime
-    from hermes_cli.web_routers import profiles
-
-    owner = EarlySessions(SessionsRuntime(profiles, profiles._profile_targets('sessions facts startup')))
+    # The capture child is spawned HERE, before the imports below, so its own imports run beside
+    # them. From this line one try/finally owns it: the reader until the runtime owns the reader.
+    from hermes_cli.sessions_capture_process import CaptureProcess
+    reader = CaptureProcess()
+    owner = None
     previous = {}
+
+    def close():
+        (reader if owner is None else owner).close()
 
     def stop(signum, frame):
         handler = previous[signum]
         if handler == signal.SIG_IGN:
             return
-        owner.close()
+        close()
         if callable(handler):
             handler(signum, frame)
         elif handler != signal.SIG_IGN:
@@ -74,11 +78,17 @@ def early_sessions(*, headless, isolated):
                     previous[signum] = signal.signal(signum, stop)
                 except (ValueError, OSError, RuntimeError):
                     previous.pop(signum, None)
+        reader.prepare()
+        from hermes_cli.sessions_native_startup import SessionsRuntime
+        from hermes_cli.web_routers import profiles
+
+        owner = EarlySessions(SessionsRuntime(profiles, profiles._profile_targets('sessions facts startup'),
+                                              capture_reader=reader))
         owner.runtime.start_background()
         yield owner
     finally:
         try:
-            owner.close()
+            close()
         finally:
             if previous and threading.current_thread() is threading.main_thread():
                 for signum, handler in previous.items():

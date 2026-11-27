@@ -164,7 +164,9 @@ class SessionsSource:
         facts = tuple(self._fact(key, body, started, budget) for key, body in zip(keys, bodies))
         timing = None
         with self._lock:
-            # <=50% duty charges the WHOLE batch, including spawn and serialization.
+            # <=50% duty charges the WHOLE batch, including spawn and serialization. One exception:
+            # the boot standby child was spawned before its batch began, so that one-time wall is
+            # not charged here; its CPU still is recorded (sessions.capture.child), used or not.
             ended = time.monotonic()
             self._next_capture = ended + max(.2, ended - started)
             due = self._deadline()
