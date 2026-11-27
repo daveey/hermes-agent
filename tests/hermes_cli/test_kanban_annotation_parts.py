@@ -106,6 +106,39 @@ def _full_read():
         parts._seen.update(saved)
 
 
+def test_one_holder_pass_projects_the_links_once_for_every_part(world, monkeypatch):
+    """t_01a20286f9f3f262: the counts and a waiting source (chat-closeout) each forced their own ledger projection
+    in the same holder pass: 480 strict projections for 246 forced passes on the hub serve."""
+    def waiting():
+        ksa.remote_links_and_origin_rows()
+        return {}
+    monkeypatch.setattr(ksa, '_waiting_sources', {'fixture': waiting})
+    _refresh()
+    assert world.links == 1, 'one holder pass projected the links once per part'
+    assert getattr(ksa._revalidate.force_read, 'links_pass', None) is None, 'the pass memo outlived its pass'
+
+    world.conn.execute("UPDATE tasks SET status = 'done' WHERE id = 't1'")
+    _refresh()
+    assert world.links == 2, 'a later pass must project again: the memo is one pass old at most'
+
+
+def test_a_forced_links_read_outside_a_holder_pass_is_never_shared(monkeypatch):
+    scope = ('no-pass',)
+    monkeypatch.setattr(ksa._revalidate.force_read, 'scope', scope, raising=False)
+    monkeypatch.setattr(ksa._revalidate.force_read, 'links_pass', None, raising=False)
+    monkeypatch.setattr(ksa, '_links_fingerprint', lambda: ('same',))
+    published = []
+    monkeypatch.setattr(ksa, '_publish_links', lambda s, f: published.append(s) or (0.0, s, f, [], []))
+    first, second = ksa._links_lookup(scope, False), ksa._links_lookup(scope, False)
+    assert published == [scope, scope] and first is not second
+
+    monkeypatch.setattr(ksa._revalidate.force_read, 'links_pass', {})
+    assert ksa._links_lookup(scope, False) is ksa._links_lookup(scope, True)
+    assert published == [scope] * 3, 'the pass memo is per pass: the earlier unshared reads are not in it'
+    monkeypatch.setattr(ksa._revalidate.force_read, 'scope', ('other',))
+    assert ksa._links_lookup(('other',), False)[1] == ('other',), "another scope got this scope's projection"
+
+
 def test_a_write_to_one_source_rereads_only_the_parts_that_read_it(world):
     _refresh()
     assert _reads(world) == (1, 1, 1), 'the first read of a scope reads every part'

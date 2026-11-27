@@ -781,6 +781,7 @@ def _event_refresh(events) -> float | None:
                 _ksa._revalidate.force_read.scope = scope
                 _ksa._revalidate.force_read.parts = forced
                 _ksa._revalidate.force_read.content_only_boards = not (lost or clock or renew)
+                _ksa._revalidate.force_read.links_pass = {}  # this pass's one forced links projection
                 # No part needs a read: avoid prepare/freeze/publication and ordinary inner TTLs.
                 # Keep the deadline/settle path below: this hint can precede COMMIT visibility.
                 if forced:
@@ -807,6 +808,7 @@ def _event_refresh(events) -> float | None:
                 _holder_ctx.deadlines = None
                 _ksa._revalidate.force_read.scope = None
                 _ksa._revalidate.force_read.parts = None
+                _ksa._revalidate.force_read.links_pass = None
                 _ksa._revalidate.force_read.content_only_boards = False
                 _ksa._annotate_refresh_lock.release()
         try:

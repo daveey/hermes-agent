@@ -39,6 +39,22 @@ def forced(scope: tuple[str, ...], part: str) -> bool:
     return parts is None or part in parts
 
 
+def pass_links(scope: tuple[str, ...], project):
+    """One forced links projection per holder pass. [daveey]
+
+    ``force_read.links_pass`` is a dict only inside one ``kanban_annotation_host._event_refresh`` scope read. The
+    counts and each waiting source (chat-closeout) forced their own ledger projection in that pass: 480 strict
+    projections for 246 forced passes on the hub serve, each under ``_links_lock`` (t_01a20286f9f3f262). The pass is
+    one snapshot, as ``one_annotation_snapshot`` already is for a request: a write during it wakes the holder again.
+    Outside a pass (the memo is None) every forced read still projects; a failed projection is never kept."""
+    held = getattr(force_read, "links_pass", None)
+    if held is None:
+        return project()
+    if scope not in held:
+        held[scope] = project()
+    return held[scope]
+
+
 def revalidatable(fingerprint: tuple, wall: float) -> bool:
     """True when ``fingerprint`` (taken at wall time ``wall``) proves no write since: every board is keyed by its
     content revision, or by a file stat last modified more than ``STAT_SETTLED_S`` before ``wall``. A stat key can

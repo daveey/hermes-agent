@@ -1018,9 +1018,10 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
         # verdicts move without any key), no key can vouch for the inputs, or the links part key moved
         # (``kanban_annotation_parts``); state/config churn alone is left to ``_LINKS_MAX_AGE_S``.
         if _revalidate.forced(scope, 'links'):
-            with _links_lock:
-                fingerprint = diag.timed("fingerprint", _links_fingerprint)
-                return _publish_links(scope, fingerprint)
+            def project():
+                with _links_lock:
+                    return _publish_links(scope, diag.timed("fingerprint", _links_fingerprint))
+            return _revalidate.pass_links(scope, project)
         hit = _links_cache.get(scope)
         # A warm display read still precedes ALL fingerprint and lock work.
         if stale_ok and hit is not None:
