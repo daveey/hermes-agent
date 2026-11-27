@@ -190,6 +190,7 @@ def test_serializer_source_writes_only_declared_keys():
 # ── (d) annotator families: source keys and audited row-mutating calls ──
 FAMILY_SOURCES = {
     "kanban": (("hermes_cli/kanban_session_activity.py", "annotate_kanban_activity"),
+               ("hermes_cli/kanban_triage_attention.py", "project"),
                ("hermes_cli/kanban_session_activity.py", "_mark_kanban_unknown"),
                ("hermes_cli/kanban_activity_projection.py", "project_kanban_activity"),
                ("hermes_cli/kanban_activity_projection.py", "project_kanban_unknown"),
@@ -222,7 +223,7 @@ FAMILY_SOURCES = {
 AUDITED_ROW_CALLS = {
     # Replica stamping only increments the already-declared external/unknown fields;
     # its complete writer is included in FAMILY_SOURCES so new keys remain guarded.
-    "_external_activity.stamp_replica_counts", "row_ids",
+    "_external_activity.stamp_replica_counts", "row_ids", "project",
     "identity.mark_unknown", "count_snapshot", "_external_activity.stamp_boards", "identity.row_ids",
     "identity.stamp_blocked_owners", "identity.timers.stamp", "_mark_kanban_unknown", "stamp_needs_you", "_merge", "ids_of",
     "stamp_rows", "external_activity.stamp_rows", "_row_ids", "replace", "_row_prs", "enumerate",

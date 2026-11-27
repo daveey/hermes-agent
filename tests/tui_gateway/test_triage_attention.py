@@ -98,6 +98,8 @@ def test_same_status_reentry_is_semantic_in_both_remote_memo_paths(db):
     tid = helpers._card(done=False)
     hold(tid, 1000)
     with contextlib.closing(kbc.connect()) as conn:
+        from hermes_cli.kanban_db_sync import apply_sync_schema_steps
+        apply_sync_schema_steps(conn)
         first = fanout._task_prints(conn, [tid])
         conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'unblocked',1600,'{}')", (tid,))
         conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'decision_retained',1601,'{}')", (tid,))

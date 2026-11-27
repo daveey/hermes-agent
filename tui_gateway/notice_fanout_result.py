@@ -34,9 +34,10 @@ class FanoutResult(list[dict]):
 
     def absorb(self, other: FanoutResult) -> None:
         self.extend(other)
-        if other.clock_deadline is not None:
-            self.clock_deadline = (other.clock_deadline if self.clock_deadline is None
-                                   else min(self.clock_deadline, other.clock_deadline))
+        clock_deadline = getattr(other, 'clock_deadline', None)
+        if clock_deadline is not None:
+            self.clock_deadline = (clock_deadline if self.clock_deadline is None
+                                   else min(self.clock_deadline, clock_deadline))
         if other.incomplete:
             self.incomplete = True
             if other.next_deadline is not None:

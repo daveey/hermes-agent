@@ -25,6 +25,8 @@ def test_real_retry_sites_preserve_earliest_deadline(monkeypatch, tmp_path, reas
     conn.execute('INSERT INTO task_events VALUES(2)')
     monkeypatch.setattr(fanout, '_board_slugs', lambda kb: ['board'])
     monkeypatch.setattr(fanout, '_board_idle', lambda *a: False)
+    from tui_gateway import notice_triage_clock
+    monkeypatch.setattr(notice_triage_clock, 'local', lambda *a, **k: (set(), None))
     monkeypatch.setattr(fanout, '_changed_tasks', lambda *a: ([], 1))
     monkeypatch.setattr(fanout, '_fan_out_changes', lambda *a: [])
     monkeypatch.setattr(fanout, '_remote_change_pass', lambda *a: FanoutResult())

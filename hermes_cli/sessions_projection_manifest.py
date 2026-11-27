@@ -243,6 +243,8 @@ _KANBAN = "kanban_session_activity.annotate_kanban_activity"
 ANNOTATION_FAMILIES: dict[str, tuple[FieldSpec, ...]] = {
     "kanban": (
         FieldSpec("kanban_observed_at", "number", CONDITIONAL, _KANBAN, "absent when kanban_unknown"),
+        FieldSpec("kanban_triage_attention", "object", CONDITIONAL, _KANBAN,
+                  "absent without known overdue triage; count, qualified refs and count partitions"),
         _flag("kanban_unknown", "kanban", "present only when the kanban read failed/was unavailable"),
         *(_count(name, _KANBAN, "absent when zero or kanban_unknown") for name in (
             "kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale",

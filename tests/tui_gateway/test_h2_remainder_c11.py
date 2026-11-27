@@ -257,7 +257,7 @@ def test_replay_benchmark_idle_passes_do_not_connect_and_cost_less(db, monkeypat
         nf.card_change_pass(session_db=_opener(db))
     skipped = time.process_time() - t0
     assert connects == []
-    monkeypatch.setattr(nf, "_board_idle", lambda ident: False)  # the pre-change behaviour: connect every pass
+    monkeypatch.setattr(nf, "_board_idle", lambda ident, report=None: False)  # the pre-change behaviour: connect every pass
     t0 = time.process_time()
     for _ in range(200):
         nf.card_change_pass(session_db=_opener(db))
