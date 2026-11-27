@@ -24,6 +24,7 @@ LABELS = {
     'remote_notices.pending_detail': ('identity_unknown', 'chat_reactivated', 'snapshot_changed',
                                       'no_ledger', 'unsettled', 'unknown'),
     'remote.call': ('memo_hit', 'seed_only', 'seed_failed', 'refreshed', 'exception', 'unknown'),
+    'remote.retry': ('inputs_error', 'initial_poll_failed', 'seed_failed', 'db_none', 'refresh_failed', 'exception', 'unknown'),
     'remote.cert': ('not_attempted', 'ack_failed', 'inputs_unavailable', 'not_all_acked', 'prints_none',
                     'after_poll_none', 'cursor_moved', 'certified', 'exception', 'unknown'),
     'remote.health': ('not_reached', 'no_generation', 'complete_true', 'complete_false', 'exception', 'unknown'),
@@ -200,6 +201,11 @@ def host_accounted(fn):
 def local_retry(result, reason, delay=1.0):
     emit('retry.site', reason)
     result.retry(delay, subpass='card_change_pass', reason=reason)
+
+
+def remote_retry(result, reason):
+    emit('remote.retry', reason)
+    result.retry(subpass='remote_card_change', reason=reason)
 
 
 def retry_report(report, subpass='unknown', reason='unknown'):

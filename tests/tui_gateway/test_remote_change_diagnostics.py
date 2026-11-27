@@ -45,7 +45,8 @@ def remote(monkeypatch, record_property):
     monkeypatch.setattr(fact_links_health, 'acknowledge', lambda *a, **k: controls['calls'].append(('health', k['complete'])))
     @contextlib.contextmanager
     def opener(chat):
-        yield controls['db'], chat
+        from tui_gateway.kanban_unloaded import SessionLookup
+        yield SessionLookup(controls['db'], chat, unavailable=controls.get('unavailable', True))
     controls['run'] = lambda: nf._remote_change_pass(opener)
     yield controls
     record_property('counter_snapshot', json.dumps(la.counters(), sort_keys=True))
@@ -100,24 +101,28 @@ def test_memo_hit_short_circuit(remote):
 
 
 @pytest.mark.parametrize(('kind', 'result'), [('ok', 'acked_refreshed'), ('skip', 'acked_intentionally_skipped'),
-                                          ('db', 'db_none'), ('refresh', 'refresh_failed'), ('error', 'exception')])
+                                          ('db', 'acked_intentionally_skipped'), ('unavailable', 'db_none'),
+                                          ('refresh', 'refresh_failed'), ('error', 'exception')])
 def test_chat_results(remote, monkeypatch, kind, result):
     remote['cards'] = [dict(board='board', id='card', key='owner/board/card', status='blocked', session='chat')]
     if kind == 'skip':
         remote['skipped'] = 'archived'
-    if kind == 'db':
+    if kind in ('db', 'unavailable'):
         remote['db'] = None
+        remote['unavailable'] = kind == 'unavailable'
     if kind == 'refresh':
         remote['refreshed'] = False
     if kind == 'error':
         def fail(*args):
             raise RuntimeError('chat failure')
         monkeypatch.setattr(nf, 'chat_skip_reason', fail)
-    remote['run']()
+    result_rows = remote['run']()
     assert runs('chat.trigger') == {'snapshot_diff': 1}
     assert runs('chat.result') == {result: 1}
     assert remote['calls'].count('refresh') == (1 if kind in ('ok', 'refresh') else 0)
-    assert runs('cert') == {('certified' if kind in ('ok', 'skip') else 'not_all_acked'): 1}
+    assert runs('cert') == {('certified' if kind in ('ok', 'skip', 'db') else 'not_all_acked'): 1}
+    if kind in ('db', 'unavailable'):
+        assert result_rows.incomplete is (kind == 'unavailable')
     conservation(chats=1)
 
 

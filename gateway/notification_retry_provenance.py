@@ -2,6 +2,7 @@
 SUBPASSES = ('card_change_pass', 'remote_card_change', 'remote_notices', 'notices', 'delegation',
              'killed_notices', 'guarantee_pass', 'unknown')
 REASONS = ('enumeration_failed', 'set_cursor_failed', 'top_gt_cursor', 'board_error', 'remote_error',
+           'inputs_error', 'initial_poll_failed', 'seed_failed', 'db_none', 'refresh_failed',
            'pending', 'exception', 'unknown')
 
 

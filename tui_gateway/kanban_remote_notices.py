@@ -1242,7 +1242,7 @@ def _stale_notice_id(row, task: dict) -> tuple[str, str]:
     return profile, key or f"remote:{row['ref']}:{row['state']}:{profile}:{sid}"
 
 
-def _settle_stale_claims(states: dict, path, ledger) -> int:
+def _settle_stale_claims(states: dict, path, ledger, *, now=None) -> int:
     """Settle in-flight claims nobody can finish: the holder is dead AND the card left the notice's state. [daveey]
 
     ``collect`` and the sweep only walk cards that are terminal NOW, so a claim whose holder died after the card
@@ -1255,7 +1255,9 @@ def _settle_stale_claims(states: dict, path, ledger) -> int:
     it) and a card missing from the replica (partial sync) are left alone. Never raises.
     """
     from tui_gateway.remote_sweep_projection import CompactTask
+    from tui_gateway.kanban_remote_expired_claims import settle_absent
 
+    now = time.time() if now is None else now
     try:
         conn = _ledger(ledger)
         try:
@@ -1265,7 +1267,10 @@ def _settle_stale_claims(states: dict, path, ledger) -> int:
             settled = 0
             for row in claims:
                 current = states.get(str(row["ref"]))
-                if current is None or current[0] == row["state"]:
+                if current is None:
+                    settled += settle_absent(conn, row, states, path, now)
+                    continue
+                if current[0] == row["state"]:
                     continue
                 if _holder_is_me(row["holder_pid"]) or _holder_alive(row["holder_pid"], row["holder_start"]):
                     continue
@@ -1676,7 +1681,7 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
         logger.debug("remote kanban observation failed; defer notices", exc_info=True)
         return []
     _load_swept(ledger)
-    _settle_stale_claims(states, path, ledger)
+    _settle_stale_claims(states, path, ledger, now=now)
     delivered: list[dict] = []
     swept: list = []
     counts: dict = {}

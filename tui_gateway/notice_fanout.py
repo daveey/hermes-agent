@@ -30,6 +30,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -48,6 +49,8 @@ STATUS_EVENT_KINDS = (
 )
 MAX_EVENTS_PER_PASS = 2000
 _not_hosted_logged: set[tuple[str, str]] = set()
+_remote_absent: dict[str, tuple[object, float]] = {}
+_remote_absent_warned: set[tuple[str, object]] = set()
 _BLOCKED_LINE = re.compile(r"Kanban (t_[0-9A-Za-z_]+) blocked")
 _TASK_ID = re.compile(r"Kanban (t_[0-9A-Za-z_]+)")
 
@@ -56,6 +59,8 @@ def _reset_for_tests() -> None:
     global _remote_memo
     _remote_memo = None
     _not_hosted_logged.clear()
+    _remote_absent.clear()
+    _remote_absent_warned.clear()
     from tui_gateway import notice_fanout_state
     notice_fanout_state.reset_for_tests()
 
@@ -410,17 +415,19 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli import fact_links_health
     from tui_gateway import notice_links_health
-    from tui_gateway.unloaded_diagnostics import Chat, emit
+    from tui_gateway.unloaded_diagnostics import Chat, emit, remote_retry
     origin = activity._origin_scope()
     health_generation = fact_links_health.pending(origin)
     out = FanoutResult(subpass='remote_card_change')
+    now = time.monotonic()
+    absent_due = {chat for chat, (_, checked) in _remote_absent.items() if now >= checked + 60.0}
     try:
         inputs = _remote_inputs_key()
         diagnostic.test('inputs_error', False)
     except Exception:  # health: allow BLE001 -- an unreadable input is unknown: run the pass
         diagnostic.test('inputs_error', True)
         logger.debug("remote card-change inputs unavailable", exc_info=True)
-        out.retry()
+        remote_retry(out, 'inputs_error')
         inputs = None
     polled = None
     if inputs is not None:
@@ -432,10 +439,10 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
             polled = None
         diagnostic.test('initial_poll_failed', polled is None)
         if polled is None:
-            out.retry()
+            remote_retry(out, 'initial_poll_failed')
             inputs = None
     memo = _remote_memo
-    if not diagnostic.test('health_pending', health_generation is not None) and inputs is not None \
+    if not diagnostic.test('health_pending', health_generation is not None) and not absent_due and inputs is not None \
             and not diagnostic.test('no_memo', memo is None) \
             and not diagnostic.test('inputs_changed', memo[0] != inputs[0]) \
             and not diagnostic.check('ledger_changed', lambda: memo[1] != _ledger_content_key(inputs[1])) \
@@ -444,7 +451,6 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
         diagnostic.call = 'memo_hit'
         return out
     _remote_memo = None
-    from hermes_state_outcome import refresh_outcomes_quietly
     from tui_gateway import notice_fanout_state as state
     from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
     current: dict[str, set[tuple[str, str]]] = {}
@@ -460,7 +466,7 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
     previous = state.load_remote(strict=True)
     if previous is None:
         if not state.seed_remote(snapshot):
-            out.retry()
+            remote_retry(out, 'seed_failed')
             diagnostic.call = 'seed_failed'
             return out
         if health_generation is None:
@@ -472,25 +478,14 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
         with Chat() as observed:
             if health_generation is not None:
                 emit('remote.chat.flag', 'health_pending')
-            if health_generation is None and previous.get(chat) == snapshot.get(chat):
+            if _remote_unchanged(chat, previous, snapshot, health_generation, absent_due):
                 observed.trigger = observed.result = 'unchanged_skip'
+                if health_generation is not None and chat in _remote_absent:
+                    acked[chat] = snapshot.get(chat)
                 continue
             observed.trigger = ('snapshot_diff' if previous.get(chat) != snapshot.get(chat) else 'health_forced')
-            try:
-                with session_db(chat) as (db, tip):
-                    if db is None:
-                        observed.result = 'db_none'
-                        out.retry()
-                        continue
-                    skipped = chat_skip_reason(db, chat)
-                    if skipped is None and not refresh_outcomes_quietly([tip], "card_change", db=db):
-                        observed.result = 'refresh_failed'
-                        out.retry()
-                        continue
-            except Exception:  # health: allow BLE001 -- retain failed chat invalidations and continue other chats
-                observed.result = 'exception'
-                out.retry()
-                logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
+            tip, skipped, observed.result = _refresh_remote_chat(chat, snapshot.get(chat), session_db, out, now)
+            if observed.result not in ('acked_refreshed', 'acked_intentionally_skipped'):
                 continue
             # Acknowledge only a successful refresh or an intentionally skipped chat.
             acked[chat] = snapshot.get(chat)
@@ -499,8 +494,9 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
             observed.result = 'acked_refreshed' if skipped is None else 'acked_intentionally_skipped'
     diagnostic.cert_active = True
     committed = state.ack_remote(acked)
+    _prune_remote_absent(snapshot, committed)
     if not committed:
-        out.retry()
+        remote_retry(out, 'refresh_failed')
     recovered_all = notice_links_health.recover_into(out, origin, health_generation, set(previous.keys() | snapshot.keys()), origin_db)
     diagnostic.cert = ('ack_failed' if not committed else 'inputs_unavailable' if inputs is None else 'not_all_acked')
     if committed and inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
@@ -512,6 +508,48 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
     diagnostic.health = 'no_generation' if health_generation is None else ('complete_true' if complete else 'complete_false')
     diagnostic.call = 'refreshed'
     return out
+
+
+def _prune_remote_absent(snapshot, committed):
+    if committed:
+        for chat in _remote_absent.keys() - snapshot.keys():
+            del _remote_absent[chat]
+
+
+def _remote_unchanged(chat, previous, snapshot, health_generation, absent_due):
+    return (previous.get(chat) == snapshot.get(chat) and chat not in absent_due
+            and (health_generation is None or chat in _remote_absent))
+
+
+def _refresh_remote_chat(chat, entry, session_db, out, now):
+    """Return an ACK outcome only after a refresh or a proven intentional skip."""
+    from hermes_state_outcome import refresh_outcomes_quietly
+    from tui_gateway.unloaded_diagnostics import remote_retry
+
+    try:
+        with session_db(chat) as lookup:
+            db, tip = lookup
+            if db is None:
+                if getattr(lookup, 'unavailable', True):
+                    remote_retry(out, 'db_none')
+                    return None, None, 'db_none'
+                skipped = 'no_local_session'
+                _remote_absent[chat] = (entry, now)
+                warning_key = (chat, entry)
+                if warning_key not in _remote_absent_warned:
+                    logger.warning("remote card-change: no_local_session for chat %s", chat)
+                    _remote_absent_warned.add(warning_key)
+            else:
+                _remote_absent.pop(chat, None)
+                skipped = chat_skip_reason(db, chat)
+            if db is not None and skipped is None and not refresh_outcomes_quietly([tip], "card_change", db=db):
+                remote_retry(out, 'refresh_failed')
+                return None, None, 'refresh_failed'
+    except Exception:  # health: allow BLE001 -- retain the invalidation and continue other chats
+        remote_retry(out, 'exception')
+        logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
+        return None, None, 'exception'
+    return tip, skipped, 'acked_refreshed' if skipped is None else 'acked_intentionally_skipped'
 
 
 def _certify_remote(inputs, polled, known, diagnostic):

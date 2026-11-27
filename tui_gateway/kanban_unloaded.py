@@ -213,6 +213,20 @@ def chat_hosted_here(chat_id: str) -> Optional[bool]:
     return None if unavailable else False
 
 
+class SessionLookup(tuple):
+    """Backward-compatible (db, tip) pair with explicit absence evidence.
+
+    A missing store or failed read leaves absence unknown; finding a session in
+    another store still supplies a usable destination.
+    """
+    unavailable: bool
+
+    def __new__(cls, db=None, tip=None, *, unavailable=False):
+        result = super().__new__(cls, (db, tip))
+        result.unavailable = unavailable
+        return result
+
+
 @contextlib.contextmanager
 def find_session_db(chat_id: str) -> Iterator[tuple[Any, Optional[str]]]:
     """Yield ``(writable SessionDB, lineage tip id)`` for the store holding ``chat_id``, or ``(None, None)``.
@@ -222,19 +236,23 @@ def find_session_db(chat_id: str) -> Iterator[tuple[Any, Optional[str]]]:
     from tui_gateway import server
     with contextlib.ExitStack() as stack:
         found: tuple[Any, Optional[str]] = (None, None)
+        unavailable = False
         for profile in server._readopt_wake_profiles():
             scope = contextlib.ExitStack()
             try:
                 db = scope.enter_context(server._profile_db({"profile": profile} if profile else None, writer=True))
-                if db is not None and db.get_session(chat_id) is not None:
+                if db is None:
+                    unavailable = True
+                elif db.get_session(chat_id) is not None:
                     found = (db, db.get_compression_tip(chat_id) or chat_id)
                     stack.push(scope.pop_all())  # held open until the caller's block ends
                     break
             except Exception:
+                unavailable = True
                 logger.debug("kanban unloaded sweep: profile %s store unavailable", profile, exc_info=True)
             with contextlib.suppress(Exception):
                 scope.close()
-        yield found
+        yield SessionLookup(*found, unavailable=unavailable and found[0] is None)
 
 
 def wake_turn(session_id: str, text: str, metadata: dict) -> str:
