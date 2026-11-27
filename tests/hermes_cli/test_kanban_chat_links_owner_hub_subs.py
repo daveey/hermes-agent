@@ -46,6 +46,7 @@ class Gateways:
         # The chat gateway's origin ledger (``_remote_links``): what its placement recorded for its chats. The
         # owner's ledger has no rows for macbook chats (``_ledger_links`` keeps only its own origin's rows).
         monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: list(self.ledger))
+        monkeypatch.setattr(ksa, "remote_links_and_origin_rows", lambda stale_ok=False: (list(self.ledger), []))
         self.conns: dict[str, sqlite3.Connection] = {}
         for name, home in self.homes.items():
             home.mkdir(parents=True)
