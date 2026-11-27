@@ -15,6 +15,7 @@ def test_recovery_rebuilds_missing_ref_before_last_owner_gc(tmp_path):
         def write(conn):
             store_receipt(conn, 'one', receipt, intern=True)
             store_receipt(conn, 'two', receipt, intern=True)
+            store_receipt(conn, 'legacy', receipt)
             conn.execute('DELETE FROM state_meta WHERE key GLOB ?', (REF_PREFIX + '*:two',))
         db._execute_write(write)
     report = recover_session_database(source, output, allow_partial=True)

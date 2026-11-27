@@ -275,3 +275,15 @@ def test_config_payload_must_be_exact_string(conn, text):
     with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
         store_receipt(conn, 'one', malformed, intern=True)
     assert conn.execute('SELECT * FROM state_meta').fetchall() == []
+
+
+def test_conflicting_inline_and_reference_custody_cannot_be_retired(conn):
+    store_receipt(conn, 'one', receipt(), intern=True)
+    key = 'gateway.local_policy.v1:one'
+    raw = json.loads(conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()[0])
+    raw['policy']['config_json'] = '{}'
+    conn.execute('UPDATE state_meta SET value=? WHERE key=?', (json.dumps(raw), key))
+    before = conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall()
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        delete_receipt(conn, 'one')
+    assert conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall() == before
