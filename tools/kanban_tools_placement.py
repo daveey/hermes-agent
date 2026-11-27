@@ -97,11 +97,13 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
         self_gw = reg.self_gateway()
         has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
         owners = resolve_chats(conn, creator_task_id) if has_links else []
-        if not owners:
-            # Pickup carries the task, not foreign chat links. Discover its existing
-            # owner in the board shadow, just as creator inheritance does. This is
-            # only a route: the origin gateway still authenticates creator/run custody.
-            owners = _replica_chats(conn, creator_task_id)
+        from hermes_cli.kanban_owner_chat import PREFIX
+        if all(o["chat_session"].startswith(PREFIX) for o in owners):
+            # Match inherit_chats: a picked-up standing fallback must not hide
+            # the real owner on the shadow. Neither lookup supplies authority.
+            replica = _replica_chats(conn, creator_task_id)
+            if not owners or not all(o["chat_session"].startswith(PREFIX) for o in replica):
+                owners = replica
         foreign = None
         for owner in owners:
             gateway, session = owner["chat_gateway"], owner["chat_session"]

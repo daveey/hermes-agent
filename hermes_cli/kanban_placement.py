@@ -1310,6 +1310,16 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     prior = remote_state(rid)
     if foreign_origin and prior == "rejected" and _forward_binding_retry(rid, options, origin_gateway, origin_profile, origin_session,
                                                 creator, run_uid):
+        from hermes_cli.kanban_owner_chat import PREFIX
+        if str(origin_session).startswith(PREFIX):
+            # A new executor run is not evidence that this historical producer
+            # acquired forwarding custody. Keep its exact definitive refusal,
+            # not an endless series of newly salted unsupported requests.
+            return {"ok": False, "request_id": rid, "fatal": True,
+                    "code": "origin_forward_binding_missing",
+                    "error": "origin_forward_binding_missing: standing owner lacks authenticated custody; "
+                             "repair custody on the origin gateway and explicitly replan the create; "
+                             "the original request remains rejected and unchanged"}
         # Only a definitive pre-create binding refusal permits a later authenticated run's new envelope.
         # Keep the product key on the wire; receiver creation idempotency still arbitrates duplicate deliveries.
         rid = request_id(self_gw, {**transport_args, "idempotency_key": f"{transport_args.get('idempotency_key') or rid}:run:{run_uid}"},

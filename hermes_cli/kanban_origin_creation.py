@@ -13,6 +13,10 @@ import secrets
 from hermes_cli.kanban_origin import OriginError
 
 
+class OriginCreateRefused(OriginError):
+    """A deterministic refusal proven before this origin request can insert a task."""
+
+
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -201,6 +205,14 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
             if (creator != expected_creator or _primary_scope(conn) != primary or binding is None
                     or binding["owner"] != creator or binding["origin"] != intent["origin"]):
                 raise OriginError("origin_creator_unproven", "creator lacks an owner-local native attestation")
+        # Exact historical replay above wins even if a parent has since vanished.
+        # Validate under the same write lock, before calling code that can insert
+        # a task. Generic exceptions (including postcommit ValueError) prove no
+        # such absence and must retain the owner's pending semantics.
+        missing = kb._missing_task_ids(conn, options["parents"])
+        if missing:
+            from hermes_cli.kanban_dependency_validation import missing_dependency_error
+            raise OriginCreateRefused("origin_parent_unknown", str(missing_dependency_error(missing)))
         task_id = kb.create_task(conn, **options, placement_checked=True,  # courier retains owner placement
                                  settle_owner_chat=False)  # its origin chat is linked below, then required
         marker = {"binding_id": "binding-" + secrets.token_hex(16), "version": 1,

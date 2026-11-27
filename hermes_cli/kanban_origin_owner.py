@@ -122,7 +122,10 @@ def origin_refusal(exc, *, origin: bool = True):
     from hermes_cli.kanban_create_authority import CreateAuthorityRefused
     from hermes_cli.kanban_origin import OriginError
     from hermes_cli.kanban_runs_on_capabilities import PlacementCapabilityMismatch
+    from hermes_cli.kanban_origin_creation import OriginCreateRefused
     from tools.registry import tool_error
+    if isinstance(exc, OriginCreateRefused):
+        return tool_error(str(exc), code=exc.code, created=False, handoff_complete=False)
     if isinstance(exc, OriginError):
         return tool_error(str(exc), code=exc.code, handoff_complete=False)
     if isinstance(exc, PlacementCapabilityMismatch):
