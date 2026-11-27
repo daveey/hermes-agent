@@ -57,8 +57,7 @@ from hermes_cli.kanban_sync_connections import connection, connection_scope, inv
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
 from hermes_cli.kanban_replay_sender import PushResult, ReplayFault, push
 from hermes_cli.kanban_sync_compat import REASSESSMENT_REFUSALS, TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
-from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed, decode_json
-from hermes_cli.kanban_sync_hub_transport import BoundedRedirects, BoundedResponseError, read_response
+from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed, decode_json, BoundedRedirects, BoundedResponseError, read_response
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
 from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-window state, re-exported
