@@ -83,6 +83,57 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         state.close()
 
 
+def _creator_owners(conn, creator_task_id: str) -> list:
+    """The creator's owner chats exactly as origin discovery reads them (links, then the replica fallback). [daveey]
+
+    Match inherit_chats: a picked-up standing fallback must not hide the real owner on the shadow.
+    Neither lookup supplies authority."""
+    from hermes_cli.kanban_creator_chats import _replica_chats, resolve_chats
+    has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
+    owners = resolve_chats(conn, creator_task_id) if has_links else []
+    from hermes_cli.kanban_owner_chat import PREFIX
+    if all(o["chat_session"].startswith(PREFIX) for o in owners):
+        replica = _replica_chats(conn, creator_task_id)
+        if not owners or not all(o["chat_session"].startswith(PREFIX) for o in replica):
+            owners = replica
+    return owners
+
+
+def _standing_owner_here(conn, creator_task_id: Optional[str], self_gw) -> Optional[str]:
+    """The creator's standing-owner chat that lives on this very gateway, or None. Read-only. [daveey]
+
+    Used only to explain a canonical-home create that has no origin to send. Origin discovery skips this link
+    (a standing owner is a producer fallback, not a conversation, and under another profile it is not in this
+    state.db), so the hub would refuse the empty origin as ``canonical_home_origin_required``. Never an origin source."""
+    if not creator_task_id or not self_gw:
+        return None
+    from hermes_cli.kanban_owner_chat import PREFIX
+    for owner in _creator_owners(conn, creator_task_id):
+        if owner["chat_gateway"] == self_gw and owner["chat_session"].startswith(PREFIX):
+            return owner["chat_session"]
+    return None
+
+
+def _standing_owner_refusal(conn, creator_task_id: Optional[str], self_gw, *, home, session_id, origin_gateway) -> Optional[str]:
+    """The refusal for a canonical-home create that has no origin because its only owner is this gateway's standing
+    owner, else None (every other no-origin shape keeps its existing route). Say what to do before any courier
+    request exists: the hub's refusal names neither cause nor remedy. [daveey]"""
+    if home is None or session_id or origin_gateway:
+        return None
+    session = _standing_owner_here(conn, creator_task_id, self_gw)
+    if not session:
+        return None
+    return tool_error(
+        f"origin_same_gateway_standing_owner: no card was created and no request was sent. A canonical-home child "
+        f"needs a tracked origin chat, and this card's only owner chat is the standing owner {session!r} on this "
+        f"gateway ({self_gw}): a producer fallback, not a conversation this run can attest, so it is never sent as "
+        f"the origin (retrying here, with any placement or runs_on, hits the same refusal). Move this card to a "
+        f"worker on a different gateway than {self_gw} (kanban_move, or `hermes kanban move <id> --pool`), where the "
+        f"same link is foreign and forwards with this creator's run authority, then repeat the identical "
+        f"kanban_create (same idempotency_key); or have the owning chat file the card.",
+        code="origin_same_gateway_standing_owner", created=False, standing_owner=session, gateway=self_gw)
+
+
 def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional[str]) -> dict:
     """Prefer a verified local chat owner; otherwise preserve the first foreign owner.
 
@@ -93,17 +144,8 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
     from hermes_cli.kanban_db_notify import is_headless_session
     if creator_task_id:
         from hermes_cli import kanban_capability_registry as reg
-        from hermes_cli.kanban_creator_chats import _replica_chats, resolve_chats
         self_gw = reg.self_gateway()
-        has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
-        owners = resolve_chats(conn, creator_task_id) if has_links else []
-        from hermes_cli.kanban_owner_chat import PREFIX
-        if all(o["chat_session"].startswith(PREFIX) for o in owners):
-            # Match inherit_chats: a picked-up standing fallback must not hide
-            # the real owner on the shadow. Neither lookup supplies authority.
-            replica = _replica_chats(conn, creator_task_id)
-            if not owners or not all(o["chat_session"].startswith(PREFIX) for o in replica):
-                owners = replica
+        owners = _creator_owners(conn, creator_task_id)
         foreign = None
         for owner in owners:
             gateway, session = owner["chat_gateway"], owner["chat_session"]

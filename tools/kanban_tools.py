@@ -29,7 +29,7 @@ from tools.kanban_tools_placement import (_local_placement, _machine_placement, 
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
                                           _effective_board_args, _origin_enrollment, _landing_placement, _pinned_note,
                                           _admission_refused, _effective_requires, _with_admission, _forwarding_fields,
-                                          _placed_rejection)
+                                          _placed_rejection, _standing_owner_refusal)
 # SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
 from tools.kanban_tools_attach_url import _download_url_with_cap, _store_attachment
 from tools.kanban_tools_db_hint import generic_tool_error
@@ -1474,6 +1474,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin, origin_gateway=origin_gateway)
             stranded = _runstate.stranded_create((local or {}).get("runs_on"))
             return (tool_error(stranded, rejection="sync_not_running"), None) if stranded else (None, local)
+        if declined := _standing_owner_refusal(conn, creator_task_id, self_gw, home=home, session_id=session_id, origin_gateway=origin_gateway):
+            return declined, None  # the hub would refuse this empty origin opaquely; name the cause and remedy
         forwarding = _forwarding_fields(conn, origin_gateway, creator_task_id, self_gw, _worker_run_id)
         placed = kp.create_remote(view, target=target, origin_session=session_id,
                                   origin_profile=origin_profile or current_profile_name("default") or "default",
@@ -1618,10 +1620,8 @@ def _handle_create(args: dict, **kw) -> str:
                 pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local", "runs_on": runs_on}
         # [daveey] Refuse a second owner: open cards on every board/gateway, not this chat's links.
-        refused, after_create = kanban_overlap.check(conn, {**args, "assignee": str(assignee)},
-                                                     courier=courier_intent is not None,
-                                                     title=str(title).strip(), session_id=session_id,
-                                                     self_tid=self_tid, parents=parents)
+        refused, after_create = kanban_overlap.check(conn, {**args, "assignee": str(assignee)}, courier=courier_intent is not None,
+                                                     title=str(title).strip(), session_id=session_id, self_tid=self_tid, parents=parents)
         if refused:
             return refused
         if courier_intent is None and origin is None:
