@@ -77,7 +77,8 @@ def commit_local_session(db, *, epoch, receipt):
              _json({'_agent_cli': True}) if creation.get('agent_cli') is True else None))
         conn.execute("INSERT INTO gateway_routing(scope,session_key,entry_json,updated_at) VALUES('',?,?,?)",
                      (route, _json(entry), started))
-        conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (key, encoded))
+        from hermes_state_policy_config import store_new_receipt
+        store_new_receipt(conn, sid, receipt)
         if on_create is not None:
             on_create.publish()  # before the row is visible, so no reader lazy-loads around it
         return receipt

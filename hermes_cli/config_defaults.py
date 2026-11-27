@@ -2325,8 +2325,7 @@ DEFAULT_CONFIG = {
         # edit is sent as a fresh message so the timestamp reflects completion.
         "fresh_final_after_seconds": 0.0,
     },
-    # Automatic cleanup of ~/.hermes/state.db, which otherwise grows without bound and slows FTS5
-    # inserts, /resume listing, and insights queries.
+    # Automatic state.db cleanup bounds history and keeps FTS5, /resume and insights fast.
     "sessions": {
         # Prune ENDED sessions inactive for retention_days (activity = freshest of live activity /
         # latest message / creation) about once per min_interval_hours at CLI/gateway/cron startup.
@@ -2339,8 +2338,8 @@ DEFAULT_CONFIG = {
         "retention_days": 90,  # inactive days of ended-session history to keep (= `hermes sessions prune`)
         # {source: days} for automation sources only, applied even with auto_prune off (docs: sessions.md)
         "source_retention_days": {},
-        # Auto-archive (soft-hide, never delete) sessions with no activity for auto_archive_days,
-        # once per min_interval_hours. Pinned sessions are exempt.
+        "intern_policy_configs": False,  # Verify ALL readers before enabling; hydrate before downgrade (policy-config-storage.md).
+        # Soft-hide idle sessions once per min_interval_hours; never delete. Pinned sessions are exempt.
         "auto_archive": False,
         "auto_archive_days": 3,  # idle days before auto-archive hides a session (only when auto_archive is true)
         # List delegate_task subagent runs in session lists (desktop sidebar, dashboard, session.list),

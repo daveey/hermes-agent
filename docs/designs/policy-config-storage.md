@@ -1,8 +1,10 @@
 # Frozen local-policy configuration storage: reader-compatible stage
 
-This change is **not enabled in production**. New receipts stay inline. It does not
-resolve the historical Kanban WAL pin or attribute a read-pool denial. It is a
-readers-first schema foundation for eliminating measured exact-byte duplication.
+This change is **not enabled in production**. New receipts stay inline unless
+`sessions.intern_policy_configs` is exactly boolean `true` in the creator's trusted
+frozen configuration. It does not resolve the historical Kanban WAL pin or attribute
+a read-pool denial. The disabled writer switch and finite conversion tool implement
+the next storage stage; deployment alone is not rollout authorization.
 
 ## Evidence and causal boundary
 
@@ -40,7 +42,7 @@ validated receipts before returning a verified output. Missing/corrupt blobs
 fail recovery closed, retaining the separate output for inspection. This is not
 live-store repair and never substitutes config defaults for lost frozen bytes.
 
-## Rollout gates (not implemented activation)
+## Rollout gates (production activation remains external)
 
 1. Land reader, consumer, retirement and recovery support through independent
    exact-head review, required CI and canonical ship. Leave writes inline.
@@ -48,20 +50,53 @@ live-store repair and never substitutes config defaults for lost frozen bytes.
    local policies. Old in-memory readers cannot decode this format. Deployment
    of files alone is insufficient. Do not force a restart under another
    experiment's custody; obtain the existing owner's ordinary custody return.
-3. A later activation change must supply an explicit disabled-by-default switch
-   at the creation writer and a bounded, resumable conversion through the
-   existing owner transaction. No schema-init migration or periodic sweeper.
-   Preserve unknown/live admissions, logical/physical targets, exact retries,
-   quarantine and malformed-receipt refusal semantics.
-4. Before rollback to an old reader, drain incompatible readers/writers and
-   hydrate all ref receipts through the new owner, storing them inline. Verify
-   zero ref-only receipts before allowing old code. Do not simply flip binaries.
+3. Only after that custody check, enable the disabled creator switch through
+   `hermes config set sessions.intern_policy_configs true` for the intended home.
+   This is not enabled by installing the feature. Existing receipts keep their
+   format; branches inherit their parent's format. The finite conversion tool
+   below changes old receipts only through the existing transaction owner.
+4. Before rollback to an old reader, disable the creator switch, stop new ref-only
+   producers through the existing rollout owner, and hydrate all ref receipts
+   through the new owner. Revisit busy/oversize owners. Independently verify zero
+   ref-only receipts before allowing old code. Do not simply flip binaries.
 5. Measure production table/index dbstat before/after and the original WAL/pool
    acceptance window only after authorized activation. VACUUM is not required
    by this representation and must not stall a live backend.
 
-Open gates: mutation/clause proof and complete consumer coverage, activation
-switch, bounded conversion/rollback tooling, process compatibility evidence,
-production measurements, and the independently unresolved WAL/pool incident.
-Do not present a passing disposable-fixture dbstat comparison as production
-reclaim or this compatibility stage as a shipped producer remediation.
+## One finite conversion batch
+
+After compatible code is installed, inspect without opening a writer:
+
+```sh
+hermes-core-python -m hermes_state_policy_rollout --db "$HERMES_HOME/state.db" --direction intern
+```
+
+After the reader/process custody check, explicitly apply one batch:
+
+```sh
+hermes-core-python -m hermes_state_policy_rollout --db "$HERMES_HOME/state.db" --direction intern --apply --readers-compatible
+```
+
+`--readers-compatible` records the caller's operational acknowledgement; it is
+**not** automatic compatibility discovery or authority to override another owner.
+Use the JSON `after` as `--after <value>` to resume, or start again to revisit skipped
+owners. Defaults: eight keys, 1 MiB payload budget; hard ceilings: 32 keys and 4 MiB.
+The budget charges inspected receipt bytes and conservatively estimates hydrated
+JSON escaping before fetching a shared blob. It does not bound SQLite page/index
+I/O, lock wait time, or SessionDB initialization. Dry-run is metadata-only: it does
+not validate payloads or predict hydrated rollback size. Output contains identifiers
+and counts only, never frozen configuration or request contents.
+
+Rollback batches use `--direction inline --apply` after disabling/quiescing new
+interned writes. Queued/started/unknown admissions, workers, leases and compression
+locks are skipped. Malformed custody aborts and rolls back the entire batch. No
+session revision, route, policy value or admission is changed. There is no scheduler,
+schema-init conversion, manual checkpoint, TRUNCATE or VACUUM in the tool; ordinary
+SessionDB transaction and close-time maintenance remain unchanged.
+
+`more=false` and `converted=0` are **not downgrade readiness**: skipped owners,
+concurrent creations, and earlier keys can still hold refs. No auto-activation or
+old-reader downgrade is performed. Open gates remain process compatibility,
+production activation/conversion, physical before/after measurements and the
+independently unresolved WAL/pool incident. Disposable tests are not production
+reclaim evidence.

@@ -179,6 +179,22 @@ def reconcile_recovered_references(conn):
     return len(refs)
 
 
+def store_new_receipt(conn, session_id, receipt):
+    """Creation opt-in from the trusted frozen config; never reload config under the write lock.
+
+    Enabling requires an operator to verify every policy reader's compatibility.
+    Absence, malformed sections and non-boolean values preserve legacy inline writes.
+    Existing owners keep their representation through replace_receipt, not this helper.
+    """
+    try:
+        config = json.loads(receipt['policy']['config_json'])
+        sessions = config.get('sessions') if isinstance(config, dict) else None
+        intern = isinstance(sessions, dict) and sessions.get('intern_policy_configs') is True
+    except (KeyError, TypeError, ValueError, RecursionError):
+        intern = False
+    store_receipt(conn, session_id, receipt, intern=intern)
+
+
 def replace_receipt(conn, session_id, receipt):
     """Replace hydrated values while retaining this owner's storage format."""
     store_receipt(conn, session_id, receipt, intern=_stored_reference(conn, session_id) is not None)
