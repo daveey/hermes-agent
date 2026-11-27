@@ -89,20 +89,27 @@ def prepare(conn, parent_id, metadata, expected_run_id, *, force=False):
     _, original = _created(conn, parent_id)
     if original.get("source_body_sha256") != _body(parent):
         raise ValueError("acceptance_continuations: unchanged original creation scope required")
+    from hermes_cli import kanban_foreign_card as foreign
     items, seen = [], set()
-    for item in raw["items"]:
-        if (not isinstance(item, dict) or set(item) != {"card", "criterion"}
-                or not isinstance(item["card"], str) or item["card"] in seen
-                or not isinstance(item["criterion"], str) or not 16 <= len(item["criterion"].strip()) <= 2000
-                or item["criterion"] not in (parent["body"] or "")):
-            raise ValueError("acceptance_continuations: unique child and literal source criterion required")
-        child = conn.execute("SELECT * FROM tasks WHERE id=?", (item["card"],)).fetchone()
-        uid = _lineage(conn, parent_id, item["card"])
-        if (child is None or not uid
-                or child["status"] in ("done", "archived") or _hold(conn, child)):
-            raise ValueError("acceptance_continuations: open unprotected created dependency required")
-        seen.add(item["card"])
-        items.append({**item, "created_uid": uid, "scope_sha256": _scope(child)})
+    # A Board-synced live file is partial: a pool worker's live file holds its claimed parent, but children it
+    # created are origin-forwarded and live only in this same board's read-only replica (as _verify_created_cards).
+    with foreign.open_replica(foreign._live_db_file(conn)) as replica:
+        for item in raw["items"]:
+            if (not isinstance(item, dict) or set(item) != {"card", "criterion"}
+                    or not isinstance(item["card"], str) or item["card"] in seen
+                    or not isinstance(item["criterion"], str) or not 16 <= len(item["criterion"].strip()) <= 2000
+                    or item["criterion"] not in (parent["body"] or "")):
+                raise ValueError("acceptance_continuations: unique child and literal source criterion required")
+            src = conn
+            child = conn.execute("SELECT * FROM tasks WHERE id=?", (item["card"],)).fetchone()
+            if child is None and replica is not None:
+                src, child = replica, replica.execute("SELECT * FROM tasks WHERE id=?", (item["card"],)).fetchone()
+            uid = _lineage(src, parent_id, item["card"])
+            if (child is None or not uid
+                    or child["status"] in ("done", "archived") or _hold(src, child)):
+                raise ValueError("acceptance_continuations: open unprotected created dependency required")
+            seen.add(item["card"])
+            items.append({**item, "created_uid": uid, "scope_sha256": _scope(child)})
     return {"version": 1, "source_body_sha256": _body(parent), "run_uid": run["uid"], "items": items}
 
 

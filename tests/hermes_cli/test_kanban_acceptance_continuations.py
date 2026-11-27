@@ -288,3 +288,59 @@ def test_malformed_creator_reference_defers_only_that_card(conn, configured):
     conn.commit()
     result = next(c for c in candidates(conn) if c["card"] == child)
     assert not result["eligible"] and "creator dependency missing" in result["reason"]
+
+
+def _partial_live_file(conn, tmp_path, monkeypatch, *, link=True):
+    """A Board-synced pool worker: its live file holds the claimed parent, while the child its run created was
+    origin-forwarded and exists only in this board's replica (live fixture t_01a21ef5117a1f80 shape)."""
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_foreign_card as foreign
+    parent = kb.create_task(conn, title="Preserve chat ownership", body=f"Acceptance:\n- {CRITERION}.",
+                            assignee="default", created_by="user")
+    assert kb.claim_task(conn, parent, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
+    run = kb.get_task(conn, parent).current_run_id
+    bootstrap(conn)
+    path = tmp_path / "sync-shadow" / "default.db"
+    path.parent.mkdir()
+    replica = kbc.connect(db_path=path)
+    conn.commit()
+    conn.backup(replica)
+    child = kb.create_task(replica, title="Verify painted Desktop sidebar grouping (read-only)",
+                           body=f"Read-only acceptance verification: {CRITERION}.", assignee="default",
+                           created_by="default", creator_task_id=parent, parents=[parent] if link else ())
+    bootstrap(replica)
+    replica.commit()
+    replica.close()
+    live = foreign._live_db_file(conn)
+    monkeypatch.setattr(foreign, "replica_path", lambda db_path: path if db_path == live else None)
+    assert kb.get_task(conn, child) is None  # the live file lacks it: only the replica has the child
+    declaration = {"version": 1, "source_body_sha256": hashlib.sha256(kb.get_task(conn, parent).body.encode()).hexdigest(),
+                   "items": [{"card": child, "criterion": CRITERION}]}
+    return parent, child, run, {"acceptance_continuations": declaration}, path
+
+
+def test_pool_worker_attests_replica_only_child(conn, configured, tmp_path, monkeypatch):
+    from hermes_cli.kanban_acceptance_continuations import _created
+    parent, child, run, metadata, path = _partial_live_file(conn, tmp_path, monkeypatch)
+    assert kb.complete_task(conn, parent, summary="Backend delivered; renderer remains.", metadata=metadata,
+                            expected_run_id=run)
+    proof = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='completed'",
+                                    (parent,)).fetchone()[0])["acceptance_continuations"]
+    from hermes_cli import kanban_db_connect as kbc
+    replica = kbc.connect(db_path=path)
+    try:
+        assert proof["items"][0]["card"] == child
+        assert proof["items"][0]["created_uid"] == _created(replica, child)[0]
+    finally:
+        replica.close()
+
+
+@pytest.mark.parametrize("case", ["unlinked", "no_replica"])
+def test_replica_lookup_keeps_lineage_and_fails_closed(conn, configured, tmp_path, monkeypatch, case):
+    from hermes_cli import kanban_foreign_card as foreign
+    parent, _child, run, metadata, _ = _partial_live_file(conn, tmp_path, monkeypatch, link=case != "unlinked")
+    if case == "no_replica":
+        monkeypatch.setattr(foreign, "replica_path", lambda db_path: None)
+    with pytest.raises(ValueError, match="created dependency"):
+        kb.complete_task(conn, parent, summary="done", metadata=metadata, expected_run_id=run)
+    assert kb.get_task(conn, parent).status == "running"
