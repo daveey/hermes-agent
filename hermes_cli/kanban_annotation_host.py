@@ -625,11 +625,16 @@ def note_deadline(due: float | None) -> None:
 
 def replace_deadlines(owner: tuple, values) -> None:
     """Stage a successful source's complete current clocks; never replace a peer's."""
+    from hermes_cli import kanban_session_activity as _ksa
     from hermes_cli.kanban_annotation_deadlines import Plan
 
     pending = getattr(_holder_ctx, 'deadlines', None)
     if isinstance(pending, Plan):
-        pending.replace(owner, values, time.time())
+        # Complete input probes may project rows while planning, without
+        # publishing any output. Only the subsequent real projection owns
+        # replacement; a probe must not borrow a newer clock for old output.
+        if getattr(_ksa._revalidate.force_read, 'scope', None) == _ksa._origin_scope():
+            pending.replace(owner, values, time.time())
     elif pending is not None:  # legacy holder: retain conservative unowned clocks
         for due in values:
             note_deadline(due)

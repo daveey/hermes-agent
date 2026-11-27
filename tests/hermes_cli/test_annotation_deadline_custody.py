@@ -117,6 +117,22 @@ def test_unread_replica_keeps_clock_while_other_source_changes(replica_holder, m
     assert host._clock_deadlines[h.scope] == old
 
 
+def test_key_probe_without_output_publication_cannot_replace_clock(replica_holder, monkeypatch):
+    h = replica_holder
+    host._event_refresh(h.events)
+    old = list(host._clock_deadlines[h.scope])
+    h.now[0] = 120.0
+    with sqlite3.connect(h.path) as conn:
+        conn.execute("UPDATE meta SET v='120' WHERE k='last_ok'")
+    def probe(scope):
+        assert ksa._read_remote_links(h.path) == []
+        return {name: 0 for name in parts.ALL}  # unchanged semantic keys; no projection
+    monkeypatch.setattr(parts, 'keys', probe)
+    host._event_refresh(h.events)  # filesystem wake actually probes, unlike a skipped control-only tick
+    assert h.calls == [100.0]
+    assert host._clock_deadlines[h.scope] == old, 'input probe borrowed a newer output clock'
+
+
 def test_deadline_owners_legacy_clocks_and_confirmations_do_not_alias():
     from hermes_cli.kanban_annotation_deadlines import Plan
     plan = Plan([], (), 100.0)
