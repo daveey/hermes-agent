@@ -9,6 +9,7 @@ travel as argv (``shlex.join`` for ssh), so SQL/quoting never gets re-split by a
 
     hermes kanban wait-check task t_x [--gateway hub] [--board SLUG] [--until done,review,blocked,triage,scheduled,archived]
                                      [--from running]
+    hermes kanban wait-check key PRODUCT_KEY [--gateway hub] [--board SLUG] [--until done] [--from review]
     hermes kanban wait-check board-empty SLUG [--gateway hub]
 """
 from __future__ import annotations
@@ -89,6 +90,13 @@ def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DE
             if not rows:
                 return 2, f"error: {target} not found"
             return _verdict(board, target, rows[0][0], source=source, until=until, since=since)
+        if kind == "key":
+            from hermes_cli.kanban_wait_key import source_for_key
+            source, rows = source_for_key(board, target)
+            if not rows:
+                return 1, "queued card not found yet"
+            target, status = rows[0][:2]
+            return _verdict(board, target, status, source=source, until=until, since=since)
         if kind == "board-empty":
             n = _query(_db(target), "select count(*) from tasks where status not in ('done','archived')")[0][0]
             return (0 if n == 0 else 1), f"{target} open={n}"
@@ -206,8 +214,11 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     try:
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT}", host, remote],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=15 if kind == "task" else SSH_TIMEOUT + 15, check=False)
+                           timeout=15 if kind in ("task", "key") else SSH_TIMEOUT + 15, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
+        if kind == "key":
+            from hermes_cli.kanban_wait_key import unreachable
+            return unreachable(gateway, target, board=board, until=until, since=since)
         if kind == "task":
             return _unreachable_task(gateway, target, board=board, until=until, since=since,
                                      live_timeout=25 - (time.monotonic() - started))
@@ -218,13 +229,16 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     # identity, freshness (rc3), missing/error (rc2), and orphan evidence; it
     # never upgrades a cached observation to a live authoritative read.
     restricted = p.returncode == 2 and p.stderr.strip().startswith("hub-read: refused:")
+    if (p.returncode == 255 or restricted) and kind == "key":
+        from hermes_cli.kanban_wait_key import unreachable
+        return unreachable(gateway, target, board=board, until=until, since=since)
     if (p.returncode == 255 or restricted) and kind == "task":
         return _unreachable_task(gateway, target, board=board, until=until, since=since,
                                  live_timeout=25 - (time.monotonic() - started))
     out = (p.stdout + p.stderr).strip()
-    if p.returncode == 0 and since and kind == "task":
+    if p.returncode == 0 and since and kind in ("task", "key"):
         words = (p.stdout or "").split()
-        if len(words) >= 2 and words[0] == target and words[1] in set(since):
+        if len(words) >= 2 and (kind == "key" or words[0] == target) and words[1] in set(since):
             return 1, f"{out} (unchanged since park)"
     if p.returncode in (0, 1, 3):  # 3: the remote read a stale replica of a third gateway
         return p.returncode, out

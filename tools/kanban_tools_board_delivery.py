@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 # The owner's answer is defined once, where the owner writes it (PR #2157 review). [daveey]
 from hermes_cli.kanban_origin_creation import OWNER_WRITTEN
+from hermes_cli.kanban_creation_wait import queued_wait as queued_wait  # noqa: PLC0414 -- public result helper reexport
 
 logger = logging.getLogger(__name__)
 

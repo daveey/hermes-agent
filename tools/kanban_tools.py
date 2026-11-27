@@ -1514,7 +1514,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                 f"creation key are refused; without one they may duplicate. Its task id appears when {target} applies it "
                 + (kbd_words.CHAT_TASKS_HEAD + kbd_words.CHAT_TASKS_SEP if session_id else "(")
                 + "`hermes-hub requests`).")
-        return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
+        return _ok(task_id=None, status="queued", **fields, runs_where=target, **kbd_words.queued_wait(args, target, note)), None
     except Exception as exc:
         logger.warning("kanban placement failed", exc_info=True)
         if home is not None or origin_gateway:

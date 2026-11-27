@@ -398,11 +398,11 @@ _SPECS = [
              help="Restrict to tasks with this current_step_key"),
     ], aliases=["ls"], help="List tasks"),
     _cmd("wait-check", [
-        _arg("check", choices=("task", "board-empty", "capability-owner"),
-             help="task <id> | board-empty <slug> | capability-owner <hermes-hub request id[,id...]>"),
-        _arg("target", help="Task id (task), board slug (board-empty) or owner request ids (capability-owner)"),
+        _arg("check", choices=("task", "key", "board-empty", "capability-owner"),
+             help="task <id> | key <idempotency_key> | board-empty <slug> | capability-owner <hermes-hub request id[,id...]>"),
+        _arg("target", help="Task id (task), idempotency key (key), board slug (board-empty) or owner request ids"),
         _arg("--gateway", default=None, help="Gateway to read via ssh (e.g. hub); omit for this machine"),
-        _arg("--board", default=None, help="Board slug for `task` (default board if omitted)"),
+        _arg("--board", default=None, help="Board slug for `task` or `key` (default board if omitted)"),
         _arg("--until", default=None,
              help="Comma-separated statuses that count as met (default: done,review,blocked,triage,parked-agent,archived "
                   "-- a tracker wakes when its owner finishes, wants review, blocks, goes to triage, or parks on "

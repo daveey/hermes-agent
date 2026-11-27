@@ -107,7 +107,11 @@ def result(args, fields, *, tid, status, target):
     labels = args['runs_on']
     request = fields['placed']['request_id']
     state = f'Created on {target} as {tid}.' if tid else f'Creation request {request} is queued for {target}; task ID pending.'
-    return {'task_id': tid, 'status': status or ('created' if tid else 'queued'), **fields,
+    out = {'task_id': tid, 'status': status or ('created' if tid else 'queued'), **fields,
             'runs_where': 'board', 'runs_on': labels,
             'note': f'{state} Administrative home is shared; execution is constrained by runs_on={labels}. '
                     'Do not repeat creation; an identical retry uses the same request.'}
+    if not tid:
+        from hermes_cli.kanban_creation_wait import queued_wait
+        out.update(queued_wait(args, target, out['note']))
+    return out
