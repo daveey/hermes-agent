@@ -69,7 +69,7 @@ def _proven(data, board, gateway, row):
             and error == row.get('last_error') and row.get('state') == 'rejected')
 
 
-def report(live, shadow, hub, board, *, started=None):
+def report(live, shadow, hub, board, *, started=None, evidence=None):
     """Caller owns normal board sync lock after successful diagnostic refresh.
 
     No SQLite reservation spans HTTP. Generation CAS covers every live/replica
@@ -78,6 +78,9 @@ def report(live, shadow, hub, board, *, started=None):
     """
     from hermes_cli.kanban_sync_client import diff
 
+    if evidence is not None:
+        evidence.clear()
+    captured = {}
     started = time.monotonic() if started is None else started
     identity = transport.scope(hub, board)
     generations = [_generation(c) for c in (live, shadow)]
@@ -106,7 +109,7 @@ def report(live, shadow, hub, board, *, started=None):
         cut._fresh(started)
         _require([_generation(c) for c in (live, shadow)] == generations and _unresolved_rows(live, shadow, started) == rows,
                  'local_cut_inputs_changed')
-        result = diff(live, shadow, identity[2])
+        result = diff(live, shadow, identity[2], evidence=captured) if evidence is not None else diff(live, shadow, identity[2])
         from hermes_cli.kanban_sync_actionability_drift import audited_rejection
 
         diagnostic_audits = [r['op_id'] for r in rows
@@ -119,5 +122,12 @@ def report(live, shadow, hub, board, *, started=None):
                                or result['rejected_ops'] != len(audits))
         result['server_refusal_evidence'] = {'head': head, 'begin': begin, 'end': end, 'rows': proofs,
                                             'execution_authority': False, 'historical_identity_certified': False}
+        if evidence is not None:
+            from hermes_cli.kanban_sync_diff_evidence import finish
+
+            finish(live, shadow, identity[2], captured)
         cut._fresh(started)
-        return result
+    # Publish only after successful freshness validation AND reservation cleanup.
+    if evidence is not None:
+        evidence.update(captured)
+    return result

@@ -10,10 +10,14 @@ import hashlib
 import sqlite3
 
 
-def rejected_summary(live: sqlite3.Connection, shadow: sqlite3.Connection) -> tuple[int, list[str]]:
+def rejected_summary(live: sqlite3.Connection, shadow: sqlite3.Connection, *, evidence=None) -> tuple[int, list[str]]:
     """Count every rejection and identify only independently custody-matched retain audits."""
     rows = [dict(r) for r in live.execute("SELECT * FROM kanban_sync_outbox WHERE state = 'rejected'")]
-    return len(rows), [r['op_id'] for r in rows if audited_rejection(live, shadow, r)]
+    verdicts = [audited_rejection(live, shadow, r) for r in rows]
+    if evidence is not None:
+        evidence['rejected'] = rows
+        evidence['ordinary_audits'] = dict(zip((r['op_id'] for r in rows), verdicts))
+    return len(rows), [r['op_id'] for r, verdict in zip(rows, verdicts) if verdict]
 
 
 def audited_rejection(live: sqlite3.Connection, shadow: sqlite3.Connection, op: dict) -> bool:

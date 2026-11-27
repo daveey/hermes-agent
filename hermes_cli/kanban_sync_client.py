@@ -55,6 +55,7 @@ from hermes_cli import kanban_sync_refusal as refusal  # one board's Containment
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
+from hermes_cli.kanban_sync_diff_rows import task_rows as _task_rows
 from hermes_cli.kanban_replay_sender import PushResult, ReplayFault, push
 from hermes_cli.kanban_sync_compat import REASSESSMENT_REFUSALS, TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
 from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed, decode_json, BoundedRedirects, BoundedResponseError, read_response
@@ -1787,21 +1788,6 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
     return out
 
 
-_DIFF_SKIP = {"current_run_id"}  # compared as run uids instead
-
-
-def _task_rows(conn: sqlite3.Connection, ids: Optional[set[str]] = None) -> dict[str, dict]:
-    columns = [c for c in sync.SYNCED_COLUMNS["tasks"] if c not in _DIFF_SKIP]
-    present = set(sync.table_columns(conn, "tasks"))
-    cols = [c for c in columns if c in present]
-    out = {}
-    for row in conn.execute(f"SELECT t.id, {', '.join('t.' + c for c in cols)}, r.uid AS run_uid "
-                            "FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id"):
-        if ids is None or row["id"] in ids:
-            out[row["id"]] = dict(row)
-    return out
-
-
 def _child_uids(conn: sqlite3.Connection, table: str, task_ids: set[str],
                 gateway: Optional[str] = None) -> set[tuple[str, str]]:
     """Child row uids of ``task_ids``. With ``gateway``, chat links of OTHER gateways' chats on a card created
@@ -1818,7 +1804,7 @@ def _child_uids(conn: sqlite3.Connection, table: str, task_ids: set[str],
     return {(t, u) for t, u in conn.execute(f"SELECT task_id, uid FROM {table} WHERE uid IS NOT NULL") if t in task_ids}
 
 
-def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> dict[str, Any]:
+def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str, *, evidence=None) -> dict[str, Any]:
     """Compare own rows, pending edits, and rejected mutations; exact audited ended-run retain
     refusals stay visible as command audits rather than replica differences."""
     pending_tasks = {r[0] for r in live.execute(
@@ -1844,14 +1830,23 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
         if bad:
             fields[tid] = bad
     children: dict[str, int] = {}
+    child_evidence = {}
     for table in ("task_links", "task_comments", "task_runs", "task_chat_links"):
         lv = _child_uids(live, table, checked, gateway)
         sh = _child_uids(shadow, table, checked, gateway)
+        if evidence is not None:
+            child_evidence[table] = {'live': lv, 'shadow': sh}
         n = len(lv ^ sh)
         if n:
             children[table] = n
     from hermes_cli.kanban_sync_retain_drift import rejected_summary
-    rejected, audits = rejected_summary(live, shadow)
+    captured = {}
+    rejected, audits = rejected_summary(live, shadow, evidence=captured) if evidence is not None else rejected_summary(live, shadow)
+    if evidence is not None:
+        captured.update(tasks={'live': live_tasks, 'shadow': shadow_tasks}, checked=checked,
+                        pending=pending_tasks, mine=mine, children=child_evidence)
+        evidence.clear()
+        evidence.update(captured)
     clean = not (missing or extra or fields or children or rejected - len(audits))
     return {"clean": clean, "checked": len(checked), "pending": len(pending_tasks & set(live_tasks)),
             "missing_in_shadow": missing, "extra_in_shadow": extra, "field_mismatch": fields,
