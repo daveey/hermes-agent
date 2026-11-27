@@ -46,7 +46,9 @@ def _proposal_shape(proposal):
     kinds += (['commented', 'spend_budget_set'] if comments else [])
     kinds += ['stop_released'] * (len(body['capability_episodes']) + 1) + ['promoted_manual', 'owner_release_applied']
     if ([e.get('kind') for e in events] != kinds
-            or any(e.get('origin_gateway') is not None or e.get('run_id') is not None for e in [*events, *comments])
+            or any(e.get('origin_gateway') is not None or e.get('run_id') is not None for e in events)
+            or any(c.get('origin_gateway') not in (None, proposal['consumption']['renewal']['origin_gateway'])
+                   or c.get('run_id') is not None for c in comments)
             or proposal['application']['result']['outcome'] != 'released'
             or [cert.parse(e['payload'])['episode'] for e in events if e['kind'] == 'stop_released']
             != [*body['capability_episodes'], body['episode']]):

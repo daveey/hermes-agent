@@ -57,6 +57,27 @@ def test_certificate_refuses_adjacent_valid_corruption(canonical, damage):
         subject.validate(canonical, wire)
 
 
+@pytest.mark.parametrize('origin', [None, 'certified-home', 'foreign', '', False, {}])
+def test_prepared_comment_origin_only_certified_home(canonical, origin):
+    proposal = canonical['operation']['proposal']
+    proposal['consumption']['renewal']['origin_gateway'] = 'certified-home'
+    proposal['comments'][0]['origin_gateway'] = origin
+    if origin is None or origin == 'certified-home':
+        subject._proposal_shape(proposal)
+    else:
+        with pytest.raises(ValueError, match='sequence'):
+            subject._proposal_shape(proposal)
+
+
+@pytest.mark.parametrize('origin', ['certified-home', 'foreign', '', False, {}])
+def test_prepared_event_origin_still_requires_null(canonical, origin):
+    proposal = canonical['operation']['proposal']
+    proposal['consumption']['renewal']['origin_gateway'] = 'certified-home'
+    proposal['events'][0]['origin_gateway'] = origin
+    with pytest.raises(ValueError, match='sequence'):
+        subject._proposal_shape(proposal)
+
+
 def test_response_cap_distinct_from_proposal_cap(canonical):
     # Historical task postimage may carry a large unrelated body; never source
     # authority and never applied. Complete response is bounded independently.
