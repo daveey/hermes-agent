@@ -4,6 +4,7 @@ import json
 import pytest
 
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_placement as kp
 from hermes_cli import kanban_placement_provenance as provenance
 from tests.tools import test_kanban_cross_board_creator_chats as helpers
@@ -32,6 +33,16 @@ def test_ship_review_without_ambient_origin(home, monkeypatch, worker):
     if worker != 'none':
         monkeypatch.setenv('HERMES_KANBAN_TASK', creator)
     if worker == 'bound':
+        # Authority now reserves under the actual live creator run before the
+        # courier seam. A string-only authority fake is not a bound run.
+        with kbc.connect_closing() as conn:
+            # Pickup's authoritative ready snapshot has already satisfied the
+            # foreign ancestor; its dependency edge is not copied locally.
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (creator,))
+            conn.commit()
+            assert kb.claim_task(conn, creator) is not None
+            conn.execute('UPDATE task_runs SET uid=? WHERE task_id=?', ('authenticated-run', creator))
+            conn.commit()
         monkeypatch.setattr(provenance, 'forwarding_authority', lambda *a, **k: {
             'creator': {'gateway': 'macbook', 'profile': 'default', 'board': 'default', 'task_id': creator},
             'run_uid': 'authenticated-run'})

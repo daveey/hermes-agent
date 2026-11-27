@@ -185,6 +185,8 @@ def lagging_registry(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HUB_STATE", str(state))
     db = sqlite3.connect(state / "hub.db")
     db.execute("CREATE TABLE replica(gw TEXT, coll TEXT, key TEXT, data TEXT, updated_at INTEGER)")
+    # Preserve the courier journal shape while exercising a lagging registry.
+    db.execute("CREATE TABLE sent(id TEXT PRIMARY KEY, state TEXT, body TEXT)")
     scope = {"task_scopes": [{"board": BOARD, "profile": "default", "state": "ok", "observed_at": time.time() - 30}]}
     db.execute("INSERT INTO replica VALUES(?,?,?,?,?)", (OTHER, "gateway", OTHER, json.dumps(scope), 1))
     row = dict(id=REVIEW, board=BOARD, status="running", gateway=OTHER, profile="default", owner_profile="default",

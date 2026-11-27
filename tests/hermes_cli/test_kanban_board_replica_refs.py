@@ -33,6 +33,8 @@ def _fresh_hub_without_cards(state_dir):
     conn = sqlite3.connect(state_dir / "hub.db")
     conn.execute("CREATE TABLE replica (coll TEXT, gw TEXT, key TEXT, data TEXT, updated_at INTEGER)")
     conn.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+    # The real courier store also has an empty outbound request journal.
+    conn.execute("CREATE TABLE sent(id TEXT PRIMARY KEY, state TEXT, body TEXT)")
     conn.execute("INSERT INTO meta VALUES ('gateway', 'worker-1')")
     conn.execute("INSERT INTO meta VALUES ('last_ok', ?)", (str(time.time() - 2),))
     conn.commit()
