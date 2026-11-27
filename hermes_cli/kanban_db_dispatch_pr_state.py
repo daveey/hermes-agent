@@ -331,11 +331,19 @@ def _comment_events(conn: sqlite3.Connection, task_id: str) -> Optional[list[tup
             data = json.loads(payload)
         except (ValueError, TypeError):
             return None
-        if not isinstance(data, dict) or type(data.get("comment_id")) is not int \
+        if not isinstance(data, dict) \
                 or not isinstance(data.get("author"), str) or type(data.get("len")) is not int:
             return None
         at = _kb._to_epoch(created_at)
-        out.append((data, at, _event_row_id(rows, at, data)))
+        row_id = _event_row_id(rows, at, data)
+        if type(data.get("comment_id")) is not int:
+            # Portable system producers omit host-local ids. Accept only their unique
+            # UID match, not an accidental legacy author/time/length match.
+            uid = data.get("comment_uid")
+            if "comment_id" in data or not isinstance(uid, str) or not uid \
+                    or len(getattr(rows, "uids", {}).get(uid, [])) != 1:
+                return None
+        out.append((data, at, row_id))
     return out
 
 
@@ -347,7 +355,7 @@ def _local_comment_id(conn: sqlite3.Connection, task_id: str, comment_id: int) -
     events = _comment_events(conn, task_id)
     if events is None:
         return None
-    hits = {row for data, _at, row in events if data["comment_id"] == comment_id}
+    hits = {row for data, _at, row in events if data.get("comment_id") == comment_id}
     if len(hits) != 1 or None in hits:
         return None
     return hits.pop()
