@@ -12,6 +12,9 @@ class EarlySessions:
         self.runtime = runtime
         self.adopted = False
         self.closed = False
+        # The app lifespan closes on a worker thread (asyncio.to_thread); an exit signal closes on
+        # the main thread. The runtime's close is not safe to run twice at once.
+        self._close_lock = threading.Lock()
 
     def adopt(self):
         if self.adopted or self.closed:
@@ -19,10 +22,18 @@ class EarlySessions:
         self.adopted = True
         return self.runtime
 
-    def close(self):
-        if not self.closed:
-            self.runtime.close()
-            self.closed = True  # failed drain retains custody for the outer retry
+    def close(self, *, blocking=True):
+        """Close once. With ``blocking=False`` (the signal path) a close already running on another
+        thread is left to finish and False is returned; it never waits inside a signal handler."""
+        if not self._close_lock.acquire(blocking):
+            return False
+        try:
+            if not self.closed:
+                self.runtime.close()
+                self.closed = True  # failed drain retains custody for the outer retry
+            return True
+        finally:
+            self._close_lock.release()
 
 
 def adopted_early_owner(state):
@@ -39,23 +50,36 @@ class _ExitSignals:
     """SIGTERM/SIGINT custody for the early sessions reader (main thread only, where CPython runs
     Python signal handlers).
 
-    A signal is never acted on inside a custody step: a spawn whose child ``prepare()`` alone owns,
-    or a close (the reader's, or the runtime's, whose locks are not re-entrant). Every handler
-    invocation is one entry of an ordered queue (``_queue``: handler frame -> entry), so:
-      * an invocation is queued by ONE ``dict.setdefault`` keyed by its own frame: a C call, so no
-        other handler runs inside it. A handler that interrupts an outer handler invocation (at any
-        bytecode, even before that one's first line) first queues every such outer invocation, by
-        the same setdefault on the outer frame, then its own. So whichever runs first queues an
-        invocation exactly once, older invocations stay ahead, and an exit raised by the inner one
-        cannot drop the outer signal;
-      * the dispatcher runs only at ``depth`` 0 and holds ``depth`` above 0 while it runs, so a
-        signal arriving inside it, its close or a previous handler is queued behind, never run
-        inside them; it marks each entry delivered before acting, and delivers every queued entry
-        even when an earlier handler raised (the last exception propagates, chained);
-      * a delivered entry stays queued, as a tombstone, until its invocation has returned, so the
-        invocation's own setdefault cannot queue it a second time;
-      * an undelivered entry for a signal being delivered collapses into it, as a pending signal;
-      * whoever brings ``depth`` back to 0 reads the queue AFTER the decrement and dispatches it.
+    A signal is never acted on inside a main-thread custody step: a spawn whose child ``prepare()``
+    alone owns, or a close (the reader's, or the runtime's, whose locks are not re-entrant). An
+    *invocation* is one call of ``handler`` (its frame); an *action* for a signum is ``close()`` then
+    the previous handler. Every invocation is one entry of an ordered queue (``_queue``: handler
+    frame -> [signum, flags]). Invariants:
+      I1 queued once: an invocation is queued by ONE ``dict.setdefault`` keyed by its frame (a C
+         call, so no handler runs inside it), done by the invocation itself or by the first handler
+         that interrupts it (at any bytecode, even before its first line) and finds it on the stack.
+         The walk adds only *unfinished* invocations: ``finished`` is set first thing in the
+         ``finally``, after the invocation is queued, and an entry is dropped only when it is
+         delivered AND its invocation has reached that ``finally``. So a walk that still finds the
+         frame either finds its entry or runs before its own setdefault; nobody queues it again
+         after its tombstone is dropped, though its frame stays on the stack until it returns.
+      I2 exactly once, in invocation order: outer invocations are queued oldest first, ahead of the
+         interrupting one; an entry is marked delivered before its action runs. Caveat: an
+         undelivered entry for the signum being delivered collapses into that delivery (a pending
+         repeat), which can move it ahead of other signals but never loses it.
+      I3 one dispatcher: actions run only from ``depth`` 0, and the dispatcher holds ``depth`` above
+         0 while it runs, so a signal arriving inside it, its close or a previous handler is only
+         queued. Nested ``depth`` changes are balanced, so its read-modify-write is safe.
+      I4 nothing stranded: whoever brings ``depth`` back to 0 reads the queue AFTER the decrement.
+      I5 exceptions: later deliveries still run when an earlier action raised; the last exception
+         propagates, chained. A close failure never propagates (below).
+      C1 custody is main-thread only: ``deferred()`` covers ``prepare()`` and the early_sessions
+         close. A close on another thread (the app lifespan's ``asyncio.to_thread``) is guarded by
+         ``EarlySessions``' close lock, which the signal path only tries: if it is held, the close is
+         left to that thread and the previous handler still runs.
+    Residue: an invocation unwound by an exception before or inside its ``finally`` leaves its
+    delivered entry as a tombstone (the frame is dead but referenced, so the key is never reused);
+    an empty queue is therefore not guaranteed once an exit propagates.
     Order is CPython's handler-invocation order (it runs tripped handlers in signal-number order,
     not kernel arrival order). A thread signal mask cannot do this: a process-directed signal caught
     on another thread still runs its Python handler on the main thread.
@@ -81,7 +105,8 @@ class _ExitSignals:
         try:
             outer, walk = [], frame
             while walk is not None:  # outer handler invocations this one interrupted
-                if walk.f_code is _HANDLER_CODE and walk.f_locals.get('self') is self:
+                if (walk.f_code is _HANDLER_CODE and walk.f_locals.get('self') is self
+                        and not walk.f_locals.get('finished')):
                     outer.append(walk)
                 walk = walk.f_back
             for invocation in reversed(outer):  # outermost (oldest) first
@@ -90,6 +115,11 @@ class _ExitSignals:
             if self.depth == 0:
                 self._dispatch()
         finally:
+            # From here this invocation is queued (by its own setdefault, or by the handler that
+            # interrupted it first) and is never queued again. Its frame stays on the stack until it
+            # returns, after its tombstone is dropped here or by a dispatcher: a handler
+            # interrupting it then must not re-queue it (the walk above skips finished invocations).
+            finished = True  # noqa: F841  # health: allow F841 -- read via f_locals by a nested handler's walk
             entry = self._queue.get(me)
             if entry is not None:
                 entry[1] |= self._RETURNED
@@ -179,7 +209,16 @@ def early_sessions(*, headless, isolated):
     reader = CaptureProcess()
     owner = None
     previous = {}
-    signals = _ExitSignals(previous, lambda: (reader if owner is None else owner).close())
+
+    def close_on_signal():
+        if owner is None:
+            reader.close()  # only the main thread holds the reader before the runtime owns it
+        elif not owner.close(blocking=False):
+            import logging
+            logging.getLogger(__name__).info(
+                'sessions capture close already running on another thread; exit signal chains on')
+
+    signals = _ExitSignals(previous, close_on_signal)
     stop = signals.handler
 
     def close():

@@ -150,6 +150,57 @@ def test_failed_drain_retains_owner():
         owner.adopt()
 
 
+def test_close_on_another_thread_is_not_run_twice_at_once():
+    entered, release, inside, overlap = threading.Event(), threading.Event(), [0], []
+
+    def close():
+        inside[0] += 1
+        overlap.append(inside[0] > 1)
+        entered.set()
+        release.wait(5)
+        inside[0] -= 1
+    owner = early.EarlySessions(SimpleNamespace(close=close))
+    worker = threading.Thread(target=owner.close)
+    worker.start()
+    assert entered.wait(5)
+    assert owner.close(blocking=False) is False  # the signal path never waits or re-enters
+    release.set()
+    worker.join(5)
+    assert owner.closed and overlap == [False] and owner.close(blocking=False) is True
+
+
+def test_exit_signal_during_the_lifespan_close_on_a_worker_thread_chains_without_a_second_close(boot):
+    """The app lifespan closes the owner through asyncio.to_thread, outside ``deferred()``. A SIGTERM
+    handled on the main thread meanwhile must not run the runtime's close concurrently."""
+    import os
+    calls, runtime = boot
+    entered, release, inside, overlap, seen = threading.Event(), threading.Event(), [0], [], []
+
+    def close():
+        inside[0] += 1
+        overlap.append(inside[0] > 1)
+        calls.append('close')
+        if threading.current_thread() is not threading.main_thread():
+            entered.set()
+            release.wait(5)
+        inside[0] -= 1
+    runtime.close = close
+    saved = signal.signal(signal.SIGTERM, lambda signum, frame: seen.append(signum))
+    try:
+        with early.early_sessions(headless=True, isolated=False) as owner:
+            worker = threading.Thread(target=owner.close, name='lifespan-to_thread')
+            worker.start()
+            assert entered.wait(5)
+            os.kill(os.getpid(), signal.SIGTERM)
+            release.set()
+            worker.join(5)
+            assert owner.closed
+    finally:
+        signal.signal(signal.SIGTERM, saved)
+    assert seen == [signal.SIGTERM]  # the previous handler still ran
+    assert overlap == [False] and calls.count('close') == 1
+
+
 class _Startup(ModuleType):
     """Stands in for sessions_native_startup: the from-import of SessionsRuntime is its import point."""
     def __init__(self, calls, factory):
