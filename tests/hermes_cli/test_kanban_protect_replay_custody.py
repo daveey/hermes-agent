@@ -37,7 +37,7 @@ class FakeHub:
         return {'results': [{'client_op_id': wires[0]['client_op_id'], 'status': 'applied'}]}
 
 
-def _reserved(conn, hub):
+def _reserved(conn, hub, *, captured=False):
     sync.set_mode(conn, 'primary')
     state = sync.sync_state(conn)
     home = state['gateway_id']
@@ -56,6 +56,11 @@ def _reserved(conn, hub):
                'target_task_id': target, 'requested_at': int(time.time()),
                'caller': {'gateway': home, 'task_id': actor, 'run_uid': run}, 'args': args}
     with kbc.write_txn(conn):
+        if captured:
+            from hermes_cli import kanban_home_generation as epochs
+            epochs.install(conn)
+            conn.execute('INSERT INTO kanban_home_generations1(task_id,nonce,pending) VALUES (?,?,0)',
+                         (target, 'protect-captured-epoch'))
         frozen = transport.reserve(conn, board, payload, request_event)
     hub.events[request_event] = {'uid': request_event, 'deleted_at': None, 'kind': 'operator_call_requested',
                                  'version': 1, 'task_id': actor, 'run_uid': run, 'origin_gateway': home,
@@ -63,10 +68,11 @@ def _reserved(conn, hub):
     return board, request_uid, frozen
 
 
+@pytest.mark.parametrize('captured', [False, True])
 @pytest.mark.parametrize('anchor', ['bound', 'never', 'null', 'missing'])
-def test_protect_transport_respects_enrollment_without_starving_pending(live, anchor):
+def test_protect_transport_respects_enrollment_without_starving_pending(live, anchor, captured):
     hub = FakeHub()
-    board, request_uid, frozen = _reserved(live, hub)
+    board, request_uid, frozen = _reserved(live, hub, captured=captured)
     assert frozen['delivery_state'] == 'pending'
     assert journal.bound_custody(live) is True
     assert journal.pending_wire(live) is None
@@ -81,6 +87,9 @@ def test_protect_transport_respects_enrollment_without_starving_pending(live, an
     # No canonical receipt is supplied: delivery must not imply confirmation.
     with pytest.raises(ValueError):
         transport.confirm(live, hub, board, request_uid)
-    assert hub.ops_calls == ([json.loads(frozen['request_json'])] if anchor in ('bound', 'never') else [])
+    expected = json.loads(frozen['request_json'])
+    if captured:
+        expected['home_generations'] = {expected['task']: 'protect-captured-epoch'}
+    assert hub.ops_calls == ([expected] if anchor in ('bound', 'never') else [])
     assert transport.command(live, request_uid) == frozen
 
