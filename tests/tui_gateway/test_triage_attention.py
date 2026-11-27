@@ -13,10 +13,14 @@ from tests.tui_gateway import test_session_outcome_notices as helpers
 db = helpers.db
 
 
-def hold(tid, entered):
+STOPPED = {'disposition': {'reason': 'scope_stopped'}}  # what kanban_retained_status reads as a retained stop
+
+
+def hold(tid, entered, payload=None):
     with contextlib.closing(kbc.connect()) as conn:
         conn.execute("UPDATE tasks SET status='triage',block_kind='decision_pending' WHERE id=?", (tid,))
-        conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'decision_retained',?,'{}')", (tid, entered))
+        conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'decision_retained',?,?)",
+                     (tid, entered, json.dumps(payload or {})))
         conn.commit()
     activity._reset_cache_for_tests()
 
@@ -41,11 +45,12 @@ def test_board_to_canonical_status_and_detached_count(db, monkeypatch, age, red)
     assert 'needs_you' not in row
 
 
-def test_natural_threshold_refreshes_existing_canonical_without_card_mutation(db, monkeypatch):
+@pytest.mark.parametrize('payload', [None, STOPPED], ids=['held', 'retained_stop'])
+def test_natural_threshold_refreshes_existing_canonical_without_card_mutation(db, monkeypatch, payload):
     now = [1_800_000_000.]
     monkeypatch.setattr(fanout.time, 'time', lambda: now[0])
     tid = helpers._card(done=False)
-    hold(tid, now[0] - 599)
+    hold(tid, now[0] - 599, payload)
     opener = helpers._opener(db)
     helpers.so.refresh_outcome(helpers.CHAT, 'card_change', db=db)
     first = fanout.card_change_pass(session_db=opener)
@@ -70,6 +75,15 @@ def test_natural_threshold_refreshes_existing_canonical_without_card_mutation(db
     assert result['status']['presentation']['stripe'] == 'stuck'
     assert result['status']['kind'] != 'decision'
     assert result['status']['revision'] > boundary['status']['revision']
+    item = next(i for i in result['status']['on'] if i['id'] == 'card:' + tid)
+    if payload:  # a real stopped scope keeps its retained identity while the local clock turns it red
+        assert boundary['status']['reason'] == 'linked_work_retained'
+        assert (item['state'], item['triage_overdue']) == ('retained', True)
+        assert item['retained_stop']['reason'] == 'scope_stopped'
+        assert (result['status']['kind'], result['status']['reason']) == ('unresolved', 'linked_work_retained')
+        assert result['status']['presentation']['reason_codes'] == ['linked_work_retained', 'triage_overdue']
+    else:
+        assert item['state'] == 'triage_overdue'
     with contextlib.closing(kbc.connect()) as conn:
         assert conn.execute('SELECT MAX(id) FROM task_events').fetchone()[0] == top
     assert not fanout.card_change_pass(session_db=opener)
