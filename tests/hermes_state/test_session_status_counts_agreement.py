@@ -238,6 +238,31 @@ def test_inline_thread_double_settles_without_deadlock(state_db, board, monkeypa
     assert is_done(stored_status(state_db))
 
 
+class TargetOnlyThread:
+    """The gateway suites' ``_ImmediateThread``: it calls ``target()`` and drops ``args``."""
+
+    def __init__(self, target, daemon=None, **_options):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+def test_target_only_thread_double_settles(state_db, board, monkeypatch):
+    """The recompute target takes no arguments, so a double that ignores ``args`` still runs it."""
+    from hermes_cli import kanban_counts_agreement as agreement
+
+    controls = Controls()
+    so.register_outcome_provider("user-steps", controls)
+    controls_refresh(state_db)
+    unrelated_write(board)
+    controls.open = False
+    monkeypatch.setattr(threading, "Thread", TargetOnlyThread)
+    controls_refresh(state_db)
+    assert is_done(stored_status(state_db))
+    assert ksa._origin_scope() not in agreement._flights  # other suites may leave their own scopes pending
+
+
 def test_failed_thread_start_settles_the_flight(state_db, board, monkeypatch):
     """A recompute that cannot start is a read failure (unknown), and the next refresh starts a new one."""
     from hermes_cli import kanban_counts_agreement as agreement
@@ -253,7 +278,7 @@ def test_failed_thread_start_settles_the_flight(state_db, board, monkeypatch):
     monkeypatch.setattr(threading, "Thread", NoThread)
     controls_refresh(state_db)
     assert stored_status(state_db)["coverage"]["state"] == "unknown"
-    assert agreement._flights == {}
+    assert ksa._origin_scope() not in agreement._flights  # other suites may leave their own scopes pending
     monkeypatch.setattr(threading, "Thread", InlineThread)
     controls_refresh(state_db)
     assert is_done(stored_status(state_db))

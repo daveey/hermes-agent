@@ -14,6 +14,7 @@ other trigger. A stale snapshot is never used: zero open work from an outdated s
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 from collections.abc import Callable, Hashable
@@ -104,7 +105,9 @@ def agreed_counts(wait_s: float = WAIT_S, *, key: Hashable | None = None,
     if start:  # outside ``_lock``: the recompute's settle path takes it
         # Shared by every waiter of this scope: never custody of the first caller's local-work scope.
         try:
-            spawn_context_thread(_run, name="kanban-counts-agreement", args=(scope, flight), passive=True).start()
+            # A zero-argument target: inline ``Thread`` doubles in gateway suites call ``target()`` and drop ``args``.
+            spawn_context_thread(functools.partial(_run, scope, flight), name="kanban-counts-agreement",
+                                 passive=True).start()
         except BaseException as exc:  # health: allow BLE001 -- settle the flight, never leave it pending forever
             with _lock:
                 flight.error = exc
