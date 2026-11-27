@@ -451,19 +451,35 @@ def _annotate_tree_activity(sessions: list[dict]) -> list[dict]:
     return sessions
 
 
-def _project_tree_inputs(
-    db, session_limit: int, *, include_discovered: bool
-) -> tuple[list[dict], list[dict], list[dict], str | None]:
-    """Gather (sessions, projects, discovered_repos, active_id) for build_tree.
-    ``include_discovered`` is the zero-session-repo overview tier; drill-in skips it (and
-    the distinct-cwd scan + git probes) on that per-turn path."""
+def project_tree_rows_key(session_limit: int) -> tuple:
+    """[daveey] Everything besides ``state.db`` that ``project_tree_rows`` reads (this store's config), so a caller
+    can keep its answer keyed on the store's commits plus this. Read under the caller's home scope."""
+    return ("project_tree_rows", session_limit, tuple(_project_tree_excluded_sources()),
+            tuple(_project_tree_automated_sources()))
+
+
+def project_tree_rows(db, session_limit: int) -> list[dict]:
+    """[daveey] The tree's session rows before activity annotation: a pure projection of ``db`` and
+    ``project_tree_rows_key``. Fresh dicts the caller may stamp."""
     # compact_rows: selecting the system-prompt blob only to drop it costs tens of MB of reads.
     rows = db.list_sessions_rich(
         limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
         include_children=False, exclude_sources=_project_tree_excluded_sources(),
         include_archived=False, compact_rows=True)
     automated = _project_tree_automated_sources()
-    sessions = _annotate_tree_activity([_project_tree_row(r, automated) for r in rows])
+    return [_project_tree_row(r, automated) for r in rows]
+
+
+def _project_tree_inputs(
+    db, session_limit: int, *, include_discovered: bool, rows: list[dict] | None = None
+) -> tuple[list[dict], list[dict], list[dict], str | None]:
+    """Gather (sessions, projects, discovered_repos, active_id) for build_tree.
+    ``include_discovered`` is the zero-session-repo overview tier; drill-in skips it (and
+    the distinct-cwd scan + git probes) on that per-turn path. ``rows`` [daveey]: this store's
+    ``project_tree_rows`` when the caller already holds them (then ``db`` is only read for discovery)."""
+    if rows is None:
+        rows = project_tree_rows(db, session_limit)
+    sessions = _annotate_tree_activity(rows)
     # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.
     git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
     from hermes_cli import projects_db as pdb
@@ -496,12 +512,13 @@ def _dir_exists_cached(path: str) -> bool:
 
 
 def _project_tree_from_inputs(
-    db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool, builder
+    db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool, builder,
+    rows: list[dict] | None = None,
 ) -> tuple[dict, str | None]:
     """Gather normalized inputs once for canonical rendering or detached capture."""
     _DIR_EXISTS_CACHE.clear()
     sessions, projects, discovered, active_id = _project_tree_inputs(
-        db, session_limit, include_discovered=include_discovered)
+        db, session_limit, include_discovered=include_discovered, rows=rows)
     # Normalize copies, not persisted rows: aliases must share ownership and lane identities.
     def paths(row: dict, *keys: str) -> dict:
         return {**row, **{k: _canonical_workspace_path(str(row.get(k) or "")) for k in keys}}
@@ -524,11 +541,14 @@ def _project_tree_from_inputs(
     return tree, active_id
 
 
-def _build_project_tree(db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool):
-    """Legacy builder; keep the direct caller contract and one canonical render."""
+def _build_project_tree(db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool,
+                        rows: list[dict] | None = None):
+    """Legacy builder; keep the direct caller contract and one canonical render. ``rows``: see
+    ``_project_tree_inputs``."""
     from tui_gateway import project_tree
     return _project_tree_from_inputs(db, preview_limit=preview_limit, hydrate=hydrate,
-        session_limit=session_limit, include_discovered=include_discovered, builder=project_tree.build_tree)
+        session_limit=session_limit, include_discovered=include_discovered, builder=project_tree.build_tree,
+        rows=rows)
 
 
 def _capture_project_tree(db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool):

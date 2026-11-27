@@ -49,7 +49,9 @@ class ProfileSessionScanCache:
         # Include identity to notice a file replacement between the two probes.
         return entry, (identity, version)
 
-    def read(self, home, key, scan):
+    def read(self, home, key, scan, clone=copy.deepcopy):
+        """``scan()``, or a ``clone`` of its stored result while ``home``'s state.db has not committed since.
+        ``clone`` copies everything a caller may mutate, both ways (default: a deep copy)."""
         if home is None:
             return scan()
         path = (Path(home) / 'state.db').absolute()
@@ -62,7 +64,7 @@ class ProfileSessionScanCache:
         cached = queries.get(key)
         if cached is not None and cached[0] == before:
             queries.move_to_end(key)
-            return copy.deepcopy(cached[1])
+            return clone(cached[1])
         # Invalidate before scanning, including when a failed scan returns None.
         for old in [k for k, value in queries.items() if value[0] != before]:
             del queries[old]
@@ -73,7 +75,7 @@ class ProfileSessionScanCache:
             self._drop(path)
             return result
         if result is not None and after_entry is entry and before == after:
-            queries[key] = (before, copy.deepcopy(result))
+            queries[key] = (before, clone(result))
             queries.move_to_end(key)
             while len(queries) > self.max_queries:
                 queries.popitem(last=False)

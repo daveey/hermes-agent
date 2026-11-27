@@ -412,6 +412,17 @@ def _csv_list(value: Optional[str]) -> list[str]:
 
 _PROFILE_SESSION_SCAN_LOCK = threading.Lock()
 _PROFILE_SESSION_SCAN_CACHE = ProfileSessionScanCache()
+# [daveey] The project tree's rows per profile, on their own lock: a tree scan of a large store must not hold up
+# ``/api/profiles/sessions``' scans (t_01a21ab4eb964866).
+_PROJECT_TREE_SCAN_LOCK = threading.Lock()
+_PROJECT_TREE_SCAN_CACHE = ProfileSessionScanCache()
+
+
+def _clone_tree_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy ``project_tree_rows`` for one response: annotation and tree building stamp these dicts, and their only
+    container values are small lists (``_lineage_ids``). Much cheaper than a deep copy of 2,000 rows."""
+    return [{k: (copy.deepcopy(v) if isinstance(v, (list, dict, set)) else v) for k, v in row.items()}
+            for row in rows]
 
 
 def _read_serial_profile_db(name, home, errors, read, cache_key):
@@ -770,18 +781,43 @@ def profile_project_trees(
     from tui_gateway import server as gateway_server
     out: list[tuple[str, Optional[dict[str, Any]]]] = []
     for name, home in _scoped_profile_targets(log_label, profile):
-        def _read(db, home=home):
-            with _hermes_home_scope(home):
-                tree, _active_id = gateway_server._build_project_tree(
-                    db, preview_limit=preview_limit, hydrate=False,
-                    session_limit=session_limit, include_discovered=False)
-                return tree
         failed: list[dict[str, str]] = []
-        tree = _read_profile_db(name, home, failed, _read)
+        tree = _profile_project_tree(gateway_server, name, home, failed, preview_limit, session_limit)
         if errors is not None:
             errors.extend(failed)
         out.append((name, None if failed else (tree or {"projects": [], "scoped_session_ids": []})))
     return out
+
+
+def _profile_project_tree(gateway_server, name, home, failed, preview_limit, session_limit):
+    """One profile's tree. Its session rows are a pure projection of its state.db (and config, in the key), so they
+    are kept until that store commits [daveey]: on the hub 12 of 13 stores are idle between the Desktop's tree
+    refreshes, yet every response re-ranked and re-projected each one (~2,000 rows, t_01a21ab4eb964866). The
+    activity annotation and the build run on every response; only the store read is reused."""
+    with _hermes_home_scope(home):
+        key = gateway_server.project_tree_rows_key(session_limit)
+
+    def scan():
+        def read(db):
+            with _hermes_home_scope(home):
+                return gateway_server.project_tree_rows(db, session_limit)
+        return _read_profile_db(name, home, failed, read)
+
+    with _PROJECT_TREE_SCAN_LOCK:
+        rows = _PROJECT_TREE_SCAN_CACHE.read(home, key, scan, clone=_clone_tree_rows)
+    if rows is None:  # no state.db yet (an empty tree), or the read failed (``failed`` says so)
+        return None
+    try:
+        with _hermes_home_scope(home):
+            tree, _active_id = gateway_server._build_project_tree(
+                None, preview_limit=preview_limit, hydrate=False,
+                session_limit=session_limit, include_discovered=False, rows=rows)
+        return tree
+    except Exception as exc:  # health: allow BLE001 -- _read_profile_db's boundary: a broken profile drops out alone
+        _log.debug("project tree build failed for profile %s", name, exc_info=True)
+        _warn_profile_read_error(name, exc)
+        failed.append({"profile": name, "error": str(exc)})
+        return None
 
 
 from hermes_cli import projects_fact_routes
@@ -808,10 +844,12 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
     scoped_session_ids: list[str] = []
     errors: list[dict[str, str]] = []
 
+    from hermes_cli.goal_session_activity import one_goal_read
     from hermes_cli.kanban_external_activity import one_board_read
 
-    # One read of each (root-pinned) board's external state for every profile's annotation in this response.
-    with one_board_read():
+    # One read of each (root-pinned) board's external state, and of every store's goals, for every profile's
+    # annotation in this response.
+    with one_board_read(), one_goal_read():
         trees = profile_project_trees(
             preview_limit, session_limit, errors, log_label="GET /api/profiles/projects/tree", profile=profile)
     for name, tree in trees:

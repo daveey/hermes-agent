@@ -24,8 +24,9 @@ import logging
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 _log = logging.getLogger(__name__)
 
@@ -104,6 +105,43 @@ def _read_active(path: Path) -> set[str]:
 
 def active_goal_sessions() -> frozenset[str]:
     """Session ids (across every profile) whose standing goal is still active."""
+    shared = getattr(_block, "reads", None)
+    if shared is None:
+        return _active_goal_sessions()[0]
+    paths = frozenset(_state_db_paths())
+    if paths in shared:
+        return shared[paths]
+    ids, certified = _active_goal_sessions()
+    if certified:
+        shared[paths] = ids
+    return ids
+
+
+# [daveey] Set by ``one_goal_read``: ``frozenset(state.db paths) -> answer`` this block already read. Every
+# profile's home scope sees the same stores (its own plus the root's profiles), so the projects tree's 13
+# per-profile annotations and the sidebar's slices asked the same question of the same files per response,
+# and on the hub each ask re-stamped 13 stores (``_db_stamp``, ~45 of the tree's samples, t_01a21ab4eb964866).
+# One answer per response, like ``kanban_external_activity.one_board_read``; a read that failed on any store is
+# not shared, so the next call in the block retries it.
+_block = threading.local()
+
+
+@contextmanager
+def one_goal_read() -> Iterator[None]:
+    """Every ``active_goal_sessions`` call in this block (this thread) answers from one read of the stores."""
+    if getattr(_block, "reads", None) is not None:
+        yield
+        return
+    _block.reads = {}
+    try:
+        yield
+    finally:
+        _block.reads = None
+
+
+def _active_goal_sessions() -> tuple[frozenset[str], bool]:
+    """``(active ids, every store read cleanly)``."""
+    certified = True
     with _cache_lock:
         paths = _state_db_paths()
         for removed in _cache.keys() - set(paths):
@@ -126,8 +164,9 @@ def active_goal_sessions() -> frozenset[str]:
             except (OSError, sqlite3.Error) as exc:
                 # Never certify errors; the next request retries even without a write.
                 _cache.pop(path, None)
+                certified = False
                 _log.debug("goal activity read failed for %s: %s", path, exc)
-        return frozenset(ids)
+        return frozenset(ids), certified
 
 
 def _row_ids(row: dict[str, Any]) -> Iterable[str]:

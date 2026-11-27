@@ -225,3 +225,89 @@ def test_scoped_home_switch_removes_prior_answer(home, monkeypatch):
     assert gsa.active_goal_sessions() == {"old"}
     monkeypatch.setenv("HERMES_HOME", str(other))
     assert gsa.active_goal_sessions() == {"new"}
+
+
+# --- one response reads the stores' goals once (t_01a21ab4eb964866) -------------------------------------------------
+
+def _counting_scans(monkeypatch):
+    calls = []
+    real = gsa._db_stamp
+
+    def stamp(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(gsa, "_db_stamp", stamp)
+    return calls
+
+
+def test_every_ask_in_one_block_shares_one_read_even_across_a_commit(home, monkeypatch):
+    path = home / "state.db"
+    _make_state_db(path, {"s": {"goal": "g", "status": "active"}})
+    _make_state_db(home / "profiles" / "work" / "state.db", {})
+    stamps = _counting_scans(monkeypatch)
+    with gsa.one_goal_read():
+        assert gsa.active_goal_sessions() == {"s"}
+        first = len(stamps)
+        with sqlite3.connect(path) as conn:  # a commit mid-response
+            conn.execute("UPDATE state_meta SET value=? WHERE key='goal:s'",
+                         (json.dumps({"goal": "g", "status": "done"}),))
+        for _ in range(12):  # the projects tree's per-profile annotations
+            assert gsa.active_goal_sessions() == {"s"}
+        assert len(stamps) == first, "one response must stamp each store once, however many rows sets ask"
+    # Notification loss would keep answering {"s"} until some later commit.
+    assert gsa.active_goal_sessions() == set()
+
+
+def test_a_failed_read_in_a_block_is_not_shared(home, monkeypatch):
+    _make_state_db(home / "state.db", {"s": {"goal": "g", "status": "active"}})
+    real = gsa._read_active
+    calls = []
+
+    def flaky(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(path)
+
+    monkeypatch.setattr(gsa, "_read_active", flaky)
+    with gsa.one_goal_read():
+        assert gsa.active_goal_sessions() == set()
+        assert gsa.active_goal_sessions() == {"s"}, "the next ask in the block retries a failed read"
+        assert gsa.active_goal_sessions() == {"s"}
+    assert len(calls) == 2
+
+
+def test_blocks_nest_and_another_thread_reads_on_its_own(home, monkeypatch):
+    import threading
+
+    path = home / "state.db"
+    _make_state_db(path, {"s": {"goal": "g", "status": "active"}})
+    with gsa.one_goal_read():
+        assert gsa.active_goal_sessions() == {"s"}
+        with sqlite3.connect(path) as conn:
+            conn.execute("DELETE FROM state_meta WHERE key='goal:s'")
+        with gsa.one_goal_read():
+            assert gsa.active_goal_sessions() == {"s"}, "a nested block shares the outer block's read"
+        assert gsa.active_goal_sessions() == {"s"}, "the inner block's end does not drop the outer one's read"
+        seen = []
+        worker = threading.Thread(target=lambda: seen.append(gsa.active_goal_sessions()))
+        worker.start()
+        worker.join()
+        assert seen == [set()], "a block is this thread's response only"
+
+
+def test_a_different_store_set_is_not_answered_from_another_sets_read(home, monkeypatch):
+    _make_state_db(home / "state.db", {"s": {"goal": "g", "status": "active"}})
+    with gsa.one_goal_read():
+        assert gsa.active_goal_sessions() == {"s"}
+        _make_state_db(home / "profiles" / "work" / "state.db", {"w": {"goal": "g", "status": "active"}})
+        assert gsa.active_goal_sessions() == {"s", "w"}
+
+
+def test_annotation_snapshot_opens_one_goal_read():
+    from hermes_cli import kanban_session_activity as ksa
+
+    with ksa.one_annotation_snapshot():
+        assert gsa._block.reads == {}
+    assert getattr(gsa._block, "reads", None) is None
