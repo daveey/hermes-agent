@@ -359,6 +359,162 @@ def test_expired_inventory_never_adopts_or_stops(monkeypatch):
     assert exc.value.code == precommit.REFUSED_EXIT
 
 
+@pytest.mark.parametrize("value", [
+    ["version", "clock", "deadline"],
+    {"version": 1, "clock": "CLOCK_MONOTONIC", "deadline": 100, "extra": 0},
+    {"version": True, "clock": "CLOCK_MONOTONIC", "deadline": 100},
+    {"version": 2, "clock": "CLOCK_MONOTONIC", "deadline": 100},
+    {"version": 1, "clock": "wall", "deadline": 100},
+    {"version": 1, "clock": "CLOCK_MONOTONIC", "deadline": True},
+    {"version": 1, "clock": "CLOCK_MONOTONIC", "deadline": 0},
+])
+def test_carrier_shape_validation_is_independent_of_expiry(value):
+    # Direct decode, not run_if_requested: later entry expiry must not mask
+    # malformed-but-positive values accepted by a broken validation clause.
+    with pytest.raises((ValueError, TypeError)):
+        precommit.parse_deadline(json.dumps(value))
+
+
+@pytest.mark.parametrize("units,refuses", [
+    (None, False), ([], False),
+    ([{"stop_unsettled": True, "pending": True}], True),
+    ([{"stop_unsettled": False, "pending": True}], False),
+    ([{"stop_unsettled": True, "pending": False}], False),
+])
+def test_adopted_inventory_checks_only_unsettled_pending_stops(monkeypatch, units, refuses):
+    from hermes_cli import update_cmd_posix_pause as pause
+    events = []
+    token = {"precommit_adoption_pending": True}
+    monkeypatch.setattr(precommit, "commit_gate", lambda: events.append("ack"))
+    def adopt(token):
+        events.append("adopt")
+        token["posix_units"] = units
+    monkeypatch.setattr(pause, "_adopt_pause", adopt)
+    monkeypatch.setattr(pause, "unit_stop_pending", lambda u: u["pending"])
+    monkeypatch.setattr(pause, "_names", lambda held: "owned fixture")
+    monkeypatch.setattr(pause, "_abort_unsettled", lambda token, why: events.append("abort") or why)
+    result = pause._commit_pause_inventory(token)
+    assert bool(result) is refuses
+    assert events == (["ack", "adopt", "abort"] if refuses else ["ack", "adopt"])
+
+
+@pytest.mark.parametrize("deadline,wrote", [(None, False), (1, True)])
+def test_first_write_guard_preserves_ordinary_and_already_written_modes(monkeypatch, deadline, wrote):
+    monkeypatch.setattr(precommit, "_child_deadline", deadline)
+    monkeypatch.setattr(precommit, "_wrote", wrote)
+    monkeypatch.setattr(precommit, "clock", lambda: 100)
+    monkeypatch.setattr(precommit, "commit_gate", lambda: pytest.fail("non-preparation entered commit gate"))
+    precommit.before_checkout_write()
+
+
+def test_ordinary_owning_install_redirect_remains_supported(monkeypatch, tmp_path):
+    from hermes_cli import update_owning_install as owning
+    owner = tmp_path / "owner"
+    calls = []
+    monkeypatch.setattr(owning, "owning_install_root", lambda _: owner)
+    monkeypatch.setattr(subprocess, "call", lambda *a, **kw: calls.append((a, kw)) or 7)
+    with pytest.raises(SystemExit) as exc:
+        owning.retarget_to_owning_install(tmp_path)
+    assert exc.value.code == 7
+    assert len(calls) == 1 and calls[0][1]["cwd"] == owner
+
+
+def test_unsupported_protocol_platform_never_spawns(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv(precommit.DEADLINE_ENV, json.dumps(
+        {"version": 1, "clock": "CLOCK_MONOTONIC", "deadline": precommit.clock() + 60}))
+    monkeypatch.setattr(precommit, "supervise", lambda *a: pytest.fail("unsupported protocol spawned"))
+    with pytest.raises(SystemExit) as exc:
+        precommit.run_if_requested(argparse.Namespace(), tmp_path)
+    assert exc.value.code == precommit.REFUSED_EXIT
+
+
+def test_parser_callbacks_are_not_serialized_to_the_child(monkeypatch, tmp_path):
+    monkeypatch.setenv(precommit.DEADLINE_ENV, json.dumps(
+        {"version": 1, "clock": "CLOCK_MONOTONIC", "deadline": precommit.clock() + 60}))
+    captured = []
+    monkeypatch.setattr(precommit, "supervise", lambda cmd, *_: captured.append(json.loads(cmd[-1])) or 7)
+    with pytest.raises(SystemExit) as exc:
+        precommit.run_if_requested(argparse.Namespace(callback=lambda: None, yes=True), tmp_path)
+    assert exc.value.code == 7 and captured == [{"yes": True}]
+
+
+def test_command_continuation_preserves_caller_environment_except_consumed_carrier(monkeypatch, tmp_path):
+    inherited = {"HOME": str(tmp_path), "HERMES_HOME": str(tmp_path / "profile"),
+                 "HERMES_SYNC_INHERITED_UPDATE_HOLDS": "fixture-inherited-owner",
+                 "HERMES_GATEWAY_PROFILE_PIN": "fixture-profile"}
+    for key, value in inherited.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv(precommit.DEADLINE_ENV, json.dumps(
+        {"version": 1, "clock": "CLOCK_MONOTONIC", "deadline": precommit.clock() + 60}))
+    expected = dict(os.environ)
+    expected.pop(precommit.DEADLINE_ENV)
+    captured = []
+    monkeypatch.setattr(precommit, "supervise", lambda cmd, deadline, env: captured.append(env) or 7)
+    with pytest.raises(SystemExit) as exc:
+        precommit.run_if_requested(argparse.Namespace(), tmp_path)
+    assert exc.value.code == 7 and captured == [expected]
+
+
+@pytest.mark.parametrize("scenario", ["spawn-error", "spawn-signal", "recv-signal", "recv-expiry", "committed-wait-error"])
+def test_supervisor_phase_interleavings_keep_exact_custody(monkeypatch, scenario):
+    events, handlers = [], {}
+    now = [100.0]
+    monkeypatch.setattr(precommit, "clock", lambda: now[0])
+    def install(sig, handler):
+        previous = handlers.get(sig)
+        handlers[sig] = handler
+        return previous
+    monkeypatch.setattr(signal, "signal", install)
+    class Channel:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def fileno(self):
+            return 10
+        def close(self):
+            pass
+        def recv(self, size):
+            if scenario == "recv-signal":
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            if scenario == "recv-expiry":
+                now[0] = 106.0
+            return b"C"
+        def sendall(self, data):
+            events.append(("ack", data))
+    monkeypatch.setattr(socket, "socketpair", lambda: (Channel(), Channel()))
+    class Child:
+        def wait(self):
+            events.append("wait")
+            if scenario == "committed-wait-error" and events.count("wait") == 1:
+                raise OSError("controlled committed observation failure")
+            return 7
+    child = Child()
+    def spawn(*args, **kwargs):
+        events.append("spawn")
+        if scenario == "spawn-error":
+            raise OSError("controlled spawn failure")
+        if scenario == "spawn-signal":
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return child
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    def ready(channels, *args):
+        events.append("select")
+        assert scenario != "spawn-signal", "cancellation must be observed before waiting for child input"
+        return (channels, [], [])
+    monkeypatch.setattr(precommit.select, "select", ready)
+    monkeypatch.setattr(precommit, "_terminate_uncommitted", lambda proc: events.append(("terminate", proc)))
+    result = precommit.supervise(["fixture"], 110, {})
+    if scenario == "committed-wait-error":
+        assert result == 7
+        assert events == ["spawn", "select", ("ack", b"Y"), "wait", "wait"]
+    else:
+        assert result == precommit.REFUSED_EXIT
+        assert ("ack", b"Y") not in events
+        assert ("terminate", child) in events if scenario != "spawn-error" else not any(isinstance(e, tuple) for e in events)
+
+
 def _child():
     """External effects replaced, real updater/fetch/pin/move/custody remain."""
     source, checkout, target, mode, fd, deadline = sys.argv[1:]

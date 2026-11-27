@@ -192,6 +192,10 @@ def run_if_requested(args: argparse.Namespace, root: Path) -> bool:
     except (ValueError, TypeError) as exc:
         print(f"↷ Update deferred: invalid precommit deadline ({exc})", flush=True)
         raise SystemExit(REFUSED_EXIT) from exc
+    # This is the same updater command continuing before lock/preflight, not a
+    # routed profile or delegated agent. Preserve exact caller home, credentials
+    # and inherited fence/hold context; build_subprocess_env also rewrites worker
+    # identity. Only the consumed protocol carrier must be removed (no recursion).
     env = dict(os.environ)
     env.pop(DEADLINE_ENV)
     code = ("import sys; sys.path.insert(0, sys.argv[1]); "
