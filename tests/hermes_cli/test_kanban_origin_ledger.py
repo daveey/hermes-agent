@@ -203,6 +203,8 @@ def _observe(conn, tid):
 def test_owner_publication_detaches_current_triage_episode_and_clears_on_exit(owner_board):
     kb, conn = owner_board
     tid = kb.create_task(conn, title='owned triage fixture', assignee='default')
+    # Keep this backdated fixture's creation before its origin triage episode.
+    conn.execute("UPDATE task_events SET created_at=999 WHERE task_id=? AND kind='created'", (tid,))
     conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
     conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'contained',1000,'{}')", (tid,))
     conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,'decision_retained',1600,'{}')", (tid,))
