@@ -23,6 +23,19 @@ def test_supported_bootstrap_observes_loader_imports(tmp_path, core, python):
     assert str(core / 'hermes_cli/plugins_loader.py') in filenames
 
 
+def test_inventory_observer_seed_is_blob_checked_not_exempt(tmp_path, core, python):
+    observer = core / 'hermes_cli/code_inventory_diagnostics.py'
+    original = observer.read_bytes()
+    try:
+        observer.write_bytes(original + b'\n# unreviewed observer change\n')
+        result = helpers.run_stub(tmp_path, python, helpers.current_script(core))
+    finally:
+        observer.write_bytes(original)
+    assert 'seed-source-skew:hermes_cli.code_inventory_diagnostics' in result['unknowns']
+    assert not any(row.get('module') == 'hermes_cli.code_inventory_diagnostics'
+                   for row in result['seed'])
+
+
 def test_late_direct_ledger_still_latches_preexisting_loader(tmp_path):
     script = tmp_path / 'late.py'
     script.write_text('''

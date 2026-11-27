@@ -39,6 +39,7 @@ SEED_COMMON = {
     "hermes_cli._early_recovery": "hermes_cli/_early_recovery.py",
     "hermes_cli.git_fingerprint": "hermes_cli/git_fingerprint.py",
     "hermes_cli.code_attestation": "hermes_cli/code_attestation.py",
+    "hermes_cli.code_inventory_diagnostics": "hermes_cli/code_inventory_diagnostics.py",
     "hermes_cli.local_work": "hermes_cli/local_work.py",
     "hermes_cli._launch_template": "hermes_cli/_launch_template.py",
 }
