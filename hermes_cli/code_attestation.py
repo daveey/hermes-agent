@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 # Load the stdlib-only observer before an audit ledger can be activated. A lazy
 # import inside its first inventory would itself change the observed code graph.
-from hermes_cli.code_inventory_diagnostics import inventory_modules
+from hermes_cli.code_inventory_diagnostics import InventoryObservation, inventory_modules
 
 if TYPE_CHECKING:
     from hermes_cli.code_attestation_snapshot import DiagnosticSnapshot
@@ -761,9 +761,10 @@ class Attestation:
 
     def quiet_unknown_partition(self, *, inventory=False):
         """Blocking and informational unknowns, from one locked ledger observation."""
-        with self._lock:
+        with InventoryObservation(self, enabled=inventory) as diagnostics:
             if inventory:
-                self.unknowns()
+                self._settle()
+                self._inventory_modules(diagnostics=diagnostics)
             else:
                 self.latched_unknowns()
             extension = self._extension_unknowns - self._blocking_unknowns
@@ -1168,8 +1169,8 @@ class Attestation:
         from hermes_cli.code_attestation_inventory import inventory_modules
         return inventory_modules(self, deadline=deadline, progress=progress)
 
-    def _inventory_modules(self, *, deadline=None):
-        return inventory_modules(self, deadline=deadline)
+    def _inventory_modules(self, *, deadline=None, diagnostics=None):
+        return inventory_modules(self, deadline=deadline, diagnostics=diagnostics)
 
     def _audit(self, event, args):
         if event not in ("compile", "exec", "import", "ctypes.dlopen") or getattr(self._tls, "busy", False):
@@ -1852,9 +1853,9 @@ class Attestation:
                 "interpreter": dict(self.interpreter_identity)}
 
     def unknowns(self):
-        with self._lock:
+        with InventoryObservation(self) as diagnostics:
             self._settle()
-            self._inventory_modules()
+            self._inventory_modules(diagnostics=diagnostics)
             return tuple(sorted(self._unknown))
 
     def integrity_observation(self, *, deadline=None):
@@ -1866,14 +1867,10 @@ class Attestation:
         if deadline is not None and self.__dict__.get("_pending"):
             self._demand.set()  # even a reader that is already out of budget is waiting
         _check_inventory_deadline(deadline)
-        acquired = (self._lock.acquire() if deadline is None else
-                    self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())))
-        if not acquired:
-            raise TimeoutError('code attestation inventory budget exhausted')
-        try:
+        with InventoryObservation(self, deadline=deadline) as diagnostics:
             self._settle(deadline=deadline)
             _check_inventory_deadline(deadline)
-            self._inventory_modules(deadline=deadline)
+            self._inventory_modules(deadline=deadline, diagnostics=diagnostics)
             _check_inventory_deadline(deadline)
             if getattr(self, '_reviewed_plugins', None):
                 from hermes_cli.plugin_review_records import verify_registered
@@ -1882,8 +1879,6 @@ class Attestation:
             return {"core_root": str(self.core_root), "boot_sha": self.boot_sha,
                     "route": self.route, "generation": self._generation,
                     "unknowns": tuple(sorted(self._unknown))}
-        finally:
-            self._lock.release()
 
     def latched_unknowns(self):
         """The latched unknowns without a module inventory (cheap: polled while measuring)."""

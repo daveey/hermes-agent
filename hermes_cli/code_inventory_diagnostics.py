@@ -52,34 +52,54 @@ class InventoryDiagnostics:
                 except Exception:  # health: allow BLE001 -- preserve the operation's exact exception/result
                     self.enabled = False
 
+    def stop(self, completed):
+        self.outcome = 'completed' if completed else 'aborted'
+        self.total = None
+        if self.enabled:
+            try:
+                self.total = monotonic_ns() - self.begin[0], thread_time_ns() - self.begin[1]
+            except Exception:  # health: allow BLE001 -- optional clocks cannot replace inventory failure
+                self.enabled = False
+
     def finish(self):
         if not self.enabled:
             return
         try:
-            total = monotonic_ns() - self.begin[0], thread_time_ns() - self.begin[1]
+            total = getattr(self, 'total', None)
+            if total is None:
+                total = monotonic_ns() - self.begin[0], thread_time_ns() - self.begin[1]
             stages = {key: (row[0], row[1] / 1_000_000, row[2] / 1_000_000)
                       for key, row in self.stages.items()}
             stages['modules'] = (self.count,
                 max(0, total[0] - sum(r[1] for r in self.stages.values())) / 1_000_000,
                 max(0, total[1] - sum(r[2] for r in self.stages.values())) / 1_000_000)
             self.sink.info('code_inventory pid=%d thread=%d request_ns=%d modules=%d '
-                        'wall_ms=%.3f cpu_ms=%.3f stages=%s', os.getpid(),
+                        'wall_ms=%.3f cpu_ms=%.3f outcome=%s stages=%s', os.getpid(),
                         threading.get_ident(), self.begin[0], self.count,
-                        total[0] / 1_000_000, total[1] / 1_000_000, stages)
+                        total[0] / 1_000_000, total[1] / 1_000_000,
+                        getattr(self, 'outcome', 'completed'), stages)
         except Exception:  # health: allow BLE001 S110 -- an optional sink/clock failure must never replace an inventory result; no recursive logging
             pass
 
 
-def inventory_modules(ledger, *, deadline=None):
+def inventory_modules(ledger, *, deadline=None, diagnostics=None):
     from hermes_cli.code_attestation import MAX_UNITS, _check_inventory_deadline
 
-    diagnostics = InventoryDiagnostics()
+    if diagnostics is not None:
+        diagnostics.scanned = True
+        if diagnostics.enabled:
+            try:
+                diagnostics.begin = monotonic_ns(), thread_time_ns()
+            except Exception:  # health: allow BLE001 -- timing failure cannot stop the inventory
+                diagnostics.enabled = False
+    completed = False
     try:
         # Recheck every mutable filename and freshly resolve every path, including
         # unchanged module identities. This is timing, not a cache or trust shortcut.
         for name, module in ledger._module_snapshot():
             _check_inventory_deadline(deadline)
-            diagnostics.count += 1
+            if diagnostics is not None:
+                diagnostics.count += 1
             filename = getattr(module, '__file__', None)
             ledger._module_file(name, filename, diagnostics=diagnostics)
             key = (name, id(module))
@@ -91,5 +111,35 @@ def inventory_modules(ledger, *, deadline=None):
                 continue
             ledger._modules[key] = identity
             ledger._generation += 1
+        completed = True
     finally:
-        diagnostics.finish()
+        if diagnostics is not None:
+            diagnostics.stop(completed)
+
+
+class InventoryObservation:
+    """Only the outer ledger reader may look up or emit to a logging sink.
+
+    Nested/private inventories remain fully verified but uninstrumented. Timing
+    starts inside the scan and stops before release; logging runs only off-lock.
+    """
+    def __init__(self, ledger, *, deadline=None, enabled=True):
+        self.lock = ledger._lock
+        self.deadline = deadline
+        owned = getattr(self.lock, '_is_owned', None)
+        self.diagnostics = InventoryDiagnostics() if enabled and callable(owned) and not owned() else None
+
+    def __enter__(self):
+        # Keep the existing shared-deadline acquisition semantics.
+        from time import monotonic
+
+        acquired = (self.lock.acquire() if self.deadline is None else
+                    self.lock.acquire(timeout=max(0.0, self.deadline - monotonic())))
+        if not acquired:
+            raise TimeoutError('code attestation inventory budget exhausted')
+        return self.diagnostics
+
+    def __exit__(self, _kind, _value, _traceback):
+        self.lock.release()
+        if self.diagnostics is not None and getattr(self.diagnostics, 'scanned', False):
+            self.diagnostics.finish()

@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -37,7 +38,9 @@ def test_actual_inventory_reports_stages_without_changing_module_observation(tmp
     module.__file__ = str(tmp_path / 'not-secret-in-log.py')
     ledger._module_snapshot = lambda: (('not-secret-in-log', module),)
     with caplog.at_level(logging.INFO, logger='hermes_cli.code_inventory_diagnostics'):
-        ledger._inventory_modules()
+        ledger._lock = threading.RLock()
+        with diagnostics.InventoryObservation(ledger) as timer:
+            ledger._inventory_modules(diagnostics=timer)
     assert ledger._modules == {('not-secret-in-log', id(module)): (module, module.__file__)}
     assert ledger._generation == 1
     rows = [r for r in caplog.records if r.name == 'hermes_cli.code_inventory_diagnostics']
@@ -71,7 +74,9 @@ def test_actual_operations_have_distinct_wall_cpu_totals(tmp_path, monkeypatch, 
 
         monkeypatch.setattr(target, name, delayed)
     with caplog.at_level(logging.INFO, logger=diagnostics.__name__):
-        ledger._inventory_modules()
+        ledger._lock = threading.RLock()
+        with diagnostics.InventoryObservation(ledger) as timer:
+            ledger._inventory_modules(diagnostics=timer)
     row = next(r for r in caplog.records if r.name == diagnostics.__name__)
     assert row.args[2:6] == (10_000_000_000, 1, 12000.0, 600.0)
     assert row.args[-1] == {'resolve': (1, 3000.0, 100.0), 'owner': (1, 4000.0, 200.0),
