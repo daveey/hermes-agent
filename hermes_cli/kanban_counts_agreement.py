@@ -33,10 +33,13 @@ _foreground_deadline: ContextVar[float | None] = ContextVar("count_agreement_dea
 def foreground_counts():
     """Finite readers cannot rely on a passive callback after returning/printing.
 
-    Share one 30s count-wait budget across a refresh's fence retries, and return unknown
-    on exhaustion/errors as usual. Live controls keep their 1s bound and deferred retry.
-    This context is per refresh, not a process-global change to interactive workers.
+    Share one 30s count-wait budget across a finite reader's rows and fence retries,
+    returning unknown on exhaustion/errors. Live controls keep their 1s/deferred retry.
+    Nested refreshes retain their reader's deadline; interactive workers are unchanged.
     """
+    if _foreground_deadline.get() is not None:
+        yield
+        return
     token = _foreground_deadline.set(time.monotonic() + FOREGROUND_WAIT_S)
     try:
         yield

@@ -118,3 +118,52 @@ def test_foreground_budget_is_shared_and_never_registers_a_late_callback(monkeyp
     with pytest.raises(ValueError), agreement.foreground_counts():
         raise ValueError("consumer failed")
     assert agreement._foreground_deadline.get() is None
+
+
+@pytest.mark.parametrize("failing_row", [False, True])
+def test_audit_shares_one_count_wait_deadline_across_rows(monkeypatch, failing_row):
+    from types import SimpleNamespace
+    import hermes_state_outcome as so
+    from hermes_cli import kanban_counts_agreement as agreement
+    from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli import sessions_cmd_outcome as cli
+
+    clock = [100.0]
+    waits, deadlines = [], []
+
+    def cold():
+        raise agreement.CountsPending("held source")
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    flight = agreement._Flight()
+    flight.done = SimpleNamespace(wait=wait, is_set=lambda: False)
+    monkeypatch.setattr(agreement, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(agreement, "fresh_open_counts", cold)
+    monkeypatch.setattr(agreement, "_flights", {("fixture",): flight})
+    monkeypatch.setattr(ksa, "_origin_scope", lambda: ("fixture",))
+    monkeypatch.setattr(cli, "ensure_outcome_hooks", lambda: None)
+    monkeypatch.setattr(cli, "sidebar_rows", lambda *a: [{"id": str(i)} for i in range(3)])
+
+    def refresh(sid, *a, **kw):
+        deadlines.append(agreement._foreground_deadline.get())
+        with pytest.raises(agreement.CountsPending):
+            agreement.agreed_counts(on_published=lambda: pytest.fail("late refresh"))
+        if failing_row and sid == "1":
+            raise ValueError("row failed")
+        return {"kind": "unresolved", "reason": "card_read_failed"}
+
+    monkeypatch.setattr(so, "refresh_outcome", refresh)
+    if failing_row:
+        with pytest.raises(ValueError, match="row failed"):
+            cli.audit_rows(None, refresh=True)
+    else:
+        rows = cli.audit_rows(None, refresh=True)
+        assert [row["reason"] for row in rows] == ["card_read_failed"] * 3
+    count = 2 if failing_row else 3
+    assert deadlines == [130.0] * count
+    assert waits == [30.0] + [0.0] * (count - 1)
+    assert not flight.callbacks
+    assert agreement._foreground_deadline.get() is None

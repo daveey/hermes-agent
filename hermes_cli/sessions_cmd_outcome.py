@@ -152,6 +152,14 @@ def _done_named(ids: list[str], sid: str, cron_items, watch_items) -> list[tuple
 
 def audit_rows(db, *, refresh: bool = False, limit: int = AUDIT_DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """``{id, title, kind, reason, age_h, on, items}`` per sidebar row (``age_h`` = hours since last activity)."""
+    from contextlib import nullcontext
+    from hermes_cli.kanban_counts_agreement import foreground_counts
+
+    with foreground_counts() if refresh else nullcontext():
+        return _audit_rows(db, refresh=refresh, limit=limit)
+
+
+def _audit_rows(db, *, refresh: bool, limit: int) -> list[dict[str, Any]]:
     from hermes_state_outcome import _cron_items, _lineage_ids, _watch_items
 
     if refresh:
