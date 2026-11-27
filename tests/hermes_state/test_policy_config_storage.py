@@ -289,6 +289,13 @@ def test_conflicting_inline_and_reference_custody_cannot_be_retired(conn):
     assert conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall() == before
 
 
+@pytest.mark.parametrize('digest', [1, {}, [], True])
+def test_store_refuses_non_string_reference_as_typed_error(conn, digest):
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        store_receipt(conn, 'one', {'policy': {'config_ref_v1': digest}})
+    assert conn.execute('SELECT * FROM state_meta').fetchall() == []
+
+
 def test_transaction_decode_missing_blob_is_typed_storage_failure(conn):
     from hermes_state_policy_config import decode_receipt
     store_receipt(conn, 'one', receipt(), intern=True)
