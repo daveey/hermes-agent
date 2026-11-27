@@ -11,6 +11,7 @@ import json
 
 def checkpoint_items(registry, owner, known):
     from tools.environments.sandbox_scope import sandbox_visible
+    from tools.process_display import display_command
     from tools.process_registry import _checkpoint_path
     from tools.process_registry_results import _owns_result
 
@@ -40,5 +41,5 @@ def checkpoint_items(registry, owner, known):
         if registry._detached_host_fate(host_pid, birth) != 'running':
             raise ValueError('process checkpoint missing completion evidence')
         items.append({'kind': 'process', 'id': f'process:{pid}', 'state': 'running',
-                      'label': str(entry.get('command') or pid)[:120], 'at': 0.0})
+                      'label': (display_command(entry.get('command')).strip() or pid)[:120], 'at': 0.0})
     return items

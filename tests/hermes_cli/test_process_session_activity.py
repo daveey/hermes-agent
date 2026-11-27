@@ -151,3 +151,62 @@ def test_stop_endpoint(home, sleeper):
 
     assert res.status_code == 200 and res.json()["status"] == "killed"
     assert live.wait(timeout=5) is not None
+
+
+# Exactly what hermes-mods' kanban-worker-nice terminal_request middleware prefixes on protected Linux hosts.
+NICE_PREAMBLE = ('# kanban-worker-nice terminal floor\n'
+                 'if [ "$(nice)" -lt 10 ]; then renice -n 10 -p "${BASHPID:-$$}" >/dev/null || exit $?; fi\n')
+
+
+def test_process_labels_drop_injected_nice_preamble(home, sleeper):
+    """Chat 20261127_202849_4c4281: two ``bb-land --wait`` rows read ``# kanban-worker-nice terminal floor if ...``."""
+    import tools.process_registry as pr
+    from hermes_state_outcome import _process_items
+
+    a, b = sleeper(), sleeper()
+    (home / "processes.json").write_text(json.dumps([
+        {**_entry("proc_land", a.pid, session_key="s_w"), "command": NICE_PREAMBLE + "bb-land --wait 858",
+         "started_at": 100.0},
+    ]))
+    pr.process_registry._running["proc_mem"] = ProcessSession(
+        id="proc_mem", command=NICE_PREAMBLE + "cd /repo && gh pr checks 858 --watch", task_id="default",
+        session_key="s_w", pid=b.pid, host_start_time=ProcessRegistry._safe_host_start_time(b.pid), started_at=200.0)
+    rows = [{"id": "s_w"}]
+
+    psa.annotate_background_activity(rows)
+
+    assert [p["command"] for p in rows[0]["background_processes"]] == [
+        "bb-land --wait 858", "cd /repo && gh pr checks 858 --watch"]
+    psa._reset_cache_for_tests()
+    assert sorted(i["label"] for i in _process_items("s_w", ["s_w"])) == [
+        "bb-land --wait 858", "cd /repo && gh pr checks 858 --watch"]
+
+
+def test_process_labels_keep_agent_comments_and_unprefixed_commands(home, sleeper):
+    a, b, c = sleeper(), sleeper(), sleeper()
+    (home / "processes.json").write_text(json.dumps([
+        {**_entry("proc_a", a.pid, session_key="s_w"), "command": "# my note\nsleep 600", "started_at": 1.0},
+        {**_entry("proc_b", b.pid, session_key="s_w"), "command": "echo '# kanban-worker-nice terminal floor'",
+         "started_at": 2.0},
+        {**_entry("proc_c", c.pid, session_key="s_w"), "command": NICE_PREAMBLE, "started_at": 3.0},
+    ]))
+    rows = [{"id": "s_w"}]
+
+    psa.annotate_background_activity(rows)
+
+    assert [p["command"] for p in rows[0]["background_processes"]] == [
+        "# my note sleep 600", "echo '# kanban-worker-nice terminal floor'", "background process"]
+
+
+def test_foreign_checkpoint_outcome_label_drops_injected_nice_preamble(home, sleeper):
+    """refresh_outcome's foreign-checkpoint items label the same way as the sidebar's."""
+    from hermes_state_process_checkpoint import checkpoint_items
+
+    live = sleeper()
+    (home / "processes.json").write_text(json.dumps([
+        {**_entry("proc_land", live.pid, parent_session_id="s_w"), "command": NICE_PREAMBLE + "bb-land --wait 858"},
+        {**_entry("proc_bare", live.pid, parent_session_id="s_w"), "command": NICE_PREAMBLE},
+    ]))
+    registry = type("R", (), {"_detached_host_fate": staticmethod(lambda pid, birth: "running")})
+
+    assert [i["label"] for i in checkpoint_items(registry, "s_w", set())] == ["bb-land --wait 858", "proc_bare"]

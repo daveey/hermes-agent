@@ -91,7 +91,9 @@ def _live(pid: Any, start: Any) -> bool:
 
 
 def _detail(proc_id: str, command: Any, started_at: Any, pid: Any) -> dict[str, Any]:
-    text = " ".join(str(command or "").split())
+    from tools.process_display import display_command
+
+    text = " ".join(display_command(command).split())
     try:
         from agent.redact import redact_sensitive_text
 
