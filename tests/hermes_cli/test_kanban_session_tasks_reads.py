@@ -236,7 +236,12 @@ def _reference(selected, ledger, *, gateway, profile, ids, statuses, placeholder
 def test_preserve_origin_obligations_returns_what_the_old_filter_did(monkeypatch):
     from hermes_cli import kanban_db_notify, kanban_placement
 
-    def placeholder(session):
+    snapshot = {"fixture": "placement-policy"}
+    monkeypatch.setattr(kanban_placement, "config", lambda: snapshot)
+
+    def placeholder(session, *, placement_config=None):
+        # The reference calls without a snapshot; production must forward this one.
+        assert placement_config is None or placement_config is snapshot
         return session.startswith("ph")
 
     def machine(gateway, session, *, local_gateway, profile):
