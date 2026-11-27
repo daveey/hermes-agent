@@ -27,6 +27,24 @@ def native_record(payload):
     return any(k.startswith('owner_release_') or k == 'consume_uid' for k in payload)
 
 
+def native_renewal(conn, event, payload):
+    """Retained private identity is hold-only evidence, even with public markers erased.
+
+    Do not validate receipt contents here: damaged custody must not become legacy
+    authority. Absent optional sidecars preserve ordinary pre-native schemas.
+    """
+    if native_record(payload):
+        return True
+    try:
+        for table in ('owner_release_consumption_receipts', TABLE, 'owner_release_executor_receipts'):
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                if conn.execute(f'SELECT 1 FROM {table} WHERE consume_uid=? LIMIT 1', (event.get('uid'),)).fetchone():
+                    return True
+    except sqlite3.Error:
+        return True  # Broken private schema is uncertainty, never a legacy downgrade.
+    return False
+
+
 def _sha(value):
     return hashlib.sha256(cert.encode(value).encode('ascii')).hexdigest()
 

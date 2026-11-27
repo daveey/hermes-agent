@@ -159,11 +159,32 @@ def test_native_sibling_markers_never_downgrade_to_legacy(proof, store, value):
         p['owner_release_intent_uid'] = value
     conn.execute("UPDATE task_events SET payload=? WHERE uid='consume-1'", (json.dumps(p),))
     assert renewal.covered(conn, 't_target') == frozenset()
-    # The real legacy branch remains available only without native markers.
+    # Stripping every public marker cannot erase retained private native identity.
     for key in ('owner_release_intent_uid','owner_release_digest'):
         p.pop(key, None)
     conn.execute("UPDATE task_events SET payload=? WHERE uid='consume-1'", (json.dumps(p),))
+    assert renewal.covered(conn, 't_target') == frozenset()
+    # A genuinely distinct legacy UID, not a mutated privately-certified native
+    # UID, still uses the preexisting comment authority branch.
+    conn.execute("UPDATE task_events SET uid='legacy-renewal' WHERE uid='consume-1'")
     assert renewal.covered(conn, 't_target') == frozenset({'stop-1', 'restriction-1'})
+
+
+@pytest.mark.parametrize('table', [
+    'owner_release_consumption_receipts', 'owner_release_applied_receipts', 'owner_release_executor_receipts',
+])
+@pytest.mark.parametrize('shape', ['valid', 'missing-column'])
+def test_private_native_identity_is_hold_only_even_with_damaged_receipt(table, shape):
+    with sqlite3.connect(':memory:') as conn:
+        event = {'uid': 'native-uid'}
+        assert not applied.native_renewal(conn, event, {})
+        conn.execute(f'CREATE TABLE {table} ({"consume_uid" if shape == "valid" else "unrelated"} TEXT)')
+        conn.execute(f'INSERT INTO {table} VALUES (?)', ('native-uid',))
+        assert applied.native_renewal(conn, event, {})
+        if shape == 'valid':
+            assert not applied.native_renewal(conn, {'uid': 'legacy-uid'}, {})
+        # Public native classification remains held even on a pre-native schema.
+        assert applied.native_renewal(conn, {'uid': 'other'}, {'owner_release_intent_uid': None})
 
 
 @pytest.mark.parametrize('origin', ['home', 'other', None])

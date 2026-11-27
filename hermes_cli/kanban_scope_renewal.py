@@ -110,8 +110,8 @@ def renewals(conn: sqlite3.Connection, task_id: str) -> list[dict]:
         uids = p.get("covered_restriction_uids")
         if p.get("version") != 1 or not p.get("episode") or not isinstance(uids, list):
             continue
-        from hermes_cli.kanban_release_application import native_record, verified_renewal
-        if native_record(p):
+        from hermes_cli.kanban_release_application import native_renewal, verified_renewal
+        if native_renewal(conn, event, p):
             if applied := verified_renewal(conn, event):
                 out.append({**event, 'payload': applied['payload'], 'intent_mandate': applied['mandate']})
             continue  # Never fall through to legacy comment authority.
