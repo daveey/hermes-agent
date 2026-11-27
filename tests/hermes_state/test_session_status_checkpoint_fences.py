@@ -1,5 +1,6 @@
 """Checkpoint liveness never overrides completion, owner or sandbox custody."""
 import json
+import time
 
 import pytest
 
@@ -63,7 +64,10 @@ def test_absent_checkpoint_remains_known_empty(db, tmp_path, monkeypatch):
 
 def test_unreadable_checkpoint_does_not_hide_retained_failure(db, receipts, tmp_path, monkeypatch):
     status.turn(db)
-    status.receipt(receipts, exit_code=3)
+    # A recovered current-generation failure must not become an old failure just
+    # because the filesystem rounds its implicit completion mtime before the turn.
+    since = db._read_one("SELECT MAX(timestamp) AS at FROM messages WHERE role = 'user'")["at"]
+    status.receipt(receipts, exit_code=3, at=since + 1)
     path = checkpoint(tmp_path, monkeypatch, [])
     path.write_text('{broken')
     value = status.refresh(db)
@@ -75,3 +79,29 @@ def test_unreadable_checkpoint_does_not_hide_retained_failure(db, receipts, tmp_
     recovered = status.refresh(db)
     assert recovered['kind'] == 'unresolved'
     assert recovered['failures'][0]['id'] == 'process:proc_example'
+
+
+@pytest.mark.parametrize('offset,expected', [(-0.5, 'done'), (0, 'unresolved'), (0.5, 'unresolved')])
+def test_checkpoint_recovery_respects_receipt_generation(db, receipts, tmp_path, monkeypatch, offset, expected):
+    status.turn(db)
+    # Exactly representable fractional seconds isolate the generation boundary
+    # from wall-clock scheduling and the filesystem's implicit timestamp tick.
+    since = int(time.time()) + 0.5
+    db._write_sql("UPDATE messages SET timestamp = ? WHERE role = 'user'", (since,))
+    receipt = status.receipt(receipts, exit_code=3, at=since + offset)
+    assert receipt.stat().st_mtime == since + offset
+    path = checkpoint(tmp_path, monkeypatch, [])
+    path.write_text('{broken')
+    unavailable = status.refresh(db)
+    assert unavailable['kind'] != 'done'
+    assert unavailable['coverage']['state'] == 'unknown'
+
+    path.write_text('[]')
+    recovered = status.refresh(db)
+    assert recovered['kind'] == expected
+    assert recovered['coverage']['state'] == 'complete'
+    if expected == 'unresolved':
+        assert recovered['failures'][0]['id'] == 'process:proc_example'
+    else:
+        # Only a failure strictly before this successfully completed turn clears.
+        assert recovered['failures'] == []
