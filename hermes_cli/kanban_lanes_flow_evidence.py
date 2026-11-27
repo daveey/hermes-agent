@@ -6,8 +6,33 @@ next projection. PR provider observations have a separate bounded lifecycle.
 from __future__ import annotations
 
 
+import re
+
+
+# Preserve every event that can affect flow classification, including episode
+# boundaries that consume no payload. PR/head evidence is intentionally NOT
+# restricted by kind: legacy/custom writers can attach it to any event.
+_FLOW_KINDS = (
+    'created', 'scheduled', 'continued', 'lane_gated', 'dispatch_skipped',
+    'claimed', 'spawned', 'worker_bound', 'completed', 'reopened',
+    'changes_requested', 'review_reopened', 'review_requested',
+    'unblocked', 'archived',
+)
+_PR_KEYS = ('published_pr', 'reviewed_pr', 'pr', 'flow_pr', 'head', 'head_sha', 'headRefOid')
+
+
+# A single conservative scan avoids repeated SQL instr scans over large payloads.
+# Only Unicode escapes can encode letters in these JSON keys; retain all such
+# input rather than trying to recognize escaped key spellings ourselves.
+_PR_PAYLOAD = re.compile('"(?:' + '|'.join(_PR_KEYS) + ')"')
+
+
 class Evidence:
-    """Read each card's ordered history and parent state at most once per view."""
+    """Read each card's flow-relevant history and parent state once per view.
+
+    ``events`` is projection evidence, not an unabridged audit history. Retain
+    kind-based episode boundaries and arbitrary-kind PR/head observations.
+    """
 
     def __init__(self, conn, *, rows=None):
         from hermes_cli import kanban_lanes_flow as flow
@@ -48,12 +73,35 @@ class Evidence:
             for start in range(0, len(ids), 400):
                 batch = ids[start:start + 400]
                 marks = ','.join('?' for _ in batch)
+                kinds = ','.join('?' for _ in _FLOW_KINDS)
+                # All unescaped PR keys contain 'pr'; head keys contain 'head'.
+                # This cheap SQL superset avoids materializing obvious noise.
+                # Exact key detection below also discards value-only matches.
                 events = self.conn.execute(
                     f"SELECT task_id, id, kind, payload FROM task_events "
-                    f"WHERE task_id IN ({marks}) ORDER BY task_id, id", batch).fetchall()
+                    f"WHERE task_id IN ({marks}) AND (kind IN ({kinds}) "
+                    "OR instr(payload, 'pr') > 0 OR instr(payload, 'head') > 0 "
+                    "OR instr(payload, ?) > 0) ORDER BY task_id, id",
+                    (*batch, *_FLOW_KINDS, '\\u')).fetchall()
+                # Only the first creation and newest occurrence of each flow
+                # kind can affect classification. Never compact PR/head-bearing
+                # observations: their per-field updates are applied in order.
+                latest = {}
                 for event in events:
-                    loaded[event['task_id']].append(
-                        {"id": event["id"], "kind": event["kind"], "payload": flow._payload(dict(event))})
+                    raw = event['payload']
+                    has_pr = isinstance(raw, str) and ('\\u' in raw or _PR_PAYLOAD.search(raw))
+                    if event['kind'] in _FLOW_KINDS and not has_pr:
+                        key = (event['task_id'], event['kind'])
+                        if event['kind'] != 'created' or key not in latest:
+                            latest[key] = event
+                    elif has_pr:
+                        loaded[event['task_id']].append(event)
+                for event in latest.values():
+                    loaded[event['task_id']].append(event)
+            for tid, history in loaded.items():
+                loaded[tid] = [
+                    {'id': e['id'], 'kind': e['kind'], 'payload': flow._payload(dict(e))}
+                    for e in sorted(history, key=lambda e: e['id'])]
             # A failed batch must not leave a partially populated view.
             self._events.update(loaded)
         return self._events[task_id]

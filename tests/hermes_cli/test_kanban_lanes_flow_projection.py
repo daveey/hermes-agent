@@ -86,10 +86,10 @@ def test_shared_evidence_preserves_legacy_card_semantics(conn, configured, statu
     legacy = flow._card_from_row(conn, row, 1000, Published(), pol)
     evidence = flow.Evidence(conn)
     shared = flow._card_from_row(conn, row, 1000, Published(), pol, evidence=evidence)
-    # Decoding is an internal representation change, not a classifier change.
-    for card in (legacy, shared):
-        card['events'] = [{'kind': e['kind'], 'payload': flow._payload(e)} for e in card['events']]
-    assert shared == legacy
+    # Histories are an internal projection input, not report output. Filtering
+    # noise must preserve every derived field and classifier result.
+    assert {k: v for k, v in shared.items() if k != 'events'} == {
+        k: v for k, v in legacy.items() if k != 'events'}
     assert flow.classify_step(shared) == flow.classify_step(legacy)
     assert flow.classify_reason(shared, flow.classify_step(shared)) == flow.classify_reason(legacy, flow.classify_step(legacy))
     assert flow.classify_source(shared) == flow.classify_source(legacy)

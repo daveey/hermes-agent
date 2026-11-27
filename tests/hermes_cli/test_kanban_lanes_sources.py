@@ -72,7 +72,7 @@ def test_child_source_owns_empty_edges_parent_status_and_history(copies, configu
     chosen = Sources(live, fleet)
     assert chosen.parents('child') == []
     live.execute("INSERT INTO task_links(parent_id,child_id) VALUES('parent','child')")
-    live.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES('child','commented','{}',100)")
+    live.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES('child','created','{}',100)")
     chosen = Sources(live, fleet)
     assert chosen.parents('child') == [('parent', 'ready')]
     assert len(chosen.events('child')) == 1
