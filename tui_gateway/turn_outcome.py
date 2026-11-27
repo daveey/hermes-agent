@@ -12,7 +12,7 @@ import threading
 from typing import Optional
 
 _start_refresh_lock = threading.Lock()
-_start_refresh_pending: set[tuple[str, str]] = set()
+_start_refresh_pending: dict[tuple[str, str], dict] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -77,26 +77,38 @@ def refresh_turn_start_outcome(session: dict, agent=None) -> None:
 
     snapshot = session.copy()
     home = server._session_home(snapshot)
-    snapshot["profile_home"] = str(home)
+    # None/absent means launch profile: do not turn it into a foreign-home scope.
     key = (str(home), sid)
     with _start_refresh_lock:
-        if key in _start_refresh_pending:
+        if pending := _start_refresh_pending.get(key):
+            pending.update(snapshot=snapshot, dirty=True)
             return
-        _start_refresh_pending.add(key)
+        pending = {"snapshot": snapshot, "dirty": False}
+        _start_refresh_pending[key] = pending
 
     def publish():
         try:
-            _refresh_session_outcome(snapshot, sid, "turn_start", frozenset())
+            while True:
+                with _start_refresh_lock:
+                    current = pending["snapshot"]
+                    pending["dirty"] = False
+                _refresh_session_outcome(current, sid, "turn_start", frozenset())
+                with _start_refresh_lock:
+                    if not pending["dirty"]:
+                        del _start_refresh_pending[key]
+                        return
         finally:
             with _start_refresh_lock:
-                _start_refresh_pending.discard(key)
+                if _start_refresh_pending.get(key) is pending:
+                    del _start_refresh_pending[key]
 
     try:
         TrackedThread(target=publish, name="turn-start-outcome", daemon=True,
                       home=home, source="tui.turn_start_outcome").start()
     except Exception:  # health: allow BLE001 -- rejected background admission must not abort the prompt
         with _start_refresh_lock:
-            _start_refresh_pending.discard(key)
+            if _start_refresh_pending.get(key) is pending:
+                del _start_refresh_pending[key]
         logger.warning("turn_start outcome scheduling failed for %s", sid, exc_info=True)
 
 

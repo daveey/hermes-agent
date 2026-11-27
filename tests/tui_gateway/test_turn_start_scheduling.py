@@ -33,8 +33,8 @@ def test_start_refresh_coalesces_and_freezes_profile_and_sid(monkeypatch, tmp_pa
         agent.session_id = "replacement"
         for publish in queued[:]:
             publish()
-        assert calls == [(str(home), ("admitted", "turn_start", frozenset())),
-                         (str(session["profile_home"]), ("admitted", "turn_start", frozenset()))]
+        assert calls == [(home, ("admitted", "turn_start", frozenset())),
+                         (session["profile_home"], ("admitted", "turn_start", frozenset()))]
         turn_outcome.refresh_turn_start_outcome(session, agent)
         assert len(queued) == 3
         queued[-1]()
