@@ -167,6 +167,26 @@ hides the old mandate without removing historical coverage; restricted accountin
 floor remains cumulative. Decided-triage maintenance never reuses an application
 renewal as permission for another placement.
 
+Marker erasure cannot downgrade a **retained private release-effect UID** to legacy
+HOME/comment authority. The local release and actionability readers inspect only
+exact direct UIDs in the same task's immutable HOME `effects` or executor `events`
+envelope; receipt validity is not required to deny fallback. Public UID mentions,
+notes, other-task evidence and consumption-only receipts do not classify a release.
+Optional absent schemas preserve legacy compatibility; malformed same-task custody
+holds conservatively. The scan permits at most 64 envelopes, each within its existing
+2 MiB HOME / 4 MiB executor cap, and 35 HOME / 38 executor effects; overflow holds,
+never truncates to permission. These resource limits may hold a genuine legacy
+release following unusually large or damaged native history. They do not establish
+indexed executor lookup or amortized diagnostic performance.
+
+Consumption alone has no release-effect identity. An already damaged/imported store
+without retained effect-bearing custody can make an erased native release
+indistinguishable from a genuine later legacy operator release. This correction does
+**not** resolve that integrity boundary or authorize reconstructing receipts. Native
+assembly/materialization writes effects and APPLIED atomically; ordinary canonical
+immutable-row ingress remains required. Historical/defensive reader tests are not
+proof of an admitted production attack or a deployed recovery.
+
 ### Atomic local assembler (not yet connected to production queue)
 
 `kanban_release_assemble.apply` now exercises ONE real application transaction:

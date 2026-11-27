@@ -307,9 +307,9 @@ def _private_reason(conn, task, reader) -> str | None:
             origins.add(None)
     else:
         origins = {None, ''}
-    from hermes_cli.kanban_release_application import native_record, verified_release
+    from hermes_cli.kanban_release_application import native_release, verified_release
     releases = frozenset(key(row) for row in rows if row['kind'] == 'stop_released' and (
-        verified_release(Rows(conn), row) is not None if native_record(record(row['payload']))
+        verified_release(Rows(conn), row) is not None if native_release(Rows(conn), row, record(row['payload']))
         else row.get('origin_gateway') in origins))
     return held(task['status'], events, verified_cover=verified, verified_releases=releases)
 

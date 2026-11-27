@@ -238,8 +238,8 @@ def _release_event(conn: sqlite3.Connection, tid: str) -> Optional[dict]:
     if row is None or (stop is not None and _event_order(row) <= _event_order(stop)):
         return None
     payload = _payload(row["payload"])
-    from hermes_cli.kanban_release_application import native_record, verified_release
-    if native_record(payload) and verified_release(conn, row) is None:
+    from hermes_cli.kanban_release_application import native_release, verified_release
+    if native_release(conn, row, payload) and verified_release(conn, row) is None:
         return None  # Every release consumer, including already-released replay, needs APPLIED.
     return {**payload, "_id": row["id"]} if payload.get("version") == 1 else None
 

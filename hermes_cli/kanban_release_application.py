@@ -45,6 +45,41 @@ def native_renewal(conn, event, payload):
     return False
 
 
+def native_release(conn, event, payload):
+    """Retained private effect UIDs prevent legacy downgrade; never grant authority.
+
+    Consumption alone records no release-effect UID. Do not turn an unfinished
+    consume (or a public mention of a UID) into a veto of genuine legacy releases.
+    Damaged same-task private custody is uncertainty, not legacy permission.
+    """
+    if native_record(payload):
+        return True
+    from hermes_cli import kanban_release_public as public
+    try:
+        for table, field, cap, count in ((TABLE, 'effects', cert.MAX_BYTES, 35),
+                                         ('owner_release_executor_receipts', 'events', public.MAX_BYTES, 38)):
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                continue
+            # Bound bytes before transfer/decoding, and the whole per-task scan.
+            rows = conn.execute(f"SELECT CASE WHEN typeof(evidence)='text' AND length(CAST(evidence AS BLOB))<=? "
+                                f'THEN evidence END FROM {table} WHERE task_id=? LIMIT 65',
+                                (cap, event.get('task_id'))).fetchall()
+            if len(rows) > 64:
+                return True
+            for row in rows:
+                effects = cert.parse(row[0], max_bytes=cap).get(field)
+                if not isinstance(effects, list) or not effects or len(effects) > count:
+                    return True
+                for effect in effects:
+                    if not isinstance(effect, dict) or not isinstance(effect.get('uid'), str):
+                        return True
+                    if effect['uid'] == event.get('uid'):
+                        return True
+    except (sqlite3.Error, TypeError, ValueError, UnicodeError, RecursionError):
+        return True
+    return False
+
+
 def _sha(value):
     return hashlib.sha256(cert.encode(value).encode('ascii')).hexdigest()
 

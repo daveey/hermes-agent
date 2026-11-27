@@ -198,6 +198,45 @@ def test_public_capability_release_needs_applied_even_at_home(proof, store, orig
     assert _private_reason(conn, task, Reader(conn)) == 'restriction_unattributable'
 
 
+@pytest.mark.parametrize('custody', ['home', 'executor'])
+def test_erased_native_release_keeps_retained_private_identity(proof, store, custody):
+    from hermes_cli.kanban_actionability_sources import Reader, _private_reason
+    conn, _ = store
+    result = prepare(conn, proof)
+    helpers.record(conn, result)
+    if custody == 'executor':
+        # Defensive damaged-import fixture: retain the same frozen effect UIDs in
+        # the executor envelope, not an authenticated foreign certification proof.
+        evidence = json.loads(conn.execute(f'SELECT evidence FROM {applied.TABLE}').fetchone()[0])
+        conn.execute('CREATE TABLE owner_release_executor_receipts(task_id TEXT,evidence TEXT)')
+        conn.execute('INSERT INTO owner_release_executor_receipts VALUES (?,?)',
+                     ('t_target', json.dumps({'events': evidence['effects']})))
+        conn.execute(f'DROP TABLE {applied.TABLE}')
+    # Deliberately damaged imported history, not ordinary Board mutable ingress.
+    # Keep the immutable private effect identities, but erase every public native
+    # marker and supply coherent legacy mandate bindings at HOME.
+    body = 'A real legacy comment cannot authorize an erased native release'
+    conn.execute("INSERT INTO task_comments VALUES (1,'comment-1','t_target',?)", (body,))
+    for event in conn.execute("SELECT uid,payload FROM task_events WHERE kind='stop_released'").fetchall():
+        payload = json.loads(event['payload'])
+        payload = {k: v for k, v in payload.items() if not k.startswith('owner_release_') and k != 'consume_uid'}
+        payload['mandate_comment_uid'] = 'comment-1'
+        conn.execute('UPDATE task_events SET payload=? WHERE uid=?', (json.dumps(payload), event['uid']))
+    # Isolate the old capability rather than masking it with a still-held scope.
+    conn.execute("DELETE FROM task_events WHERE uid IN ('stop-1','restriction-1','consume-1')")
+    assert applied.verified_application(conn, 'intent-1') is None
+    assert release._release_event(conn, 't_target') is None
+    assert release.current_mandate(conn, 't_target') is None
+    task = dict(conn.execute('SELECT * FROM tasks').fetchone())
+    assert _private_reason(conn, task, Reader(conn)) == 'restriction_unattributable'
+    # Distinct genuine legacy release UIDs remain compatible despite unrelated
+    # retained private native custody for the same task.
+    conn.execute("UPDATE task_events SET uid='legacy-'||uid WHERE kind='stop_released'")
+    assert release._release_event(conn, 't_target') is not None
+    assert release.current_mandate(conn, 't_target')['body'] == body
+    assert _private_reason(conn, task, Reader(conn)) is None
+
+
 def test_applied_never_authorizes_a_later_triage_repair(proof, store, monkeypatch):
     from hermes_cli import kanban_decided_triage as maintenance
     from hermes_cli import kanban_containment_guard, kanban_goal_recovery, kanban_resume_requester, kanban_wake_check
