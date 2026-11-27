@@ -72,6 +72,13 @@ class HubRoutesMixin:
         return self._call("GET", f"/v2/boards/{quote(board, safe='')}/reviewer-allowance?"
                           + urlencode({"task": task}), max_response_bytes=8192)
 
+    def home_transfer_capability(self, board: str) -> dict:
+        """Read-only protocol preflight; absence never authorizes local preparation."""
+        from urllib.parse import quote
+
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/home-transfer/capability",
+                          max_response_bytes=8192)
+
     def home_transfer(self, board: str, body: dict) -> dict:
         """Cooperative handoff; exact tuple/phase retry, never legacy rehome fallback."""
         from urllib.parse import quote

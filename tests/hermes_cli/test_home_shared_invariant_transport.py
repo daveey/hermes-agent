@@ -5,6 +5,7 @@ from tests.hermes_cli import test_home_review_contracts as contracts
 from tests.hermes_cli import test_review_daily_transfer as daily
 from tests.hermes_cli import test_home_feed_entrypoints as entry_cases
 from tests.hermes_cli import test_review_home_feed_isolation as feed_review
+from tests.hermes_cli import test_home_owner_preflight as owner_preflight
 from tests.hermes_cli import test_home_label_presend as presend
 from tests.hermes_cli import test_home_quarantine_custody as quarantine_cases
 from tests.hermes_cli import test_home_release_landing_race as release_landing
@@ -17,6 +18,11 @@ live = contracts.live
 conn = daily.conn
 configured = daily.configured
 person = daily.person
+
+test_unavailable_protocol_never_prepares_or_sends = owner_preflight.test_unavailable_protocol_never_prepares_or_sends
+test_capable_peer_sees_committed_freeze_and_exact_tuple_retries = owner_preflight.test_capable_peer_sees_committed_freeze_and_exact_tuple_retries
+test_after_prepare_unknown_response_never_unfreezes = owner_preflight.test_after_prepare_unknown_response_never_unfreezes
+test_capability_is_not_reused_for_later_new_preparation = owner_preflight.test_capability_is_not_reused_for_later_new_preparation
 
 test_conflicting_protected_row_preserves_healthy_peer = quarantine_cases.test_conflicting_protected_row_preserves_healthy_peer
 test_quarantine_closure_races_preserve_custody = quarantine_cases.test_quarantine_closure_races_preserve_custody

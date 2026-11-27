@@ -45,8 +45,15 @@ def source_step(conn, hub: Hub, board: str, identity: dict) -> dict:
     fresh nonce, local rollback of already committed protocol or lease repair.
     """
     identity = _identity(conn, hub, board, identity, "source")
+    args = {k: v for k, v in identity.items() if k != "task"}
+    source.validate_identity(identity["task"], **args)
+    # No protocol bytes have left yet: an absent/rolled-back Board must leave
+    # ordinary local work writable. Never infer release after a mutation send.
+    cap = hub.home_transfer_capability(board)
+    if not isinstance(cap, dict) or type(cap.get("home_transfer")) is not int or cap["home_transfer"] != 1:
+        raise ValueError("Board home-transfer capability v1 required before local preparation")
     with dbc.write_txn(conn):
-        source.prepare(conn, identity["task"], **{k:v for k,v in identity.items() if k != "task"})
+        source.prepare(conn, identity["task"], **args)
     record = _advance(hub, board, identity, "prepare")
     if record["phase"] == "prepared":
         record = _advance(hub, board, identity, "commit")

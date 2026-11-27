@@ -156,6 +156,18 @@ def _install(conn: sqlite3.Connection) -> None:
     installed_first(conn, first)
 
 
+def validate_identity(task_id: str, *, source: str, destination: str,
+                      nonce: str, expected_version: int) -> dict:
+    """Validate the supported tuple without schema, task or network effects."""
+    if (not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", task_id)
+            or not isinstance(source, str) or not _SOURCE.fullmatch(source)
+            or destination != 'hub' or not isinstance(nonce, str) or not _NONCE.fullmatch(nonce)
+            or type(expected_version) is not int or expected_version < 1):
+        raise ValueError("invalid home preparation identity")
+    return dict(task_id=task_id, source=source, destination=destination,
+                nonce=nonce, expected_version=expected_version)
+
+
 def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination: str,
             nonce: str, expected_version: int) -> dict:
     """Fence one idle local task inside the caller's write transaction.
@@ -171,13 +183,8 @@ def prepare(conn: sqlite3.Connection, task_id: str, *, source: str, destination:
     """
     if not conn.in_transaction:
         raise ValueError("home preparation requires a write transaction")
-    if (not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", task_id)
-            or not isinstance(source, str) or not _SOURCE.fullmatch(source)
-            or destination != 'hub' or not isinstance(nonce, str) or not _NONCE.fullmatch(nonce)
-            or type(expected_version) is not int or expected_version < 1):
-        raise ValueError("invalid home preparation identity")
-    record = dict(task_id=task_id, source=source, destination=destination,
-                  nonce=nonce, expected_version=expected_version)
+    record = validate_identity(task_id, source=source, destination=destination,
+                               nonce=nonce, expected_version=expected_version)
     conn.execute("SAVEPOINT home_prepare")
     try:
         _install(conn)
