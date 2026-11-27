@@ -217,18 +217,14 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "workers' context."
         )),
         "metadata": {**_prop("object", (
-                "Free-form dict of structured facts about this "
-                "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
-                "\"findings\": [...]}. Surfaced to downstream "
-                "workers alongside ``summary``."
+                "Structured attempt facts, e.g. changed_files, tests_run, findings; surfaced downstream with summary."
         )), "properties": {
             "completion_receipt": _completion_receipt_schema(),
             "acceptance_continuations": {
                 "type": "object", "additionalProperties": False,
-                "description": "Optional explicit attestation: these never-run created children are REQUIRED to finish "
-                               "this card's original acceptance, not improvements. Copy source_body_sha256 from this "
-                               "card's immutable created event; body must be unchanged. Only owned claimed-run completion "
-                               "admits it. Planner rechecks unchanged scope, dependencies, holds and existing lane budgets.",
+                "description": "Required never-run original-acceptance children only, not improvements. Owned claimed-run attestation, not "
+                               "inferred authority. Copy source_body_sha256 from immutable creation; body must be unchanged. "
+                               "Planner rechecks scope, dependencies, holds and lane budgets.",
                 "required": ["version", "source_body_sha256", "items"],
                 "properties": {
                     "version": {"type": "integer", "enum": [1]},
@@ -236,7 +232,7 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                     "items": {"type": "array", "minItems": 1, "maxItems": 16, "items": {
                         "type": "object", "additionalProperties": False, "required": ["card", "criterion"],
                         "properties": {"card": {"type": "string"}, "criterion": {
-                            "type": "string", "minLength": 16, "maxLength": 2000,
+                            "type": "string", "minLength": 16,  # Writer enforces 2000; llama.cpp rejects bounds >=2000.
                             "description": "Verbatim original acceptance criterion. This is executor attestation, not inferred authority."}}}},
                 },
             },
@@ -254,42 +250,25 @@ KANBAN_COMPLETE_SCHEMA = _schema(
             "contract_waiver": {"description": "Absent-check waiver: an object with reason, or a reason string."},
         }},
         "result": _prop("string", (
-                "Short result log line (legacy field, maps to "
-                "task.result). Use ``summary`` instead when "
-                "possible; this exists for compatibility with "
-                "callers that still set --result on the CLI."
+                "Legacy task.result log line. Prefer summary."
         )),
         "created_cards": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Optional structured manifest of task ids you "
-                "created via ``kanban_create`` during this run. "
-                "The kernel verifies each id exists and was "
-                "created by this worker's profile; any phantom "
-                "id blocks the completion with an error listing "
-                "what went wrong (auditable in the task's events). "
-                "Only list ids you got back from a successful "
-                "``kanban_create`` call — do not invent or "
-                "remember ids from prose. Omit the field if you "
-                "did not create any cards."
+                "IDs returned by successful kanban_create calls this run, never invented or copied from prose. "
+                "The kernel verifies existence and creator profile; phantom IDs refuse completion with audited errors. "
+                "Omit if none."
             ),
         },
         "artifacts": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Optional absolute paths to deliverables produced this run "
-                "(charts, PDFs, spreadsheets, images, archives), not intermediate "
-                "files. The notifier sends native attachments to the subscribed "
-                "chat with the completion notice. Completion records the executing "
-                "machine, path and SHA256. Existing files up to 25 MB are "
-                "copied to card attachments and replicated to the home board; "
-                "larger scratch files are retained on the executing machine. "
-                "Missing paths (including scratch paths) produce visible "
-                "receipt warnings, not successful file-delivery claims. "
-                "Failures preserving existing scratch bytes keep the task "
-                "in-flight. Native chat uploads depend on local byte availability."
+                "Absolute deliverable paths (not intermediates) for native chat attachments. Completion records host, "
+                "path and SHA256. Existing files <=25 MB are copied to card attachments and replicated home; larger "
+                "scratch files remain on the executing host. Missing paths yield visible receipt warnings, not delivery "
+                "claims. Failed preservation keeps the task in-flight. Native uploads require local bytes."
             ),
         },
     },
