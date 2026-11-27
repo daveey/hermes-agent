@@ -16,17 +16,26 @@ def _dict(raw) -> dict:
     return raw if isinstance(raw, dict) else kb._json_dict(raw)
 
 
+# [daveey] The board's retained-run overlay shares this NULL-ness read set and the
+# [daveey] P2-marked preconditions below. Extend both contracts before reading other bookkeeping.
+UNUSED_GRANT_BOOKKEEPING = ("worker_pid", "worker_started_at", "last_heartbeat_at", "claim_lock")
+
+
+def unused_grant_candidate(run) -> bool:
+    """[daveey] P2-marked preconditions only; stable for a clean retained run."""
+    if (_get(run, "status") not in (None, "released") or _get(run, "outcome") != "released"
+            or _get(run, "ended_at") is None or _get(run, "summary") or _get(run, "error")):
+        return False
+    metadata = _dict(_get(run, "metadata"))
+    return set(metadata) == {"unused_grant"} and metadata.get("unused_grant") is True
+
+
 def unused_grant_run(run, events) -> bool:
     """Pure core of :func:`is_unused_grant`: ``run`` (row or dict) and ``events`` (that run's events, each with
     ``kind`` and ``payload`` as dict or JSON text) show a bare Board grant/release and nothing else."""
-    metadata = _dict(_get(run, "metadata"))
-    if (_get(run, "status") not in (None, "released") or _get(run, "outcome") != "released"
-            or _get(run, "ended_at") is None or set(metadata) != {"unused_grant"}
-            or metadata.get("unused_grant") is not True):
+    if not unused_grant_candidate(run):
         return False
-    if any(_get(run, key) is not None for key in ("worker_pid", "worker_started_at", "last_heartbeat_at", "claim_lock")):
-        return False
-    if _get(run, "summary") or _get(run, "error"):
+    if any(_get(run, key) is not None for key in UNUSED_GRANT_BOOKKEEPING):
         return False
     released = False
     for event in events:

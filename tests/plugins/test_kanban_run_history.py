@@ -134,9 +134,8 @@ def test_unchanged_run_bookkeeping_keeps_decoded_rows(source):
     source.set_trace_callback(None)
     reads = [s for s in statements if 'FROM task_runs' in s]
     assert len(reads) == 1
-    from plugins.kanban.dashboard.board_event_history import ORDERED_AGGREGATES
-    # One narrow signature read: one row per task when SQLite can aggregate in id order.
-    assert reads[0].startswith('SELECT task_id, group_concat(' if ORDERED_AGGREGATES else 'SELECT task_id, id, ')
+    # [daveey] Only NULL tests for candidate IDs, never typed text over all task runs.
+    assert reads[0].startswith('SELECT id, worker_pid IS NOT NULL')
     assert got[2]['t'] is retained
     source.execute("UPDATE task_runs SET worker_pid = 42")
     got, old = refresh(source, old)
@@ -145,11 +144,124 @@ def test_unchanged_run_bookkeeping_keeps_decoded_rows(source):
     assert got[2]['t'][0]['worker_pid'] == 42
 
 
-def test_retained_run_overlay_is_type_exact(source):
-    """An equal-comparing value of another type (1 -> 1.0 in an untyped column) is still a change."""
+@pytest.mark.parametrize('column', ['claim_expires', 'sync_version', 'worker_pid'])
+def test_unread_value_changes_keep_retained_history(source, column):
+    """[daveey] Exact responses do not require exact unread bookkeeping values."""
+    source.execute('UPDATE task_runs SET worker_pid=1')
     old = memo(source)
-    for value in (1, 1.0, 1):
-        source.execute('UPDATE task_runs SET claim_expires = ?', (value,))
+    _, old = refresh(source, old)
+    retained = old['t'][4]
+    for value in (2, 3):
+        source.execute(f'UPDATE task_runs SET {column} = ?', (value,))
         got, old = refresh(source, old)
-        _, _, fresh_runs = inputs(source)
-        assert type(got[2]['t'][0]['claim_expires']) is type(fresh_runs['t'][0]['claim_expires']) is type(value)
+        assert got[2]['t'] is retained
+        _, events, runs = inputs(source)
+        task = dict(source.execute('SELECT * FROM tasks').fetchone())
+        assert kd.compute_task_diagnostics(task, got[1]['t'], list(got[2]['t']), now=9100) == (
+            kd.compute_task_diagnostics(task, events['t'], list(runs['t']), now=9100))
+
+
+@pytest.mark.parametrize('assignment', ["status='completed'", "outcome='completed'", 'ended_at=NULL',
+                                       "metadata='{}'", "summary='ran'", "error='failed'"])
+def test_non_candidates_issue_no_signature_query(source, assignment):
+    """[daveey] Ordinary historical runs cost zero SQL rows on a clean refresh."""
+    source.execute(f'UPDATE task_runs SET {assignment}')
+    old = memo(source)
+    statements = []
+    source.set_trace_callback(statements.append)
+    got, _ = refresh(source, old)
+    source.set_trace_callback(None)
+    assert not [s for s in statements if 'FROM task_runs' in s]
+    assert got[2]['t'][0] is old['t'][4][0]
+
+
+def test_unused_grant_bookkeeping_read_set(source, monkeypatch):
+    """[daveey] Observe real reads so a new excluded-column reader cannot silently drift."""
+    from hermes_cli import kanban_unused_grant as ug, kanban_activity_revision as ar
+    run = dict(source.execute('SELECT * FROM task_runs').fetchone())
+    seen = set()
+    get = ug._get
+    def record(row, key):
+        if row is run:
+            seen.add(key)
+        return get(row, key)
+    monkeypatch.setattr(ug, '_get', record)
+    assert ug.unused_grant_candidate(run)
+    assert not seen & ar.BOOKKEEPING_COLUMNS['task_runs']
+    seen.clear()
+    assert ug.unused_grant_run(run, [{'kind': 'released', 'payload': {'unused_grant': True}}])
+    assert seen & ar.BOOKKEEPING_COLUMNS['task_runs'] == set(ug.UNUSED_GRANT_BOOKKEEPING)
+
+
+def _grant(conn):
+    from hermes_cli import kanban_db as kb
+    tid = kb.create_task(conn, title='retained grant', assignee='worker')
+    conn.execute("UPDATE tasks SET status='ready', created_at=1 WHERE id=?", (tid,))
+    conn.execute('DELETE FROM task_events WHERE task_id=?', (tid,))
+    rid = conn.execute("INSERT INTO task_runs (task_id,profile,status,outcome,started_at,ended_at,metadata) "
+                       "VALUES (?,'worker','released','released',9000,9001,?)", (tid, '{"unused_grant":true}')).lastrowid
+    conn.executemany('INSERT INTO task_events (task_id,run_id,kind,payload,created_at) VALUES (?,?,?,?,?)', [
+        (tid, None, 'created', '{}', 1), (tid, rid, 'claimed', '{}', 9000),
+        (tid, rid, 'released', '{"unused_grant":true}', 9001)])
+    return tid, rid
+
+
+@pytest.mark.parametrize('mutation', ["status='completed'", "outcome='completed'", 'ended_at=NULL',
+                                      "metadata='{}'", "summary='ran'", "error='failed'", 'insert', 'delete'])
+def test_p2_run_changes_refresh_next_board_read(board, monkeypatch, mutation):
+    """[daveey] Run membership and every candidate gate are covered by real P2 triggers."""
+    from contextlib import closing
+    from hermes_cli import kanban_db_connect as kbc, kanban_task_change as ktc
+    monkeypatch.setattr(kd.time, 'time', lambda: 9100.0)
+    with closing(kbc.connect()) as conn:
+        tid, rid = _grant(conn)
+        if mutation == 'delete':
+            conn.execute('UPDATE task_runs SET worker_pid=1 WHERE id=?', (rid,))
+            conn.execute("DELETE FROM task_events WHERE task_id=? AND kind!='created'", (tid,))
+        conn.commit()
+        baseline = helpers._stable(helpers._read(board))
+        _, cursor = ktc.changed_since(conn, None)
+        if mutation == 'insert':
+            conn.execute("INSERT INTO task_runs (task_id,profile,status,outcome,started_at,ended_at) "
+                         "VALUES (?,'worker','completed','completed',9000,9002)", (tid,))
+        elif mutation == 'delete':
+            conn.execute('DELETE FROM task_runs WHERE id=?', (rid,))
+        else:
+            conn.execute(f'UPDATE task_runs SET {mutation} WHERE id=?', (rid,))
+        conn.commit()
+        changed, _ = ktc.changed_since(conn, cursor)
+        assert changed == frozenset({tid})
+        actual = helpers._stable(helpers._read(board))
+        assert actual != baseline
+        assert actual == helpers._cold(board)
+
+
+def test_clean_board_signs_only_candidate_ids_after_sync_bump(board, monkeypatch):
+    """[daveey] A clean GET must not scan ordinary runs, even on the same card as a grant."""
+    from contextlib import closing
+    from hermes_cli import kanban_db_connect as kbc, kanban_task_change as ktc
+    from plugins.kanban.dashboard import board_run_history as rh
+    from hermes_cli import kanban_db_sync, kanban_activity_revision as ar
+    monkeypatch.setattr(kd.time, 'time', lambda: 9100.0)
+    with closing(kbc.connect()) as conn:
+        kanban_db_sync.apply_sync_schema_steps(conn)
+        ar.ensure_revision(conn, ar.LOCAL_TABLES)
+        tid, rid = _grant(conn)
+        conn.executemany("INSERT INTO task_runs (task_id,profile,status,outcome,started_at,ended_at) "
+                         "VALUES (?,'worker','completed','completed',1,2)", [(tid,)] * 80)
+        conn.commit()
+        baseline = helpers._stable(helpers._read(board))
+        _, cursor = ktc.changed_since(conn, None)
+        signed = []
+        real = rh._signatures
+        def sign(conn, ids, columns):
+            signed.extend(ids)
+            return real(conn, ids, columns)
+        monkeypatch.setattr(rh, '_signatures', sign)
+        conn.execute('UPDATE task_runs SET sync_version=COALESCE(sync_version,0)+1 WHERE task_id=?', (tid,))
+        conn.commit()
+        changed, _ = ktc.changed_since(conn, cursor)
+        assert changed == frozenset()
+        actual = helpers._stable(helpers._read(board))
+        assert signed == [rid]
+        assert actual == baseline == helpers._cold(board)

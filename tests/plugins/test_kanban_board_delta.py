@@ -294,7 +294,8 @@ def test_done_heartbeat_without_a_mark_refreshes_rows_events_and_runs(conn):
     held = next(r for r in rows["diag_inputs"][0] if r["id"] == tid)
     assert held["last_heartbeat_at"] == 999
     assert rows["diag_inputs"][1][tid][-1]["kind"] == "heartbeat"
-    assert rows["diag_inputs"][2][tid][-1]["last_heartbeat_at"] == 999
+    # [daveey] Non-grants retain unread run bookkeeping; payload parity below is the contract.
+    assert rows["diag_inputs"][2][tid][-1]["last_heartbeat_at"] is None
     _same(board)
 
 

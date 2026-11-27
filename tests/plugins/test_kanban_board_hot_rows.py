@@ -207,19 +207,17 @@ def runs_source():
     conn.close()
 
 
-@needs_ordered
-def test_run_signatures_return_one_row_per_task(runs_source):
+def test_run_signatures_return_only_candidate_nullness(runs_source):
     statements = []
     runs_source.set_trace_callback(statements.append)
-    sigs = brh._signatures(runs_source, ["t0", "t1", "t2", "none"], ["claim_expires", "worker_pid"])
-    assert sorted(sigs) == ["t0", "t1", "t2"]  # 3 rows for 60 runs; a task without runs is absent
-    assert len(statements) == 1 and "GROUP BY task_id" in statements[0]
+    sigs = brh._signatures(runs_source, [21, 100], ["worker_pid"])
+    assert sigs == {21: (False,)}
+    assert len(statements) == 1 and "WHERE id IN" in statements[0]
     for value in (1.0, "20", b"20", 0.0):
-        runs_source.execute("UPDATE task_runs SET claim_expires = ? WHERE id = 21", (value,))
-        again = brh._signatures(runs_source, ["t2"], ["claim_expires", "worker_pid"])
-        assert again["t2"] != sigs["t2"], value
-    runs_source.execute("UPDATE task_runs SET claim_expires = 20 WHERE id = 21")
-    assert brh._signatures(runs_source, ["t2"], ["claim_expires", "worker_pid"]) == {"t2": sigs["t2"]}
+        runs_source.execute("UPDATE task_runs SET worker_pid = ? WHERE id = 21", (value,))
+        assert brh._signatures(runs_source, [21], ["worker_pid"]) == {21: (True,)}
+    runs_source.execute("UPDATE task_runs SET worker_pid = NULL WHERE id = 21")
+    assert brh._signatures(runs_source, [21], ["worker_pid"]) == sigs
 
 
 def test_count_polls_do_not_wait_for_a_board_build(board):

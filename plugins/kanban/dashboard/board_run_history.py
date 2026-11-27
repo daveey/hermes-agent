@@ -1,17 +1,25 @@
-"""P2-retained run snapshots with an exact per-read bookkeeping overlay."""
-import itertools
-import marshal
-import operator
+"""[daveey] P2-retained runs with response-exact, not row-exact bookkeeping.
+
+The only response reader of these rows is ``board_read.diagnostics_from_inputs``
+(including shadow and owner/fact capture), via ``kanban_diagnostics``. Its only
+bookkeeping reader is ``kanban_unused_grant.unused_grant_run``: four NULL tests,
+behind P2-marked preconditions. Share that reader's candidate predicate and read
+set. Any future diagnostic bookkeeping reader must extend this overlay contract.
+
+Clean retained rows may carry stale bookkeeping values the projection never
+reads (including claim_expires/sync_version, noncandidate rows, and non-NULL
+value changes). They are NOT general-purpose fresh run snapshots. P2 covers run
+inserts/deletes and all candidate-precondition changes; the caller must supply a
+trusted change set in the same SQLite snapshot. Legacy and dirty reads stay full.
+"""
+import json
 from types import MappingProxyType
 
-# P2 excludes these run columns. Even historical terminal runs need the overlay:
-# unused-grant classification reads NULL-ness of four of them at projection time.
-_BOOKKEEPING = ("claim_lock", "claim_expires", "last_heartbeat_at", "worker_pid",
-                "worker_started_at", "sync_version")
+from hermes_cli.kanban_unused_grant import UNUSED_GRANT_BOOKKEEPING, unused_grant_candidate
 
 
 def retained_runs(conn, ids, prev, changed, load):
-    """Return all run fields without decoding unchanged historical metadata again.
+    """[daveey] Retain diagnostic inputs, refreshing only response-visible NULL tests.
 
     ``changed=None`` is the legacy/untrusted path. The caller owns the same-snapshot
     cursor contract and replaces the memo on schema or connection generation change.
@@ -21,86 +29,55 @@ def retained_runs(conn, ids, prev, changed, load):
     dirty = [tid for tid in ids if tid in changed or tid not in prev or len(prev[tid]) < 5]
     result = load(conn, "task_runs", dirty) if dirty else {}
     clean = [tid for tid in ids if tid not in result]
-    if not clean:
-        return result
-    old = {tid: prev[tid][4] for tid in clean}
-    # Old schemas can lack a newer bookkeeping column. Schema changes force FULL,
-    # so retained rows describe the selected columns for this snapshot generation.
-    keys = next((row.keys() for rows in old.values() for row in rows), ())
-    columns = [key for key in _BOOKKEEPING if key in keys]
-    signatures = _signatures(conn, clean, columns)
-    stale = [tid for tid in clean if getattr(old[tid], "signature", None) != signatures.get(tid, "")]
-    stale_set = set(stale)
-    for tid in clean:
-        if tid not in stale_set:
-            result[tid] = old[tid]  # every run id and bookkeeping value (type included) unchanged
-    if not stale:
-        return result
-    selected = ", ".join(("id", "task_id", *columns))
-    rows_by_task = {tid: [] for tid in stale}
-    for row in conn.execute(
-            f"SELECT {selected} FROM task_runs WHERE task_id IN ({','.join('?' for _ in stale)}) ORDER BY id",
-            tuple(stale)):
-        rows_by_task[row[1]].append(tuple(row))
-    reload = []
-    for tid in stale:
-        before, overlay = old[tid], rows_by_task[tid]
-        if len(before) != len(overlay) or any(a["id"] != b[0] for a, b in zip(before, overlay)):
-            reload.append(tid)  # fail exact if a caller supplied an incomplete invalidation set
-            continue
-        rows = []
-        for original, row in zip(before, overlay):
-            # Same typed encoding as the signature, including signed floating zero
-            # on legacy untyped columns. Never stamp bytes for values not retained.
-            updates = {key: value for key, value in zip(columns, row[2:])
-                       if marshal.dumps(original[key], 2) != marshal.dumps(value, 2)}
-            rows.append(MappingProxyType({**original, **updates}) if updates else original)
-        # Read before these values, so a later write can only make the next compare miss.
-        result[tid] = RunHistory(rows, signatures.get(tid, ""))
-    if reload:
-        result.update(load(conn, "task_runs", reload))
+    old = {tid: (prev[tid][4] if isinstance(prev[tid][4], RunHistory) else RunHistory(prev[tid][4]))
+           for tid in clean}
+    candidates = {row["id"]: row for history in old.values() for row in history.candidates}
+    if not candidates:
+        return {**result, **old}
+    # [daveey] Schema changes force FULL; older schemas may omit bookkeeping columns.
+    columns = [key for key in UNUSED_GRANT_BOOKKEEPING if key in next(iter(candidates.values()))]
+    signatures = _signatures(conn, list(candidates), columns)
+    stale = [rid for rid, row in candidates.items()
+             if tuple(row[key] is not None for key in columns) != signatures.get(rid)]
+    overlays = _overlays(conn, stale, columns)
+    for tid, history in old.items():
+        if any(row["id"] not in signatures for row in history.candidates):
+            # [daveey] Fail exact on a missing candidate even if a caller violated P2.
+            result.update(load(conn, "task_runs", [tid]))
+        elif any(row["id"] in overlays for row in history.candidates):
+            result[tid] = RunHistory(MappingProxyType({**row, **overlays[row["id"]]})
+                                     if row["id"] in overlays else row for row in history)
+        else:
+            result[tid] = history
     return result
 
 
 class RunHistory(tuple):
-    """Retained runs plus the packed signature of their ids and bookkeeping values."""
+    """[daveey] Immutable rows and their P2-stable unused-grant candidates."""
 
-    signature: bytes | str
+    candidates: tuple
 
-    def __new__(cls, rows, signature):
+    def __new__(cls, rows):
         self = super().__new__(cls, rows)
-        self.signature = signature
+        self.candidates = tuple(row for row in self if unused_grant_candidate(row))
         return self
 
 
-def _signatures(conn, task_ids, columns) -> dict:
-    """Exact typed run values of each task, one row per task.
-
-    SQLite builds each task's text in C (``board_event_history.row_text``: storage class plus
-    hex bytes, so NULL/int/float/text/blob and embedded NULs stay distinct) over the covering
-    ``idx_runs_task_bookkeeping`` index. Every GET after a bookkeeping commit signs every run of
-    every displayed card here; stepping each run row into Python (1.3k-3k rows on the hub board,
-    each one a GIL hand-off in the busy backend) was the cost. Signatures are only compared
-    in-process. Without ordered aggregates (SQLite < 3.44) runs are packed with ``marshal``
-    (version 2: equal values encode equally regardless of object sharing).
-    """
-    if not task_ids:
-        return {}
-    from plugins.kanban.dashboard.board_event_history import ORDERED_AGGREGATES, row_text
-    if ORDERED_AGGREGATES:
-        cur = conn.cursor()
-        cur.row_factory = None
-        return dict(cur.execute(
-            f"SELECT task_id, group_concat({row_text(('id', *columns))}, ',' ORDER BY id) FROM task_runs "
-            f"WHERE task_id IN ({','.join('?' for _ in task_ids)}) GROUP BY task_id", tuple(task_ids)).fetchall())
-    selected = ", ".join(("task_id", "id", *columns))
-    # Plain tuples, grouped in C: every GET after a bookkeeping commit reads every run of
-    # every displayed card here, and per-row Row objects were most of its cost.
+def _signatures(conn, run_ids, columns) -> dict:
+    """[daveey] Indexed candidate-ID seeks; only NULL-ness crosses into Python."""
+    selected = ", ".join(("id", *(f"{key} IS NOT NULL" for key in columns)))
     cur = conn.cursor()
     cur.row_factory = None
-    rows = cur.execute(
-        f"SELECT {selected} FROM task_runs "
-        f"WHERE task_id IN ({','.join('?' for _ in task_ids)}) ORDER BY task_id, id",
-        tuple(task_ids)).fetchall()
-    return {tid: marshal.dumps([row[1:] for row in group], 2)
-            for tid, group in itertools.groupby(rows, key=operator.itemgetter(0))}
+    return {row[0]: row[1:] for row in cur.execute(
+        f"SELECT {selected} FROM task_runs WHERE id IN (SELECT value FROM json_each(?))",
+        (json.dumps(run_ids),))}
+
+
+def _overlays(conn, run_ids, columns) -> dict:
+    """[daveey] Fetch actual values only when their response-visible NULL-ness moved."""
+    if not run_ids:
+        return {}
+    selected = ", ".join(("id", *columns))
+    return {row[0]: dict(zip(columns, tuple(row)[1:])) for row in conn.execute(
+        f"SELECT {selected} FROM task_runs WHERE id IN (SELECT value FROM json_each(?))",
+        (json.dumps(run_ids),))}
