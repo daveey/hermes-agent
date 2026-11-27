@@ -169,6 +169,13 @@ def reconcile_recovered_references(conn):
     # The caller's recovery transaction owns all writes; no live-store migration.
     conn.execute('DELETE FROM state_meta WHERE key GLOB ?', (REF_PREFIX + '*',))
     conn.executemany('INSERT INTO state_meta(key,value) VALUES(?,?)', refs)
+    # Only after validating the complete surviving owner inventory can recovery
+    # retire payloads whose policy rows were not salvaged. Never keep them forever.
+    for (key,) in conn.execute('SELECT key FROM state_meta WHERE key GLOB ?', (BLOB_PREFIX + '*',)).fetchall():
+        digest = key[len(BLOB_PREFIX):]
+        if conn.execute('SELECT 1 FROM state_meta WHERE key GLOB ? LIMIT 1',
+                        (REF_PREFIX + digest + ':*',)).fetchone() is None:
+            conn.execute('DELETE FROM state_meta WHERE key=?', (key,))
     return len(refs)
 
 

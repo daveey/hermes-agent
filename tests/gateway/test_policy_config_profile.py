@@ -22,6 +22,12 @@ async def test_interned_profile_selection_compares_exact_frozen_policy(home, mon
         commit_selection(authority, ref, policy, config, model,
                          db.get_session(ref.session_id)['runtime_generation'], ended=ended)
         assert local_receipt(db, ref.session_id)['policy'] == original['policy']
+        from hermes_state_policy_config import delete_receipt
+        from hermes_state_runtime import RuntimeStoreError
+        db._execute_write(lambda conn: delete_receipt(conn, ref.session_id))
+        with pytest.raises(RuntimeStoreError, match='revision_conflict'):
+            commit_selection(authority, ref, policy, config, model,
+                             db.get_session(ref.session_id)['runtime_generation'], ended=ended)
     finally:
         await owner.close()
         store.close_all_db_handles()

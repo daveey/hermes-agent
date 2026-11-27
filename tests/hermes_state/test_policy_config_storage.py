@@ -200,3 +200,78 @@ def test_reference_lookup_uses_key_index(conn):
     plan = conn.execute('EXPLAIN QUERY PLAN SELECT 1 FROM state_meta WHERE key GLOB ? LIMIT 1',
                         (REF_PREFIX + 'a' * 64 + ':*',)).fetchall()
     assert any('SEARCH' in row[3] and 'INDEX' in row[3] for row in plan)
+
+
+@pytest.mark.parametrize('operation', ['decode', 'reconcile'])
+def test_snapshot_operations_require_owner_transaction(conn, operation):
+    from hermes_state_policy_config import decode_receipt, reconcile_recovered_references
+    conn.commit()
+    operations = {'decode': lambda: decode_receipt(conn, json.dumps(receipt())),
+                  'reconcile': lambda: reconcile_recovered_references(conn)}
+    with pytest.raises(RuntimeStoreError, match='runtime_coordination_required'):
+        operations[operation]()
+
+
+def test_missing_receipt_fails_at_storage_boundary(conn):
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        load_receipt(conn, 'missing')
+
+
+@pytest.mark.parametrize('digest', ['bad', 'A' * 64, {}, 1])
+def test_invalid_stored_reference_cannot_be_retired(conn, digest):
+    conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
+                 ('gateway.local_policy.v1:one', json.dumps({'policy': {'config_ref_v1': digest}})))
+    before = conn.execute('SELECT * FROM state_meta').fetchall()
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        delete_receipt(conn, 'one')
+    assert conn.execute('SELECT * FROM state_meta').fetchall() == before
+
+
+def test_storing_raw_reference_instead_of_hydrated_policy_is_refused(conn):
+    store_receipt(conn, 'one', receipt(), intern=True)
+    raw = json.loads(conn.execute('SELECT value FROM state_meta WHERE key=?',
+                                  ('gateway.local_policy.v1:one',)).fetchone()[0])
+    before = conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall()
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        store_receipt(conn, 'two', raw)
+    assert conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall() == before
+
+
+def test_repeated_same_owner_same_config_keeps_its_reference(conn):
+    store_receipt(conn, 'one', receipt(), intern=True)
+    store_receipt(conn, 'one', receipt(), intern=True)
+    assert load_receipt(conn, 'one') == receipt()
+    assert len(inventory(conn, BLOB_PREFIX)) == len(inventory(conn, REF_PREFIX)) == 1
+
+
+def test_existing_corrupt_blob_cannot_be_reused_by_new_owner(conn):
+    store_receipt(conn, 'one', receipt(), intern=True)
+    conn.execute('UPDATE state_meta SET value=? WHERE key GLOB ?', ('wrong', BLOB_PREFIX + '*'))
+    before = conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall()
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        store_receipt(conn, 'two', receipt(), intern=True)
+    assert conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall() == before
+
+
+def test_legacy_only_recovery_does_not_reinterpret_old_malformed_receipts(conn):
+    from hermes_state_policy_config import reconcile_recovered_references
+    conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
+                 ('gateway.local_policy.v1:old', 'legacy malformed receipt'))
+    before = conn.execute('SELECT * FROM state_meta').fetchall()
+    assert reconcile_recovered_references(conn) == 0
+    assert conn.execute('SELECT * FROM state_meta').fetchall() == before
+
+
+def test_non_object_receipt_is_typed_storage_failure(conn):
+    from hermes_state_policy_config import decode_receipt
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        decode_receipt(conn, '[]')
+
+
+@pytest.mark.parametrize('text', [None, 1, {}])
+def test_config_payload_must_be_exact_string(conn, text):
+    malformed = receipt()
+    malformed['policy']['config_json'] = text
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        store_receipt(conn, 'one', malformed, intern=True)
+    assert conn.execute('SELECT * FROM state_meta').fetchall() == []

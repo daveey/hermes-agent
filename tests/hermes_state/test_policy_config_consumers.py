@@ -77,6 +77,9 @@ def test_interned_branch_has_independent_reference(interned):
     db, _epoch, sid, original = interned
     _, result = db._execute_write(lambda conn: branch_in_transaction(db, conn, sid, {}))
     child = result['branched_session_id']
+    with db._read_ctx() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM state_meta WHERE key GLOB ?',
+                            (REF_PREFIX + '*',)).fetchone()[0] == 2
     db._execute_write(lambda conn: retire_local_receipts(conn, [sid]))
     assert local_receipt(db, child)['policy'] == original['policy']
     db._execute_write(lambda conn: release_receipts(conn, [child]))
@@ -88,3 +91,15 @@ def test_interned_retirement(interned, remove):
     db, _epoch, sid, _original = interned
     db._execute_write(lambda conn: remove(conn, [sid]))
     _assert_no_blobs(db)
+
+
+def test_retirement_preserves_non_policy_key_semantics(interned):
+    from hermes_state_local import API_BINDING_PREFIX, API_DECLARED_PREFIX
+    db, _epoch, sid, _original = interned
+    def remove(conn):
+        conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (API_BINDING_PREFIX + sid, 'binding'))
+        conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (API_DECLARED_PREFIX + 'conversation', sid))
+        retire_local_receipts(conn, [sid])
+        return conn.execute('SELECT key FROM state_meta WHERE key IN (?,?)',
+                            (API_BINDING_PREFIX + sid, API_DECLARED_PREFIX + 'conversation')).fetchall()
+    assert db._execute_write(remove) == []
