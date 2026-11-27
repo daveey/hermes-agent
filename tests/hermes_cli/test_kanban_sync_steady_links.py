@@ -45,6 +45,7 @@ def svc():
 def ledger(monkeypatch):
     rows: list[dict] = []
     monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: list(rows))
+    monkeypatch.setattr(ksa, "remote_links_and_origin_rows", lambda stale_ok=False: (list(rows), []))
     return rows
 
 

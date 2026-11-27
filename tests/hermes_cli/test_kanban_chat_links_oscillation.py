@@ -19,17 +19,26 @@ def test_origin_display_dedup_does_not_oscillate_release(live, kanban_home, monk
         live.execute('DELETE FROM kanban_sync_outbox')
     origin = dict(id=task, board='default', gateway=ME, profile='default', origin_gateway=ME,
                   origin_profile='default', origin_session='human', session='human', via='origin',
-                  key=f'{ME}/default/default/{task}', status='ready', released=False, unfinished=True, stale=False)
+                  key=f'{ME}/default/default/{task}', status='ready', unfinished=True, stale=False)
     monkeypatch.setattr(activity, '_board_db_paths', lambda: [kanban_home / 'kanban.db'])
 
-    def entry(stale_ok=False, *, with_rows=False):
-        visible = activity._without_local_open_duplicates([origin], gateway=ME, profile='default')
-        return (visible, [origin]) if with_rows else visible
+    from hermes_cli import kanban_origin_adapter, kanban_origin_ledger, profiles
+    (kanban_home / 'kanban').mkdir(exist_ok=True)
+    (kanban_home / 'kanban' / 'origin-ledger.db').touch()
+    monkeypatch.setattr(kanban_origin_adapter, '_gateway', lambda path: ME)
+    monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
+    monkeypatch.setattr(kanban_origin_ledger, 'project', lambda *a, **kw: [origin])
+    monkeypatch.setattr(activity, '_hub_db_path', lambda: None)
+    monkeypatch.setattr(activity, '_legacy_remote_links', list)
+    activity._reset_cache_for_tests()
 
-    monkeypatch.setattr(activity, '_links_entry', entry)
+    def reconcile():
+        activity._reset_cache_for_tests()  # fresh projection on each side of the feedback loop
+        return links.reconcile(live, 'default', ME)
+
     assert activity._remote_links() == []  # the real local linked-row reader deduplicates it
     for _ in range(4):
-        counts = links.reconcile(live, 'default', ME)
+        counts = reconcile()
         assert counts['changed'] == counts['released'] == 0
         assert live.execute('SELECT released FROM task_chat_links WHERE uid=?', (uid,)).fetchone()[0] == 0
     assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='task_chat_links' AND row_uid=?", (uid,)).fetchone()
@@ -37,11 +46,11 @@ def test_origin_display_dedup_does_not_oscillate_release(live, kanban_home, monk
     # Real producer transitions still apply exactly once, even while the visible
     # projection hides this same local card. No sticky released flag or freeze.
     for state, status in [(True, 'done'), (False, 'ready')]:
-        origin.update(released=state, unfinished=not state, status=status)
-        assert links.reconcile(live, 'default', ME)['changed'] == 1
+        origin.update(unfinished=not state, status=status)
+        assert reconcile()['changed'] == 1
         assert live.execute('SELECT released FROM task_chat_links WHERE uid=?', (uid,)).fetchone()[0] == state
         for _ in range(3):
-            assert links.reconcile(live, 'default', ME)['changed'] == 0
+            assert reconcile()['changed'] == 0
         assert live.execute('SELECT released FROM task_chat_links WHERE uid=?', (uid,)).fetchone()[0] == state
 
 

@@ -110,6 +110,8 @@ def _mixed() -> list[dict]:
 def ledger(monkeypatch):
     rows: list[dict] = []
     monkeypatch.setattr("hermes_cli.kanban_session_activity._remote_links", lambda stale_ok=False: list(rows))
+    monkeypatch.setattr("hermes_cli.kanban_session_activity.remote_links_and_origin_rows",
+                        lambda stale_ok=False: (list(rows), []))
     return rows
 
 

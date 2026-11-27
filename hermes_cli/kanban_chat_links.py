@@ -465,7 +465,9 @@ def reconciliation_cards() -> list[dict[str, Any]]:
     """
     from hermes_cli.kanban_session_activity import remote_links_and_origin_rows
     visible, origins = remote_links_and_origin_rows()
-    return [*visible, *origins]
+    # project() expresses authoritative closure as unfinished=False, not the
+    # legacy projection's released field. Do not mutate the shared reader rows.
+    return [*visible, *({**row, "released": not row.get("unfinished", True)} for row in origins)]
 
 
 def _plan(conn: sqlite3.Connection, board: str, gateway: str,
