@@ -52,6 +52,7 @@ MAX_EVENTS_PER_PASS = 2000
 _not_hosted_logged: set[tuple[str, str]] = set()
 _remote_absent: dict[str, tuple[object, float]] = {}
 _remote_absent_warned: set[tuple[str, object]] = set()
+_remote_pending: set[str] = set()  # absence rechecks retain custody through refresh AND durable ACK
 _BLOCKED_LINE = re.compile(r"Kanban (t_[0-9A-Za-z_]+) blocked")
 _TASK_ID = re.compile(r"Kanban (t_[0-9A-Za-z_]+)")
 
@@ -62,6 +63,7 @@ def _reset_for_tests() -> None:
     _not_hosted_logged.clear()
     _remote_absent.clear()
     _remote_absent_warned.clear()
+    _remote_pending.clear()
     from tui_gateway import notice_fanout_state
     notice_fanout_state.reset_for_tests()
 
@@ -448,7 +450,7 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
             remote_retry(out, 'initial_poll_failed')
             inputs = None
     memo = _remote_memo
-    if not diagnostic.test('health_pending', health_generation is not None) and not absent_due and inputs is not None \
+    if not diagnostic.test('health_pending', health_generation is not None) and not absent_due and not _remote_pending and inputs is not None \
             and not diagnostic.test('no_memo', memo is None) \
             and not diagnostic.test('inputs_changed', memo[0] != inputs[0]) \
             and not diagnostic.check('ledger_changed', lambda: memo[1] != _ledger_content_key(inputs[1])) \
@@ -480,6 +482,8 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
                     acked[chat] = snapshot.get(chat)
                 continue
             observed.trigger = ('snapshot_diff' if previous.get(chat) != snapshot.get(chat) else 'health_forced')
+            if chat in _remote_absent:
+                _remote_pending.add(chat)
             tip, skipped, observed.result = _refresh_remote_chat(chat, snapshot.get(chat), session_db, out, now)
             if observed.result not in ('acked_refreshed', 'acked_intentionally_skipped'):
                 continue
@@ -490,12 +494,14 @@ def _remote_change_observed(session_db, origin_db, diagnostic):
             observed.result = 'acked_refreshed' if skipped is None else 'acked_intentionally_skipped'
     diagnostic.cert_active = True
     committed = state.ack_remote(acked)
+    if committed:
+        _remote_pending.difference_update(acked)
     _prune_remote_absent(snapshot, committed)
     if not committed:
         remote_retry(out, 'refresh_failed')
     recovered_all = notice_links_health.recover_into(out, origin, health_generation, set(previous.keys() | snapshot.keys()), origin_db)
     diagnostic.cert = ('ack_failed' if not committed else 'inputs_unavailable' if inputs is None else 'not_all_acked')
-    if committed and inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
+    if committed and not _remote_pending and inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
         _certify_remote(inputs, polled, known, diagnostic)
     diagnostic.cert_active = False
     diagnostic.health = 'exception'
@@ -530,7 +536,7 @@ def _prune_remote_absent(snapshot, committed):
 
 
 def _remote_unchanged(chat, previous, snapshot, health_generation, absent_due):
-    return (previous.get(chat) == snapshot.get(chat) and chat not in absent_due
+    return (previous.get(chat) == snapshot.get(chat) and chat not in absent_due and chat not in _remote_pending
             and (health_generation is None or chat in _remote_absent))
 
 
