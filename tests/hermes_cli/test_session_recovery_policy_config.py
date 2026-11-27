@@ -67,7 +67,7 @@ def test_recovery_refuses_unreadable_policy_config(tmp_path, damage):
     assert isinstance(caught.value.__cause__, RuntimeStoreError)
 
 
-@pytest.mark.parametrize('damage', ['missing_blob', 'corrupt_blob', 'malformed_legacy'])
+@pytest.mark.parametrize('damage', ['missing_blob', 'corrupt_blob', 'malformed_legacy', 'deep_legacy'])
 @pytest.mark.parametrize('allow_partial', [False, True])
 def test_recover_cli_reports_unreadable_policy_custody(tmp_path, capsys, damage, allow_partial):
     from hermes_cli.sessions_cmd import _cmd_recover
@@ -82,8 +82,9 @@ def test_recover_cli_reports_unreadable_policy_custody(tmp_path, capsys, damage,
             else:
                 # Even partial salvage cannot prove a malformed receipt does not
                 # own one of the recovered blobs. Refuse before rebuilding/GC.
+                raw = '[' * 200000 + ']' * 200000 if damage == 'deep_legacy' else 'not json'
                 conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
-                             ('gateway.local_policy.v1:legacy', 'not json'))
+                             ('gateway.local_policy.v1:legacy', raw))
         db._execute_write(write)
     before = hashlib.sha256(source.read_bytes()).digest()
     result = _cmd_recover(SimpleNamespace(source=source, output=output, allow_partial=allow_partial))
@@ -96,14 +97,15 @@ def test_recover_cli_reports_unreadable_policy_custody(tmp_path, capsys, damage,
     assert hashlib.sha256(source.read_bytes()).digest() == before
 
 
-def test_recover_cli_preserves_malformed_inline_only_legacy(tmp_path, capsys):
+@pytest.mark.parametrize('raw', ['not json', '[' * 200000 + ']' * 200000], ids=['invalid', 'deep'])
+def test_recover_cli_preserves_malformed_inline_only_legacy(tmp_path, capsys, raw):
     from hermes_cli.sessions_cmd import _cmd_recover
     source, output = tmp_path / 'source.db', tmp_path / 'recovered.db'
     with closing(SessionDB(source)) as db:
         db._execute_write(lambda conn: conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
-                                                   ('gateway.local_policy.v1:legacy', 'not json')))
+                                                   ('gateway.local_policy.v1:legacy', raw)))
     assert _cmd_recover(SimpleNamespace(source=source, output=output, allow_partial=True)) == 0
     assert 'verified at:' in capsys.readouterr().out
     with closing(sqlite3.connect(output)) as conn:
         assert conn.execute('SELECT value FROM state_meta WHERE key=?',
-                            ('gateway.local_policy.v1:legacy',)).fetchone()[0] == 'not json'
+                            ('gateway.local_policy.v1:legacy',)).fetchone()[0] == raw

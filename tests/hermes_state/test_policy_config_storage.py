@@ -262,6 +262,23 @@ def test_legacy_only_recovery_does_not_reinterpret_old_malformed_receipts(conn):
     assert conn.execute('SELECT * FROM state_meta').fetchall() == before
 
 
+@pytest.mark.parametrize('operation', ['load', 'decode', 'delete', 'replace'])
+def test_deep_stored_receipt_is_typed_failure_without_mutation(conn, operation):
+    from hermes_state_policy_config import decode_receipt
+    raw = '[' * 200000 + ']' * 200000
+    conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
+                 ('gateway.local_policy.v1:one', raw))
+    before = conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall()
+    operations = {'load': lambda: load_receipt(conn, 'one'),
+                  'decode': lambda: decode_receipt(conn, raw),
+                  'delete': lambda: delete_receipt(conn, 'one'),
+                  'replace': lambda: store_receipt(conn, 'one', receipt(), intern=True)}
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable') as caught:
+        operations[operation]()
+    assert isinstance(caught.value.__cause__, RecursionError)
+    assert conn.execute('SELECT * FROM state_meta ORDER BY key').fetchall() == before
+
+
 def test_non_object_receipt_is_typed_storage_failure(conn):
     from hermes_state_policy_config import decode_receipt
     with pytest.raises(RuntimeStoreError, match='storage_unavailable'):

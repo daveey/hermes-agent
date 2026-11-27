@@ -46,7 +46,7 @@ def _decode(raw, lookup):
             receipt['policy'].pop('config_ref_v1')
             receipt['policy']['config_json'] = text
         return receipt
-    except (ValueError, TypeError, UnicodeError) as exc:
+    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
         raise RuntimeStoreError('storage_unavailable') from exc
 
 
@@ -82,7 +82,7 @@ def _stored_reference(conn, session_id):
         return None
     try:
         return _reference(json.loads(row[0]))
-    except (ValueError, TypeError, AttributeError) as exc:
+    except (ValueError, TypeError, AttributeError, RecursionError) as exc:
         raise RuntimeStoreError('storage_unavailable') from exc
 
 
