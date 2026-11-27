@@ -6,6 +6,7 @@ admission hold (00:51:19) and the checkout move (00:51:44), and served pre-updat
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import subprocess
 import sys
@@ -49,6 +50,8 @@ def serve_harness(monkeypatch):
     monkeypatch.setattr(smp, "begin_process", lambda *a, **k: None)
 
     def _start_server(**kwargs):
+        # Unrelated startup work may yield; only update-gate sleeps are the oracle.
+        time.sleep(0)
         calls.append("start_server")
         started.set()
 
@@ -60,6 +63,10 @@ def serve_harness(monkeypatch):
     # the re-exec path is exercised for real in a child process below.
     import hermes_cli.version_info as vi
     monkeypatch.setattr(vi, "_cached_version_info", None)
+    monkeypatch.setattr(vi, "prewarm_version_info", lambda: None)
+    from hermes_cli import sessions_early_boot, serve_bootstrap_listener
+    monkeypatch.setattr(sessions_early_boot, "early_sessions", lambda **kw: nullcontext(None))
+    monkeypatch.setattr(serve_bootstrap_listener, "BootstrapListener", lambda *a: nullcontext(None))
 
     def _no_exec(*_a):
         raise AssertionError("cmd_dashboard tried to re-exec the test process")
@@ -97,16 +104,19 @@ def test_serve_started_while_update_live_does_not_serve_until_it_clears(serve_ha
     assert serve_harness.calls == ["token", "start_server"]
 
 
-def test_serve_with_no_update_starts_immediately(serve_harness, monkeypatch):
-    monkeypatch.setattr(suw, "update_live", lambda: False)
+@pytest.mark.parametrize("held_once", [False, True])
+def test_serve_with_no_update_starts_immediately(serve_harness, monkeypatch, held_once):
+    probes = iter([held_once, False])
+    monkeypatch.setattr(suw, "update_live", lambda: next(probes, False))
     monkeypatch.setattr(suw, "admission_hold_present", lambda: False)
     slept: list[float] = []
-    monkeypatch.setattr(suw.time, "sleep", lambda s: slept.append(s))
+    wait = suw.wait_for_update_clear
+    monkeypatch.setattr(suw, "wait_for_update_clear", lambda: wait(sleep=slept.append))
 
     t0 = time.monotonic()
     serve_harness.call()
     assert serve_harness.calls == ["token", "start_server"]
-    assert slept == []
+    assert slept == ([0.02] if held_once else [])
     assert time.monotonic() - t0 < 1.0
 
 
