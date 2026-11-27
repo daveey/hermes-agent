@@ -44,14 +44,43 @@ class PushResult:
     cancelled: int = 0
 
 
+# Direct callers (run endings, scope renewal) overlap the sync round's push by design;
+# they wait this long for a bound board's sender fence instead of failing. Tests set 0.
+DIRECT_WAIT_S = 10.0
+
+
+def _sender_fence(path):
+    import time
+    from contextlib import ExitStack
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy, sender_lock
+    deadline = time.monotonic() + DIRECT_WAIT_S
+    while True:
+        stack = ExitStack()
+        try:
+            stack.enter_context(sender_lock(path))
+            return stack
+        except SyncRoundBusy:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
 def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=False, seen=None):
-    """Serialize the complete session/send, not only individual SQL writes."""
+    """Serialize a bound journal's complete session/send, not only individual SQL writes.
+
+    A never-enrolled legacy board has no replay custody to fence and keeps the
+    pre-fence behaviour: overlapping legacy pushes are not refused.
+    """
     from hermes_cli.kanban_db_connect import _main_db_file
-    from hermes_cli.kanban_sync_guard import sender_lock
+    from hermes_cli import kanban_sync_client as client
     path = _main_db_file(conn)
     if path is None:
         raise ValueError('sender requires an on-disk board')
-    with sender_lock(path):
+    client.refuse_if_schema_ahead(conn)
+    if not journal.bound_custody(conn):
+        return _push(conn, hub, board, gateway, primary=primary, max_batches=max_batches,
+                     before_head=before_head, seen=seen)
+    with _sender_fence(path):
         return _push(conn, hub, board, gateway, primary=primary, max_batches=max_batches,
                      before_head=before_head, seen=seen)
 

@@ -73,7 +73,9 @@ class Peer:
 
 @pytest.mark.parametrize('action', ['push', 'detach'])
 @pytest.mark.parametrize('stage', ['session', 'ops'])
-def test_process_in_http_session_excludes_other_sender_and_detach(live, action, stage):
+def test_process_in_http_session_excludes_other_sender_and_detach(live, action, stage, monkeypatch):
+    from hermes_cli import kanban_replay_sender
+    monkeypatch.setattr(kanban_replay_sender, 'DIRECT_WAIT_S', 0)
     kb.create_task(live, title='one sender', assignee='worker')
     path = Path(live.execute('PRAGMA database_list').fetchone()[2])
     peer = Peer(stage)
