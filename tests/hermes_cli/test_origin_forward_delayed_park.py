@@ -46,9 +46,6 @@ def test_creator_park_waits_for_exactly_one_admitted_child(world, tmp_path, monk
                         'destination': {'gateway': 'owner', 'profile': 'default', 'board': 'default'},
                         'create': {'title': 'child', 'assignee': 'default', 'session_id': 'creator'}}}
     frozen = json.dumps(request)
-    from hermes_cli.kanban_origin_forward_run_end import reserve
-    with kbc.connect_closing() as conn:
-        reserve(conn, creator, uid, request['id'])
     with sqlite3.connect(path) as db:
         db.execute('INSERT INTO sent VALUES(?,?,?,?)', (request['id'], 'sent', '{}', frozen))
     # The genuine schedule entry rolls back rather than releasing admission custody.
