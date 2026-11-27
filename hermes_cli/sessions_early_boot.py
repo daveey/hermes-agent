@@ -35,6 +35,79 @@ def adopted_early_owner(state):
 _EXIT_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
+class _ExitSignals:
+    """SIGTERM/SIGINT custody for the early sessions reader (main thread only, where CPython runs
+    Python signal handlers).
+
+    A signal is never acted on inside a custody step: a spawn whose child ``prepare()`` alone owns,
+    or a close (the reader's, or the runtime's, whose locks are not re-entrant). Every signal goes
+    through one FIFO queue, and only the dispatcher pops it, so:
+      * ``handler`` always enqueues first (a repeat of a still-queued signal collapses into it, as
+        a pending signal does), then dispatches only when ``depth`` is 0;
+      * the dispatcher holds ``depth`` above 0 while it runs, so a signal arriving inside it, its
+        close or a previous handler is queued behind, never run inside them and never ahead of
+        an older one; every entry it pops is delivered even when an earlier handler raised (the
+        last exception propagates, chained), as an unqueued signal would run while it unwound;
+      * whoever brings ``depth`` back to 0 reads the queue AFTER the decrement and dispatches it:
+        a signal queued before the decrement is seen there; one after it dispatches itself.
+    A thread signal mask cannot do this: a process-directed signal caught on another thread still
+    runs its Python handler on the main thread, so masking the main thread does not defer it.
+
+    Contract: a previous handler must return or raise; one that blocks keeps later signals queued
+    (exit escalation is then the supervisor's SIGKILL).
+    """
+    def __init__(self, previous, close):
+        self.previous, self._close = previous, close
+        self.depth = 0
+        self.pending = []  # (signum, frame) in arrival order
+
+    def handler(self, signum, frame):
+        if self.previous[signum] == signal.SIG_IGN:
+            return
+        if all(signum != queued for queued, _ in self.pending):
+            self.pending.append((signum, frame))
+        if self.depth == 0:
+            self._dispatch()
+
+    @contextmanager
+    def deferred(self):
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self._leave()
+
+    def _leave(self):
+        self.depth -= 1
+        if self.pending and self.depth == 0:
+            self._dispatch()
+
+    def _dispatch(self):
+        self.depth += 1
+        try:
+            self._deliver_queue()
+        finally:
+            self._leave()
+
+    def _deliver_queue(self):
+        if self.pending:  # depth > 0: no handler can pop or run in between
+            signum, frame = self.pending.pop(0)
+            try:
+                self._act(signum, frame)
+            finally:
+                self._deliver_queue()
+
+    def _act(self, signum, frame):
+        handler = self.previous[signum]
+        try:
+            self._close()
+        finally:  # a close that keeps custody still lets the previous handler exit
+            if callable(handler):
+                handler(signum, frame)
+            else:
+                raise SystemExit(128 + signum)
+
+
 @contextmanager
 def early_sessions(*, headless, isolated):
     # Preserve legacy/embedded/non-Linux ordering and the supported rollback.
@@ -57,59 +130,12 @@ def early_sessions(*, headless, isolated):
     reader = CaptureProcess()
     owner = None
     previous = {}
-    # Signal custody. The handler never acts inside a custody step (a spawn whose child prepare()
-    # alone owns, or a close: the reader's, or the runtime's, whose locks are not re-entrant). It
-    # queues the signal instead, and the step that brings ``depth`` back to 0 delivers the queue.
-    # A thread signal mask cannot do this: CPython runs Python handlers on the main thread whichever
-    # thread the kernel picked, so a mask on the main thread alone does not defer them.
-    depth = [0]
-    pending = []  # (signum, frame), arrival order; a repeat of a queued signal collapses into it
-
-    @contextmanager
-    def deferred():
-        depth[0] += 1
-        try:
-            yield
-        finally:
-            depth[0] -= 1
-            # Read after the decrement: a signal queued before it is seen here; one arriving after
-            # it acts at once (and drains the queue itself).
-            if depth[0] == 0:
-                drain()
-
-    def drain():
-        # Each queued signal runs even when an earlier handler raised, as an unqueued second signal
-        # would while the first one's exit unwinds; the last exception propagates, chained.
-        if pending and depth[0] == 0:
-            signum, frame = pending.pop(0)
-            try:
-                act(signum, frame)
-            finally:
-                drain()
+    signals = _ExitSignals(previous, lambda: (reader if owner is None else owner).close())
+    stop = signals.handler
 
     def close():
-        with deferred():
+        with signals.deferred():
             (reader if owner is None else owner).close()
-
-    def act(signum, frame):
-        handler = previous[signum]
-        with deferred():
-            try:
-                close()
-            finally:  # a close that keeps custody still lets the previous handler exit
-                if callable(handler):
-                    handler(signum, frame)
-                else:
-                    raise SystemExit(128 + signum)
-
-    def stop(signum, frame):
-        if previous[signum] == signal.SIG_IGN:
-            return
-        if depth[0]:
-            if all(signum != queued for queued, _ in pending):
-                pending.append((signum, frame))
-            return
-        act(signum, frame)
 
     try:
         # signal.signal is illegal off the main thread (serve_update_wait and
@@ -121,7 +147,7 @@ def early_sessions(*, headless, isolated):
                     previous[signum] = signal.signal(signum, stop)
                 except (ValueError, OSError, RuntimeError):
                     previous.pop(signum, None)
-        with deferred():
+        with signals.deferred():
             reader.prepare()
         from hermes_cli.sessions_native_startup import SessionsRuntime
         from hermes_cli.web_routers import profiles

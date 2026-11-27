@@ -83,7 +83,12 @@ class CaptureProcess:
         "custody retained; close() again".
     ``_lock`` is never held while a standby is stopped, and ``standby.retiring`` is never held while
     ``_lock`` is taken, so the two never nest. The SIGTERM/SIGINT handler of ``early_sessions`` does
-    not interrupt ``prepare`` or ``close``: it blocks those signals across them (see there).
+    not run inside ``prepare`` or ``close``: it queues across them (``_ExitSignals``).
+
+    Caller contract: ``prepare`` and ``close`` are serialized by their caller (``early_sessions``
+    runs both on the main thread). A ``close`` that overlaps a ``prepare`` on another thread does
+    not wait for it: the child that call is still spawning is retired by ``prepare`` itself, which
+    raises if it cannot stop it (custody retained in ``_retiring``: ``close()`` again).
     """
     def __init__(self, *, seconds=5, max_bytes=MAX_RESPONSE, command=None):
         self.seconds, self.max_bytes = seconds, min(max_bytes, MAX_RESPONSE)
