@@ -253,9 +253,34 @@ def test_a_conjunction_is_judged_on_every_key_however_it_is_spaced(spacing):
     (f'({wake()})', []),
     (f"{wake()} || true", []),
     (f'{wake()} && true', [KEY]),
+    # a line break after ``&&`` continues the conjunction; it is not a new command
+    (f'{wake(OTHER_KEY)} &&\n{wake()}', [OTHER_KEY, KEY]),
+    (f'{wake(OTHER_KEY)} && \n {wake()}', [OTHER_KEY, KEY]),
+    (f'{wake()} &&\n{wake(OTHER_KEY)}', [KEY, OTHER_KEY]),
+    (f'{wake(OTHER_KEY)} && \\\n{wake()}', [OTHER_KEY, KEY]),     # backslash-newline is a continuation
+    (f'{wake(OTHER_KEY)} &&\n\n{wake()}', [OTHER_KEY, KEY]),
+    (f'{wake()} \\\n', [KEY]),
+    ('hermes kanban wait-check key ' + KEY + ' \\\n --gateway hub', [KEY]),
+    (f'{wake(OTHER_KEY)} &&\n{wake()}\n', [OTHER_KEY, KEY]),
 ])
 def test_wait_keys_reads_the_keys_the_exit_status_depends_on(probe, keys):
     assert wait_keys(probe) == keys, probe
+
+
+@pytest.mark.parametrize('joiner', [' &&\n', ' && \\\n', ' &&\n\n'])
+def test_the_lost_key_after_a_line_continued_conjunction_refuses(refused, joiner):
+    """``OTHER &&<newline> LOST`` can never fire either: the line break continues the ``&&``."""
+    task, run, _ = refused
+    with kbc.connect_closing() as conn:
+        why = refusal('schedule', conn, task, run, wake_check=f'{wake(OTHER_KEY)}{joiner}{wake()}')
+        assert 'origin_forward_rejected_wait' in (why or ''), why
+
+
+def test_a_lone_lost_key_wrapped_with_a_continuation_refuses(refused):
+    task, run, _ = refused
+    with kbc.connect_closing() as conn:
+        why = refusal('schedule', conn, task, run, wake_check='hermes kanban wait-check key ' + KEY + ' \\\n --gateway hub')
+        assert 'origin_forward_rejected_wait' in (why or ''), why
 
 
 def test_a_quoted_operator_in_a_key_is_one_word():

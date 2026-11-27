@@ -31,6 +31,7 @@ _WORD_CHARS = "".join(c for c in string.printable if not c.isspace() and c not i
 
 def _words(wake_check: str) -> list[str]:
     """Shell words of ``wake_check`` with every operator its own word, however it is spaced."""
+    wake_check = wake_check.replace("\\\r\n", " ").replace("\\\n", " ")  # a continuation is a space
     lexer = shlex.shlex(wake_check, posix=True, punctuation_chars=True)
     lexer.whitespace = " \t\r"  # a newline separates commands: keep it as a word
     lexer.wordchars = _WORD_CHARS  # keys like ``bb-land:817:ab`` stay one word
@@ -52,6 +53,8 @@ def wait_keys(wake_check: Optional[str]) -> list[str]:
         return []
     commands: list[list[str]] = [[]]
     for word in words:
+        if word == "\n" and (not commands[-1] or commands[-1][-1] == "&&"):
+            continue  # a blank line, or a line break after ``&&``, continues the command
         if word in _SEQUENCE:
             commands.append([])
         elif word == "&&" or _REDIRECT.match(word):
