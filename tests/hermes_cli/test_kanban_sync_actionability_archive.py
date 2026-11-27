@@ -61,7 +61,7 @@ def test_archive_independent_proof_guards(archived, change):
         meta = payload['_recovery_history_v1']
         if change == 'source-status':
             payload['source_status'] = 'archived'
-        elif change in ('valid', 'predecessor-order', 'duplicate-identity'):
+        if change in ('valid', 'predecessor-order', 'duplicate-identity'):
             # Valid connected graph: earlier(127) -> later(128) -> archive(130).
             # Reverse only the edge, or collide only its portable identity.
             earlier = {'_recovery_history_v1': {'identity': 'earlier', 'predecessors': []}}
@@ -76,7 +76,7 @@ def test_archive_independent_proof_guards(archived, change):
                 conn.execute("INSERT INTO task_events VALUES (?,?,'t_card','reclaimed',?,?,NULL,NULL)",
                              (eid, uid, second, json.dumps(event)))
             meta['predecessors'].append('earlier' if change == 'predecessor-order' else 'later')
-        elif change == 'duplicate-run-uid':
+        if change == 'duplicate-run-uid':
             conn.execute("INSERT INTO task_runs SELECT 10,uid,task_id,status,outcome,started_at,ended_at FROM task_runs WHERE id=9")
         elif change == 'source-order':
             # Immutable custody binds a source UID, not a selectable source kind.
