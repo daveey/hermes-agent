@@ -8,7 +8,11 @@ from what the turn left behind rather than from idleness. Best-effort: never rai
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
+
+_start_refresh_lock = threading.Lock()
+_start_refresh_pending: set[tuple[str, str]] = set()
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +62,42 @@ def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[fr
 
 
 def refresh_turn_start_outcome(session: dict, agent=None) -> None:
-    """Publish admitted live evidence without discounting this turn's marker or lease."""
+    """Schedule admitted live evidence; board projection must never gate the prompt.
+
+    Coalesce by profile home + admitted SID. Capture both before handing off: the
+    cached session/agent may be reused or compressed while a projection is stuck.
+    The worker reads current evidence, so a delayed start cannot resurrect an
+    ended turn. Turn-end publication retains its existing synchronous ordering.
+    """
     sid = turn_sid(session, agent)
-    if sid:
-        _refresh_session_outcome(session, sid, "turn_start", frozenset())
+    if not sid:
+        return
+    from hermes_cli.local_work_threads import TrackedThread
+    from tui_gateway import server
+
+    snapshot = session.copy()
+    home = server._session_home(snapshot)
+    snapshot["profile_home"] = str(home)
+    key = (str(home), sid)
+    with _start_refresh_lock:
+        if key in _start_refresh_pending:
+            return
+        _start_refresh_pending.add(key)
+
+    def publish():
+        try:
+            _refresh_session_outcome(snapshot, sid, "turn_start", frozenset())
+        finally:
+            with _start_refresh_lock:
+                _start_refresh_pending.discard(key)
+
+    try:
+        TrackedThread(target=publish, name="turn-start-outcome", daemon=True,
+                      home=home, source="tui.turn_start_outcome").start()
+    except Exception:  # health: allow BLE001 -- rejected background admission must not abort the prompt
+        with _start_refresh_lock:
+            _start_refresh_pending.discard(key)
+        logger.warning("turn_start outcome scheduling failed for %s", sid, exc_info=True)
 
 
 def _refresh_session_outcome(session: dict, sid: str, trigger: str, concluding: frozenset) -> None:

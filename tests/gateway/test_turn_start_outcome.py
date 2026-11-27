@@ -33,7 +33,18 @@ def test_turn_start_publication_failure_is_logged_not_raised(tmp_path, monkeypat
     if path == "tui":
         monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda session: nullcontext())
         monkeypatch.setattr(server, "_session_db", lambda session: nullcontext(object()))
+        from hermes_cli.local_work_threads import TrackedThread
+        workers = []
+
+        def tracked(**kwargs):
+            worker = TrackedThread(**kwargs)
+            workers.append(worker)
+            return worker
+
+        monkeypatch.setattr("hermes_cli.local_work_threads.TrackedThread", tracked)
         refresh_turn_start_outcome({"session_key": "start"})
+        workers[0].join(2)
+        assert not workers[0].is_alive()
     else:
         refresh_gateway_turn_start_outcome(SimpleNamespace(_session_db=object()), SimpleNamespace(session_id="start"))
     assert "unavailable fixture store" in caplog.text
