@@ -17,6 +17,8 @@ import {
 } from '@/store/session'
 import type { SessionCreateResponse } from '@/types/hermes'
 
+import { withSessionBusyRetry } from '../use-prompt-actions/utils'
+
 type RequestGateway = <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 
 /** A backend predating a `session.create` field rejects the whole create at
@@ -74,7 +76,7 @@ export async function createGatewaySession(
     }
   }
 
-  return create(params)
+  return withSessionBusyRetry(() => create(params))
 }
 
 // `session.create` params from the current profile + sticky-UI model/effort/fast,

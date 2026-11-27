@@ -2405,5 +2405,6 @@
   "assistant.thread.errorCodes.core_update_forced_stop.title": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "updates.stages.backup": ["ar","ja","ru","zh","zh-hant"],
   "updates.backupProgress": ["ar","ja","ru","zh","zh-hant"],
-  "updates.backupChecking": ["ar","ja","ru","zh","zh-hant"]
+  "updates.backupChecking": ["ar","ja","ru","zh","zh-hant"],
+  "sidebar.nav.unsent-retry": ["ar","de","es","fr","ja","ru","zh","zh-hant"]
 }

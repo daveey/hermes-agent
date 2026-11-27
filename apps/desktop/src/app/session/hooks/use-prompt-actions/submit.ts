@@ -1042,13 +1042,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         let createdId: null | string
 
         try {
-          // A hub still loading its chat model refuses the create too: wait it out instead of
-          // failing a first send the user cannot see again.
-          createdId = await withSessionBusyRetry(() =>
-            createBackendSessionForSend(bubbleText, {
-              onComposerScopeAssigned: options?.onComposerScopeAssigned
-            })
-          )
+          createdId = await createBackendSessionForSend(bubbleText, {
+            onComposerScopeAssigned: options?.onComposerScopeAssigned
+          })
         } catch (err) {
           dropOptimistic(null)
           releaseBusy()

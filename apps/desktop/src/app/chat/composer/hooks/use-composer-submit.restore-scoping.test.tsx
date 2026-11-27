@@ -1,11 +1,12 @@
 import { useStore } from '@nanostores/react'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { startTransition, Suspense, useLayoutEffect, useRef } from 'react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createSessionRpcDispatcher } from '@/app/contrib/session-rpc-dispatcher'
 import { NEW_CHAT_ROUTE, routeSessionId, sessionRoute } from '@/app/routes'
 import { usePromptActions } from '@/app/session/hooks/use-prompt-actions'
+import { CHAT_MODEL_LOADING_RETRY_TIMEOUT_MS } from '@/app/session/hooks/use-prompt-actions/utils'
 import { useSessionActions } from '@/app/session/hooks/use-session-actions'
 import { useSessionStateCache } from '@/app/session/hooks/use-session-state-cache'
 import {
@@ -667,4 +668,152 @@ it('parks a refused first send with a warning naming the session and keeps its c
   })
   expect($unlistedSessionOwnerRows.get().map(row => row.id)).toContain('stored-B')
   warn.mockRestore()
+})
+
+const LOADING = '400: Chat model is still loading; retry when it is ready'
+
+// A hub whose session.create answers `onCreate(callNumber)` (throw to refuse) and whose prompt.submit
+// answers `onSubmit`.
+const mockHub = (onCreate: (call: number) => void, onSubmit: (call: number, params: Record<string, unknown>) => unknown) => {
+  const calls = { create: 0, submit: 0, params: [] as Record<string, unknown>[] }
+
+  vi.mocked(requestGatewayForAgent).mockImplementation(async (_connection, _profile, method, params) => {
+    if (method === 'session.create') {
+      calls.create += 1
+      onCreate(calls.create)
+
+      return { session_id: 'rt-B', stored_session_id: 'stored-B', info: {} }
+    }
+
+    if (method === 'prompt.submit') {
+      calls.submit += 1
+      calls.params.push(params as Record<string, unknown>)
+
+      return await onSubmit(calls.submit, params as Record<string, unknown>)
+    }
+
+    // Closing the orphaned session after a drift abort.
+    if (method === 'session.close') {
+      return {}
+    }
+
+    throw new Error(`unexpected ${method}`)
+  })
+
+  return calls
+}
+
+it('waits out a hub still loading its chat model on session.create, then delivers the first send', async () => {
+  stashSessionDraft(null, 'first message before the session exists', [])
+  $newChatRoute.set({ connectionId: 'connection-create-loading', profile: 'default' })
+
+  const calls = mockHub(
+    call => {
+      if (call === 1) {
+        throw new Error(LOADING)
+      }
+    },
+    (_call, params) => ({ status: 'started', session_id: 'rt-B', submission_id: params.submission_id })
+  )
+
+  seed({}, null)
+  act(() => handles.submit.submitDraft())
+  await waitFor(() => expect(calls.submit).toBe(1), { timeout: 8_000 })
+  expect(calls.create).toBe(2)
+  expect(window.localStorage.getItem('hermes:composer-draft-retry:v1:stored-B')).toBeNull()
+}, 15_000)
+
+it('does not yank the user back to the new chat when they switch away while session.create waits out the loading hub', async () => {
+  stashSessionDraft(null, 'first message while I wander off', [])
+  $newChatRoute.set({ connectionId: 'connection-create-switch', profile: 'default' })
+
+  const calls = mockHub(
+    call => {
+      if (call === 1) {
+        // The user opens chat A while the hub is still loading, then the retry succeeds.
+        act(() => navigate('A'))
+        throw new Error(LOADING)
+      }
+    },
+    (_call, params) => ({ status: 'started', session_id: 'rt-B', submission_id: params.submission_id })
+  )
+
+  seed({}, null)
+  act(() => handles.submit.submitDraft())
+  await waitFor(() => expect(calls.create).toBe(2), { timeout: 8_000 })
+  await act(async () => {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  })
+
+  // The drift baseline is the one captured at send: the switch aborts the send and the user stays on A.
+  expect(calls.submit).toBe(0)
+  expect(route).toBe('stored-A')
+  expect($selectedStoredSessionId.get()).toBe('stored-A')
+  expect($activeSessionId.get()).toBe('rt-A')
+}, 15_000)
+
+describe('a hub that never finishes loading its chat model', () => {
+  let nowOffset = 0
+  let nowSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    nowOffset = 0
+    const realNow = Date.now.bind(Date)
+    nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + nowOffset)
+  })
+
+  afterEach(() => {
+    nowSpy.mockRestore()
+  })
+
+  it('stops waiting at the deadline and parks the first send as a retry draft', async () => {
+    stashSessionDraft(null, 'first message the loading hub never takes', [])
+    $newChatRoute.set({ connectionId: 'connection-deadline', profile: 'default' })
+
+    const calls = mockHub(
+      () => {},
+      () => {
+        // The wait budget is spent as soon as the first refusal arrives.
+        nowOffset = CHAT_MODEL_LOADING_RETRY_TIMEOUT_MS + 1_000
+        throw new Error(LOADING)
+      }
+    )
+
+    seed({}, null)
+    act(() => handles.submit.submitDraft())
+    await waitFor(() => expect(window.localStorage.getItem('hermes:composer-draft-retry:v1:stored-B')).not.toBeNull())
+    // Past the deadline the refusal is final: exactly one attempt, no endless wait.
+    expect(calls.submit).toBe(1)
+    expect(outboxKeys()).toEqual([])
+    expect($unlistedSessionOwnerRows.get().map(row => row.id)).toContain('stored-B')
+  }, 15_000)
+
+  it('retries an identityless resend after a definite loading refusal instead of calling it unsafe', async () => {
+    stashSessionDraft(null, 'first message to a backend without submission ids', [])
+    $newChatRoute.set({ connectionId: 'connection-legacy', profile: 'default' })
+
+    const calls = mockHub(
+      () => {},
+      call => {
+        if (call === 1) {
+          // Pre-admission refusal of `submission_id`: the client falls back to an identityless write.
+          throw Object.assign(new Error('invalid params'), { code: 4094 })
+        }
+
+        if (call === 2) {
+          throw new Error(LOADING)
+        }
+
+        return { status: 'started', session_id: 'rt-B' }
+      }
+    )
+
+    seed({}, null)
+    act(() => handles.submit.submitDraft())
+    await waitFor(() => expect(calls.submit).toBe(3), { timeout: 8_000 })
+    expect(calls.params[0]).toHaveProperty('submission_id')
+    expect(calls.params[1]).not.toHaveProperty('submission_id')
+    expect(calls.params[2]).not.toHaveProperty('submission_id')
+    expect(window.localStorage.getItem('hermes:composer-draft-retry:v1:stored-B')).toBeNull()
+  }, 15_000)
 })

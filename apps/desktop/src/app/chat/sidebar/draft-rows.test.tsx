@@ -6,7 +6,7 @@ import { makeSessionInfo } from '@/test/session-info'
 
 const state = vi.hoisted(() => ({ focus: vi.fn(), reveal: vi.fn(), note: vi.fn() }))
 vi.mock('@/components/pane-shell/tree/store', () => ({ revealTreePane: state.reveal, noteActiveTreeGroup: state.note }))
-vi.mock('@/i18n', () => ({ useI18n: () => ({ t: { sidebar: { nav: { 'new-session': 'New session' } } } }) }))
+vi.mock('@/i18n', () => ({ useI18n: () => ({ t: { sidebar: { nav: { 'new-session': 'New session', 'unsent-retry': 'Not sent – retry:' } } } }) }))
 vi.mock('@/store/session-states', () => ({ $sessionTiles: atom([]), focusOpenSession: state.focus }))
 vi.mock('@/store/session-focus', () => ({ $focusedStoredSessionId: atom(null), $focusedSessionIsTile: atom(false) }))
 vi.mock('@/store/session', () => ({
@@ -24,6 +24,7 @@ vi.mock('@/store/session', () => ({
 vi.mock('@/store/composer', () => ({
   $draftTitles: atom({}),
   $freshDraftKey: atom('__new__:test'),
+  draftKey: (scope: string | null | undefined) => scope ?? '__new__',
   takeSessionDraft: () => ({ text: '', attachments: [] })
 }))
 vi.mock('@/store/projects', async () => {
@@ -242,5 +243,23 @@ describe('client-only sidebar drafts', () => {
     expect(rows()).toHaveLength(2)
     rerender(view({ filter: ['__no_project__'] }))
     expect(rows()).toHaveLength(1)
+  })
+
+  it('lists a chat whose first send the hub never accepted as unsent even with no tile open', () => {
+    window.localStorage.setItem(
+      'hermes:composer-draft-retry:v1:parked',
+      JSON.stringify({ id: 'sub-1', text: 'my first words', attachmentIds: [] })
+    )
+    $unlistedSessionOwnerRows.set([makeSessionInfo({ id: 'parked' })])
+    render(view())
+    const parked = document.querySelector('[data-sidebar-draft-id="parked"]')
+    expect(parked?.textContent).toBe('Not sent – retry: New session')
+    window.localStorage.removeItem('hermes:composer-draft-retry:v1:parked')
+  })
+
+  it('does not list an unlisted stub without a retry draft or a tile', () => {
+    $unlistedSessionOwnerRows.set([makeSessionInfo({ id: 'plain' })])
+    render(view())
+    expect(document.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
   })
 })

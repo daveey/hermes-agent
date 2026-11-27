@@ -4850,6 +4850,7 @@
     "sidebar.nav.cron",
     "sidebar.nav.messaging",
     "sidebar.nav.new-session",
+    "sidebar.nav.unsent-retry",
     "sidebar.newSessionIn",
     "sidebar.noFilterMatches",
     "sidebar.noMatch",

@@ -130,7 +130,7 @@ export function SidebarDraftRows({
         type="button"
       >
         <span className="truncate">
-          {row.unsent ? 'Not sent \u2013 retry: ' : ''}
+          {row.unsent ? `${t.sidebar.nav['unsent-retry'] ?? 'Not sent \u2013 retry:'} ` : ''}
           {titles[row.id] || t.sidebar.nav['new-session']}
         </span>
       </button>
