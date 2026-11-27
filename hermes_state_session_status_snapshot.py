@@ -166,8 +166,10 @@ def _process_items(db: Any, tip: str) -> list[dict]:
     """Live and retained processes of this chat from the registry's strict qualified inventory."""
     from tools.process_registry import process_registry
     from hermes_state_process_checkpoint import checkpoint_items
+    from tools.process_registry_results import _owner_pass
 
-    with _so()._owner_scope(db):
+    # One lineage handle for the whole inventory (results, owner filter, checkpoint), opened under the owner's home.
+    with _so()._owner_scope(db), _owner_pass():
         rows = process_registry.list_sessions(include_retained=True, strict=True, owner_session_id=tip)
         checkpoints = checkpoint_items(process_registry, tip, {row['session_id'] for row in rows})
     items = list(checkpoints)

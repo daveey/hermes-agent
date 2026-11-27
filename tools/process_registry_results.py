@@ -5,6 +5,8 @@ adopted as live PIDs. Each producer writes its own file so independent one-shot
 parents cannot overwrite each other's results in the running-PID checkpoint.
 """
 
+import contextlib
+import contextvars
 import json
 import logging
 import re
@@ -143,6 +145,31 @@ def status_exit_fields(session, *, strict: bool) -> dict:
     return fields
 
 
+_lineage_pass: contextvars.ContextVar = contextvars.ContextVar("process_result_lineage_pass", default=None)
+
+
+@contextlib.contextmanager
+def _owner_pass():
+    """Share one read-only lineage handle and per-parent tips across one inventory pass.
+
+    Every outcome refresh walks up to MAX_RETAINED_RESULTS receipts twice (load, then the
+    strict owner filter); opening a SessionDB per receipt cost ~128 opens per refresh, each
+    a GIL release in the serve. Reentrant: a nested pass reuses the outer one. The memo only
+    lives for the pass, so a later rotation is seen by the next pass.
+    """
+    if _lineage_pass.get() is not None:
+        yield
+        return
+    state = {"db": None, "tips": {}}
+    token = _lineage_pass.set(state)
+    try:
+        yield
+    finally:
+        _lineage_pass.reset(token)
+        if state["db"] is not None:
+            state["db"].close()
+
+
 def _owns_result(owner: str, parent: str | None) -> bool:
     if not parent:
         return False
@@ -152,15 +179,28 @@ def _owns_result(owner: str, parent: str | None) -> bool:
 
     # Pure lineage read on the hot path of every retained-result load; a writable open here
     # was one more writer handle per call inside the gateway (#100896).
-    db = SessionDB(read_only=True)
-    try:
-        return db.get_compression_tip(parent) == owner
-    finally:
-        db.close()
+    state = _lineage_pass.get()
+    if state is None:
+        db = SessionDB(read_only=True)
+        try:
+            return db.get_compression_tip(parent) == owner
+        finally:
+            db.close()
+    tips = state["tips"]
+    if parent not in tips:
+        if state["db"] is None:
+            state["db"] = SessionDB(read_only=True)
+        tips[parent] = state["db"].get_compression_tip(parent)
+    return tips[parent] == owner
 
 
 def registry_sessions(registry, include_retained, strict, owner_session_id, loader) -> dict:
     """Opt-in qualified status view; preserve the default tool/display inventory."""
+    with _owner_pass():
+        return _registry_sessions(registry, include_retained, strict, owner_session_id, loader)
+
+
+def _registry_sessions(registry, include_retained, strict, owner_session_id, loader) -> dict:
     from tools.environments.sandbox_scope import sandbox_visible
 
     if strict and (not include_retained or not owner_session_id):
@@ -191,6 +231,11 @@ def registry_sessions(registry, include_retained, strict, owner_session_id, load
 
 def load_completed_results(prefix: str = "", *, strict: bool = False, owner_session_id: str | None = None) -> dict:
     """Restore read-only snapshots; no process handles, watchers, or queue events."""
+    with _owner_pass():
+        return _load_completed_results(prefix, strict=strict, owner_session_id=owner_session_id)
+
+
+def _load_completed_results(prefix: str, *, strict: bool, owner_session_id: str | None) -> dict:
     from tools.process_registry import ProcessSession
 
     from gateway.session_context import get_session_env
