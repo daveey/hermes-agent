@@ -71,11 +71,17 @@ class SessionStateStore:
     def __init__(self, db: Any, *, collect: Optional[Callable[..., dict]] = None,
                  reduce: Optional[Callable[..., Any]] = None, clock: Callable[[], float] = time.time,
                  divergence_path: Optional[Path] = None, reconcile_s: float = RECONCILE_S,
-                 reconcile_batch: int = RECONCILE_BATCH, retain_s: float = RETAIN_S) -> None:
+                 reconcile_batch: int = RECONCILE_BATCH, retain_s: float = RETAIN_S,
+                 home: Optional[Path] = None) -> None:
         from hermes_session_state_collect import collect as default_collect
         from hermes_session_state_reducer import reduce as default_reduce
 
+        from hermes_constants import hermes_home_key
+
         self.db = db
+        # The profile home whose state.db this store owns (``current()`` serves only that home).
+        self.home = Path(home) if home is not None else Path(db.db_path).parent
+        self.home_key = hermes_home_key(self.home)
         self._collect = collect or default_collect
         self._reduce = reduce or default_reduce
         self._clock = clock
@@ -448,8 +454,18 @@ _store: list[Optional[SessionStateStore]] = [None]
 
 
 def current() -> Optional[SessionStateStore]:
-    """The process's running store (None outside a serving gateway / when disabled)."""
-    return _store[0]
+    """The process's running store for the ACTIVE profile home, else None.
+
+    One gateway process can serve several profiles: an authenticated secondary-profile request binds its home as
+    the task-local override (``native_profile_scope``). The store serves only the home whose state.db it owns, so a
+    request or hook bound to any other home gets None (HTTP 503 / WS 4503) and never another profile's objects.
+    """
+    store = _store[0]
+    if store is None:
+        return None
+    from hermes_constants import get_hermes_home, hermes_home_key
+
+    return store if hermes_home_key(get_hermes_home()) == store.home_key else None
 
 
 def install(store: Optional[SessionStateStore]) -> Optional[SessionStateStore]:

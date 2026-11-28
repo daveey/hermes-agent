@@ -70,6 +70,40 @@ def test_get_resolves_any_session_id_of_the_lineage(store, db, board, client):
     assert client.get("/api/session-state/chat").json()["identity"]["lineage"] == "chat"
 
 
+def _profile_bound_client(home):
+    """The router behind the production per-request profile binder (``native_profile_scope``)."""
+    from hermes_cli.dashboard_auth.native_http import native_profile_scope
+
+    app = FastAPI()
+    app.include_router(routes.router)
+
+    @app.middleware("http")
+    async def scope(request, call_next):
+        request.state.native_http_principal = {"profile_id": str(home)}
+        with native_profile_scope(request):
+            return await call_next(request)
+    return TestClient(app)
+
+
+def test_a_request_bound_to_another_profile_never_gets_this_profiles_objects(store, board, tmp_path):
+    task = kb.create_task(board, title="Deploy", assignee="worker", session_id="chat")
+    assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
+    obj = store.recompute("chat")
+    other = tmp_path / "secondary"
+    other.mkdir()
+    with _profile_bound_client(other) as tc:
+        assert tc.get("/api/session-state/chat").status_code == 503
+        assert tc.get("/api/session-state", params={"since": 0}).status_code == 503
+        refused = tc.post("/api/session-state/actions", json={
+            "action": "unblock", "session_id": "chat", "card": f"default/{task}", "request_id": "req-x",
+            "label": "Ship it", "episode": obj["cards"][f"default/{task}"]["block_episode"]})
+        assert refused.status_code == 503
+    assert kb.get_task(board, task).status == "blocked"  # the refused action committed nothing
+    with _profile_bound_client(tmp_path) as tc:  # control: the store's own profile, through the same binder
+        assert tc.get("/api/session-state/chat").json() == obj
+        assert tc.get("/api/session-state", params={"since": 0}).json()["objects"] == [obj]
+
+
 def test_websocket_since_rev_catch_up_then_pushes(store, board, db, client):
     db.create_session("other", source="desktop")
     task = kb.create_task(board, title="Work", assignee="worker", session_id="chat")

@@ -79,7 +79,9 @@ def clock():
 
 
 @pytest.fixture
-def store(db, clock, tmp_path):
+def store(db, clock, tmp_path, monkeypatch):
+    # The store serves only the home whose state.db it owns (``current()``): make that the active home.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     made = SessionStateStore(db, clock=clock, divergence_path=tmp_path / "logs" / "divergence.jsonl")
     previous = install(made)
     pushed: list[dict] = []

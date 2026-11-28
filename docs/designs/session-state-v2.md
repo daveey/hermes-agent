@@ -71,6 +71,10 @@ handler (refused without one). `release` acts only on the home-filed `release_ta
 (`kanban_release.offered`, else `not_offered`) and runs as an explicit human writer
 (`human_writer("session-state-action:<request_id>")`), never with the serving process's ancestry.
 
+Profile scope: the process store serves only the profile home whose state.db it owns. A request (or in-process
+hook) bound to another home through the per-request profile binder (`native_profile_scope`) gets 503 / WS close
+4503 and never another profile's objects (`hermes_session_state_store.current`).
+
 Reconciliation is bounded: each sweep first prunes the rows (object, card index, aliases, resolutions) of gone
 sessions and of sessions ended more than `RETAIN_S` (7 days) ago, then recomputes the next `RECONCILE_BATCH` (64)
 lineages round-robin, serving live events between them.

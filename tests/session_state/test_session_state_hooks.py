@@ -149,6 +149,46 @@ def test_user_steps_request_create_and_resolve(store, tmp_path, monkeypatch):
     assert _last(store)["asks"] == []
 
 
+def test_user_steps_store_created_after_startup_emits_its_first_request(store, tmp_path, monkeypatch):
+    """The warm-file case is the test above; here actions.sqlite3 does not exist when the watcher starts."""
+    path = tmp_path / "user-steps" / "actions.sqlite3"
+
+    def provider(sid):
+        if not path.exists():
+            return {"decision_items": []}
+        with sqlite3.connect(path) as conn:
+            rows = conn.execute("SELECT id FROM requests WHERE session = ? AND state = 'open'", (sid,)).fetchall()
+        return {"decision_items": [{"id": f"us:{r[0]}", "question": "Pick a colour"} for r in rows]}
+    monkeypatch.setitem(so._providers, "user-steps-late", provider)
+    watcher = UserStepsWatcher(store, path)
+    store.add_tick(watcher)
+    assert store.recompute("chat")["asks"] == []
+    drain(store)  # polls while the file is absent
+    path.parent.mkdir()
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE requests (namespace TEXT, id TEXT, session TEXT, revision INTEGER, state TEXT, "
+                     "resolution TEXT, PRIMARY KEY(namespace, id))")
+        conn.execute("INSERT INTO requests VALUES ('ns', 'first', 'chat', 1, 'open', NULL)")
+    drain(store)
+    assert [a["id"] for a in store.get("chat")["asks"]] == ["us:first"]
+    assert [a["id"] for a in _last(store)["asks"]] == ["us:first"]  # pushed, not only persisted
+
+
+def test_a_hook_bound_to_another_profile_home_does_not_reach_this_store(store, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    other = tmp_path / "secondary"
+    other.mkdir()
+    token = set_hermes_home_override(str(other))
+    try:
+        emit_session("chat", "manual")
+    finally:
+        reset_hermes_home_override(token)
+    assert drain(store) == 0
+    emit_session("chat", "manual")  # control: the store's own home reaches it
+    assert drain(store) >= 1
+
+
 def test_emit_session_without_a_running_store_is_a_no_op(monkeypatch):
     from hermes_session_state_store import install
 

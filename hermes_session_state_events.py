@@ -251,7 +251,12 @@ class UserStepsWatcher(_Watched):
         self._digests: Optional[dict[str, str]] = None
 
     def __call__(self) -> None:
-        if not self.path.is_file() or not self._moved(self.path):
+        if not self.path.is_file():
+            # Absent means known-empty: when the store first appears, every request in it is new and is emitted
+            # (a None baseline would swallow the first requests until an unrelated event or reconciliation).
+            self._digests = {}
+            return
+        if not self._moved(self.path):
             return
         try:
             with closing(_open_ro(self.path)) as conn:

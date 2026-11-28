@@ -42,7 +42,7 @@ def start(home: Any = None, *, tick_s: float = 0.1) -> Optional[Any]:
     if not state_path.is_file():
         return None
     db = SessionDB(db_path=state_path)
-    store = SessionStateStore(db, divergence_path=home / "logs" / "session-state-divergence.jsonl")
+    store = SessionStateStore(db, home=home, divergence_path=home / "logs" / "session-state-divergence.jsonl")
     install_watchers(store, state_path=state_path, user_steps_path=home / "user-steps" / "actions.sqlite3")
     rows = db._read_all("SELECT id FROM sessions WHERE outcome_at > ? ORDER BY outcome_at DESC LIMIT ?",
                         (time.time() - SEED_WINDOW_S, SEED_LIMIT))
