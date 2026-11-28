@@ -38,7 +38,13 @@ def capture(conn: sqlite3.Connection, kind: str) -> dict[str, list[float]]:
     else:
         successor = f"SELECT MIN(next_id) FROM ({probes})"
     sql = (
-        f"WITH parks AS MATERIALIZED (SELECT id,task_id,payload,created_at FROM {source} "
+        # These top-level fields never contribute to ETA. Strip their potentially
+        # large prose in SQLite, before packing/crossing the Python/GIL boundary.
+        # Retain the rest of the JSON verbatim in structure: extracting awaiting
+        # with json_extract would change last-key-wins duplicate-key semantics.
+        f"WITH parks AS MATERIALIZED (SELECT id,task_id,"
+        "CASE WHEN json_valid(payload) THEN json_remove(payload,'$.reason','$.checkpoint') "
+        f"ELSE payload END AS payload,created_at FROM {source} "
         "WHERE kind IN ('scheduled','continued')" + opt_in + " AND json_extract(payload,'$.awaiting.kind')=? "
         "ORDER BY id DESC LIMIT ?), ended AS ("
         f"SELECT p.*, ({successor}) AS end_id FROM parks p) "
