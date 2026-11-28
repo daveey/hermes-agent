@@ -251,21 +251,32 @@ HUMAN_ONLY_NOTE = ("A live owner holds this card, but its stop is human-only: th
                    "allowance is exhausted and an agent release refuses it (allowance_exhausted)")
 
 
-def human_only_stop(conn: sqlite3.Connection, task_id: str) -> bool:
-    """The card's pending stop is one no owner agent can lift: it is held on its own pending spend/scope stop, the
-    Board's reviewer allowance is its budget, and the Board reports that allowance active with no fresh lease
-    left (the ``allowance_exhausted`` refusal ``kanban_release._board_allowance`` gives every agent authority).
+CACHE_LIMIT_NOTE = ("A live owner holds this card, but its stop is human-only: its cache-read limit is used up and an agent "
+                    "release may not raise a limit a person may have set (budget_limit_in_force)")
+
+
+def human_only_stop(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Why the card's pending stop is one no owner agent can lift, else None. It is held on its own pending
+    spend/scope stop and every agent release refuses it while a human release would go through:
+    - the Board's reviewer allowance is its budget and the Board reports it active with no fresh lease left
+      (``allowance_exhausted`` from ``kanban_release._board_allowance``), or
+    - its cache-read limit is reached in the current window and an agent may not raise it
+      (``budget_limit_in_force`` from ``kanban_release._budget_plan``), and any Board allowance reads active.
     A live owner then owns nothing a release could act on, so it must not suppress the human release offer.
-    One authenticated Board read outside any transaction; an unknown or unreadable answer is never human-only."""
+    At most one authenticated Board read, outside any transaction; an unknown, unreadable or invalidated Board
+    answer is never human-only (a human release refuses those too)."""
     from hermes_cli import kanban_allowance_observation as observation
     from hermes_cli import kanban_release
     from hermes_cli import kanban_spend_allowance as allowance
     if conn.in_transaction or kanban_release.held(conn, task_id) != task_id:
-        return False
-    if not allowance.history(conn, task_id) or allowance.state(conn, task_id) != allowance.BOARD:
-        return False
-    seen = observation.board_state(conn, task_id)
-    return isinstance(seen, dict) and seen.get("state") == "active" and seen.get("remaining") == 0
+        return None
+    if allowance.history(conn, task_id):
+        seen = observation.board_state(conn, task_id)
+        if not isinstance(seen, dict) or (seen and seen.get("state") != "active"):
+            return None
+        if seen and allowance.state(conn, task_id) == allowance.BOARD and seen.get("remaining") == 0:
+            return HUMAN_ONLY_NOTE
+    return CACHE_LIMIT_NOTE if kanban_release.agent_cache_limit_in_force(conn, task_id) else None
 
 
 def _payload(raw: Any) -> dict:
@@ -449,7 +460,7 @@ def _request(conn: sqlite3.Connection, row: dict, entry: Optional[dict], age: in
 
 
 def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int, defer: int,
-              desk, contained: bool, human_only: bool = False) -> bool:
+              desk, contained: bool, human_only: Optional[str] = None) -> bool:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_ask_resolved import store_request
     from hermes_cli.kanban_human_request import NONHUMAN_KINDS
@@ -473,7 +484,7 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
             kind = fresh.get("block_kind")
             if kind in NONHUMAN_KINDS:
                 kind = "needs_input"
-            filed = _request(conn, fresh, entry, age, HUMAN_ONLY_NOTE if human_only else
+            filed = _request(conn, fresh, entry, age, human_only or
                              "No unreleased chat link to a live chat and no open spend-decision supervisor card", kind)
             if human_only and not filed.get("release_target"):
                 return False  # no release offer to deliver (restricted, or the stop moved): the owner keeps it
@@ -700,7 +711,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                 if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
                         or _excluded(conn, _gated(conn, row), now, age=age, defer=defer_s)):
                     continue
-                human_only = False
+                human_only = None
                 if live_owner(conn, tid, own=own, liveness=liveness):
                     human_only = human_only_stop(conn, tid)
                     if not human_only:

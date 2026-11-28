@@ -228,3 +228,75 @@ def test_a_safety_restricted_live_owned_stop_gets_no_offerless_red_ask(kanban_ho
         cfg = {"kanban": {"triage_owner_chat": park.DESK}}
         assert park._sweep(conn, now=park._later(3), cfg=cfg) == []
         _nothing_filed(conn, tid)
+
+
+def _over_cache(monkeypatch, conn, tid: str, extra: int = 1):
+    """The cartpole card's shape (t_01a216ed277893e9): its cache-read spend is past the board limit it inherits,
+    and an earlier scope stop fixed its accounting floor, so the limit counts the current window."""
+    real = budget.spend
+
+    def spend(conn, task, **kw):
+        spent = real(conn, task, **kw)
+        return spent._replace(tokens={**spent.tokens, "cache_read_tokens": budget.limits().cache_read_tokens + extra})
+    monkeypatch.setattr(budget, "spend", spend)
+    # An earlier, renewed scope stop fixed the card's accounting floor, so its limit counts the current window
+    # (kanban_spend_budget.limit_window); that window reading alone is faked here.
+    real_window = budget.limit_window
+    monkeypatch.setattr(budget, "limit_window", lambda c, task: "current" if task == tid else real_window(c, task))
+    assert budget.limit_window(conn, tid) == "current"
+
+
+RENEWABLE = {**EXHAUSTED, "remaining": 3, "used": 7}
+
+
+def test_a_cache_limit_an_agent_may_not_raise_is_human_only_too(kanban_home, own_gateway, monkeypatch):
+    """Board leases left, but the cache-read limit is used up: every agent release refuses budget_limit_in_force,
+    so the live owner gets the stamped human release offer, and the click is the human release that lifts it."""
+    for conn in (own_gateway,):
+        tid = _allowance_stop_with_live_owner(conn, kanban_home)
+        _board(monkeypatch, RENEWABLE)
+        _over_cache(monkeypatch, conn=conn, tid=tid)
+        from tests.hermes_cli import test_kanban_allowance_supersession as supersession
+        agent = supersession._state(tid, supersession.AGENT, "chat")
+        kanban_release._board_allowance(conn, agent)  # Board leases left: the allowance itself allows it
+        assert agent.keep_allowance
+        with pytest.raises(kanban_release.Refusal) as caught:
+            kanban_release._budget_plan(conn, agent)
+        assert caught.value.code == "budget_limit_in_force"
+        assert kanban_release.agent_cache_limit_in_force(conn, tid)
+        assert stranded.human_only_stop(conn, tid) == stranded.CACHE_LIMIT_NOTE
+        assert park._sweep(conn, now=park._later(3), cfg={}) == [tid]
+        ask = json.loads(park._row(conn, tid)[2])
+        assert ask["release_target"]["task"] == tid and stranded.CACHE_LIMIT_NOTE in ask["evidence"]
+        assert kanban_release.offered(conn, tid, ask) == tid
+        from hermes_cli import kanban_scope_renewal_cli as renewal_cli
+        monkeypatch.setattr(renewal_cli, "renew", lambda conn_, task_id, **kw: {})
+        receipt = _answer(conn, tid)
+        task = kb.get_task(conn, tid)
+        assert receipt["choice"] == "unblock" and task is not None and task.status == "ready"
+        assert not decision.pending(conn, tid)
+        assert budget.card_limits(conn, tid, budget.limits()).cache_read_tokens == 0  # the person lifted it
+
+
+@pytest.mark.parametrize("seen", [None, {**EXHAUSTED, "state": "invalidated"}])
+def test_a_cache_limit_with_an_unreadable_or_invalidated_board_is_not_offered(kanban_home, own_gateway,
+                                                                              monkeypatch, seen):
+    """A human release refuses those too (allowance_unreadable / allowance_invalidated): no offer that cannot work."""
+    for conn in (own_gateway,):
+        tid = _allowance_stop_with_live_owner(conn, kanban_home)
+        _board(monkeypatch, seen)
+        _over_cache(monkeypatch, conn=conn, tid=tid)
+        assert stranded.human_only_stop(conn, tid) is None
+        assert park._sweep(conn, now=park._later(3), cfg={}) == [] and park._row(conn, tid)[2] is None
+
+
+def test_an_agent_set_cache_limit_stays_with_the_live_owner(kanban_home, own_gateway, monkeypatch):
+    """A limit an agent set is one an agent release may replace: not human-only, the owner keeps the card."""
+    for conn in (own_gateway,):
+        tid = _allowance_stop_with_live_owner(conn, kanban_home)
+        _board(monkeypatch, RENEWABLE)
+        _over_cache(monkeypatch, conn=conn, tid=tid)
+        monkeypatch.setattr(budget, "cache_attribution", lambda prior: "agent")
+        assert not kanban_release.agent_cache_limit_in_force(conn, tid)
+        assert stranded.human_only_stop(conn, tid) is None
+        assert park._sweep(conn, now=park._later(3), cfg={}) == [] and park._row(conn, tid)[2] is None

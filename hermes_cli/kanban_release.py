@@ -649,6 +649,28 @@ def _board_allowance(conn: sqlite3.Connection, s) -> None:
     s.keep_allowance = True
 
 
+def _cache_limit(conn: sqlite3.Connection, tid: str, *, agent: bool):
+    """``(prior override, spend, keeps_limit, card cache limit, effective limit, used, reached)``: the cache-read
+    reading ``_budget_plan`` decides on. ``keeps_limit``: an agent writer must keep a limit it cannot attribute to an
+    agent; ``reached``: that limit is already used up in the window the card runs in."""
+    from hermes_cli import kanban_spend_budget as ksb
+    prior = ksb.card_override(conn, tid) or {}
+    spent = ksb.spend(conn, tid)
+    keeps = agent and ksb.override_set(prior) and ksb.cache_attribution(prior) != "agent"
+    cache = ksb._limit_value(prior.get("cache_read_tokens"))
+    limit = ksb.limits().cache_read_tokens if cache is None else cache
+    used = spent.tokens["cache_read_tokens"]
+    reached = bool(limit) and used >= limit and ksb.limit_window(conn, tid) == "current"
+    return prior, spent, keeps, cache, limit, used, reached
+
+
+def agent_cache_limit_in_force(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Every agent release of the card refuses ``budget_limit_in_force``: its cache-read limit is reached in the
+    current window and is one an agent may not raise (a person may have set it). Only a human release lifts it."""
+    _, _, keeps, _, _, _, reached = _cache_limit(conn, task_id, agent=True)
+    return bool(keeps and reached)
+
+
 def _budget_plan(conn: sqlite3.Connection, s) -> tuple[Optional[int], Optional[int], int, str]:
     """``(runs limit, cache-read limit, runs spent, text)`` this release leaves on the card; a None run limit
     leaves the override untouched.
@@ -664,14 +686,8 @@ def _budget_plan(conn: sqlite3.Connection, s) -> tuple[Optional[int], Optional[i
     A human (or an agent replacing an agent's limit) lifts it; an agent that must keep it is refused before
     anything is written (``budget_limit_in_force``). That holds for a card with no run limit as well."""
     from hermes_cli import kanban_spend_budget as ksb
-    prior = ksb.card_override(conn, s.tid) or {}
-    spent = ksb.spend(conn, s.tid)
-    s.keeps_limit = (s.writer[0] != "human" and ksb.override_set(prior) and ksb.cache_attribution(prior) != "agent")
+    prior, spent, s.keeps_limit, cache, limit, used, reached = _cache_limit(conn, s.tid, agent=s.writer[0] != "human")
     s.prior = prior
-    cache = ksb._limit_value(prior.get("cache_read_tokens"))
-    limit = ksb.limits().cache_read_tokens if cache is None else cache
-    used = spent.tokens["cache_read_tokens"]
-    reached = bool(limit) and used >= limit and ksb.limit_window(conn, s.tid) == "current"
     if reached and s.keeps_limit:
         raise _Refusal("budget_limit_in_force", f"{s.tid} has reached its cache-read limit ({used} of {limit}) and an "
                        "agent does not raise a limit a person may have set; a human runs "
