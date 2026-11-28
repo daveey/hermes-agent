@@ -374,18 +374,28 @@ def statements_for(board, monkeypatch, call):
     return len([s for s in statements if s.lstrip().upper().startswith(("SELECT", "WITH"))])
 
 
-def test_done_read_cost_is_independent_of_card_count_for_listing_and_counts(board, monkeypatch):
+@pytest.mark.parametrize("warm", [False, True])
+def test_done_read_cost_is_independent_of_card_count_for_listing_and_counts(board, monkeypatch, warm):
     finish(board, card(board))
     listing = lambda: activity.session_tasks(["session"], statuses=("done",))
     counts = lambda: (activity._reset_cache_for_tests(), annotate())
+
+    def listing_cost():
+        # Counts reset the retained readers. Compare like cache states, rather
+        # than a cold one-card selection with a warm many-card selection.
+        activity._reset_cache_for_tests()
+        if warm:
+            listing()
+        return statements_for(board, monkeypatch, listing)
+
     listing(), counts()  # one-time schema/revision warm-up is not a per-card cost
-    one_list = statements_for(board, monkeypatch, listing)
+    one_list = listing_cost()
     one_count = statements_for(board, monkeypatch, counts)
     for _ in range(25):
         finish(board, card(board), "delivered" if _ % 2 else "rejected")
     activity._reset_cache_for_tests()
     assert len(listing()) == 26
-    assert statements_for(board, monkeypatch, listing) == one_list
+    assert listing_cost() == one_list
     assert statements_for(board, monkeypatch, counts) == one_count
 
 
