@@ -266,7 +266,8 @@ def content_keys(path, parts=('counts', 'links', 'attention')) -> dict:
         if before is None:
             return unknown
         with activity.cached_ro(path, busy_budget=0) as conn:
-            values = read_revisions(conn, (conn, before), kinds)
+            from hermes_cli.kanban_annotation_probe_cache import read
+            values = read(conn, path, (conn, before), kinds, read_revisions)
         if revision.file_stat(path)[0] != before:
             return unknown
         return {part: unknown[part] if value is None else ('part', part, *value)
