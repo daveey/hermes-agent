@@ -17,6 +17,7 @@ import {
 import { RemoteLivenessTracker, RemoteRevalidationCoordinator, revalidateRemoteConnection } from './remote-liveness'
 import { RemotePrewarmer } from './remote-prewarm'
 import { createRemoteWarmSet } from './remote-warm-set'
+import { observePrimaryRevalidation, withRegistryRevalidationStages } from './request-stages'
 import { createBootstrapCoordinator } from './ssh-bootstrap-coordinator'
 import type { SshConnection } from './ssh-connection'
 import { createSshTeardownTracker } from './ssh-teardown'
@@ -50,6 +51,7 @@ export function primaryRevalidationMainFixture({
     'ensureBackend',
     'freshGatewayWsUrl',
     'ensureRegistryBackend',
+    'ensureRegistryBackendUnobserved',
     'revalidatePrimaryRemoteBackend',
     'resetHermesConnectionState',
     'invalidatePrimaryConnection',
@@ -124,6 +126,8 @@ export function primaryRevalidationMainFixture({
   })
 
   const bindings = {
+    observePrimaryRevalidation,
+    withRegistryRevalidationStages,
     capturePrimarySshTeardown,
     createPrimaryRemoteRevalidator,
     ensureProbedPrimaryBackend,
