@@ -160,6 +160,23 @@ def test_a_non_home_gateway_links_nothing(conn, monkeypatch):
     assert [i["task"] for i in khc.maybe_sweep(conn, now=1e12)["linked"]] == [unforged]
 
 
+def test_a_deleted_needs_you_chat_is_replaced_by_its_next_generation(conn, monkeypatch):
+    """Review 6094556989: after the user deletes ``kanban_owner_needs_you``, ensure() returns ``..._2``; that chat
+    must count as the human chat (linked once, outcome refreshed), not stay missing forever."""
+    unforged = _unforged(conn)
+    gen2 = owner.session_id(khc.NEEDS_YOU, 2)
+    monkeypatch.setattr(owner, "ensure", lambda producer: gen2)
+    refreshed = []
+    import hermes_state_outcome
+    monkeypatch.setattr(hermes_state_outcome, "refresh_outcomes_quietly",
+                        lambda sids, why: refreshed.extend(sids) or len(sids))
+    result = khc.sweep(conn)
+    assert result["failed"] == [] and result["linked"] == [{"task": unforged, "source": "needs_you", "session": gen2}]
+    assert refreshed == [gen2] and khc.missing(conn) == []
+    assert not khc.is_needs_you_session(khc.needs_you_session() + "_x")
+    assert not khc.is_needs_you_session(owner.session_id("kanban_dispatcher"))
+
+
 def test_the_needs_you_chat_is_red_while_another_of_its_cards_runs(conn, home, monkeypatch):
     """Point 2: a linked human ask makes the outcome ``decision`` (the red stripe) even beside running work."""
     unforged = _unforged(conn)

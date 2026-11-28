@@ -99,6 +99,14 @@ def _created_chats(conn, task_id: str) -> list[tuple[str, Optional[str], str]]:
     return rows
 
 
+def is_needs_you_session(session: Any) -> bool:
+    """Any generation of the standing chat (``kanban_owner_needs_you``, ``_2``, ...): a deleted chat retires its id
+    for good and ``ensure`` takes the next generation."""
+    import re
+    base = needs_you_session()
+    return bool(re.fullmatch(re.escape(base) + r"(?:_[2-9]\d*)?", str(session or "")))
+
+
 def is_human_chat(conn, gateway: Any, profile: Any, session: Any) -> bool:
     from hermes_cli.kanban_adoption_authority import gateway as _gateway
     from hermes_cli.kanban_owner_chat import PREFIX
@@ -109,7 +117,7 @@ def is_human_chat(conn, gateway: Any, profile: Any, session: Any) -> bool:
         return False
     me = _gateway(conn)
     if session.startswith(PREFIX):
-        return session == needs_you_session() and gateway == me
+        return is_needs_you_session(session) and gateway == me
     return not is_machine_session(gateway, session, local_gateway=me, profile=profile)
 
 
