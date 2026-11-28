@@ -462,6 +462,7 @@ import { FirstRunSetupResetError, runPrimaryBackendStartup } from './primary-bac
 import { joinPrimaryBoot, primaryBootRequest, primaryDialClaimKey, primaryProfileRestorable } from './primary-boot-join'
 import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { PrimaryProfilePin, resolveLaunchProfile } from './primary-profile-pin'
+import { capturePrimarySshTeardown, createPrimaryRemoteRevalidator, ensureProbedPrimaryBackend } from './primary-remote-revalidation'
 import { connectPrimaryRemote } from './primary-remote-startup'
 import { applyDesktopIdentity, PRODUCT_IDENTITY } from './product-identity'
 import {
@@ -546,7 +547,6 @@ import {
   RemoteLivenessTracker,
   RemoteRevalidationCoordinator,
   revalidatePooledRemoteBackends,
-  revalidateRemoteConnection,
   revalidateSuspectPooledRemoteBackends
 } from './remote-liveness'
 import { resolveRemoteOauthTicket, rosterSourceEnumerationTimeoutMs } from './remote-oauth-ticket'
@@ -10260,7 +10260,10 @@ async function ensureRegistryBackend(
 
   if (primary) {
     return {
-      ...primary,
+      ...(await ensureProbedPrimaryBackend(primary, { forceProbe: opts.forceProbe, passive }, {
+        revalidate: revalidatePrimaryRemoteBackend,
+        ensure: () => ensureBackend(profile, { passive })
+      })),
       profile: profileKey,
       connectionId: id
     }
@@ -13725,54 +13728,30 @@ function recordWindowConnectionRoute(sender: Electron.WebContents, route: unknow
 }
 
 ipcMain.on('hermes:connection:active-route', (event, route) => recordWindowConnectionRoute(event.sender, route))
-// Reconnect-after-wake recovery. A REMOTE primary backend has no child process,
-// so the 'exit'/'error' handlers that would clear a dead connection promise never
-// fire — once the remote becomes unreachable across a sleep/wake the renderer
-// re-dials the same dead descriptor forever and the composer stays stuck on
-// "Starting Hermes…". Before the renderer's backoff loop reconnects, it asks us
-// to confirm the cached PRIMARY backend is still reachable; if a remote one is
-// not, we drop the cache so the next getConnection() rebuilds it. Local backends
-// self-heal via their child 'exit' handler, so we never touch them here.
-ipcMain.handle('hermes:connection:revalidate', async () => {
-  const connectionPromise = backendConnectionState.getPromise()
 
-  if (!connectionPromise) {
-    await revalidatePool()
+// Explicit warm-set probes and renderer reconnects share the primary's existing
+// failure policy and teardown barrier. A matching registry alias must not swallow forceProbe.
+const revalidatePrimaryRemoteBackend = createPrimaryRemoteRevalidator({
+  currentConnectionPromise: () => backendConnectionState.getPromise(),
+  coordinator: remoteRevalidation,
+  log: rememberLog,
+  probe: (connection, path, options) => fetchJsonForBackend(connection, path, { ...options, pool: 'probe' }),
+  resetConnection: () => resetHermesConnectionState({ soft: true }),
+  tracker: remoteLiveness,
+  captureSshTeardown: connection => capturePrimarySshTeardown(connection, {
+    states: sshConnections,
+    cancelAndWait: (scope, teardown) => sshBootstrapCoordinator.cancelAndWait(scope, teardown),
+    teardown: scope => teardownSshConnection(scope, 'revalidate')
+  })
+})
 
-    return { ok: true, rebuilt: false }
-  }
-
-  // Main and every session pop-out have their own renderer reconnect loop but
-  // share this primary connection. Coalesce simultaneous requests so one outage
-  // produces one failure observation rather than exhausting the whole streak.
-  return remoteRevalidation.run(connectionPromise, async () => {
-    const [result] = await Promise.all([
-      revalidateRemoteConnection({
-        connectionPromise,
-        currentConnectionPromise: () => backendConnectionState.getPromise(),
-        log: rememberLog,
-        probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
-        resetConnection: () => resetHermesConnectionState({ soft: true }),
-        tracker: remoteLiveness
-      }),
-      revalidatePool()
-    ])
-
-    // A rebuilt SSH connection must also tear down its tunnel/master before the
-    // renderer re-dials (which only happens after this handler resolves), so the
-    // fresh bootstrap can't reattach to a dying transport.
-    if (result.rebuilt) {
-      const conn = await connectionPromise.catch(() => null)
-
-      if (conn?.remoteKind === 'ssh') {
-        const profile = primaryProfileKey()
-        await sshBootstrapCoordinator.cancelAndWait(sshScopeKey(profile), () => teardownSshConnection(profile, 'revalidate'))
-      }
-    }
+ipcMain.handle('hermes:connection:revalidate', () =>
+  remoteRevalidation.run(backendPool, async () => {
+    const [result] = await Promise.all([revalidatePrimaryRemoteBackend(), revalidatePool()])
 
     return result
   })
-})
+)
 
 // Pooled remote descriptors get the same treatment as the primary: they have no
 // child process to signal their host's death, so nothing else can retire a dead
