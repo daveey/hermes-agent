@@ -41,11 +41,11 @@ def build_kanban_policy(connection, params, config):
                                  (task.id, task.current_run_id)).fetchone()
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
                 raise RuntimeStoreError('stale_kanban_claim')
-            context = kb.build_worker_context(conn, task.id)
+            context = kb.build_worker_context(conn, task.id, compact=True)
             # [daveey] The run before this one lost to an owner restart: resume its conversation.
             from gateway.session_kanban_resume import restart_candidate
             resume_from = restart_candidate(conn, task.id, task.current_run_id)
-            resume_base = kb.build_worker_context(conn, task.id, recovery_tail=False) if resume_from else None
+            resume_base = kb.build_worker_context(conn, task.id, recovery_tail=False, compact=True) if resume_from else None
             from hermes_cli.kanban_db_context import ctx_workspace_span
             context_workspace = ctx_workspace_span(task)  # [daveey] the capsule rewrite's exact header span
             # [daveey] Owner-derived (task row + resolved backend), never caller/config supplied.

@@ -45,7 +45,7 @@ def _override(conn, tid, **payload):
 
 
 def _released(conn, **extra):
-    tid = kb.create_task(conn, title="reviewed", assignee="worker")
+    tid = kb.create_task(conn, title="reviewed", assignee="worker", max_retries=100)  # above auto-replan threshold
     uid = _override(conn, tid, **{"runs": 10, "cache_read_tokens": None, "runs_basis": allowance.BASIS,
                                   "review_uid": REVIEW, "by": "kanban-spend-reviewer", **extra})
     return tid, uid

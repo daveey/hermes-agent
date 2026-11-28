@@ -709,6 +709,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
         if not task:
             from hermes_cli.kanban_pickup_stall import not_here_note
             return _err(f"no such task: {args.task_id}{not_here_note(conn, args.task_id)}")
+        from hermes_cli.kanban_worker_brief import print_cli
+        if print_cli(conn, task, args):
+            return 0
         comments = kb.list_comments(conn, args.task_id)
         events = kb.list_events(conn, args.task_id)
         from hermes_cli.kanban_artifact_receipt import latest_receipt, format_receipt
@@ -764,9 +767,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         field("branch", task.branch_name)
     if task.skills:
         field("skills", ", ".join(task.skills))
-    if task.model_override:
-        _prov = f" (provider: {task.provider_override})" if task.provider_override else ""
-        field("model", f"{task.model_override}{_prov}")
+    from hermes_cli.kanban_cli_show import print_model
+    print_model(task, field)
     _print_max_retries(task)
     field("created", f"{_fmt_ts(task.created_at)} by {task.created_by or '-'}")
     _hub_admission_show.print_show_field(events, field)  # [daveey] why this card is (or is not) on the hub

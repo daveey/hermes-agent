@@ -36,7 +36,7 @@ def github(monkeypatch):
 
 
 def owner(conn, *, key="published_pr", url=PR, runs=15):
-    tid = kb.create_task(conn, title="Core work", assignee="default")
+    tid = kb.create_task(conn, title="Core work", assignee="default", max_retries=100)  # above auto-replan threshold
     helpers._runs(conn, tid, runs, usage={"cache_read_tokens": 1_000_000})
     conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?",
                  (json.dumps({key: url}), tid))

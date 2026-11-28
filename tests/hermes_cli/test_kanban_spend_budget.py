@@ -114,13 +114,15 @@ def test_long_tail_card_goes_to_triage_with_its_spend(kanban_home):
         assert len(_events(conn, tid, ksb.EVENT)) == 1
 
 
-def test_below_budget_still_spawns(kanban_home):
+def test_below_spend_budget_replans_before_spawning(kanban_home):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="busy", assignee="default")
         _runs(conn, tid, ksb.DEFAULT_RUNS - 1)
         spawns = Spawns()
         res = kbd.dispatch_once(conn, spawn_fn=spawns)
-        assert spawns.ids == [tid] and res.no_progress_held == []
+        parent, = kb.parent_ids(conn, tid)
+        assert spawns.ids == [] and res.no_progress_held == [(tid, f'replan:{parent}')]
+        assert _events(conn, tid, ksb.EVENT) == []
 
 
 def test_cache_read_limit_trips_before_the_run_limit(kanban_home):
@@ -197,8 +199,9 @@ def test_promote_from_triage_starts_a_new_window(kanban_home):
         assert ksb.spend(conn, tid).runs == 0
         spawns = Spawns()
         kbd.dispatch_once(conn, spawn_fn=spawns)
-        assert tid in spawns.ids
-        assert spawns.ids == [tid]  # only explicitly promoted original work runs
+        assert tid not in spawns.ids  # spend renewal is independent of convergence planning
+        parent, = kb.parent_ids(conn, tid)
+        assert kb.get_task(conn, tid).status == 'todo' and kb.get_task(conn, parent).status == 'ready'
 
 
 def test_live_claim_is_never_taken_off_the_lane(kanban_home):
@@ -356,7 +359,8 @@ def test_a_human_answer_opens_a_new_window(kanban_home, writer_kind, relay):
         assert ksb.spend(conn, tid).runs == 0
         spawns = Spawns()
         res = kbd.dispatch_once(conn, spawn_fn=spawns)
-        assert res.no_progress_held == [] and spawns.ids == [tid]
+        parent, = kb.parent_ids(conn, tid)
+        assert res.no_progress_held == [(tid, f'replan:{parent}')] and spawns.ids == []
         assert _events(conn, tid, ksb.EVENT) == []
 
 
@@ -383,7 +387,9 @@ def test_per_card_exemption_is_explicit_and_audited(kanban_home):
             _runs(conn, card, ksb.DEFAULT_RUNS * 3, usage={"cache_read_tokens": 2_000_000})
         spawns = Spawns()
         res = kbd.dispatch_once(conn, spawn_fn=spawns)
-        assert spawns.ids == [tid] and res.no_progress_held == [(other, "spend_budget:triage")]
+        parent, = kb.parent_ids(conn, tid)
+        assert spawns.ids == []
+        assert set(res.no_progress_held) == {(tid, f'replan:{parent}'), (other, 'spend_budget:triage')}
         (event,) = _events(conn, tid, ksb.OVERRIDE_EVENT)
         note = next(c for c in kb.list_comments(conn, tid) if "standing shepherd" in c.body)
         assert event.payload == {"runs": 0, "cache_read_tokens": 0, "by": "david", "reason": "standing shepherd",
@@ -514,7 +520,9 @@ def test_owner_refusals_do_not_hold_the_t_01a1f874b1c702d7_window(kanban_home):
         assert (spent.runs, spent.excluded) == (8, 7)
         assert ksb.hold(conn, tid, lim=LIMITS) is None
         spawns = Spawns()
-        assert kbd.dispatch_once(conn, spawn_fn=spawns).no_progress_held == [] and spawns.ids == [tid]
+        result = kbd.dispatch_once(conn, spawn_fn=spawns)
+        parent, = kb.parent_ids(conn, tid)
+        assert result.no_progress_held == [(tid, f'replan:{parent}')] and spawns.ids == []
 
 
 def test_fifteen_real_runs_still_hold_next_to_refusals(kanban_home):

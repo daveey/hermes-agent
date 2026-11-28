@@ -58,7 +58,7 @@ def publish(home, **changes):
 
 def running(conn, tid=None):
     if tid is None:
-        tid = kb.create_task(conn, title="Verify core release", assignee="worker")
+        tid = kb.create_task(conn, title="Verify core release", assignee="worker", max_retries=100)  # above auto-replan threshold
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
     assert kb.claim_task(conn, tid, claimer="worker") is not None

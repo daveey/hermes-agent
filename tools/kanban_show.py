@@ -63,7 +63,7 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
     from tools.kanban_tools_capsule import own_card_view
 
     tid = task.id
-    worker_context = kb.build_worker_context(conn, tid)
+    worker_context = kb.build_worker_context(conn, tid, compact=compact_view(args))
     capsule = {}
     details = {}
     queue_hint = None

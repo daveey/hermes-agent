@@ -122,6 +122,12 @@ def test_failure_recovery_cannot_release_spend_stop_after_old_gave_up(kanban_hom
         # A recorded decision still releases it, and a later failure stop recovers as before.
         assert kb.promote_task(conn, tid, actor="operator", reason="rescope")[0]
         assert kb.get_task(conn, tid).status in ("ready", "todo")
+        from hermes_cli.kanban_auto_replan import hold as replan
+        parent = replan(conn, tid)
+        assert parent and kb.get_task(conn, tid).status == 'todo'
+        assert kb.complete_task(conn, parent, result='Convergence plan recorded')
+        kb.recompute_ready(conn, failure_limit=100)
+        assert replan(conn, tid) is None
         assert kb.claim_task(conn, tid)
         assert dispatch._record_task_failure(conn, tid, "Worker crashed", outcome="crashed",
                                              failure_limit=1, release_claim=True, end_run=True)

@@ -125,7 +125,7 @@ def test_backoff_cap_notice_once_and_nonwall_resets(board, monkeypatch, outcome)
     clock = [1_800_000_000]
     monkeypatch.setattr(kb.time, 'time', lambda: clock[0])
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title='backoff', assignee='a')
+        tid = kb.create_task(conn, title='backoff', assignee='a', max_retries=100)  # above auto-replan threshold
         for count, delay in enumerate([300, 600, 1200, 2400, 4800, 7200, 7200], 1):
             start = clock[0]
             run_id = reap(conn, tid)

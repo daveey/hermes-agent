@@ -77,7 +77,8 @@ def test_refused_no_progress_controls_write_no_hold(kanban_home, monkeypatch, co
 @pytest.mark.parametrize("control", ["dry_run", "exempt", "foreign"])
 def test_refused_budget_controls_write_no_hold(kanban_home, monkeypatch, control):
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title="Remote control", assignee="default")
+        # max_retries keeps the auto-replan threshold above this spend-control fixture.
+        tid = kb.create_task(conn, title="Remote control", assignee="default", max_retries=100)
         helpers._runs(conn, tid, spend.DEFAULT_RUNS)
         remote_only(monkeypatch, conn, tid)
         if control == "exempt":

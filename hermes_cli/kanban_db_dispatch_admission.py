@@ -59,6 +59,10 @@ def budget_refused(conn: sqlite3.Connection, task_id: str, result, *, dry_run: b
     if not dry_run and (held := spend_hold(conn, task_id)) is not None:
         result.no_progress_held.append((task_id, f"spend_budget:{held}"))
         return True
+    from hermes_cli.kanban_auto_replan import hold as replan
+    if not dry_run and (parent := replan(conn, task_id)) is not None:
+        result.no_progress_held.append((task_id, f"replan:{parent}"))
+        return True
     return False
 
 

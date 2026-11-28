@@ -635,7 +635,17 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
 
 
 @_host_skills
-def skill_view(
+def skill_view(name: str, file_path: str | None = None, task_id: str | None = None,
+               preprocess: bool = True, section: str | None = None) -> str:
+    """Read a skill, with selective worker presentation and explicit section expansion."""
+    from tools.skills_tool_worker import present
+    result = _skill_view_full(name, file_path, task_id, preprocess)
+    if is_background_review() or (section is None and not preprocess):
+        return result  # Internal pinned/preloaded-skill consumers request the original source.
+    return present(result, section=section, file_path=file_path)
+
+
+def _skill_view_full(
     name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
     or path ("axolotl", "03-fine-tuning/axolotl"); "<plugin>:<skill>" resolves plugin-provided
@@ -663,6 +673,7 @@ def skill_view(
         try:  # read once — reused for platform check and main content
             content = _read_skill_text(skill_md)
         except Exception as e:
+            logger.debug('Skill file read failed', exc_info=True)
             return _fail(f"Failed to read skill '{name}': {e}")
         _log_security_warnings(name, skill_md, content, all_dirs, active_skills_dir)
         frontmatter = _safe_frontmatter(content=content)
@@ -710,6 +721,7 @@ def skill_view(
 
                     pm.ensure(dep)
                 except Exception as exc:
+                    logger.debug('Skill dependency setup failed', exc_info=True)
                     failed_deps.append(f"{dep}: {exc}")
             if failed_deps:
                 deps_note = (
@@ -737,6 +749,7 @@ def skill_view(
             result["metadata"] = metadata
         return _json(result)
     except Exception as e:
+        logger.debug('Skill view failed', exc_info=True)
         return tool_error(str(e), success=False)
 
 
@@ -769,6 +782,7 @@ SKILL_VIEW_SCHEMA = {
                 "type": "string",
                 "description": "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.",
             },
+            "section": {"type": "string"},
         },
         "required": ["name"],
     },
@@ -791,7 +805,7 @@ def _skill_view_with_bump(args, **kw):
     # possibly-pruned transcript copy (#95976). No dedup in the fork; None also keeps its views
     # out of the parent's bucket.
     dedup_task_id = None if is_background_review() else task_id
-    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id)
+    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id, section=args.get("section"))
     with suppress(Exception):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):

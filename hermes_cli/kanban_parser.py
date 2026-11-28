@@ -411,7 +411,8 @@ _SPECS = [
              help="Comma-separated statuses the card had when you parked: not met while it is still in one of them "
                   "(re-park after handling a wake without waking again at once)"),
     ], help="Wake-probe primitive: exit 0 met, 1 not yet, 2 cannot tell. The only supported cross-gateway wait idiom"),
-    _cmd("show", [_TASK_ID, _json_flag(), *_run_state_args("filter listed runs by task_runs column")],
+    _cmd("show", [_TASK_ID, _json_flag(), _arg("--verbose", action="store_true", help="Expand full worker history"),
+                  *_run_state_args("filter listed runs by task_runs column")],
          help="Show a task with comments + events"),
     _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
          help="Assign or reassign a task"),

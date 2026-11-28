@@ -76,7 +76,7 @@ def _deadline_wakes(conn, tid) -> None:
 
 
 def _mac_card(conn) -> str:
-    tid = kb.create_task(conn, title="Upkeep system P5 Mac", assignee="worker")
+    tid = kb.create_task(conn, title="Upkeep system P5 Mac", assignee="worker", max_retries=100)  # above auto-replan threshold
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
     return tid

@@ -3531,7 +3531,8 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 # --- Worker context builder (what a spawned worker sees) ---
 
-def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tail: bool = True) -> str:
+def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tail: bool = True,
+                         compact: bool = False) -> str:
     """Everything a worker should read about its task: header, body, attachments, prior attempts,
     done-parent handoffs, the assignee's recent work, comments. Lists are tail-capped and fields char-capped
     (``_CTX_MAX_*``) so the prompt stays bounded. ``recovery_tail=False`` omits the transcript tail (a run
@@ -3541,8 +3542,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
         raise ValueError(f"unknown task {task_id}")
     from hermes_cli.kanban_db_context import (
         _ctx_attachments, _ctx_comments, _ctx_header, _ctx_parent_results, _ctx_prior_attempts, _ctx_release,
-        _ctx_role_history,
+        _ctx_role_history, _ctx_standing,
     )
+    if compact:
+        from hermes_cli.kanban_worker_brief import render
+        return render(conn, task)
     # One clock reading so every relative age in this rendering agrees.
     now = int(time.time())
     lines: list[str] = []
@@ -3573,14 +3577,6 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
     from hermes_cli.kanban_worker_recovery import build_recovery_context
     return "\n".join(lines).rstrip() + "\n" + (build_recovery_context(conn, task_id) if recovery_tail else "")
 
-
-def _ctx_standing(lines: list[str], task: Task, comments: list[Comment]) -> None:
-    """Every ``standing:`` line in the body or ANY comment, word for word, ahead of everything else. [daveey]
-
-    The comment thread is tail-capped (``_CTX_MAX_COMMENTS``), so a standing "don't wait" written early on a
-    busy card would otherwise drop out of the worker's prompt."""
-    from hermes_cli.kanban_db_context import _ctx_standing as render_standing
-    render_standing(lines, task, comments)
 
 
 # --- Stats + SLA helpers ---

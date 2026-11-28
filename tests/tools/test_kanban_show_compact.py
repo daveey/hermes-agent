@@ -81,7 +81,7 @@ def test_a_body_worker_context_truncates_stays_in_task(card):
 
 def test_texts_worker_context_carries_are_pointed_and_others_kept(card):
     long_comment = "Please also cover the gizmo path; the widget fix alone leaves gizmo users broken."
-    huge_comment = "y" * (3 * 1024)  # over the 2 KB per-comment context cap: rendered truncated
+    huge_comment = "y" * (3 * 1024)  # newest comments now render in full within the brief budget
     with kbc.connect() as conn:
         kb.add_comment(conn, card, "operator", long_comment)
         kb.add_comment(conn, card, "operator", huge_comment)
@@ -89,7 +89,8 @@ def test_texts_worker_context_carries_are_pointed_and_others_kept(card):
     full = json.loads(kt._handle_show({"verbose": True}))
     out = json.loads(kt._handle_show({}))
     bodies = [c["body"] for c in out["comments"]]
-    assert bodies == ["(in worker_context)", huge_comment, "short"]
+    assert bodies == ["(in worker_context)", "(in worker_context)", "short"]
+    assert huge_comment in out['worker_context']
     assert [c["body"] for c in full["comments"]] == [long_comment, huge_comment, "short"]
     assert [(c["author"], c["created_at"]) for c in out["comments"]] == [
         (c["author"], c["created_at"]) for c in full["comments"]]

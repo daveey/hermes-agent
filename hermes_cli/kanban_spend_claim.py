@@ -13,6 +13,7 @@ def claim_check(conn, task_id):
     from hermes_cli import kanban_spend_budget as budget
     from hermes_cli import kanban_spend_decision as decision
     from hermes_cli import kanban_spend_pr_owner as owner
+    from hermes_cli.kanban_auto_replan import claim_refused as replan_refused
 
     from hermes_cli.config_backend import ConfigBackendUnavailable
     from hermes_cli import kanban_db_sync as sync
@@ -43,9 +44,9 @@ def claim_check(conn, task_id):
             return refuse("usage_accounting_pending")
         lim = budget.card_limits(conn, task_id, board)
         if budget.over(budget.spend(conn, task_id), lim) is None:
-            return False
+            return replan_refused(conn, task_id)
         if pr is None or pr not in owner.recognised_prs(conn, task_id):
             return refuse("spend_budget_exhausted")
-        return False
+        return replan_refused(conn, task_id)
 
     return refused

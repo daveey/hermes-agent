@@ -13,6 +13,11 @@ board = helpers.board
 MODELS = [helpers.OPUS, helpers.FABLE, helpers.SONNET, "claude-review-four"]
 
 
+def _above_replan(conn, tid):
+    """Raise only the auto-replan threshold; these fixtures assert model attribution, not replan policy."""
+    conn.execute("UPDATE tasks SET max_retries=100 WHERE id=?", (tid,))
+
+
 def run(conn, tid, model, lane="ready"):
     rid = provenance._run(conn, tid, model=model, receipt=model, lane=lane)
     if lane == "review":
@@ -24,6 +29,7 @@ def test_fifth_review_uses_strong_route_and_retains_current_author(board):
     cfg = helpers.config(board, strong=MODELS[0], routes=MODELS)
     with kbc.connect() as conn:
         task = helpers.task(conn, MODELS[0])
+        _above_replan(conn, task.id)
         for index, model in enumerate(MODELS):
             run(conn, task.id, model)
             run(conn, task.id, MODELS[(index + 1) % len(MODELS)], "review")
@@ -39,6 +45,7 @@ def test_current_epoch_collects_all_authors_and_the_strong_route_may_review_acro
                          routes=[current] + [model for model in MODELS if model != current])
     with kbc.connect() as conn:
         task = helpers.task(conn, MODELS[0])
+        _above_replan(conn, task.id)
         for model in MODELS:
             run(conn, task.id, model)
             run(conn, task.id, model, "review")
@@ -173,7 +180,7 @@ def test_dispatch_fifth_review_after_four_real_verdict_cycles(board, monkeypatch
     monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
     spawned = []
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="dispatch review epoch", assignee="default")
+        tid = kb.create_task(conn, title="dispatch review epoch", assignee="default", max_retries=100)
         for index, model in enumerate(MODELS):
             implement(conn, tid, model)
             verdict(conn, tid, MODELS[(index + 1) % len(MODELS)])
