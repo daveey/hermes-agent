@@ -27,6 +27,16 @@ export function UiLatencyTranscriptProbe({
   const ready = usePaneVisible() && !loading
   const latest = useRef({ ready, storedSessionId })
   latest.current = { ready, storedSessionId }
+  const mounted = useRef(false)
+
+  // eslint-disable-next-line no-restricted-syntax -- Mount lifetime only, not a reactive mirror; supports StrictMode replay.
+  useEffect(() => {
+    mounted.current = true
+
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   useEffect(() => {
     if (!ready || !storedSessionId) {
@@ -36,7 +46,7 @@ export function UiLatencyTranscriptProbe({
     finishUiLatencyAfterPaint(
       'ui.session_switch',
       { session_id: storedSessionId },
-      () => latest.current.ready && latest.current.storedSessionId === storedSessionId
+      () => mounted.current && latest.current.ready && latest.current.storedSessionId === storedSessionId
     )
   }, [epoch, ready, storedSessionId])
 

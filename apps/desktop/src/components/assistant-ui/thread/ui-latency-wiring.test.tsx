@@ -1,5 +1,6 @@
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { PaneVisibleContext } from '@/components/pane-shell/pane-visibility'
@@ -134,6 +135,28 @@ describe('ui.session_switch wiring through the real Thread', () => {
     await settle()
     expect(events).toEqual([])
     expect(peekUiLatency('ui.session_switch')).not.toBeNull()
+  })
+
+  it('does not emit when the real transcript unmounts before paint', async () => {
+    startUiLatency('ui.session_switch', { session_id: 'b' })
+    const view = render(<Pane messages={transcript('b')} stored="b" />)
+    view.unmount()
+    await settle()
+
+    expect(events).toEqual([])
+    expect(peekUiLatency('ui.session_switch')).toBeNull()
+  })
+
+  it('still measures a committed transcript after StrictMode effect replay', async () => {
+    startUiLatency('ui.session_switch', { session_id: 'b' })
+    render(
+      <StrictMode>
+        <Pane messages={transcript('b')} stored="b" />
+      </StrictMode>
+    )
+
+    await waitFor(() => expect(events).toHaveLength(1))
+    expect(events[0]).toMatchObject({ name: 'ui.session_switch', session_id: 'b' })
   })
 
   it('does not emit when the pane starts loading again before the second frame', async () => {
