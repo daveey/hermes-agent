@@ -472,6 +472,21 @@
       "plugin.yaml": "2431374c0cdb3730b1764f240865357e3beb4aec9bbd2d7baf8cb910cf7f9add",
       "tests/test_coach_source.py": "082f725d8588070765f43c7ebbf98014048be7a6e7d3cc7062cff3b99e4922aa",
       "tests/test_skill_outcomes.py": "d4402f749a347e7cf6d6c558204ca55778bd3b889ecb4974233efb8f21eeb6fb"
+    },
+    "mac-heavy-guard": {
+      "README.md": "a11e688d7b7aa6e8808c81505941c188682b18bd94053b4eee4634a4180e1d58",
+      "__init__.py": "79c3f0a9fa7b94ef21ae76e8abe4f34edb31e1f8ec14b6bf7c7baeb57004014d",
+      "claude_hook.py": "11c15025b5b4d45c9fcb8cdd0417ab18e68818f38c377a2909796d06c040fb3a",
+      "guard.py": "4877747996eebbf8899bd505b831b89ecec5e19de66a3f2a09299eb0d26bfd9c",
+      "plugin.yaml": "0ad9ad5161adff1b0a5f48fef8979440d0e147ba008e99d8900f3682641fcd26",
+      "tests/diff_corpus.py": "4030a06190bc86496e720fefbbd3711b933cd58567be8ae2d7f123c4fa05c89d",
+      "tests/fixtures/main_verdicts.json": "fe21042351c0ce8b4598159faba5c34d5cab4d557629a068cd2941b6adeccfdc",
+      "tests/test_ansi_arithmetic.py": "600b983df33d309a5eac0ae5be7e1149eb48b7b5b9bc313257b61f27b7b71fa3",
+      "tests/test_ansi_hold.py": "bff7fbef648ad2067379987f60ab44bd7668f5f49f77885905b6784bf797a498",
+      "tests/test_differential.py": "8118061d597507472b0bd561c6056833235778a9d4684e27a6ab92be5b5849c8",
+      "tests/test_public_commands.py": "b5e028dacdc367d1fad65244e1b28cc664bf66e0421b694e23198d528268b521",
+      "tests/test_source_review.py": "da28e84f675fa765fc3853014303eb3809d83b5801e80352372b52da98ef2dba",
+      "tests_guard.py": "f06410fdccd524e9178727216487df7e69d4fd6b154007e3a08de8b9fe066349"
     }
   }
 }

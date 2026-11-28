@@ -1,0 +1,305 @@
+{
+  "version": 1,
+  "review_task": "t_01a22117f2ca486c",
+  "source_commit": "8ae73075dfcb83f32d51b3ad686c261cf96d42be",
+  "report_sha256": "752f13193cf391d183cf7034ee065537fac3da41a090281e5241a13557a1796b",
+  "source_only": true,
+  "plugins": {
+    "mac-heavy-guard": {
+      "verdict": "approve",
+      "files": {
+        "README.md": "a11e688d7b7aa6e8808c81505941c188682b18bd94053b4eee4634a4180e1d58",
+        "__init__.py": "79c3f0a9fa7b94ef21ae76e8abe4f34edb31e1f8ec14b6bf7c7baeb57004014d",
+        "claude_hook.py": "11c15025b5b4d45c9fcb8cdd0417ab18e68818f38c377a2909796d06c040fb3a",
+        "guard.py": "4877747996eebbf8899bd505b831b89ecec5e19de66a3f2a09299eb0d26bfd9c",
+        "plugin.yaml": "0ad9ad5161adff1b0a5f48fef8979440d0e147ba008e99d8900f3682641fcd26",
+        "tests/diff_corpus.py": "4030a06190bc86496e720fefbbd3711b933cd58567be8ae2d7f123c4fa05c89d",
+        "tests/fixtures/main_verdicts.json": "fe21042351c0ce8b4598159faba5c34d5cab4d557629a068cd2941b6adeccfdc",
+        "tests/test_ansi_arithmetic.py": "600b983df33d309a5eac0ae5be7e1149eb48b7b5b9bc313257b61f27b7b71fa3",
+        "tests/test_ansi_hold.py": "bff7fbef648ad2067379987f60ab44bd7668f5f49f77885905b6784bf797a498",
+        "tests/test_differential.py": "8118061d597507472b0bd561c6056833235778a9d4684e27a6ab92be5b5849c8",
+        "tests/test_public_commands.py": "b5e028dacdc367d1fad65244e1b28cc664bf66e0421b694e23198d528268b521",
+        "tests/test_source_review.py": "da28e84f675fa765fc3853014303eb3809d83b5801e80352372b52da98ef2dba",
+        "tests_guard.py": "f06410fdccd524e9178727216487df7e69d4fd6b154007e3a08de8b9fe066349"
+      },
+      "subtree": "c29f75c5ebe8fa26f36329bf99d8b84795b7eeec",
+      "approval_scope": "Finite full-source/deciding-interface audit for this exact key and README contract, preserving C1 partial and MHG-N2..N5 limits; not whole-system safety, registry admission, enrollment, deployment or installed parity.",
+      "closure_file_map": [
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "hermes_cli/plugins_context.py",
+          "git_blob": "195ac7d5349220d99686a2e520411ccf490a5beb",
+          "mode": "100644",
+          "bytes": 53394,
+          "sha256": "013130468f0510e98b498eb11107c1c77aa10d8c3b7062c1cd07ce9e34a30bae"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "hermes_cli/plugins_discovery.py",
+          "git_blob": "715cdb5d9b5608cbfa39e8a90bfe05badd0dc58a",
+          "mode": "100644",
+          "bytes": 22185,
+          "sha256": "a007abe9d44307388d502852f35ce0f30c770742c2bbec9b213068af4f8ec856"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "hermes_cli/plugins_loader.py",
+          "git_blob": "2848bce7c3ba1afc0c93b83159543b79aa8bc34d",
+          "mode": "100644",
+          "bytes": 49314,
+          "sha256": "b1891f88ad5ceeecfc6588912bc0d005c0dd2008ad4bdb767fd21ba830f1af20"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "hermes_cli/plugins_dispatch.py",
+          "git_blob": "10fbd8f142a5e1ddaee4ad16027e9d05c6dfc954",
+          "mode": "100644",
+          "bytes": 46770,
+          "sha256": "a40fd8bc85dc68f6cd414548d208e81daa71e6235b1f73ef6aefdef62db47103"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "hermes_cli/lifecycle.py",
+          "git_blob": "04c3d918743e6bbac36c0f67d182fdc81ccfed4a",
+          "mode": "100644",
+          "bytes": 3969,
+          "sha256": "7e1216e22723919920c59d9364c3a80cc77b4e7f007c739c8a28e714fc45e380"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "agent/turn_context.py",
+          "git_blob": "abd4e2a35464ae54fccb3e0d87bd90a54ac5b78b",
+          "mode": "100644",
+          "bytes": 84717,
+          "sha256": "727ed479e999c33eb077091785d378cfb9b80fb3ad34def61ddbf36503f6cead"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "agent/agent_runtime_helpers.py",
+          "git_blob": "871ab380c2103e2ff73827ba1e45139379830b71",
+          "mode": "100644",
+          "bytes": 201499,
+          "sha256": "27109ebedc4296a1fb1b9a95627eb82ea6b615f04c0cbe9bfc984cfebcf98359"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "agent/tool_executor.py",
+          "git_blob": "80478e8ec6cb8d3db2838bf83c3b7ce4b18fde2f",
+          "mode": "100644",
+          "bytes": 92660,
+          "sha256": "facb59842ee60579bca4ec6ff6b76e7b48671fc8b1e029bbb0d27146ab032a45"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "tools/terminal_tool.py",
+          "git_blob": "724616913da5b123bfadfb47cd3d85edcd0341f5",
+          "mode": "100644",
+          "bytes": 98146,
+          "sha256": "937aee4dd67bd6d35f457a3ac5bfadcaa1163422d303ea0d7465709ba2241d21"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "hermes_cli/plugins.py",
+          "git_blob": "af61862f9f858a6a0201d26ef15504730d53262c",
+          "mode": "100644",
+          "bytes": 80347,
+          "sha256": "9a801a35ea333b1717aa628ee9c76d5eff2b14a89d237ad60d5f9b519a4c3414"
+        },
+        {
+          "repository": "/home/ubuntu/.hermes/hermes-agent",
+          "commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "path": "hermes_cli/plugins_manifest.py",
+          "git_blob": "a13ec9151f1089a49cd2bfccd3a43dbcd655dec6",
+          "mode": "100644",
+          "bytes": 29016,
+          "sha256": "bb1c4beaa35064e11d5b872a32eaf7de5a50554ed9dec740de9117d1cdc79274"
+        },
+        {
+          "repository": "/home/ubuntu/code/hermes-mods",
+          "commit": "8ae73075dfcb83f32d51b3ad686c261cf96d42be",
+          "path": "plugins/tailnet/__init__.py",
+          "git_blob": "5b1724681765314550e5f90b38f37a3c6aa180e0",
+          "mode": "100644",
+          "bytes": 36641,
+          "sha256": "4efffdc651b6bc6fc311a55637228dc4a75b01eae2976041017650975f208bad"
+        },
+        {
+          "repository": "/home/ubuntu/code/hermes-mods",
+          "commit": "8ae73075dfcb83f32d51b3ad686c261cf96d42be",
+          "path": "plugins/tailnet/runner.py",
+          "git_blob": "88bf8d9bdde9f7a3379e05fea5b50bace6c03172",
+          "mode": "100644",
+          "bytes": 18086,
+          "sha256": "e22c4df35f631aab71477b7f7c60a16bb06d208aa7be8104f08f955434723c5f"
+        },
+        {
+          "repository": "/home/ubuntu/code/hermes-mods",
+          "commit": "8ae73075dfcb83f32d51b3ad686c261cf96d42be",
+          "path": "plugins/tailnet/terminal_guard.py",
+          "git_blob": "fb39fcea04d9284bd9b8431ccb966059aa208900",
+          "mode": "100644",
+          "bytes": 14924,
+          "sha256": "43880de01cf87939f88f05cb2e93eba6590379ea0f3da598416564ef1247699c"
+        },
+        {
+          "repository": "/home/ubuntu/code/hermes-mods",
+          "commit": "8ae73075dfcb83f32d51b3ad686c261cf96d42be",
+          "path": "plugins/tailnet/plugin.yaml",
+          "git_blob": "c1ffbab0743bec60be04113bdb88f4864576edda",
+          "mode": "100644",
+          "bytes": 742,
+          "sha256": "3b3652120000339b4e08de862d5da910f8524bb6e370afa4413ff7c5f176c15b"
+        },
+        {
+          "repository": "/home/ubuntu/code/hermes-mods",
+          "commit": "8ae73075dfcb83f32d51b3ad686c261cf96d42be",
+          "path": "plugins/kanban-worker-nice/__init__.py",
+          "git_blob": "ab133719672b6822d2f0754e9aa05d64f168b588",
+          "mode": "100644",
+          "bytes": 5645,
+          "sha256": "7f7883119ae9b11d962620334d2f8f7127863c986ab92bf47f2caa74fc9e6cf1"
+        },
+        {
+          "repository": "/home/ubuntu/code/hermes-mods",
+          "commit": "8ae73075dfcb83f32d51b3ad686c261cf96d42be",
+          "path": "plugins/kanban-worker-nice/plugin.yaml",
+          "git_blob": "fef82cb10f53fc2092e61f8588cc410811ca43cf",
+          "mode": "100644",
+          "bytes": 230,
+          "sha256": "b298ca7ba2ff01c279711ba4b73c157874626d6bf84243077b10178e099836d2"
+        }
+      ],
+      "executable_closure": [
+        {
+          "from": "plugin.yaml / __init__.py:176-181",
+          "target": "register(ctx) -> pre_tool_call=_pre_tool_call and transform_tool_result=_transform_tool_result",
+          "status": "reviewed",
+          "assessment": "No tool registration. Registered callbacks tested, not merely classify(). Local hook is active on Darwin unless MAC_HEAVY_GUARD=0; exported MAC_HEAVY_OK nonempty/nonzero bypasses. Inline opt-out is the existing env-name policy. terminal/process_manage/process command arguments and recursive tool_call/mcp__tool_call only; no claim for arbitrary execution tools."
+        },
+        {
+          "from": "__init__.py:27-88",
+          "target": "sibling guard.py decision module",
+          "status": "reviewed",
+          "assessment": "Custom SourceFileLoader bypasses pyc, module reload by mtime_ns+size, decision lock across refresh/enabled/classify/message. Failed refresh retains last good module. This unchanged advisory reload is not a cryptographic source identity boundary or proof the first generation is installed."
+        },
+        {
+          "from": "__init__.py:94-106",
+          "target": "tools.terminal_tool _resolve_container_task_id / _active_environments / env.cwd",
+          "status": "reviewed_interface_trusted_separately",
+          "source_commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "assessment": "Explicit workdir wins; otherwise task resolver and tracked environment cwd, then None fallback on any import/lookup error. Read exact core resolver/source: task/session context supplies IDs; local cwd is the tracked environment string. No SQL call made in this audit. Full backend/environment implementation and target installed version remain separately managed, not blanket-approved."
+        },
+        {
+          "from": "core plugin facade/discovery/loader/context/dispatch -> agent runtime/tool_executor -> lifecycle",
+          "target": "selected hook registration and action:block enforcement",
+          "status": "reviewed_interface_trusted_separately",
+          "source_commit": "60ea03f38724146314246001e2901e9290076b7f",
+          "assessment": "Read substantive gate_manifest enabled/disabled opt-in, directory source loader, register(ctx), track_hook and invoke_hook. Dispatcher collects non-None results; callback failures/timeouts produce policy blocks on this captured core. Lifecycle recognizes action:block; tool_executor runs pre-tool veto before dispatch. Plugin internal catch-all returning None hides exceptions from even this fail-closed dispatcher. Safe mode/safe workers/discovery suppression, source winner selection, catalog/review registration, profile context, ledger ownership and timeout machinery remain managed-core trust boundaries; not enrolled or exercised against production discovery."
+        },
+        {
+          "from": "claude_hook.py:15-37",
+          "target": "sibling guard.py evaluate and Claude PreToolUse JSON/exit protocol",
+          "status": "reviewed",
+          "assessment": "Fresh sibling load, supplied session cwd, exit2+stderr on hold, exit0 and optional additionalContext on allowed targeted test. Actual script exercised both runpy and fixture subprocesses; external Claude application honoring exit2 is trusted separately, not installed proof. Malformed JSON retains existing exit0 behavior."
+        },
+        {
+          "from": "guard.py copied shared block and mac-specific global rebinding",
+          "target": "heredoc parser / _mac_hd_substitutions / command-substitution scanner / _ansi_word / typed events",
+          "status": "reviewed",
+          "assessment": "Shared block is included source, not a runtime sibling import. Mac-specific override changes the global _hd_substitutions binding, so its effective behavior was read after the copied block. Two repaired typed boundaries: second join at 1239 inside try, heredoc ownership at 1706-1714. Only _UnsupportedSubstitution becomes a hold; independently injected RuntimeError propagates through check_shell/evaluate/note/commands where relevant. Public commands emits simple argv and holds as ValueError, not private events. Other plugins with copied text are not approved."
+        },
+        {
+          "from": "guard.py:1318-1757",
+          "target": "wrapper/runner/classifier and script/read/stat paths",
+          "status": "reviewed",
+          "assessment": "Read classification tables, SSH explicit local option scans and strict remote heredoc exemption, runner/argv grammar, large-file stats, script path resolution, shebang selection and <=64KiB/two-level bounds. Files are read as data, never executed by guard. Existence/executable/shebang rules and NUL behavior retained. Read/execute races, symlink replacement, ambient variable/alias/SSH configuration and unmodeled launchers remain limits, not containment guarantees."
+        },
+        {
+          "from": "guard.py:1781-1907",
+          "target": "core_worktree -> PATH git -C <dir> config --get remote.origin.url; evaluate/note/core-test hints",
+          "status": "reviewed_call_trusted_binary",
+          "assessment": "Fixed list argv, no shell, 3-second timeout, .git plus scripts/run_tests.sh precondition; origin regex controls advice. Sparse-file/cwd/git fixture tests executed. System git binary, its config/includes and PATH are separately trusted. No hub operation is invoked: hermes-core-wt is only recommendation text. Notes are bounded pending metadata, not workload enrollment."
+        },
+        {
+          "from": "plugins/tailnet/runner.py:155-265",
+          "target": "dynamic sibling MHG guard -> strict _tokens/_lexable overrides -> commands/check_argv -> workload_reason",
+          "status": "reviewed",
+          "assessment": "Read full workload classifier, local shell/shebang fallback and error conversion. Strict raw parser overrides preserve malformed-command refusal; commands ValueError propagates as unclassifiable refusal; other parser failures are also converted into ValueError here. Actual workload_reason tested independently and throughout differential. Tailnet source is pinned to the same mods commit and included in closure map, not approved as a whole."
+        },
+        {
+          "from": "plugins/tailnet/runner.py main/enforce_workload_policy and tailnet __init__ exec/copy/pre_tool_call",
+          "target": "machine-wide workload-policy.json protected host selection and terminal_guard dynamic consumer",
+          "status": "reviewed_selection_trusted_separately",
+          "assessment": "Read runner policy-before-key/execution path and terminal_guard in full. Policy version/address/alias validation, resolver, remote command extraction and classifier refusal are substantive deciding input. Offline protected fixture refused rc126 before tempdir/SSH; clean control reached no-key rc255. Terminal guard also calls same runner classifier after target matching. DNS/ssh-G lookup, actual SSH/SCP/SFTP/rsync transport, credentials and production policy file identity are separate unexercised trust boundaries; no network or credential probe performed."
+        },
+        {
+          "from": "plugins/kanban-worker-nice/__init__.py terminal_request",
+          "target": "actual terminal nice-floor prefix producer",
+          "status": "reviewed",
+          "assessment": "Called real committed producer under fixture host eligibility, retained exact output bytes in evidence/nice-prefix.txt and replayed every input both plain and prefixed. No renice or prefixed commands executed. Host allowlist/default nice/priority execution remains separately managed; this audit checks parser/consumer parity only."
+        },
+        {
+          "from": "runtime imports and operating environment",
+          "target": "Python stdlib/importlib/os/shlex/stat/subprocess/pathlib/json/threading; OS/filesystem; external Bash and Claude semantics",
+          "status": "trusted_separately",
+          "assessment": "No blanket approval of interpreter, OS, shell engine, core, tailnet plugin or other guard keys. Existing test Bash/Git invocations were disposable fixture-only, with SQL/network/signals denied before pytest and Python child startup. Production source parity, natural workload conditions, unknown/latency accounting and mature standard checks remain unverified and owned by parent."
+        }
+      ],
+      "installed_layout_binding": "UNVERIFIED; source receipt only, managed core/tailnet/nice/OS/transport remain separately trusted, not whole-plugin approval",
+      "residual_findings": "C1 partial; C2-C4 fixed; C5 superseded by named boundaries; MHG-N1 fixed; MHG-N2..N5 documented nonblocking limits retained.",
+      "fixture_parts": {
+        "README.md": [
+          "README.md.json"
+        ],
+        "__init__.py": [
+          "__init__.py.json"
+        ],
+        "claude_hook.py": [
+          "claude_hook.py.json"
+        ],
+        "guard.py": [
+          "guard.py.json"
+        ],
+        "plugin.yaml": [
+          "plugin.yaml.json"
+        ],
+        "tests/diff_corpus.py": [
+          "tests/diff_corpus.py.json"
+        ],
+        "tests/fixtures/main_verdicts.json": [
+          "tests/fixtures/main_verdicts.json.part0.json",
+          "tests/fixtures/main_verdicts.json.part1.json",
+          "tests/fixtures/main_verdicts.json.part2.json"
+        ],
+        "tests/test_ansi_arithmetic.py": [
+          "tests/test_ansi_arithmetic.py.json"
+        ],
+        "tests/test_ansi_hold.py": [
+          "tests/test_ansi_hold.py.json"
+        ],
+        "tests/test_differential.py": [
+          "tests/test_differential.py.json"
+        ],
+        "tests/test_public_commands.py": [
+          "tests/test_public_commands.py.json"
+        ],
+        "tests/test_source_review.py": [
+          "tests/test_source_review.py.json"
+        ],
+        "tests_guard.py": [
+          "tests_guard.py.json"
+        ]
+      }
+    }
+  }
+}
