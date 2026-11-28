@@ -1,5 +1,9 @@
 """Quiet chats must not acquire writable boards on another chat's event."""
 import contextlib
+import threading
+
+from hermes_constants import get_hermes_home
+from tui_gateway import kanban_consumer_health as health
 
 import pytest
 
@@ -10,6 +14,47 @@ from tui_gateway import notification_idle as idle
 from tui_gateway import server
 
 CHAT = '20261113_120000_abcdef'
+
+
+@pytest.mark.parametrize('use_seen', [False, True])
+def test_missing_board_is_not_created(use_seen):
+    path = kb.kanban_db_path()
+    assert not path.exists()
+    assert server._kb_poll_board(kb, kb.DEFAULT_BOARD, CHAT, [], {} if use_seen else None) == []
+    assert not path.exists(), 'a chat poll must not recreate a missing board'
+
+
+@pytest.mark.parametrize('use_seen', [False, True])
+def test_quiet_read_refreshes_registered_consumer_health(board, use_seen):
+    path, _own, other = board
+    home = get_hermes_home()
+    stop, ready = threading.Event(), threading.Event()
+    errors = []
+
+    def run():
+        try:
+            seen = {} if use_seen else None
+            for _ in range(2):
+                with contextlib.closing(kbc.connect()) as conn, kb.write_txn(conn):
+                    kb._append_event(conn, other, 'completed', {})
+                assert server._kb_poll_board(kb, kb.DEFAULT_BOARD, CHAT, [], seen) == []
+                assert health.available(home, CHAT, path)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            ready.set()
+            stop.wait(3)
+
+    thread = threading.Thread(target=run)
+    health.register({'session_key': CHAT, 'profile_home': str(home)}, stop, thread)
+    thread.start()
+    try:
+        assert ready.wait(3)
+        assert not errors, errors
+        assert health.available(home, CHAT, path)
+    finally:
+        stop.set()
+        thread.join(3)
 
 
 @pytest.fixture

@@ -801,10 +801,16 @@ def _kb_reclaim_stray_subs(_kbn, slug: str, session_key: str, stray: tuple) -> b
 def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: list | None) -> list:
     from tui_gateway.notification_idle import board_quiet
     with contextlib.suppress(Exception):
+        path = _kb.kanban_db_path(board=slug)
+        if not path.exists():
+            return []  # Polling must not recreate a deleted or not-yet-created board.
         # A global event hint wakes quiet historical subscribers too. Prove
         # absence before acquiring a writable/migrating handle, not just after.
         # In-flight claims and unknown reads still enter clock/liveness recovery.
-        if board_quiet(_kb.kanban_db_path(board=slug), session_key):
+        if board_quiet(path, session_key):
+            from hermes_constants import get_hermes_home
+            from tui_gateway.kanban_consumer_health import polled
+            polled(get_hermes_home(), session_key, path)
             return []
     try:
         conn = _kbc.connect(board=slug)
