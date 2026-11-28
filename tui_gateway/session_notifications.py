@@ -799,8 +799,12 @@ def _kb_reclaim_stray_subs(_kbn, slug: str, session_key: str, stray: tuple) -> b
 
 
 def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: list | None) -> list:
+    from tui_gateway.notification_idle import board_quiet
     with contextlib.suppress(Exception):
-        if _kbn.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
+        # A global event hint wakes quiet historical subscribers too. Prove
+        # absence before acquiring a writable/migrating handle, not just after.
+        # In-flight claims and unknown reads still enter clock/liveness recovery.
+        if board_quiet(_kb.kanban_db_path(board=slug), session_key):
             return []
     try:
         conn = _kbc.connect(board=slug)

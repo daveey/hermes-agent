@@ -45,13 +45,13 @@ def collection_home(session, launch_home):
 def board_quiet(path, session_key):
     """Only a successful empty read is a proof; foreign in-flight claims need clock/liveness retries."""
     from pathlib import Path
-    from hermes_cli.kanban_session_activity import cached_ro
+    from tui_gateway.notification_reader import reading
     from tui_gateway.session_notifications import _KANBAN_NOTIFY_KINDS
     placeholders = ",".join("?" for _ in _KANBAN_NOTIFY_KINDS)
     try:
-        with cached_ro(Path(path)) as conn:
+        with reading(Path(path)) as (conn, _retained):
             row = conn.execute(
-                "SELECT 1 FROM kanban_notify_subs AS s WHERE platform = 'tui' AND chat_id = ? "
+                "SELECT 1 FROM kanban_notify_subs AS s WHERE LOWER(platform) = 'tui' AND chat_id = ? "
                 "AND (inflight_from IS NOT NULL OR EXISTS (SELECT 1 FROM task_events AS e "
                 "WHERE e.task_id = s.task_id AND e.id > s.last_event_id "
                 f"AND e.kind IN ({placeholders}))) LIMIT 1",
