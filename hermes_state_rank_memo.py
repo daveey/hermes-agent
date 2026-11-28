@@ -212,11 +212,14 @@ class RankMemo:
         self.entries: OrderedDict[tuple, _Entry] = OrderedDict()
         self.previews: OrderedDict[str, tuple] = OrderedDict()
         self.preview_ok = False
+        from hermes_state_row_memo import RowMemo
+        self.rows = RowMemo()  # [daveey] decoded projected rows (hermes_state_row_memo), same clock and lock
 
     def _reset(self) -> None:
         self.clock = None
         self.entries.clear()
         self.previews.clear()
+        self.rows.clear()
         self.generation += 1
 
     def advance_for_test(self) -> None:
@@ -261,6 +264,7 @@ class RankMemo:
             self.generation += 1
             for sid in moved:
                 self.previews.pop(sid, None)
+                self.rows.drop(sid)
             for key in list(self.entries):
                 entry = self.entries[key]
                 entry.dirty |= moved
@@ -393,8 +397,18 @@ def ranked_ids(conn, memo: RankMemo, key: tuple, need: int, exact_ids, restricte
 def project(conn, memo: RankMemo, ids_rows: list, select_head: str, prompt_join: str, preview_sql: str,
             last_active_sql: str, generation: int) -> list:
     """The page's rows in ranked order: ``select_head`` columns + ``last_active`` + ``_effective_last_active``,
-    exactly what ``ranked_query`` projects, read in the caller's snapshot. Cached previews replace the
-    correlated preview subquery only for rows whose ``transcript_revision`` still matches."""
+    exactly what ``ranked_query`` projects, read in the caller's snapshot. Rows kept by
+    ``hermes_state_row_memo`` are re-projected only when their session may have changed."""
+    from hermes_state_row_memo import project as kept_project
+    return kept_project(conn, memo, ids_rows, prompt_join, select_head + last_active_sql, generation,
+                        lambda rows: _project_fresh(conn, memo, rows, select_head, prompt_join, preview_sql,
+                                                    last_active_sql, generation))
+
+
+def _project_fresh(conn, memo: RankMemo, ids_rows: list, select_head: str, prompt_join: str, preview_sql: str,
+                   last_active_sql: str, generation: int) -> list:
+    """``project`` read from SQLite. Cached previews replace the correlated preview subquery only for rows whose
+    ``transcript_revision`` still matches."""
     # The cached (revision, raw) rides on the page row itself: one PK join per row, no second json_each to
     # join against (an unindexed CTE join was quadratic on a 2000-row tree page).
     use_cache = preview_sql in select_head

@@ -9,7 +9,9 @@ Now SQL drops the page's ids (``s.id NOT IN``), and a narrow probe without the p
 any pin is left at all; only then does the wide read run. Probe and read share ONE read snapshot, and the read
 is the old query with one more conjunct (same driving index, filters and ``started_at DESC`` sort), so it
 returns exactly the old rows minus the page's ids, in the old order. Ids are unique (PK; the prompt join is on
-a PK), so the old Python dedupe had nothing else to drop. Nothing outlives the call: no cache, no TTL.
+a PK), so the old Python dedupe had nothing else to drop. No TTL: when the store clock can vouch for it, the
+read takes only the ordered ids and projects just the pins whose rows may have changed (``_kept_rows``,
+``hermes_state_row_memo``).
 """
 import json
 
@@ -55,6 +57,9 @@ def backfill_pins(db, sessions: list, select_head: str, prompt_join: str, clause
         if began:
             conn.execute("BEGIN")  # [daveey] Keep the probe and hydration on one snapshot.
         try:
+            kept = _kept_rows(db, conn, select_head, prompt_join, where_sql, params)
+            if kept is not None:
+                return kept
             if conn.execute(f"SELECT 1 {_PIN_FROM} {where_sql} LIMIT 1", params).fetchone() is None:
                 return []
             return read_chunks(conn, _pinned_query(select_head, prompt_join, where_sql), params)
@@ -63,3 +68,38 @@ def backfill_pins(db, sessions: list, select_head: str, prompt_join: str, clause
                 conn.execute("ROLLBACK")
 
     sessions.extend(db._list_row(row) for row in db._read_retrying_ioerr(read))
+
+
+def _kept_rows(db, conn, select_head: str, prompt_join: str, where_sql: str, params: list):
+    """[daveey] The back-fill's rows through the store's kept rows (``hermes_state_row_memo``), or None for the
+    wide read. Same snapshot, same FROM/WHERE/ORDER BY: only the ordered ids are read here, then the store clock
+    is advanced to this snapshot and only rows not provably unchanged are projected. A ``started_at`` tie (the
+    wide read's order between tied rows is the sorter's, not the ids') takes the wide read."""
+    import hermes_state_rank_memo as rank_memo
+    import hermes_state_recency as recency
+    import hermes_state_row_memo as row_memo
+    from hermes_state_common import _sql_preview_raw
+    path = str(getattr(db, "db_path", "") or "")
+    preview_sql = _sql_preview_raw()
+    # Only a projection whose rows can be kept (the compact list head: preview and transcript_revision).
+    if (prompt_join or not path or preview_sql not in select_head or "s.transcript_revision" not in select_head
+            or not (row_memo.ENABLED and recency.ENABLED and rank_memo.enabled())):
+        return None
+    pins = conn.execute(f"SELECT s.id, s.started_at {_PIN_FROM} {where_sql} ORDER BY s.started_at DESC",
+                        params).fetchall()
+    if not pins:
+        return []
+    if any(not isinstance(sid, str) for sid, _ in pins) or len({rank_memo._v(at) for _, at in pins}) < len(pins):
+        return None
+    store = recency._store_for(path)
+    if store is None:
+        return None
+    with store.lock:
+        reason = store.rank_memo.advance(conn)
+        if reason is not None:
+            store.stale = True  # what ranked_ids' exact path does for its own advance (D1 candidates)
+        generation = store.rank_memo.generation
+        if store.rank_memo.clock is None:
+            return None  # the store cannot vouch for changes right now: nothing is kept, read wide
+    return rank_memo.project(conn, store.rank_memo, [(sid, None, None, None) for sid, _ in pins], select_head,
+                             prompt_join, preview_sql, _sql_session_last_active("s"), generation)
