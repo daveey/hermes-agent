@@ -31,7 +31,27 @@ def load_provider(config):
     source = path.read_bytes()
     if len(source) > 1024 * 1024 or hashlib.sha256(source).hexdigest() != spec['sha256']:
         raise ProtocolError('provider bytes changed')
+    # Exact manifest of the sibling files the provider will load; checked BEFORE any provider import.
+    files = spec.get('files')
+    if files is not None:
+        if not isinstance(files, dict) or not files or len(files) > 64:
+            raise ProtocolError('provider manifest shape')
+        for name, digest in files.items():
+            member = Path(name)
+            if member.is_absolute() or '..' in member.parts or not isinstance(digest, str):
+                raise ProtocolError('provider manifest path')
+            try:
+                data = (path.parent / member).read_bytes()
+            except OSError:
+                raise ProtocolError('provider manifest member missing') from None
+            if len(data) > 4 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != digest:
+                raise ProtocolError('provider manifest digest mismatch')
     name = '_hermes_scoped_producer_v1'
+    if config.get('shared') and spec.get('manifest') is None:
+        raise ProtocolError('manifest required')  # missing is never "disabled"
+    if spec.get('manifest') is not None:
+        from hermes_cli.serve_producer_manifest import verify_declared
+        verify_declared(spec['manifest'], path.parent)
     module_spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(module_spec)
     sys.modules[name] = module
@@ -45,6 +65,11 @@ def producer(channel, config):
 
     module = load_provider(config)
     target = module.open_provider(config) if hasattr(module, 'open_provider') else module.produce
+    if config['provider'].get('manifest') is not None:
+        from hermes_cli.serve_producer_manifest import verify_loaded
+        # The factory may load readers/callbacks too; verify the complete bootstrap before READY.
+        verify_loaded(config['provider']['manifest'], Path(config['provider']['path']).parent,
+                      allowed=(Path(config['provider']['path']).name,))
     db_path = Path(config['runtime']) / 'projection.sqlite3'
     fd = os.open(db_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     os.close(fd)
@@ -61,6 +86,25 @@ def producer(channel, config):
                 return
             if not authorized(request, config):
                 raise ProtocolError('producer authorization failed')
+            if request.get('verb') == 'EVENTS':
+                # Bounded pull of the provider's ordered event ring; never a push from the child.
+                poll = getattr(target, 'events_since', None)
+                try:
+                    after = request.get('after')
+                    if after is not None and (type(after) is not int or after < -1):
+                        raise ValueError('event cursor')
+                    partition = request.get('partition')
+                    kwargs = {} if partition is None else {'partition': partition}
+                    batch = poll(after, 64, **kwargs) if poll is not None else {'seq': 0, 'events': [], 'reset': False}
+                    response = {'verb': 'EVENTS', 'key': 'events', 'generation': config['generation'], **batch}
+                    frames = encode_request(uuid.uuid4().hex, response)
+                except (ValueError, TypeError, RuntimeError, ProtocolError, ResourceExhausted):
+                    frames = encode_request(uuid.uuid4().hex, {'verb': 'UNAVAILABLE', 'key': 'events',
+                                                               'generation': config['generation'],
+                                                               'error': 'events'})
+                for frame in frames:
+                    channel.sock.sendall(frame)
+                continue
             key = request['key']
             try:
                 result = target(request['payload'])
@@ -147,7 +191,7 @@ def broker(channel, config):
         try:
             while not stop.is_set():
                 request = channel.receive()
-                if not authorized(request, config) or request.get('verb') != 'PRODUCE':
+                if not authorized(request, config) or request.get('verb') not in ('PRODUCE', 'EVENTS'):
                     raise ProtocolError('broker authorization failed')
                 for attempt in range(3):
                     try:
@@ -216,7 +260,15 @@ def main():
     role, descriptor = sys.argv[1:3]
     channel = Channel(socket.socket(fileno=int(descriptor)))
     config = channel.receive()
-    if role == 'broker':
+    if role == 'broker' and config.get('shared'):
+        from hermes_cli.serve_producer_broker import run_shared
+        from hermes_cli.serve_producer_admission import LaunchGate
+        if len(sys.argv) <= 5:
+            run_shared(channel, config)  # refuses missing gate before custody
+        else:
+            with LaunchGate.adopt(Path(config['runtime']), int(sys.argv[5])) as gate:
+                run_shared(channel, config, gate=gate)
+    elif role == 'broker':
         broker(channel, config)
     elif role == 'producer':
         from hermes_cli.serve_producer_custody import CustodyConflict, FamilyCustody

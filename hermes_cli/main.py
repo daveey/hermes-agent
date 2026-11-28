@@ -2257,7 +2257,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "auth", "status", "cron", "doctor", "config", "pairing", "skills", "tools", "mcp",
         "sessions", "insights", "update", "uninstall", "profile", "dashboard", "serve", "webapp",
         "desktop", "gui", "claw", "plugins", "security", "acp", "webhook", "peer",
-        "memory", "dump", "debug", "backup", "import", "completion", "logs", "usage",
+        "memory", "dump", "debug", "backup", "import", "completion", "logs", "usage", "producer-mode",
     }
     _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
     if _SESSION_FLAGS.intersection(argv):  # the active memory provider registers ``hermes <name>``

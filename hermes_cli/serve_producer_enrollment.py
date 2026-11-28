@@ -7,6 +7,7 @@ conflicts and production startup is still unavailable in this preparatory slice.
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 from hermes_cli.serve_producer_admission import (
@@ -32,11 +33,12 @@ class BrokerEnrollment:
         self._inode = os.fstat(owner.fd)
 
     @classmethod
-    def acquire(cls, runtime: Path, installation: Path):
+    def acquire(cls, runtime: Path, installation: Path, *, gate=None):
         runtime = runtime.resolve()
         installation = installation.resolve(strict=True)
-        ticket = enroll_launch(runtime, 'producer_broker', installation=installation)
-        with LaunchGate.acquire(runtime):
+        with (LaunchGate.acquire(runtime) if gate is None else nullcontext(gate)) as held:
+            held._held()
+            ticket = enroll_launch(runtime, 'producer_broker', installation=installation, gate=held)
             adapter = LinuxProcessCensus()
             record = adapter.read_process(os.getpid(), adapter.boot_id())
             expected = str(installation / 'hermes_cli/serve_producer_process.py')

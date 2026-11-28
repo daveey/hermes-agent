@@ -42,3 +42,5 @@ def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
     config_subparsers.add_parser("migrate", help="Update config with new options")
 
     config_parser.set_defaults(func=cmd_config)
+    from hermes_cli.subcommands.producer_mode import build_producer_mode_parser
+    build_producer_mode_parser(subparsers)  # installation-local mode setter lives with configuration

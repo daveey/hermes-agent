@@ -8,6 +8,7 @@ can authorize a successor or boot. This module starts no external producers.
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 import json
 import os
 import stat
@@ -32,7 +33,9 @@ LAUNCH_SOURCES = ('hermes_cli/main.py', 'gateway/run.py', 'tui_gateway/entry.py'
                   'hermes_cli/gateway_runtime_start.py', 'hermes_cli/plugin_host_child.py',
                   'hermes_cli/serve_producer_admission.py', 'hermes_cli/serve_producer_census.py',
                   'hermes_cli/serve_producer_process.py', 'hermes_cli/serve_producer_enrollment.py',
-                  'hermes_cli/serve_producer_identity.py')
+                  'hermes_cli/serve_producer_identity.py', 'hermes_cli/serve_producer_participation.py',
+                  'hermes_cli/serve_producer_retirement.py', 'hermes_cli/serve_producer_observation.py',
+                  'hermes_cli/serve_producer_lifecycle.py')
 _MAX_PARTICIPANTS = 8192
 _MAX_RECEIPTS = 8 * 1024 * 1024
 
@@ -206,7 +209,8 @@ def _wait_gate(runtime: Path, deadline: float):
             waiter.wait(min(remaining, 0.025))
 
 
-def enroll_launch(runtime: Path, role: str, *, installation: Path, timeout: float = 10) -> LaunchReceipt:
+def enroll_launch(runtime: Path, role: str, *, installation: Path, timeout: float = 10,
+                  gate=None) -> LaunchReceipt:
     """Pre-import enrollment only: no guarded mode or COMPLETE claim is minted here.
 
     Existing receipts survive until their exact incarnation is positively gone.
@@ -219,7 +223,8 @@ def enroll_launch(runtime: Path, role: str, *, installation: Path, timeout: floa
         raise ValueError('invalid launch timeout')
     installation = installation.resolve(strict=True)
     adapter = LinuxProcessCensus()
-    with _wait_gate(runtime, time.monotonic() + timeout):
+    with (_wait_gate(runtime, time.monotonic() + timeout) if gate is None else nullcontext(gate)) as held:
+        held.require_runtime(runtime)
         path = runtime / 'participants.json'
         try:
             path.lstat()
@@ -432,6 +437,50 @@ class LaunchGate:
     def acquire(cls, runtime: Path) -> LaunchGate:
         return cls(_acquire_runtime(runtime, 'admission'))
 
+    @property
+    def fd(self) -> int:
+        fd = self._custody.fd
+        if fd is None or os.getpid() != self._pid:
+            raise AdmissionUnavailable('launch gate must remain held by collecting process')
+        return fd
+
+    def require_runtime(self, runtime: Path):
+        """Validate the inherited description, not a serialized clean/guarded bit.
+
+        fdinfo reports locks belonging to THIS open description (including inherited
+        locks whose recorded owner is the collecting parent). Merely opening the same
+        inode while somebody else holds it is not custody. Never acquire or LOCK_UN here.
+        """
+        from hermes_cli.serve_producer_custody import _private
+
+        self._held()
+        directory = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            _private(os.fstat(directory), directory=True)
+            current = os.fstat(self.fd)
+            _private(current, directory=False)
+            path = os.stat('admission.lock', dir_fd=directory, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (path.st_dev, path.st_ino):
+                raise AdmissionUnavailable('launch gate inode changed')
+            info = _read_bytes(Path(f'/proc/self/fdinfo/{self.fd}'), 8192).decode('ascii')
+            if not any(line.startswith('lock:') and ' FLOCK ' in line and ' WRITE ' in line
+                       for line in info.splitlines()):
+                raise AdmissionUnavailable('inherited launch gate is not locked')
+        finally:
+            os.close(directory)
+
+    @classmethod
+    def adopt(cls, runtime: Path, fd: int):
+        """Take ownership of a descriptor passed by the collecting serve across exec."""
+        gate = cls(fd)
+        try:
+            gate.require_runtime(runtime)
+            os.set_inheritable(fd, False)  # the producer must inherit family custody, not this gate
+            return gate
+        except BaseException:
+            gate.close()
+            raise
+
     def __enter__(self):
         self._held()
         return self
@@ -443,8 +492,7 @@ class LaunchGate:
         self._custody.close()
 
     def _held(self):
-        if self._custody.fd is None or os.getpid() != self._pid:
-            raise AdmissionUnavailable('launch gate must remain held by collecting process')
+        return self.fd
 
     def inspect(self, *, boot_id: str, generation: str, installation: str,
                 census, collectors: dict, classify, legacy_candidates: tuple[ProcessKey, ...],
