@@ -3546,7 +3546,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
     )
     if compact:
         from hermes_cli.kanban_worker_brief import render
-        return render(conn, task)
+        return render(conn, task, recovery_tail=recovery_tail)
     # One clock reading so every relative age in this rendering agrees.
     now = int(time.time())
     lines: list[str] = []

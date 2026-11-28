@@ -2,7 +2,7 @@
 import time
 
 
-def render(conn, task, *, limit=10_000):
+def render(conn, task, *, limit=10_000, recovery_tail=True):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_context as ctx
     from hermes_cli.kanban_containment_authority import render_context
@@ -31,7 +31,7 @@ def render(conn, task, *, limit=10_000):
     if checkpoint:
         lines.append(checkpoint)
     from hermes_cli.kanban_worker_recovery import build_recovery_context
-    recovery = build_recovery_context(conn, task.id)
+    recovery = build_recovery_context(conn, task.id) if recovery_tail else ''
     if recovery:
         lines.append(recovery)
     parents = kb.parent_ids(conn, task.id)

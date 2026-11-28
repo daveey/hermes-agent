@@ -40,7 +40,8 @@ def test_fifth_artifact_review_dispatch(board, monkeypatch, with_ranges):
     helpers.config(board, strong=MODELS[0], routes=MODELS)
     monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '0')
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title='five artifact cycles', assignee='default')
+        # This fixture tests ten intentional implementation/review attempts, not convergence admission.
+        tid = kb.create_task(conn, title='five artifact cycles', assignee='default', max_retries=20)
         for index in range(5):
             model = MODELS[index % 4]
             sha = str(index + 1) * 40
