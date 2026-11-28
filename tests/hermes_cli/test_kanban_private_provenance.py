@@ -112,6 +112,33 @@ def test_private_reason_missing_evidence_has_typed_empty_result(explain, failure
     assert _private_reason(None, {'id': 'fixture'}, reader, explain=explain) == ([] if explain else None)
 
 
+@pytest.mark.parametrize('admin,expected', [(None, False),
+    ({'kind': 'chat', 'refs': ['recorded']}, True),
+    ({'kind': 'operator', 'refs': ['recorded']}, False)])
+def test_recorded_chat_is_independent_unknown_fact(monkeypatch, admin, expected):
+    """Reducer seam contract: isolate chat uncertainty from synced/partial/source flags."""
+    from types import SimpleNamespace
+    from hermes_cli import kanban_actionability_sources as sources
+    from hermes_cli import kanban_actionability_confirmed as confirmed
+
+    task = {'id': 'fixture', 'status': 'triage'}
+    event = {'uid': 'stop', 'kind': 'spend_budget_triaged',
+             'data': {'cause': 'scope_stopped'}, 'created_at': 1}
+    reader = SimpleNamespace(synced=False, partial=False, task=lambda _tid: task,
+        events=lambda _tid: [event], uid=lambda row: row['uid'],
+        pending=lambda _tid: None, columns=lambda _table: set())
+    monkeypatch.setattr(sources, '_state', lambda *_args: (event, False, []))
+    monkeypatch.setattr(sources, '_dependencies', lambda *_args: ([], False))
+    monkeypatch.setattr(sources, '_administration', lambda *_args: (admin, {'escalate_at': 100}))
+    monkeypatch.setattr(sources, '_release_offer', lambda *_args: None)
+    monkeypatch.setattr(sources, '_private_reason', lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sources, 'project', lambda facts, **_kwargs: dict(facts))
+    monkeypatch.setattr(confirmed, 'compose', lambda _reader, _task, _facts, row, **_kwargs: row)
+    row = sources._describe(None, 'fixture', now=1, reader=reader)
+    assert bool(row['unknown']) is expected
+    assert row['administrative_owner'] == admin
+
+
 def test_details_excludes_resolved_sources_and_nonstop_context():
     from types import SimpleNamespace
     from hermes_cli.kanban_actionability_restrictions import details
