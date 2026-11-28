@@ -1,6 +1,7 @@
 """Change-keyed routing data for outcome polling; never cache turn liveness."""
 from collections import OrderedDict
 import json
+import sqlite3
 import threading
 from typing import Any
 
@@ -48,11 +49,20 @@ def _revision(conn):
 
 
 def _scan(conn):
+    from hermes_state_routing_index import ACTIVE_ROUTING_INDEX, ACTIVE_ROUTING_PREDICATE
+
     grouped = {}
-    rows = conn.execute(
-        "SELECT scope, entry_json, json_extract(entry_json, '$.session_id') AS sid"
-        " FROM gateway_routing WHERE json_extract(entry_json, '$.active_turn_token') IS NOT NULL"
-    ).fetchall()
+    select = "SELECT scope, entry_json, json_extract(entry_json, '$.session_id') AS sid FROM gateway_routing"
+    where = " WHERE json_extract(entry_json, '$.active_turn_token') IS NOT NULL"
+    try:
+        rows = conn.execute(select + f" INDEXED BY {ACTIVE_ROUTING_INDEX}" + where
+                            + " AND (" + ACTIVE_ROUTING_PREDICATE + ")").fetchall()
+    except sqlite3.OperationalError as exc:
+        # Only absence of our optional index permits literal legacy/read-only
+        # fallback. Malformed JSON, busy, corruption and unknown layouts raise.
+        if str(exc) != f"no such index: {ACTIVE_ROUTING_INDEX}":
+            raise
+        rows = conn.execute(select + where).fetchall()
     for row in rows:
         try:
             entry = json.loads(row["entry_json"] or "{}")

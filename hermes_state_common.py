@@ -1035,6 +1035,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_local_created_started
 from hermes_state_session_count import count_index_sql as _count_index_sql
 DEFERRED_INDEX_SQL += _count_index_sql(_sql_json_extract)
 
+# After column reconciliation and any legacy routing-PK rebuild, never from a reader.
+from hermes_state_routing_index import ACTIVE_ROUTING_INDEX_SQL
+
+DEFERRED_INDEX_SQL += "\n" + ACTIVE_ROUTING_INDEX_SQL + "\n"
+
 
 # ── Deferred FTS rebuild bookkeeping (schema v23) ──
 # While a background index rebuild is pending, two state_meta keys define
