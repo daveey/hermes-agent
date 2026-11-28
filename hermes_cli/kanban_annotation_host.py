@@ -398,7 +398,11 @@ def refresh_locked(scope: tuple[str, ...], read_at: float | None = None) -> tupl
         if getattr(ksa._revalidate.force_read, 'scope', None) != scope:
             holder_counts.clear_use()
         try:
-            value = ksa._read_annotation_parts()
+            # Caller snapshot state is thread-local: bounded refresh runs here
+            # on another thread. Pin its links for counts and waiting adapters
+            # so they do not re-enter a contended projection after counts read.
+            with ksa.one_annotation_snapshot():
+                value = ksa._read_annotation_parts()
         finally:
             finish(scope)
         ksa._bounded.record(scope, value, holder_counts.observed_at(read_at))

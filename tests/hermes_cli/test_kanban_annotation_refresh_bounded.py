@@ -154,6 +154,76 @@ def test_fast_cold_scope_returns_counts_with_caller_context(scoped):
     assert reads == ["caller"]
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_helper_pins_links_across_counts_and_waiting_sources(scoped, fail_first):
+    """The worker thread must establish its own snapshot, not borrow caller TLS."""
+    from hermes_cli import kanban_annotation_host as host
+
+    scoped.setattr(host, "prepare", lambda scope: None)
+    scoped.setattr(host, "finish", lambda scope: None)
+    scoped.setattr(host, "enabled", lambda: False)
+    scoped.setattr(ksa._host_copy, "adopt", lambda scope: None)
+    scoped.setattr(ksa._revalidate, "refresh_if_unchanged", lambda *args: None)
+    scoped.setattr(ksa, "attention_task_counts", dict)
+    old = (0, SCOPE, "old", [{"id": "ask", "status": "blocked"}], [{"binding_id": "old"}])
+    new = (0, SCOPE, "new", [{"id": "other", "status": "running"}], [{"binding_id": "new"}])
+    lookups, seen, workers, cleaned = [], [], [], []
+    real_thread = ksa._bounded._real_thread_class()
+
+    class Worker(real_thread):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            workers.append(self)
+
+        def run(self):
+            try:
+                super().run()
+            finally:
+                cleaned.append(getattr(ksa._annotation_scope, "links", None) is None)
+
+    scoped.setattr(ksa._bounded, "_real_thread_class", lambda: Worker)
+
+    def lookup(scope, stale_ok):
+        lookups.append(scope)
+        return old if len(lookups) == 1 else new
+
+    def counts(**kwargs):
+        seen.append(ksa.remote_links_and_origin_rows())
+        return ({},) * 9
+
+    def waiting():
+        # chat-closeout's _gate_ready uses this exact boundary: without the
+        # worker's own snapshot it enters an unnecessary contended links gate.
+        assert getattr(ksa._annotation_scope, "reads", None) is not None
+        seen.append(ksa.remote_links_and_origin_rows())
+        if fail_first and len(seen) == 2:
+            raise RuntimeError("waiting source failed")
+        return {}
+
+    scoped.setattr(ksa, "_links_lookup", lookup)
+    scoped.setattr(ksa, "_all_counts", counts)
+    scoped.setattr(ksa, "_extra_waiting", waiting)
+    scoped.setattr(ksa, "_read_annotation_parts", host.read_annotation_parts)
+    try:
+        with ksa.one_annotation_snapshot():
+            if fail_first:
+                with pytest.raises(RuntimeError, match="waiting source failed"):
+                    ksa._annotation_snapshot()
+            else:
+                assert ksa._annotation_snapshot() is not None
+        assert seen == [(old[3], old[4])] * 2
+        assert lookups == [SCOPE]
+        assert ksa._annotation_snapshot() is not None
+        assert seen == [(old[3], old[4])] * 2 + [(new[3], new[4])] * 2
+        assert lookups == [SCOPE, SCOPE]
+    finally:
+        for worker in workers:
+            worker.join(5)
+            assert not worker.is_alive()
+    assert cleaned == [True, True]
+    assert getattr(ksa._annotation_scope, "reads", None) is None
+
+
 def test_refresh_runs_on_a_real_thread_when_thread_is_stubbed(scoped):
     _prime(scoped, 1)
 
