@@ -2,7 +2,7 @@
 
 The collector is the only I/O in a recompute. It reuses the v1 canonical readers
 (``hermes_state_session_status_snapshot.collect_parts`` with raw card rows, so clock-derived card state is decided
-by the reducer at its own ``now``) and adds what v2 shows beyond v1: each linked local card's dependency closure
+by the reducer at its own ``now``) and adds what v2 shows beyond v1: each linked card's qualified dependency closure
 (``task_links`` parents, bounded), and the current block episode of every blocked/triage card (the lifecycle event
 that started it, so a resolution binds to one episode and a later re-block is red again).
 
@@ -11,13 +11,9 @@ A reader that raises is recorded under ``errors`` (unknown coverage), never as a
 from __future__ import annotations
 
 import json
-import logging
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable
-
-logger = logging.getLogger(__name__)
 
 MAX_CLOSURE = 200  # dependency-closure cards per lineage
 MAX_DEPTH = 8
@@ -119,36 +115,6 @@ def _block_starts(conn: sqlite3.Connection, ids: set[str]) -> dict[str, str]:
     return start
 
 
-def local_graph(path: Path, linked: Iterable[str]) -> dict[str, Any]:
-    """For the linked cards of one board: ``parents`` (child -> parent ids), closure-only ``rows`` (with triage
-    entry clocks) and the block ``episodes`` of every blocked/triage card among them."""
-    from hermes_cli.kanban_generation import open_ro
-    from hermes_cli.kanban_triage_attention import annotate
-
-    linked = {str(t) for t in linked}
-    parents: dict[str, list[str]] = {}
-    seen, frontier = set(linked), set(linked)
-    with closing(open_ro(path, timeout=0.5)) as conn:
-        for _depth in range(MAX_DEPTH):
-            if not frontier or len(seen) >= MAX_CLOSURE:
-                break
-            found = set()
-            for parent, child in _parents(conn, frontier):
-                parents.setdefault(child, []).append(parent)
-                if parent not in seen:
-                    found.add(parent)
-            room = max(0, MAX_CLOSURE - len(seen))
-            frontier = set(sorted(found)[:room])
-            seen |= frontier
-        closure = seen - linked
-        rows = _rows(conn, closure)
-        annotate(conn, list(rows.values()))
-        blocking = {t for t, r in rows.items() if r.get("status") in _BLOCKING} | linked
-        episodes = block_episodes(conn, blocking)
-    return {"parents": {k: sorted(v) for k, v in parents.items()}, "rows": rows, "episodes": episodes,
-            "truncated": len(seen) >= MAX_CLOSURE}
-
-
 def collect(db: Any, tip: str, *, trigger: str = "manual", concluding: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Every input :func:`hermes_session_state_reducer.reduce` needs for the lineage whose live tip is ``tip``."""
     import hermes_state_outcome as so
@@ -158,19 +124,13 @@ def collect(db: Any, tip: str, *, trigger: str = "manual", concluding: frozenset
     stored = so._parse(row.get("outcome_json")) or None
     parts = collect_parts(db, tip, stored, trigger=trigger, concluding=concluding, card_rows=True)
     errors: dict[str, str] = {}
-    graphs: dict[str, Any] = {}
     paths = board_paths()
-    by_board: dict[str, set[str]] = {}
-    for card in parts.get("card_rows") or ():
-        if card.get("board") in paths and not is_remote(card):
-            by_board.setdefault(str(card["board"]), set()).add(str(card["id"]))
-    for board, ids in sorted(by_board.items()):
-        try:
-            graphs[board] = local_graph(paths[board], ids)
-        except Exception as exc:  # health: allow BLE001 -- an unreadable closure is unknown coverage, never empty
-            logger.warning("session state: dependency closure unreadable on %s for %s", board, tip, exc_info=True)
-            errors["closure"] = f"closure_read_failed:{type(exc).__name__}"
+    from hermes_session_state_graph import collect_graph
+
+    dependency_graph = collect_graph(list(parts.get("card_rows") or ()), paths,
+                                     str(parts["identity"].get("gateway") or "local"))
+    errors.update(dependency_graph["errors"])
     stored_status = (stored or {}).get("status") if isinstance(stored, dict) else None
-    return {"tip": tip, "lineage": lineage_of(parts["identity"], tip), "parts": parts, "graphs": graphs,
+    return {"tip": tip, "lineage": lineage_of(parts["identity"], tip), "parts": parts,
             "errors": errors, "stored_status": stored_status if isinstance(stored_status, dict) else None,
-            "trigger": trigger}
+            "trigger": trigger, "dependency_graph": dependency_graph}

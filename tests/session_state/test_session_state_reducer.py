@@ -55,7 +55,7 @@ def test_a_committed_resolution_for_the_current_episode_clears_red(db, board):
     task = kb.create_task(board, title="Deploy", assignee="worker", session_id="chat")
     assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
     inputs = collect(db, "chat")
-    episode = inputs["graphs"]["default"]["episodes"][task]
+    episode = inputs["dependency_graph"]["episodes"][f"default/{task}"]
     key = f"default/{task}"
     base = {"request_id": "r", "card": key, "action": "answer", "choice_id": "yes", "label": "Ship it",
             "by": "user", "at": 1.0, "delivery": "committed", "episode": episode}
@@ -86,15 +86,15 @@ def test_register_reducer_replaces_and_restores_the_adapter(db, board):
 
 
 def test_an_unreadable_closure_is_unknown_coverage_not_empty(db, board, monkeypatch):
-    import hermes_session_state_collect as collect_module
+    import hermes_session_state_graph as graph_module
 
     kb.create_task(board, title="Work", assignee="worker", session_id="chat")
 
-    def broken(path, linked):
+    def broken(stack, path):
         raise OSError("gone")
-    monkeypatch.setattr(collect_module, "local_graph", broken)
+    monkeypatch.setattr(graph_module, "_snapshot", broken)
     obj = reducer.reduce(collect(db, "chat"), now=time.time()).to_dict()
-    assert obj["sources"]["closure"] == {"coverage": "unknown", "reason": "closure_read_failed:OSError"}
+    assert obj["sources"]["closure:default"] == {"coverage": "unknown", "reason": "closure_read_failed:OSError"}
 
 
 @pytest.mark.parametrize("status,parents_open,expected", [

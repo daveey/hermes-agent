@@ -104,6 +104,9 @@ def _card(row: dict, *, key: str, gateway: str, linked: bool, parents: list[str]
     from hermes_cli.kanban_open_asks import card_is_open_human_ask
     from hermes_cli.kanban_triage_attention import overdue
 
+    expiry = _num(row.get("source_expires_at"))
+    if expiry is not None and now >= expiry:
+        row = {**row, "stale": True}
     status = str(row.get("status") or "unknown")
     human = card_is_open_human_ask(status, row.get("block_kind"), row.get("human_request")) \
         and not row.get("retained_wait")
@@ -129,48 +132,17 @@ def _card(row: dict, *, key: str, gateway: str, linked: bool, parents: list[str]
 
 
 def _cards(inputs: dict, resolutions: list[dict], now: float) -> dict[str, Card]:
-    from hermes_session_state_collect import is_remote
-
-    parts, graphs = inputs["parts"], inputs.get("graphs") or {}
-    gateway = str(parts["identity"].get("gateway") or "local")
+    gateway = str(inputs["parts"]["identity"].get("gateway") or "local")
+    graph = inputs["dependency_graph"]
+    rows = graph["rows"]
     out: dict[str, Card] = {}
-    for row in parts.get("card_rows") or ():
-        board = str(row.get("board") or "default")
-        tid = str(row.get("id") or "")
-        if is_remote(row):
-            key = str(row.get("key") or f"{row['gateway']}/{board}/{tid}")
-            out[key] = _card(row, key=key, gateway=str(row["gateway"]), linked=True, parents=[], parent_rows=[],
-                             episode=_str(row.get("block_episode")) or None, resolutions=resolutions, now=now)
-            continue
-        graph = graphs.get(board) or {}
-        rows, links, episodes = graph.get("rows") or {}, graph.get("parents") or {}, graph.get("episodes") or {}
-        listed = {str(r.get("id")): r for r in parts.get("card_rows") or () if not is_remote(r)
-                  and str(r.get("board") or "default") == board}
-        for cid in [tid, *_closure(tid, links)]:
-            ckey = f"{board}/{cid}"
-            if ckey in out:
-                continue
-            crow = listed.get(cid) or rows.get(cid)
-            if crow is None:
-                continue
-            pids = links.get(cid, [])
-            out[ckey] = _card({**crow, "board": board}, key=ckey, gateway=gateway, linked=cid in listed,
-                              parents=[f"{board}/{p}" for p in pids],
-                              parent_rows=[listed.get(p) or rows.get(p) or {"id": p, "status": "unknown"} for p in pids],
-                              episode=episodes.get(cid), resolutions=resolutions, now=now)
-    return dict(sorted(out.items()))
-
-
-def _closure(tid: str, links: dict[str, list[str]]) -> list[str]:
-    seen, stack, order = {tid}, list(links.get(tid, [])), []
-    while stack:
-        cid = stack.pop(0)
-        if cid in seen:
-            continue
-        seen.add(cid)
-        order.append(cid)
-        stack.extend(links.get(cid, []))
-    return order
+    for key, row in sorted(rows.items()):
+        parents = graph["parents"].get(key, [])
+        out[key] = _card(row, key=key, gateway=str(row.get("gateway") or gateway),
+                         linked=row["linked"], parents=parents,
+                         parent_rows=[rows.get(p) or {"id": p, "status": "unknown"} for p in parents],
+                         episode=graph["episodes"].get(key), resolutions=resolutions, now=now)
+    return out
 
 
 def _section(card: Card) -> Optional[str]:
@@ -225,6 +197,7 @@ def _next_change(cards: dict[str, Card], rows: list[dict], now: float) -> Option
     from hermes_cli.kanban_triage_attention import next_transition
 
     due = [t for row in rows if (t := next_transition(row, now=now)) is not None]
+    due += [t for row in rows if (t := _num(row.get("source_expires_at"))) is not None and t > now]
     due += [c.eta for c in cards.values() if c.eta is not None and c.eta > now and c.blocked_on == "clock"]
     return min(due) if due else None
 
@@ -260,8 +233,7 @@ def legacy_adapter(inputs: dict[str, Any], *, now: float, resolutions: list[dict
             for a in snapshot.get("asks") or ()]
     # A card ask a committed resolution answered is history, not a pending ask (design item 7).
     asks = [a for a in asks if a.card is None or (a.card in cards and cards[a.card].resolution is None)]
-    closure_rows = [{**r, "status": r.get("status")} for g in (inputs.get("graphs") or {}).values()
-                    for r in (g.get("rows") or {}).values()]
+    closure_rows = list(inputs["dependency_graph"]["rows"].values())
     sources = {name: {"coverage": s.get("coverage", "unknown"), "reason": s.get("reason")}
                for name, s in sorted((snapshot.get("sources") or {}).items())}
     for name, reason in sorted((inputs.get("errors") or {}).items()):
@@ -271,8 +243,7 @@ def legacy_adapter(inputs: dict[str, Any], *, now: float, resolutions: list[dict
         identity=identity, session=_session(status_v1, parts),
         header=_header(status_v1, cards, asks, bool(parts.get("muted"))), cards=cards, asks=asks,
         resolutions=[dict(r) for r in resolutions][-50:], sources=sources,
-        next_change_at=_next_change(cards, linked_rows + [r for r in closure_rows if r.get("status") == "triage"],
-                                    now),
+        next_change_at=_next_change(cards, linked_rows + closure_rows, now),
         legacy={"kind": status_v1.get("kind"), "reason": status_v1.get("reason"),
                 "stripe": (status_v1.get("presentation") or {}).get("stripe")})
 

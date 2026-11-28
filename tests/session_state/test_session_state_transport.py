@@ -59,7 +59,8 @@ def test_get_serves_the_persisted_row_without_collecting(store, board, client, m
         raise AssertionError("GET must not read sources")
     monkeypatch.setattr(store, "_collect", refuse)
     monkeypatch.setattr(collect_module, "collect", refuse)
-    monkeypatch.setattr(collect_module, "local_graph", refuse)
+    import hermes_session_state_graph as graph_module
+    monkeypatch.setattr(graph_module, "collect_graph", refuse)
     assert client.get("/api/session-state/chat").json() == obj
     listing = client.get("/api/session-state", params={"since": 0}).json()
     assert listing["rev"] == obj["rev"] and listing["objects"] == [obj]
