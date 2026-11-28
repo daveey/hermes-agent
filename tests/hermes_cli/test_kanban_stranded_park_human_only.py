@@ -290,6 +290,78 @@ def test_a_cache_limit_with_an_unreadable_or_invalidated_board_is_not_offered(ka
         assert park._sweep(conn, now=park._later(3), cfg={}) == [] and park._row(conn, tid)[2] is None
 
 
+@pytest.mark.parametrize("target", [None, "another-card"])
+def test_only_the_held_target_is_classified(kanban_home, own_gateway, monkeypatch, target):
+    conn = own_gateway
+    tid = _allowance_stop_with_live_owner(conn, kanban_home)
+    calls = _board(monkeypatch, EXHAUSTED)
+    monkeypatch.setattr(kanban_release, "held", lambda c, t: target)
+    assert stranded.human_only_stop(conn, tid) is None
+    assert calls == []
+
+
+def test_no_classification_inside_a_write_transaction(kanban_home, own_gateway, monkeypatch):
+    conn = own_gateway
+    tid = _allowance_stop_with_live_owner(conn, kanban_home)
+    calls = _board(monkeypatch, EXHAUSTED)
+    _over_cache(monkeypatch, conn, tid)
+    with kb.write_txn(conn):
+        assert stranded.human_only_stop(conn, tid) is None
+    assert calls == []
+
+
+def test_non_board_basis_is_not_reported_as_exhausted(kanban_home, own_gateway, monkeypatch):
+    conn = own_gateway
+    tid = _allowance_stop_with_live_owner(conn, kanban_home)
+    calls = _board(monkeypatch, EXHAUSTED)
+    monkeypatch.setattr(allowance, "state", lambda c, t: "not-board")
+    assert stranded.human_only_stop(conn, tid) is None
+    assert calls == [tid]
+
+
+@pytest.mark.parametrize("agent,override,attribution,cache,used,window,expected", [
+    (True, True, "human", None, 100, "current", (True, 100, True)),
+    (False, True, "human", None, 100, "current", (False, 100, True)),
+    (True, False, "human", None, 100, "current", (False, 100, True)),
+    (True, True, "agent", None, 100, "current", (False, 100, True)),
+    (True, True, "human", 50, 50, "current", (True, 50, True)),
+    (True, True, "human", 0, 100, "current", (True, 0, False)),
+    (True, True, "human", None, 99, "current", (True, 100, False)),
+    (True, True, "human", None, 100, "lifetime", (True, 100, False)),
+])
+def test_cache_limit_reading_branches(own_gateway, monkeypatch, agent, override, attribution, cache, used, window,
+                                      expected):
+    from types import SimpleNamespace
+    prior = {"cache_read_tokens": cache}
+    monkeypatch.setattr(budget, "card_override", lambda c, t: prior)
+    monkeypatch.setattr(budget, "spend", lambda c, t: SimpleNamespace(tokens={"cache_read_tokens": used}))
+    monkeypatch.setattr(budget, "override_set", lambda p: override)
+    monkeypatch.setattr(budget, "cache_attribution", lambda p: attribution)
+    monkeypatch.setattr(budget, "limits", lambda: SimpleNamespace(cache_read_tokens=100))
+    monkeypatch.setattr(budget, "limit_window", lambda c, t: window)
+    result = kanban_release._cache_limit(own_gateway, "fixture", agent=agent)
+    assert (result[2], result[4], result[6]) == expected
+    assert kanban_release.agent_cache_limit_in_force(own_gateway, "fixture") == (
+        override and attribution != "agent" and expected[2])
+
+
+def test_no_allowance_history_does_not_read_board(kanban_home, own_gateway, monkeypatch):
+    conn = own_gateway
+    tid = _allowance_stop_with_live_owner(conn, kanban_home)
+    calls = _board(monkeypatch, EXHAUSTED)
+    monkeypatch.setattr(allowance, "history", lambda c, t: False)
+    assert stranded.human_only_stop(conn, tid) is None
+    assert calls == []
+
+
+def test_empty_board_still_allows_cache_limit_classification(kanban_home, own_gateway, monkeypatch):
+    conn = own_gateway
+    tid = _allowance_stop_with_live_owner(conn, kanban_home)
+    _board(monkeypatch, {})
+    _over_cache(monkeypatch, conn, tid)
+    assert stranded.human_only_stop(conn, tid) == stranded.CACHE_LIMIT_NOTE
+
+
 def test_an_agent_set_cache_limit_stays_with_the_live_owner(kanban_home, own_gateway, monkeypatch):
     """A limit an agent set is one an agent release may replace: not human-only, the owner keeps the card."""
     for conn in (own_gateway,):

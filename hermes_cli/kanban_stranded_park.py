@@ -274,7 +274,7 @@ def human_only_stop(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
         seen = observation.board_state(conn, task_id)
         if not isinstance(seen, dict) or (seen and seen.get("state") != "active"):
             return None
-        if seen and allowance.state(conn, task_id) == allowance.BOARD and seen.get("remaining") == 0:
+        if allowance.state(conn, task_id) == allowance.BOARD and seen.get("remaining") == 0:
             return HUMAN_ONLY_NOTE
     return CACHE_LIMIT_NOTE if kanban_release.agent_cache_limit_in_force(conn, task_id) else None
 
