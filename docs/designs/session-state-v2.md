@@ -55,9 +55,19 @@ children); the process registry lifecycle wake; user-steps `requests` create/res
 `hermes_cli/web_routers/session_state.py`: `GET /api/session-state/{id}`, `GET /api/session-state?since=<rev>`
 (persisted rows only, no compute), `WS /api/session-state/ws` (`subscribe{keys, since_rev}` → snapshot, then
 pushes; clients keep the highest rev per lineage), `POST /api/session-state/actions`
-(`{action: unblock|answer|archive|release, session_id, card, request_id, choice_id?, label?, text?}`) → commits on
-the local board (answer only through a registered fenced decision handler; refused without one), records the
-resolution, recomputes synchronously and returns `{ok, object, rev, resolution}`.
+(`{action: unblock|answer|archive|release, session_id, card, episode, request_id, choice_id?, label?, text?}`) →
+commits on the local board, records the resolution, recomputes synchronously and returns
+`{ok, object, rev, resolution}`. `episode` is required: the card's `block_episode` as shown (null when it was not
+blocked). Every transition is fenced to it inside its write transaction (`unblock_task`/`archive_task`/`release`
+`precondition`; checked before the answer handler runs), so a click on an ask that was answered and re-blocked
+since is refused `stale_episode` and resolves nothing. `answer` goes only through a registered fenced decision
+handler (refused without one). `release` acts only on the home-filed `release_target` offer
+(`kanban_release.offered`, else `not_offered`) and runs as an explicit human writer
+(`human_writer("session-state-action:<request_id>")`), never with the serving process's ancestry.
+
+Reconciliation is bounded: each sweep first prunes the rows (object, card index, aliases, resolutions) of gone
+sessions and of sessions ended more than `RETAIN_S` (7 days) ago, then recomputes the next `RECONCILE_BATCH` (64)
+lineages round-robin, serving live events between them.
 
 Shadow mode: nothing renders from it in P1.
 

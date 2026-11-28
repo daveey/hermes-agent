@@ -109,3 +109,81 @@ def test_reconciliation_runs_from_the_worker_every_interval(store, board, clock)
     clock.now += 301
     drain(store, rounds=1)
     assert store.metrics()["reconcile_runs"] == 1
+
+
+def _rows(db):
+    with db._read_ctx() as conn:
+        return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in (
+            "session_state", "session_state_cards", "session_state_alias", "session_state_resolutions")}
+
+
+def test_reconcile_prunes_gone_and_long_ended_sessions(db, board, clock, tmp_path):
+    from hermes_session_state_store import SessionStateStore
+
+    made = SessionStateStore(db, clock=clock, retain_s=3600)
+    for sid in ("old", "recent", "gone"):
+        db.create_session(sid, source="desktop")
+        kb.create_task(board, title=sid, assignee="worker", session_id=sid)
+        assert made.recompute(sid) is not None
+        made.add_resolution(sid, {"request_id": f"r-{sid}", "card": "x", "episode": None})
+    made.recompute("chat")
+    db._execute_write(lambda c: c.execute("UPDATE sessions SET ended_at=? WHERE id='old'", (clock.now - 7200,)))
+    db._execute_write(lambda c: c.execute("UPDATE sessions SET ended_at=? WHERE id='recent'", (clock.now - 60,)))
+    db._execute_write(lambda c: c.execute("DELETE FROM sessions WHERE id='gone'"))
+    made.reconcile()  # 'recent' ending changes its object: a legitimate diff, not part of this assertion
+    assert made.metrics()["pruned"] == 2
+    assert made.get("old") is None and made.get("gone") is None
+    assert made.get("recent") is not None and made.get("chat") is not None
+    assert made.resolutions("old") == [] and [r["request_id"] for r in made.resolutions("recent")] == ["r-recent"]
+    with db._read_ctx() as conn:
+        left = {r[0] for r in conn.execute("SELECT DISTINCT lineage FROM session_state_cards")}
+        aliases = {r[0] for r in conn.execute("SELECT DISTINCT lineage FROM session_state_alias")}
+    assert left <= {"recent", "chat"} and aliases <= {"recent", "chat"}
+    counts = _rows(db)
+    assert made.reconcile() == 0 and made.metrics()["pruned"] == 2 and _rows(db) == counts  # nothing more
+
+
+def test_one_sweep_recomputes_a_bounded_round_robin_batch(db, board, clock):
+    from hermes_session_state_store import SessionStateStore
+
+    made = SessionStateStore(db, clock=clock, reconcile_batch=2)
+    lineages = ["chat", "s1", "s2", "s3", "s4"]
+    for sid in lineages[1:]:
+        db.create_session(sid, source="desktop")
+    for sid in lineages:
+        made.recompute(sid)
+    swept: list[str] = []
+    real = made.recompute
+
+    def spy(session_id, *, trigger="manual"):
+        if trigger == "reconcile":
+            swept.append(session_id)
+        return real(session_id, trigger=trigger)
+    made.recompute = spy  # type: ignore[method-assign]
+    for _ in range(3):
+        before = len(swept)
+        made.reconcile()
+        assert len(swept) - before <= 2  # bounded however many rows are persisted
+    assert sorted(swept[:5]) == sorted(lineages) and len(swept) == 6  # all covered in ceil(5/2) sweeps, then wraps
+    assert swept[5] == swept[0]
+
+
+def test_live_events_are_served_between_sweep_items(db, board, clock):
+    from hermes_session_state_store import SessionStateStore
+
+    made = SessionStateStore(db, clock=clock)
+    for sid in ("s1", "s2"):
+        db.create_session(sid, source="desktop")
+    for sid in ("chat", "s1", "s2"):
+        made.recompute(sid)
+    order: list[tuple[str, str]] = []
+    real = made.recompute
+
+    def spy(session_id, *, trigger="manual"):
+        order.append((session_id, trigger))
+        if trigger == "reconcile" and len(order) == 1:
+            made.emit_session("s2", "card_change")  # a live event arrives during the sweep
+        return real(session_id, trigger=trigger)
+    made.recompute = spy  # type: ignore[method-assign]
+    made.reconcile()
+    assert order[:2] == [("chat", "reconcile"), ("s2", "card_change")]  # not queued behind the whole sweep

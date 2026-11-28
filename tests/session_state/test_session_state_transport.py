@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import closing
 
 import pytest
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import hermes_session_state_collect as collect_module
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_db_connect import connect
 from hermes_cli.web_routers import session_state as routes
 from tests.session_state.conftest import HUMAN_REQUEST, drain
 
@@ -101,10 +103,11 @@ def test_websocket_refuses_a_disallowed_upgrade(store, monkeypatch):
 def test_action_unblock_returns_the_post_transition_object_and_a_reblock_bumps_rev(store, board, client):
     task = kb.create_task(board, title="Deploy", assignee="worker", session_id="chat")
     assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
-    store.recompute("chat")
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    assert shown
     reply = client.post("/api/session-state/actions", json={
         "action": "unblock", "session_id": "chat", "card": f"default/{task}", "request_id": "req-1",
-        "label": "Ship it"}).json()
+        "label": "Ship it", "episode": shown}).json()
     assert reply["ok"] is True
     card = reply["object"]["cards"][f"default/{task}"]
     assert card["lifecycle"] != "blocked" and card["red"] is False
@@ -125,16 +128,16 @@ def test_answer_resolves_only_its_own_request(store, board, client, monkeypatch)
     b = kb.create_task(board, title="B", assignee="worker", session_id="chat")
     for task in (a, b):
         assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
-    store.recompute("chat")
+    shown = store.recompute("chat")["cards"][f"default/{a}"]["block_episode"]
     seen = []
     register_answer_handler(lambda request: seen.append(request) or {"ok": True})
     try:
         reply = client.post("/api/session-state/actions", json={
             "action": "answer", "session_id": "chat", "card": f"default/{a}", "request_id": "req-a",
-            "choice_id": "yes", "label": "Ship it"}).json()
+            "choice_id": "yes", "label": "Ship it", "episode": shown}).json()
     finally:
         register_answer_handler(None)
-    assert seen and seen[0]["request_id"] == "req-a"
+    assert seen and seen[0]["request_id"] == "req-a" and seen[0]["episode"] == shown
     cards = reply["object"]["cards"]
     assert cards[f"default/{a}"]["resolution"]["request_id"] == "req-a" and cards[f"default/{a}"]["red"] is False
     assert cards[f"default/{b}"]["red"] is True and cards[f"default/{b}"]["resolution"] is None
@@ -147,7 +150,8 @@ def test_answer_without_a_decision_handler_is_refused_and_records_nothing(store,
     assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
     before = store.recompute("chat")
     reply = client.post("/api/session-state/actions", json={
-        "action": "answer", "session_id": "chat", "card": f"default/{task}", "request_id": "r"})
+        "action": "answer", "session_id": "chat", "card": f"default/{task}", "request_id": "r",
+        "episode": before["cards"][f"default/{task}"]["block_episode"]})
     assert reply.status_code == 409 and reply.json()["refusal"] == "answer_unavailable"
     assert store.resolutions("chat") == [] and store.get("chat") == before
 
@@ -156,23 +160,145 @@ def test_refused_transition_and_bad_requests(store, board, client):
     task = kb.create_task(board, title="A", assignee="worker", session_id="chat")
     store.recompute("chat")
     refused = client.post("/api/session-state/actions", json={
-        "action": "unblock", "session_id": "chat", "card": f"default/{task}"})
+        "action": "unblock", "session_id": "chat", "card": f"default/{task}", "episode": None})
     assert refused.status_code == 409 and refused.json()["refusal"] == "unblock_refused"
     assert store.resolutions("chat") == []
     assert client.post("/api/session-state/actions", json={"action": "nuke", "session_id": "chat",
                                                             "card": f"default/{task}"}).status_code == 400
-    assert client.post("/api/session-state/actions", json={"action": "unblock", "session_id": "chat",
-                                                            "card": "default/t_none"}).status_code == 404
-    assert client.post("/api/session-state/actions", json={"action": "unblock", "session_id": "chat",
-                                                            "card": f"elsewhere/{task}"}).status_code == 404
+    for episode in ({}, {"episode": ""}, {"episode": 5}):  # the shown episode is required (a string or null)
+        missing = client.post("/api/session-state/actions", json={
+            "action": "unblock", "session_id": "chat", "card": f"default/{task}", **episode})
+        assert missing.status_code == 400 and missing.json()["refusal"] == "episode_required"
+    for card in ("default/t_none", f"elsewhere/{task}"):
+        assert client.post("/api/session-state/actions", json={
+            "action": "unblock", "session_id": "chat", "card": card, "episode": None}).status_code == 404
 
 
 def test_archive_action(store, board, client):
     task = kb.create_task(board, title="A", assignee="worker", session_id="chat")
     store.recompute("chat")
     reply = client.post("/api/session-state/actions", json={
-        "action": "archive", "session_id": "chat", "card": f"default/{task}"}).json()
+        "action": "archive", "session_id": "chat", "card": f"default/{task}", "episode": None}).json()
     assert reply["ok"] and f"default/{task}" not in reply["object"]["cards"]
+
+
+def _post(client, action, task, episode, **extra):
+    return client.post("/api/session-state/actions", json={
+        "action": action, "session_id": "chat", "card": f"default/{task}", "episode": episode, **extra})
+
+
+def _unblocked_events(board, task):
+    return board.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind IN ('unblocked', 'archived')",
+                         (task,)).fetchone()[0]
+
+
+@pytest.mark.parametrize("action", ["unblock", "archive", "answer"])
+def test_a_stale_click_never_resolves_a_newer_episode(store, board, client, action):
+    """A click shown at one block episode, after the card was answered and re-blocked (a new episode), is refused
+    and records nothing: it must not unblock/archive/answer an ask the user never saw."""
+    from hermes_session_state_actions import register_answer_handler
+
+    task = kb.create_task(board, title="Deploy", assignee="worker", session_id="chat")
+    assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    assert kb.unblock_task(board, task)  # answered elsewhere ...
+    assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)  # ... and a new ask
+    newer = store.recompute("chat")
+    assert newer["cards"][f"default/{task}"]["block_episode"] not in (None, shown)
+    before = _unblocked_events(board, task)
+    seen = []
+    register_answer_handler(lambda request: seen.append(request) or {"ok": True})
+    try:
+        reply = _post(client, action, task, shown, request_id="stale")
+    finally:
+        register_answer_handler(None)
+    assert reply.status_code == 409 and reply.json()["refusal"] == "stale_episode"
+    assert seen == [] and _unblocked_events(board, task) == before
+    held = kb.get_task(board, task).status
+    assert held == newer["cards"][f"default/{task}"]["lifecycle"] and held in ("blocked", "triage")
+    assert store.resolutions("chat") == []
+    assert store.get("chat") == newer and store.get("chat")["cards"][f"default/{task}"]["red"] is True
+
+
+def test_the_fence_is_asked_inside_the_transition_transaction(store, board, client, monkeypatch):
+    """A re-block landing between the request's read and the transition's write is still refused."""
+    from hermes_cli import kanban_db
+
+    task = kb.create_task(board, title="Deploy", assignee="worker", session_id="chat")
+    assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    real = kanban_db.unblock_task
+
+    def racing(conn, task_id, **kw):  # another writer (own connection: this runs on the endpoint's thread)
+        with closing(connect(collect_module.board_paths()["default"])) as other:
+            assert real(other, task_id) and kb.block_task(
+                other, task_id, kind="needs_input", human_request=HUMAN_REQUEST)
+        return real(conn, task_id, **kw)
+    monkeypatch.setattr(kanban_db, "unblock_task", racing)
+    reply = _post(client, "unblock", task, shown, request_id="race")
+    assert reply.status_code == 409 and reply.json()["refusal"] == "stale_episode"
+    assert kb.get_task(board, task).status in ("blocked", "triage") and store.resolutions("chat") == []
+
+
+def _spend_stopped_with_offer(board, *, filed=True):
+    """A spend-stopped card linked to the chat whose stored ask carries the home-filed release offer (what the
+    stranded-park brief writes), as ``tests/hermes_cli/test_kanban_release.py`` builds it."""
+    import json
+
+    from hermes_cli import kanban_release
+    from hermes_cli import kanban_spend_decision as decision
+
+    task = kb.create_task(board, title="Retained work", assignee="default", session_id="chat")
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (task,))
+        kb._append_event(board, task, decision.EVENT, {"reason": "Spend budget: 15 runs"})
+    offer = kanban_release.offer(board, task)
+    assert offer is not None
+    ask = {**HUMAN_REQUEST, "release_target": offer}
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET human_request=? WHERE id=?", (json.dumps(ask), task))
+        if filed:
+            kb._append_event(board, task, "stranded_park_escalated", {"request": True, "release_target": offer})
+    return task
+
+
+def test_release_runs_as_an_explicit_human_writer_on_a_filed_offer(store, board, client, monkeypatch):
+    from hermes_cli import kanban_release
+
+    task = _spend_stopped_with_offer(board)
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    calls = []
+    real = kanban_release.release
+
+    def spy(conn, task_id, **kw):
+        calls.append(kw)
+        return real(conn, task_id, **kw)
+    monkeypatch.setattr(kanban_release, "release", spy)
+    reply = _post(client, "release", task, shown, request_id="rel-1")
+    assert reply.status_code == 200 and reply.json()["ok"] is True, reply.json()
+    (kw,) = calls
+    assert kw["writer"] == kanban_release.human_writer("session-state-action:rel-1")  # never the process walk
+    assert kw["author"] == "session-state" and callable(kw["precondition"])
+    assert kb.get_task(board, task).status != "triage"
+    record = board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='stop_released'",
+                           (task,)).fetchone()
+    assert record is not None and '"authority_kind": "human"' in record[0]
+    assert [r["request_id"] for r in store.resolutions("chat")] == ["rel-1"]
+
+
+@pytest.mark.parametrize("filed", [False, True])
+def test_release_is_refused_without_a_standing_offer_or_on_a_stale_episode(store, board, client, filed):
+    task = _spend_stopped_with_offer(board, filed=filed)
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    if filed:  # the offer stands, but the click names an episode the card is no longer in
+        reply = _post(client, "release", task, "evt:999999", request_id="rel-stale")
+        assert reply.status_code == 409 and reply.json()["refusal"] == "stale_episode", reply.json()
+    else:  # an ask that carries the stamp but was never filed by the home is not an offer
+        reply = _post(client, "release", task, shown, request_id="rel-forged")
+        assert reply.status_code == 409 and reply.json()["refusal"] == "not_offered"
+    assert kb.get_task(board, task).status == "triage" and store.resolutions("chat") == []
+    assert board.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='stop_released'",
+                         (task,)).fetchone()[0] == 0
 
 
 def test_routes_answer_503_without_a_store(monkeypatch):

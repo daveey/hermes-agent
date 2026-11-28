@@ -9,8 +9,10 @@ state.db (``session_state``), recomputed in full by the pluggable pure reducer w
 * **rev**: one store-wide monotonic counter (``session_state_meta.rev``), persisted, bumped only when an object's
   digest (canonical JSON without ``rev``/``computed_at``) changes; equal recomputes never churn it.
 * **timer**: each object's ``next_change_at`` is the only timer: when it falls due the lineage is recomputed.
-* **reconciliation**: every :data:`RECONCILE_S` every persisted lineage is recomputed; a digest change there was a
-  missed event, logged and counted (``metrics()['reconcile_diffs']``).
+* **reconciliation**: every :data:`RECONCILE_S` the rows of gone sessions and of sessions ended more than
+  :data:`RETAIN_S` ago are pruned, then the next :data:`RECONCILE_BATCH` persisted lineages (round-robin) are
+  recomputed, serving live events between them; a digest change there was a missed event, logged and counted
+  (``metrics()['reconcile_diffs']``).
 * **divergence**: each recompute compares the v2 header with the stored v1 ``outcome_json.status`` and appends a
   bounded JSONL record on disagreement (``logs/session-state-divergence.jsonl``).
 
@@ -30,6 +32,8 @@ from typing import Any, Callable, Iterable, Optional
 logger = logging.getLogger(__name__)
 
 RECONCILE_S = 300.0
+RECONCILE_BATCH = 64  # lineages recomputed per sweep (round-robin): bounds one sweep however long the history
+RETAIN_S = 7 * 86400.0  # rows of sessions ended longer ago than this are pruned (an event recreates one)
 DIVERGENCE_MAX_BYTES = 2 * 1024 * 1024
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS session_state (
@@ -66,7 +70,8 @@ class SessionStateStore:
 
     def __init__(self, db: Any, *, collect: Optional[Callable[..., dict]] = None,
                  reduce: Optional[Callable[..., Any]] = None, clock: Callable[[], float] = time.time,
-                 divergence_path: Optional[Path] = None, reconcile_s: float = RECONCILE_S) -> None:
+                 divergence_path: Optional[Path] = None, reconcile_s: float = RECONCILE_S,
+                 reconcile_batch: int = RECONCILE_BATCH, retain_s: float = RETAIN_S) -> None:
         from hermes_session_state_collect import collect as default_collect
         from hermes_session_state_reducer import reduce as default_reduce
 
@@ -76,6 +81,9 @@ class SessionStateStore:
         self._clock = clock
         self._divergence_path = divergence_path
         self._reconcile_s = reconcile_s
+        self._reconcile_batch = max(1, int(reconcile_batch))
+        self._reconcile_cursor = ""
+        self._retain_s = retain_s
         self._compute_lock = threading.RLock()  # one recompute (collect -> reduce -> persist -> push) at a time
         self._cv = threading.Condition()
         self._pending: dict[str, str] = {}  # session id -> trigger
@@ -87,7 +95,7 @@ class SessionStateStore:
         self._stopping = False
         self._next_reconcile = self._clock() + reconcile_s
         self._metrics = {"recomputes": 0, "published": 0, "unchanged": 0, "errors": 0, "reconcile_runs": 0,
-                         "reconcile_diffs": 0, "divergences": 0, "timer_fires": 0}
+                         "reconcile_diffs": 0, "divergences": 0, "timer_fires": 0, "pruned": 0}
         self._ensure()
         self._load_timers()
 
@@ -342,9 +350,13 @@ class SessionStateStore:
         for lineage in self._due(now):
             self._metrics["timer_fires"] += 1
             self.emit_session(lineage, "timer")
+        done = self._serve_pending()
         if now >= self._next_reconcile:
             self._next_reconcile = now + self._reconcile_s
             self.reconcile()
+        return done + self._serve_pending()
+
+    def _serve_pending(self) -> int:
         with self._cv:
             pending, self._pending = self._pending, {}
         done = 0
@@ -357,22 +369,61 @@ class SessionStateStore:
                 logger.warning("session state recompute failed for %s", sid, exc_info=True)
         return done
 
+    def prune(self) -> int:
+        """Delete the rows (object, card index, aliases, resolutions) of every lineage whose session is gone or
+        ended more than ``retain_s`` ago; a later event about one recreates it. Returns how many were pruned."""
+        cutoff = self._clock() - self._retain_s
+
+        def write(conn):
+            gone = [str(r[0]) for r in conn.execute(
+                "SELECT s.lineage FROM session_state s LEFT JOIN sessions x ON x.id = s.tip "
+                "WHERE x.id IS NULL OR (x.ended_at IS NOT NULL AND x.ended_at < ?)", (cutoff,))]
+            if not gone:
+                return gone
+            ids = json.dumps(gone)
+            for table in ("session_state", "session_state_cards", "session_state_alias",
+                          "session_state_resolutions"):
+                conn.execute(f"DELETE FROM {table} WHERE lineage IN (SELECT value FROM json_each(?))", (ids,))
+            return gone
+        with self.db._read_ctx() as conn:  # the common case is nothing to prune: no write at all
+            if conn.execute("SELECT 1 FROM session_state s LEFT JOIN sessions x ON x.id = s.tip WHERE x.id IS NULL "
+                            "OR (x.ended_at IS NOT NULL AND x.ended_at < ?) LIMIT 1", (cutoff,)).fetchone() is None:
+                return 0
+        gone = self.db._execute_write(write) or []
+        with self._cv:
+            for lineage in gone:
+                self._timers.pop(lineage, None)
+        self._metrics["pruned"] += len(gone)
+        return len(gone)
+
     def reconcile(self) -> int:
-        """Recompute every persisted lineage; a digest change here is a missed event (logged, counted)."""
+        """Prune, then recompute the next ``reconcile_batch`` persisted lineages (round-robin, so every row is
+        covered within ``ceil(rows / batch)`` sweeps and one sweep's cost is bounded however long the history).
+        Live events pending meanwhile are served between lineages, never queued behind the sweep. A digest change
+        here is a missed event (logged, counted)."""
         self._metrics["reconcile_runs"] += 1
+        self.prune()
         with self.db._read_ctx() as conn:
-            rows = [(str(r[0]), str(r[1])) for r in conn.execute("SELECT lineage, digest FROM session_state")]
+            rows = [(str(r[0]), str(r[1])) for r in conn.execute(
+                "SELECT lineage, digest FROM session_state WHERE lineage > ? ORDER BY lineage LIMIT ?",
+                (self._reconcile_cursor, self._reconcile_batch))]
+            if len(rows) < self._reconcile_batch:  # wrap around to the start
+                rows += [(str(r[0]), str(r[1])) for r in conn.execute(
+                    "SELECT lineage, digest FROM session_state WHERE lineage <= ? ORDER BY lineage LIMIT ?",
+                    (self._reconcile_cursor, self._reconcile_batch - len(rows)))]
         diffs = 0
         for lineage, before in rows:
+            self._reconcile_cursor = lineage
             try:
                 obj = self.recompute(lineage, trigger="reconcile")
             except Exception:  # health: allow BLE001 -- the sweep continues past one failing lineage
                 self._metrics["errors"] += 1
                 logger.warning("session state reconcile failed for %s", lineage, exc_info=True)
-                continue
+                obj = None
             if obj is not None and digest(obj) != before:
                 diffs += 1
                 logger.info("session state reconcile diff: lineage=%s rev=%s", lineage, obj.get("rev"))
+            self._serve_pending()
         self._metrics["reconcile_diffs"] += diffs
         return diffs
 
