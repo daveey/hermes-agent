@@ -68,10 +68,11 @@ def test_daily_flaky_intake_is_stale_after_its_day_only(conn, configured):
 
 def test_daily_rolling_retro_card_expires_after_seven_days_not_its_day(conn, configured):
     old = held(conn, key="core-ship-backstop:softmax-universe/daveey-hermes:2026-01-02", age=OLD)
+    again = held(conn, key="core-ship-backstop:softmax-universe/daveey-hermes:2026-01-02:2", age=OLD)
     young = held(conn, key="core-ship-backstop:softmax-universe/daveey-hermes:2026-01-03", age=86400)
     result = plan.apply(conn, [{"action": "archive", "card": c, "basis": "stale", "reason": "old"}
-                               for c in (old, young)])
-    assert [a["card"] for a in result["applied"]] == [old]
+                               for c in (old, again, young)])
+    assert [a["card"] for a in result["applied"]] == [old, again]
     assert "seven days" in result["rejected"][0]["why"]
 
 

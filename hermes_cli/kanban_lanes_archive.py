@@ -54,9 +54,10 @@ def _p(name, created_by, key, informational=False):
 # not proof that a card is an expiring report rather than repair work. Named groups: ``subject`` (what a newer card
 # about the same thing shares), ``target`` (the card an alarm is about), ``day`` (a daily intake's date).
 PRODUCERS = (
-    # A per-merge sha (legacy) or one rolling retro card per repo per UTC day; either expires only after 7 days.
+    # A per-merge sha (legacy) or one rolling retro card per repo per UTC day (``:<n>`` when that day's card was
+    # already done); either expires only after 7 days held.
     _p("core-ship-backstop", "core-ship-backstop",
-       r"^(?:[0-9a-f]{40}|core-ship-backstop:[^:\s]+/[^:\s]+:\d{4}-\d{2}-\d{2})$", informational=True),
+       r"^(?:[0-9a-f]{40}|core-ship-backstop:[^:\s]+/[^:\s]+:\d{4}-\d{2}-\d{2}(?::\d+)?)$", informational=True),
     _p("model-capacity-watch", "model-capacity-watch", r"^model-capacity-pace:(?P<subject>[^:]+):\d+$",
        informational=True),
     _p("coach-ask-gate", "coach", r"^ask-gate-weekly:\d{4}-\d{2}-\d{2}$", informational=True),
