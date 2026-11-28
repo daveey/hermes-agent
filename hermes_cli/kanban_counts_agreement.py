@@ -26,7 +26,25 @@ logger = logging.getLogger(__name__)
 
 WAIT_S = 1.0
 FOREGROUND_WAIT_S = 30.0
-_foreground_deadline: ContextVar[float | None] = ContextVar("count_agreement_deadline", default=None)
+
+
+class _WaitBudget:
+    def __init__(self) -> None:
+        self.remaining = FOREGROUND_WAIT_S
+        self.lock = threading.Lock()
+
+    def wait(self, done: threading.Event) -> None:
+        # Context copies share this object; serialize them so none can spend the
+        # same allowance twice. Only count-source waiting consumes the budget.
+        with self.lock:
+            started = time.monotonic()
+            try:
+                done.wait(self.remaining)
+            finally:
+                self.remaining = max(0.0, self.remaining - (time.monotonic() - started))
+
+
+_foreground_budget: ContextVar[_WaitBudget | None] = ContextVar("count_agreement_budget", default=None)
 
 
 @contextmanager
@@ -35,16 +53,17 @@ def foreground_counts():
 
     Share one 30s count-wait budget across a finite reader's rows and fence retries,
     returning unknown on exhaustion/errors. Live controls keep their 1s/deferred retry.
-    Nested refreshes retain their reader's deadline; interactive workers are unchanged.
+    Nested refreshes retain their reader's budget; interactive workers are unchanged.
+    Unrelated per-row I/O and judgment do not consume count-wait allowance.
     """
-    if _foreground_deadline.get() is not None:
+    if _foreground_budget.get() is not None:
         yield
         return
-    token = _foreground_deadline.set(time.monotonic() + FOREGROUND_WAIT_S)
+    token = _foreground_budget.set(_WaitBudget())
     try:
         yield
     finally:
-        _foreground_deadline.reset(token)
+        _foreground_budget.reset(token)
 
 
 
@@ -139,11 +158,12 @@ def agreed_counts(wait_s: float = WAIT_S, *, key: Hashable | None = None,
                 if _flights.get(scope) is flight:
                     del _flights[scope]
             raise
-    deadline = _foreground_deadline.get()
-    if deadline is not None:
-        wait_s = max(0.0, deadline - time.monotonic())
+    budget = _foreground_budget.get()
+    if budget is not None:
         on_published = None  # no late projection write racing the finite reader's result
-    flight.done.wait(max(0.0, wait_s))
+        budget.wait(flight.done)
+    else:
+        flight.done.wait(max(0.0, wait_s))
     with _lock:
         if not flight.done.is_set():
             if on_published is not None:

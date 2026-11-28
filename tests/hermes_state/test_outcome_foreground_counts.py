@@ -11,7 +11,7 @@ import pytest
 
 
 @pytest.mark.parametrize("audit", [False, True])
-@pytest.mark.parametrize("case", ["empty", "open", "error", "timeout"])
+@pytest.mark.parametrize("case", ["empty", "gap", "open", "error", "timeout"])
 def test_cli_waits_for_count_publication_before_returning(tmp_path, audit, case):
     """Hold a real agreement flight past the interactive bound in a fresh interpreter.
 
@@ -19,7 +19,7 @@ def test_cli_waits_for_count_publication_before_returning(tmp_path, audit, case)
     Both the printed result and the separately reopened store must be final.
     """
     script = r'''
-import json, sys
+import json, sys, time
 from pathlib import Path
 from types import SimpleNamespace
 import hermes_state_outcome as so
@@ -38,7 +38,11 @@ cli._surface_reports = lambda *a: {}
 cli.sidebar_rows = lambda *a: [{"id": "chat", "title": "fixture"}]
 so._cron_items = lambda *a: []
 so._watch_items = lambda *a: []
+offset = [0.0]
+agreement.time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
 def cold():
+    if sys.argv[3] == "gap":
+        offset[0] += 60.0  # non-count work before this row's wait
     raise agreement.CountsPending("cold process")
 agreement.fresh_open_counts = cold
 if sys.argv[3] == "timeout":
@@ -77,7 +81,7 @@ with SessionDB(db_path=home / "state.db") as db:
             stdout, stderr = proc.communicate("release\n", timeout=30)
         assert proc.returncode == 0, stderr
         result = json.loads(stdout)
-        expected = "done" if case == "empty" else "unresolved"
+        expected = "done" if case in {"empty", "gap"} else "unresolved"
         assert (result[0] if audit else result["outcome"])["kind"] == expected, (result, stderr)
         from hermes_state import SessionDB
         from hermes_state_outcome import get_outcome
@@ -85,10 +89,40 @@ with SessionDB(db_path=home / "state.db") as db:
             stored = get_outcome("chat", db=db)
         assert stored is not None
         assert stored["kind"] == expected
-        assert stored["status"]["coverage"]["state"] == ("complete" if case == "empty" else "unknown")
+        assert stored["status"]["coverage"]["state"] == ("complete" if case in {"empty", "gap"} else "unknown")
     finally:
         if proc.poll() is None:
             proc.communicate("release\n", timeout=30)
+
+
+def test_unrelated_elapsed_time_does_not_consume_count_wait_budget(monkeypatch):
+    from types import SimpleNamespace
+    from hermes_cli import kanban_counts_agreement as agreement
+    from hermes_cli import kanban_session_activity as ksa
+
+    clock = [100.0]
+    waits = []
+
+    def cold():
+        raise agreement.CountsPending("cold")
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += 0.25
+
+    flight = agreement._Flight()
+    flight.result = ({}, {})
+    flight.done = SimpleNamespace(wait=wait, is_set=lambda: True)
+    monkeypatch.setattr(agreement, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(agreement, "fresh_open_counts", cold)
+    monkeypatch.setattr(ksa, "_origin_scope", lambda: ("fixture",))
+    monkeypatch.setattr(agreement, "_flights", {("fixture",): flight})
+    with agreement.foreground_counts():
+        assert agreement.agreed_counts() == ({}, {})
+        clock[0] += 60.0  # unrelated audit I/O/judgment, not count waiting
+        with agreement.foreground_counts():
+            assert agreement.agreed_counts() == ({}, {})
+    assert waits == [30.0, 29.75]
 
 
 def test_foreground_budget_is_shared_and_never_registers_a_late_callback(monkeypatch):
@@ -105,19 +139,19 @@ def test_foreground_budget_is_shared_and_never_registers_a_late_callback(monkeyp
     monkeypatch.setattr(agreement, "fresh_open_counts", cold)
     monkeypatch.setattr(ksa, "_origin_scope", lambda: ("fixture",))
     monkeypatch.setattr(agreement, "_flights", {("fixture",): flight})
-    clock = iter([100.0, 110.0, 125.0, 135.0, 140.0])
+    clock = iter([100.0, 110.0, 125.0, 145.0, 160.0, 160.0])
     monkeypatch.setattr(agreement, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     with agreement.foreground_counts():
         for _ in range(3):
             with pytest.raises(agreement.CountsPending):
                 agreement.agreed_counts(0.0, on_published=lambda: pytest.fail("late refresh"))
-    assert waits == [20.0, 5.0, 0.0]
+    assert waits == [30.0, 20.0, 0.0]
     assert not flight.callbacks
-    assert agreement._foreground_deadline.get() is None
+    assert agreement._foreground_budget.get() is None
     # A foreground exception cannot leave a long wait/disabled callback in the live worker.
     with pytest.raises(ValueError), agreement.foreground_counts():
         raise ValueError("consumer failed")
-    assert agreement._foreground_deadline.get() is None
+    assert agreement._foreground_budget.get() is None
 
 
 @pytest.mark.parametrize("failing_row", [False, True])
@@ -148,7 +182,7 @@ def test_audit_shares_one_count_wait_deadline_across_rows(monkeypatch, failing_r
     monkeypatch.setattr(cli, "sidebar_rows", lambda *a: [{"id": str(i)} for i in range(3)])
 
     def refresh(sid, *a, **kw):
-        deadlines.append(agreement._foreground_deadline.get())
+        deadlines.append(agreement._foreground_budget.get())
         with pytest.raises(agreement.CountsPending):
             agreement.agreed_counts(on_published=lambda: pytest.fail("late refresh"))
         if failing_row and sid == "1":
@@ -163,7 +197,8 @@ def test_audit_shares_one_count_wait_deadline_across_rows(monkeypatch, failing_r
         rows = cli.audit_rows(None, refresh=True)
         assert [row["reason"] for row in rows] == ["card_read_failed"] * 3
     count = 2 if failing_row else 3
-    assert deadlines == [130.0] * count
+    assert len(deadlines) == count
+    assert all(budget is deadlines[0] for budget in deadlines)
     assert waits == [30.0] + [0.0] * (count - 1)
     assert not flight.callbacks
-    assert agreement._foreground_deadline.get() is None
+    assert agreement._foreground_budget.get() is None
