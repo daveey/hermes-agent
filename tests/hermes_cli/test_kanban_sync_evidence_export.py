@@ -141,6 +141,27 @@ def test_expiration_after_capture_does_not_publish(case, monkeypatch):
     assert evidence == {}
 
 
+@pytest.mark.parametrize('fields', [
+    '{', None, 'null', '[]',
+    json.dumps({'op': 'retain', 'client_op_id': 'wrong', 'task': 't_card'}),
+    json.dumps({'op': 'retain', 'client_op_id': 'rejected-op', 'task': 't_card', 'run_uid': 'missing-run'}),
+])
+def test_malformed_retain_custody_stays_dirty_without_evidence_exception(case, fields):
+    (live, shadow), hub, _proof, _calls = case
+    live.execute("UPDATE kanban_sync_outbox SET table_name='tasks', row_uid='t_card', op='retain', fields=?, last_error='missing_decision_episode'", (fields,))
+    before = [list(conn.iterdump()) for conn in (live, shadow)]
+    expected = audit.report(live, shadow, hub, 'default')
+    assert expected['clean'] is False
+    evidence = {'stale': True}
+    actual = audit.report(live, shadow, hub, 'default', evidence=evidence)
+    assert actual == expected
+    assert evidence['audits'] == [{'op_id': 'rejected-op', 'ordinary': False, 'diagnostic': None,
+                                   'custody': None, 'custody_error': 'malformed_or_unavailable'}]
+    assert evidence['rejected'][0]['fields'] == fields
+    assert [list(conn.iterdump()) for conn in (live, shadow)] == before
+    assert not live.in_transaction and not shadow.in_transaction
+
+
 def test_retain_capture_includes_original_full_custody(case):
     from tests.hermes_cli.test_kanban_refusal_inventory import seed_retains
     (live, shadow), hub, _proof, _calls = case
