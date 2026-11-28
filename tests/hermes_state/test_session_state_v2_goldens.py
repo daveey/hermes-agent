@@ -4,6 +4,9 @@ The snapshots are a requested wire contract, not a catalog/config change detecto
 All classification runs in production collectors; only source IO is substituted.
 """
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -109,6 +112,23 @@ def test_cli_stdout_and_output_file_are_same_consumer_contract(monkeypatch, caps
     main()
     assert json.loads(path.read_text()) == actual
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("inherit_hermes_home", [False, True], ids=["home-only", "hermes-home"])
+def test_spawned_cli_never_writes_the_invoking_users_home(tmp_path, collected, inherit_hermes_home):
+    """Desktop/mods spawn this CLI outside pytest's home isolation (review of #4709)."""
+    home, hermes_home, output = tmp_path / "home", tmp_path / "hermes-home", tmp_path / "out.json"
+    home.mkdir()
+    hermes_home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+    env["HOME"] = str(home)
+    if inherit_hermes_home:
+        env["HERMES_HOME"] = str(hermes_home)
+    subprocess.run([sys.executable, "-m", "tests.hermes_state.session_state_v2_fixtures",
+                    "--case", "waiting_card", "--output", str(output)],
+                   cwd=FIXTURES.parents[2], env=env, check=True, timeout=120)
+    assert list(home.iterdir()) == [] and list(hermes_home.iterdir()) == []
+    assert json.loads(output.read_text())["cases"] == [collected["waiting_card"]]
 
 
 def test_unknown_case_is_rejected_and_materialization_does_not_mutate_source():

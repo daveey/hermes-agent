@@ -7,9 +7,10 @@ Only source IO is substituted. No status, human-ask, wait or age classifier is m
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -212,12 +213,36 @@ def run_all(case_id=None):
             "cases": [run_case(case, data) for case in cases]}
 
 
+@contextmanager
+def isolated_home():
+    """Bind HOME/HERMES_HOME to a disposable tree before any core module is imported.
+
+    The CLI runs outside pytest's home isolation (Desktop and mods consumers spawn
+    it), and core imports materialize profile state; tests never write the
+    invoking user's real home.
+    """
+    saved = {key: os.environ.get(key) for key in ("HOME", "HERMES_HOME")}
+    with tempfile.TemporaryDirectory(prefix="session-v2-home-") as temp:
+        os.environ["HOME"] = temp
+        os.environ["HERMES_HOME"] = str(Path(temp) / ".hermes")
+        try:
+            yield Path(temp)
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    text = json.dumps(run_all(args.case), indent=2, sort_keys=True) + "\n"
+    with isolated_home():
+        result = run_all(args.case)
+    text = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
     else:
