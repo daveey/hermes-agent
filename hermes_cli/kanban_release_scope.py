@@ -74,14 +74,14 @@ def observe(conn, hub, proof):
     saved = replica.verified_consumption(conn, proof['consume']['client_op_id'])
     if saved is None or cert.encode(saved) != cert.encode(proof):
         raise ValueError('HOME foreign scope lacks exact private consumption')
-    if hub.ident.gateway != proof['renewal']['origin_gateway']:
-        raise ValueError('HOME foreign scope observer identity differs')
     local = _rows(conn, proof)
     ordinary = {renewal.key(e) for e in renewal.scope_evidence(conn, proof['intent']['task_id'], proof['intent']['episode'])}
     captured = {}
     for uid, image in local.items():
         if uid in ordinary:
             continue  # Existing locally confirmed custody retains its own verifier.
+        if hub.ident.gateway != proof['renewal']['origin_gateway']:
+            raise ValueError('HOME foreign scope observer identity differs')
         if uid not in cert.coverage(proof) or image['origin_gateway'] == hub.ident.gateway:
             raise ValueError('HOME foreign scope is uncovered or lacks local custody')
         ev = hub.row_evidence(proof['intent']['board'], 'task_events', uid, max_response_bytes=cert.MAX_BYTES)
