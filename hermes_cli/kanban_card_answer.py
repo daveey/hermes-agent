@@ -205,12 +205,12 @@ def _human_offer(conn, request, fingerprint, receipt, note, origin, fence, ask):
     whose stamp went stale after a new stop, or text the home did not file, falls through to the plain transition."""
     from hermes_cli import kanban_release
     from hermes_cli import kanban_release_offer as offers
-    if request["choice"] not in (offers.RELEASE, offers.DONT) or not offers.is_offer(ask):
+    if request["choice"] not in (offers.RELEASE, offers.UNBLOCK, offers.DONT) or not offers.is_offer(ask):
         return None
     if kanban_release.offered(conn, request["task"], ask) is None:
         return None
     provenance = {**request, "originGateway": origin}
-    if request["choice"] == offers.RELEASE:
+    if request["choice"] != offers.DONT:  # Release, or the Desktop's default Unblock on the offer
         return _release(conn, request, fingerprint, receipt, note, provenance, fence, ask)
     with kb.write_txn(conn):
         old = _receipt(conn, request, fingerprint)
@@ -307,6 +307,9 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     options = current["ask"].get("choices") or [
         {"label": "Unblock", "value": "unblock"}, {"label": "Archive", "value": "archive"},
     ]
+    from hermes_cli import kanban_release_offer as offers
+    if request["choice"] == offers.UNBLOCK and offers.is_offer(current["ask"]):
+        options = [*options, {"label": "Unblock", "value": offers.UNBLOCK}]  # Desktop's Unblock = Release here
     choices = [ch for ch in options if isinstance(ch, dict) and ch.get("value") == request["choice"]]
     informational = request.get('mode') == 'comment'
     if informational:

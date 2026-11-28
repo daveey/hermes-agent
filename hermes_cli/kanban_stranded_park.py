@@ -515,16 +515,19 @@ def _may_offer(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def _offer_human_only(conn: sqlite3.Connection, task_id: str, entry: Optional[dict], *, own: str, desk,
-                      now: int) -> bool:
+                      now: int, owned: bool = False) -> bool:
     """File the stamped Release / Don't ask at once when only a person can release the card (``kanban_release_offer``),
-    bound to every chat linked to it and the desk chat; once per park episode. Never releases."""
+    bound to every chat linked to it and the desk chat; once per park episode. Never releases. ``owned``: a live
+    owner chat holds the card (the ask's evidence says why it is offered anyway)."""
     from hermes_cli import kanban_release_offer as offers
     code = offers.human_only(conn, task_id)  # one Board read, outside any transaction
     if code is None:
         return False
     chats = offers.linked_chats(conn, task_id, own=own) + ([desk] if desk is not None else [])
+    note = HUMAN_ONLY_NOTE if owned and code == "allowance_exhausted" else None
     try:
-        out = offers.file(conn, task_id, code=code, chats=chats, gateway=own, episode_entry=entry, sweep=True, now=now)
+        out = offers.file(conn, task_id, code=code, chats=chats, gateway=own, episode_entry=entry, sweep=True, now=now,
+                          note=note)
     except offers.OfferRefused as exc:
         logger.info("kanban: no human-only release offer on %s (%s)", task_id, exc.code)
         return False
@@ -744,7 +747,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                 if young or owner:
                     # A live chat (or none yet) that cannot release a human-only stop owns nothing it can act on.
                     if not str(owner or "").startswith("supervisor ") and _offer_human_only(
-                            conn, tid, entry, own=own, desk=desk, now=now):
+                            conn, tid, entry, own=own, desk=desk, now=now, owned=bool(owner)):
                         escalated.append(tid)
                         continue
                     if young:

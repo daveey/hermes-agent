@@ -18,7 +18,7 @@ import sqlite3
 import time
 from typing import Any, Optional
 
-RELEASE, DONT = "release", "dont"
+RELEASE, DONT, UNBLOCK = "release", "dont", "unblock"  # UNBLOCK: the Desktop's default button, same as Release
 CHOICES = ({"label": "Release", "value": RELEASE}, {"label": "Don't", "value": DONT})
 _WHY = {"allowance_exhausted": "its ten-run reviewer allowance is used up and an agent release cannot replace it",
         "allowance_in_force": "the Board still holds its reviewer allowance and an agent release cannot replace it"}
@@ -63,7 +63,8 @@ def _board(conn: sqlite3.Connection) -> str:
     return (board_slug_for_path(path) if path else None) or "default"
 
 
-def request(conn: sqlite3.Connection, row: dict, code: Optional[str], *, gateway: str) -> dict:
+def request(conn: sqlite3.Connection, row: dict, code: Optional[str], *, gateway: str,
+            note: Optional[str] = None) -> dict:
     """The stamped ask, in the unblock-card shape: the card as a link, what it is, why it stopped, the cost, and
     the Release / Don't buttons. Caller checked that ``kanban_release.offer`` names a release."""
     from hermes_cli import kanban_release
@@ -79,7 +80,8 @@ def request(conn: sqlite3.Connection, row: dict, code: Optional[str], *, gateway
     only = _WHY.get(code or "", "the owning chat or a delegate can release it too")
     action = (f"Release {link} ({brief._text(source.get('title') or what, 120)})? Release (same as Unblock) = it "
               f"resumes to finish its acceptance with {runs} more runs under a goal-level scope; safety holds still "
-              "apply. Don't = it stays stopped with no further spend; nothing is archived.")
+              "apply. Don't = it stays stopped with no further spend; nothing is archived. (A person may also run "
+              f"`hermes kanban release {stopped}`.)")
     ask = validate_human_request({
         "action": action,
         "why_human": f"Tried: an agent release; only a person can release it now: {only}.",
@@ -88,7 +90,8 @@ def request(conn: sqlite3.Connection, row: dict, code: Optional[str], *, gateway
                   "a normal agent run).\nOptions:\nA) Release: finish the acceptance; it can be stopped again.\n"
                   "B) Don't: it stays stopped; archive it separately to drop it.\nRecommend: A - a scope or budget "
                   "stop is a pause, not a finding against the work."),
-        "evidence": f"Pending stop {offer['episode']}; agent release refusal: {code or 'none read'}.",
+        "evidence": (f"{note}. " if note else "")
+        + f"Pending stop {offer['episode']}; agent release refusal: {code or 'none read'}.",
         "choices": [dict(c) for c in CHOICES],
     }, kind=row.get("block_kind") or "needs_input")
     ask[kanban_release.STAMP] = offer  # after validation, which drops a supplied stamp: only the home sets it
@@ -135,7 +138,8 @@ def _refusal(conn: sqlite3.Connection, task_id: str) -> Optional[OfferRefused]:
     stopped = kanban_release.target(conn, task_id)
     if frozen(conn, task_id):
         return OfferRefused("home_transfer", "home transfer owns this card; no offer filed")
-    if contained(conn, task_id) or contained(conn, stopped):
+    from hermes_cli.kanban_containment_connections import held as held_contained
+    if any(check(conn, card) for check in (contained, held_contained) for card in (task_id, stopped)):
         return OfferRefused("containment_hold", kanban_release.CONTAINMENT)
     if restricted(conn, stopped):
         return OfferRefused("safety_restricted", execution_refusal(conn, stopped) or "Provider safety restriction")
@@ -145,7 +149,8 @@ def _refusal(conn: sqlite3.Connection, task_id: str) -> Optional[OfferRefused]:
 
 
 def file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(), gateway: str,
-         episode_entry: Optional[dict] = None, sweep: bool = False, now: Optional[int] = None) -> dict:
+         episode_entry: Optional[dict] = None, sweep: bool = False, now: Optional[int] = None,
+         note: Optional[str] = None) -> dict:
     """File (or confirm) the stamped human-only offer on ``task_id`` and bind ``chats``. Releases nothing.
 
     ``sweep``: the stranded-park sweep's once-per-park-episode filing, rechecked under the write lock
@@ -177,16 +182,18 @@ def file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(
             if kind in NONHUMAN_KINDS or not kind:
                 kind = "needs_input"
                 conn.execute("UPDATE tasks SET block_kind = ? WHERE id = ?", (kind, task_id))
-            filed = request(conn, {**row, "block_kind": kind}, code, gateway=gateway)
+            filed = request(conn, {**row, "block_kind": kind}, code, gateway=gateway, note=note)
             store_request(conn, task_id, filed)
             entry = stranded.park_entry(conn, task_id)
             kb._append_event(conn, task_id, stranded.EVENT, {
                 "episode_start": entry["created_at"] if entry else int(row.get("created_at") or 0),
                 "reason": stranded._reason(entry), "desk_chat": None, "request": True, "human_only": code,
                 "chats": [f"{o.gateway}/{o.profile}/{o.session}" for o, _ in chats], **stranded._record(filed)})
+        linked = [origin for origin, _ in linked_chats(conn, task_id, own=gateway)]
         for chat in chats:
             stranded._subscribe_desk(conn, task_id, chat)
-            stranded._link_desk(conn, task_id, chat, now)
+            if chat[0] not in linked:  # an already-linked chat keeps its own link; no duplicate shepherd row
+                stranded._link_desk(conn, task_id, chat, now)
     return {"outcome": outcome, "task": task_id, "target": offer["task"], "episode": offer["episode"]}
 
 
