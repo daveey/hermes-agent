@@ -39,14 +39,15 @@ def test_inventory_partition_settles_pending_evidence_before_scan_and_read(tmp_p
         ledger.mark_unknown('pending-source-skew')
 
     def scan(**_kwargs):
-        assert events == ['settle']
+        # Settle before preparation, then again after concurrent audit ingress.
+        assert events == ['settle', 'settle']
         assert ledger._lock._is_owned()
         events.append('scan')
 
     ledger._settle = settle
     ledger._inventory_modules = scan
     assert ledger.quiet_unknown_partition(inventory=True) == (['pending-source-skew'], [])
-    assert events == ['settle', 'scan']
+    assert events == ['settle', 'settle', 'scan']
 
 
 @pytest.mark.parametrize('entry', ['integrity_observation', 'unknowns', 'partition'])
@@ -74,8 +75,9 @@ def test_scan_clock_excludes_settlement_and_lock_acquisition(tmp_path, monkeypat
             getattr(ledger, entry)()
     rows = [r for r in caplog.records if r.name == diagnostics.__name__]
     assert len(rows) == 1
-    assert rows[0].args[4:6] == (4.0, 1.0)
-    assert rows[0].args[-1]['modules'] == (0, 4.0, 1.0)
+    # Preparation and classification take independent snapshots; both are timed.
+    assert rows[0].args[4:6] == (8.0, 2.0)
+    assert rows[0].args[-1]['modules'] == (0, 8.0, 2.0)
 
 
 @pytest.mark.parametrize('failure', ['settle', 'pre_scan_deadline'])
@@ -161,4 +163,4 @@ def test_busy_logging_setup_does_not_delay_bounded_integrity_reader(tmp_path, mo
     assert completed_while_held, 'optional logging setup blocked the verified inventory'
     assert errors == []
     assert len(results) == 1 and results[0]['unknowns'] == ()
-    assert scans == ['scanned']
+    assert scans == ['scanned', 'scanned']

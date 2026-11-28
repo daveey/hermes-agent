@@ -774,10 +774,11 @@ class Attestation:
 
     def quiet_unknown_partition(self, *, inventory=False):
         """Blocking and informational unknowns, from one locked ledger observation."""
-        with InventoryObservation(self, enabled=inventory) as diagnostics:
+        observation = InventoryObservation(self, enabled=inventory, prepare=inventory)
+        with observation as diagnostics:
             if inventory:
                 self._settle()
-                self._inventory_modules(diagnostics=diagnostics)
+                self._inventory_modules(diagnostics=diagnostics, prepared=observation.prepared)
             else:
                 self.latched_unknowns()
             extension = self._extension_unknowns - self._blocking_unknowns
@@ -1164,6 +1165,9 @@ class Attestation:
         path = None if filename.startswith("<") else (
             diagnostics.call('resolve', Path(filename).resolve) if diagnostics is not None
             else Path(filename).resolve())
+        return self._resolved_module_file(name, filename, path, diagnostics=diagnostics)
+
+    def _resolved_module_file(self, name, filename, path, *, diagnostics=None):
         owner = (diagnostics.call('owner', self._owner_path, path) if diagnostics is not None
                  else self._owner_path(path)) if path is not None else None
         if diagnostics is not None:
@@ -1183,8 +1187,8 @@ class Attestation:
         from hermes_cli.code_attestation_inventory import inventory_modules
         return inventory_modules(self, deadline=deadline, progress=progress)
 
-    def _inventory_modules(self, *, deadline=None, diagnostics=None):
-        return inventory_modules(self, deadline=deadline, diagnostics=diagnostics)
+    def _inventory_modules(self, *, deadline=None, diagnostics=None, prepared=None):
+        return inventory_modules(self, deadline=deadline, diagnostics=diagnostics, prepared=prepared)
 
     def _audit(self, event, args):
         if event not in ("compile", "exec", "import", "ctypes.dlopen") or getattr(self._tls, "busy", False):
@@ -1867,9 +1871,10 @@ class Attestation:
                 "interpreter": dict(self.interpreter_identity)}
 
     def unknowns(self):
-        with InventoryObservation(self) as diagnostics:
+        observation = InventoryObservation(self, prepare=True)
+        with observation as diagnostics:
             self._settle()
-            self._inventory_modules(diagnostics=diagnostics)
+            self._inventory_modules(diagnostics=diagnostics, prepared=observation.prepared)
             return tuple(sorted(self._unknown))
 
     def integrity_observation(self, *, deadline=None):
@@ -1881,10 +1886,11 @@ class Attestation:
         if deadline is not None and self.__dict__.get("_pending"):
             self._demand.set()  # even a reader that is already out of budget is waiting
         _check_inventory_deadline(deadline)
-        with InventoryObservation(self, deadline=deadline) as diagnostics:
+        observation = InventoryObservation(self, deadline=deadline, prepare=True)
+        with observation as diagnostics:
             self._settle(deadline=deadline)
             _check_inventory_deadline(deadline)
-            self._inventory_modules(deadline=deadline, diagnostics=diagnostics)
+            self._inventory_modules(deadline=deadline, diagnostics=diagnostics, prepared=observation.prepared)
             _check_inventory_deadline(deadline)
             if getattr(self, '_reviewed_plugins', None):
                 from hermes_cli.plugin_review_records import verify_registered

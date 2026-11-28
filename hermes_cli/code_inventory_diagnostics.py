@@ -1,13 +1,14 @@
-"""Bounded, payload-free requested-module-inventory timing; never an admission input.
+"""Fresh module inventory preparation and bounded, payload-free scan timing.
 
 Wall minus thread CPU does not identify GIL, filesystem or lock wait ownership.
-The outer caller's lock acquisition and pending-code settlement are not measured.
+Timing excludes lock acquisition and settlement, and includes off-lock preparation.
 """
 from __future__ import annotations
 
 import os
 import sys
 import threading
+from pathlib import Path
 from time import monotonic_ns, thread_time_ns
 
 # Never import logging from an audited inventory: its first import may execute
@@ -72,7 +73,9 @@ class InventoryDiagnostics:
         self.total = None
         if self.enabled:
             try:
-                self.total = monotonic_ns() - self.begin[0], thread_time_ns() - self.begin[1]
+                preparation = getattr(self, 'preparation_total', (0, 0))
+                self.total = (monotonic_ns() - self.begin[0] + preparation[0],
+                              thread_time_ns() - self.begin[1] + preparation[1])
             except Exception:  # health: allow BLE001 -- optional clocks cannot replace inventory failure
                 self.enabled = False
 
@@ -97,11 +100,12 @@ class InventoryDiagnostics:
             pass
 
 
-def inventory_modules(ledger, *, deadline=None, diagnostics=None):
+def inventory_modules(ledger, *, deadline=None, diagnostics=None, prepared=None):
     from hermes_cli.code_attestation import MAX_UNITS, _check_inventory_deadline
 
     if diagnostics is not None:
         diagnostics.scanned = True
+        diagnostics.count = 0
         if diagnostics.enabled:
             try:
                 diagnostics.begin = monotonic_ns(), thread_time_ns()
@@ -116,7 +120,13 @@ def inventory_modules(ledger, *, deadline=None, diagnostics=None):
             if diagnostics is not None:
                 diagnostics.count += 1
             filename = getattr(module, '__file__', None)
-            ledger._module_file(name, filename, diagnostics=diagnostics)
+            item = prepared.get((name, id(module))) if prepared is not None else None
+            if item is not None and item[0] is module and item[1] == filename:
+                if filename:
+                    ledger._resolved_module_file(name, filename, item[2], diagnostics=diagnostics)
+            else:
+                # New/replaced modules and changed filenames never reuse a result.
+                ledger._module_file(name, filename, diagnostics=diagnostics)
             key = (name, id(module))
             identity = (module, filename)
             if ledger._modules.get(key) == identity:
@@ -138,13 +148,29 @@ class InventoryObservation:
     Nested/private inventories remain fully verified but uninstrumented. Timing
     starts inside the scan and stops before release; logging runs only off-lock.
     """
-    def __init__(self, ledger, *, deadline=None, enabled=True):
+    def __init__(self, ledger, *, deadline=None, enabled=True, prepare=False):
+        self.ledger = ledger
         self.lock = ledger._lock
         self.deadline = deadline
         owned = getattr(self.lock, '_is_owned', None)
-        self.diagnostics = InventoryDiagnostics() if enabled and callable(owned) and not owned() else None
+        outer = callable(owned) and not owned()
+        self.diagnostics = InventoryDiagnostics() if enabled and outer else None
+        self.prepare = prepare and outer
+        self.prepared = None
 
     def __enter__(self):
+        if self.prepare:
+            try:
+                self._prepare()
+            except BaseException:
+                if self.diagnostics is not None and getattr(self.diagnostics, 'scanned', False):
+                    self.diagnostics.stop(False)
+                    self.diagnostics.finish()
+                raise
+        self._acquire()
+        return self.diagnostics
+
+    def _acquire(self):
         # Keep the existing shared-deadline acquisition semantics.
         from time import monotonic
 
@@ -152,7 +178,53 @@ class InventoryObservation:
                     self.lock.acquire(timeout=max(0.0, self.deadline - monotonic())))
         if not acquired:
             raise TimeoutError('code attestation inventory budget exhausted')
-        return self.diagnostics
+
+    def _prepare(self):
+        from hermes_cli.code_attestation import _check_inventory_deadline
+
+        # Only collect module identities under the ledger lock. Filesystem work
+        # is fresh on EVERY call, never cached across observations or retries.
+        self._acquire()
+        try:
+            if self.deadline is None:
+                self.ledger._settle()
+            else:
+                self.ledger._settle(deadline=self.deadline)
+            _check_inventory_deadline(self.deadline)
+        except BaseException:
+            self.lock.release()
+            raise
+        timer = self.diagnostics
+        begin = None
+        if timer is not None and timer.enabled:
+            try:
+                begin = monotonic_ns(), thread_time_ns()
+                timer.begin = begin
+                timer.scanned = True
+            except Exception:  # health: allow BLE001 -- optional clocks cannot alter verification
+                timer.enabled = False
+        try:
+            snapshot = tuple((name, module, getattr(module, '__file__', None))
+                             for name, module in self.ledger._module_snapshot())
+        finally:
+            self.lock.release()
+        prepared = {}
+        for name, module, filename in snapshot:
+            _check_inventory_deadline(self.deadline)
+            if timer is not None:
+                timer.count += 1
+            path = None
+            if filename and not filename.startswith('<'):
+                path = (timer.call('resolve', Path(filename).resolve) if timer is not None
+                        else Path(filename).resolve())
+            prepared[(name, id(module))] = (module, filename, path)
+        _check_inventory_deadline(self.deadline)
+        self.prepared = prepared
+        if begin is not None and timer is not None and timer.enabled:
+            try:
+                timer.preparation_total = monotonic_ns() - begin[0], thread_time_ns() - begin[1]
+            except Exception:  # health: allow BLE001 -- optional clocks cannot alter verification
+                timer.enabled = False
 
     def __exit__(self, _kind, _value, _traceback):
         self.lock.release()
