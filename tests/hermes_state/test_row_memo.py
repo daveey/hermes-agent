@@ -306,6 +306,30 @@ def test_commit_between_page_and_pin_reads_is_visible(db, monkeypatch):
     assert done and _row(got, "s003")["title"] == "between"
 
 
+def test_lowering_between_page_and_pin_reads_invalidates_candidates(db, monkeypatch):
+    """The pin back-fill's own clock advance can consume a 'lowered' reason: it must leave D1's candidates
+    invalidated for the next ranked read, as ranked_ids' exact path does."""
+    _seed(db, count=200, pins=(3, 9))
+    _sidebar(db)
+    _sidebar(db)
+    original = rank_memo.project
+    done = []
+
+    def project(conn, *args, **kwargs):
+        rows = original(conn, *args, **kwargs)
+        if not done and args[1] and args[1][0][3] is not None:  # the ranked page, before the pin read
+            _write(db, "UPDATE messages SET timestamp = ? WHERE session_id = 's010'", (_BASE + 9000,))
+            done.append(True)
+        return rows
+    monkeypatch.setattr(rank_memo, "project", project)
+    _sidebar(db)
+    monkeypatch.setattr(rank_memo, "project", original)
+    assert done
+    got = _sidebar(db)
+    assert next(r["id"] for r in got["recents"]) == "s010"
+    assert got == _fresh(db, monkeypatch)
+
+
 def test_kept_pin_read_shares_one_snapshot_and_releases_it(db, monkeypatch):
     """The ordered pin ids, the clock advance and the projection share one snapshot: a commit after the ids
     were read is not visible in this read, and is visible in the next one."""
