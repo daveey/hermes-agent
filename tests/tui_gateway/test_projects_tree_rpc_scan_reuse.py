@@ -3,9 +3,12 @@
 On the hub the Desktop's own-profile tree RPC re-read the 2,000-row session page and re-aggregated
 ``distinct_session_cwds`` over every session on each request, though the store had not committed:
 the tui-rpc pool ran ~15k voluntary context switches/s in that loop. Both reads are now kept until
-the store's ``PRAGMA data_version`` moves; annotation and the tree build still run per request.
+the SessionDB's write generation moves; annotation and the tree build still run per request.
 """
 from __future__ import annotations
+
+import gc
+import sqlite3
 
 import pytest
 
@@ -83,7 +86,7 @@ def test_a_commit_rereads_and_shows_the_new_session(launch, reads):
     home, repo = launch
     with _serving_launch_profile(home):
         assert _members(_call("projects.tree")) == ["s_one"]
-        _create_session(home, "s_two", repo)
+        _create_session(home, "s_two", repo)  # another connection's commit
         after = _call("projects.tree")
         again = _call("projects.tree")
     assert reads == ["page", "cwds", "page", "cwds"]
@@ -103,20 +106,31 @@ def test_a_caller_mutating_its_answer_does_not_reach_the_kept_copy(launch, reads
     assert rows and all(row.get("title") != "edited by a caller" for row in rows)
 
 
-def test_capture_worker_fast_exit_closes_the_rpc_tree_observer(launch, reads):
-    """The capture worker's early exit verifies every retained observer is closed; this one too."""
-    from hermes_cli import sessions_capture_worker
+def test_reuse_opens_no_connection_and_ends_with_the_store(launch, monkeypatch):
+    """Reuse rides the SessionDB's own writer: nothing here opens or retains SQLite (profile deletion's
+    custody drains only the stores it knows), a closed store is never reused, and the kept rows go with it."""
+    from hermes_state import SessionDB
     from tui_gateway import project_tree_scan
 
     home, _repo = launch
-    with _serving_launch_profile(home):
-        _call("projects.tree")
-    assert project_tree_scan._CACHE._profiles  # the observer is retained between requests
-    assert project_tree_scan._LOCK.acquire(blocking=False)
-    try:  # a read in flight: no early exit, and its observer is left alone
-        assert sessions_capture_worker._cleaned() is False
-        assert project_tree_scan._CACHE._profiles
-    finally:
-        project_tree_scan._LOCK.release()
-    sessions_capture_worker._cleaned()
-    assert not project_tree_scan._CACHE._profiles
+    db = SessionDB(db_path=home / "state.db")
+    scans: list[int] = []
+
+    def scan():
+        scans.append(1)
+        return [{"id": "row", "_lineage_ids": ["a"]}]
+
+    project_tree_scan.read(db, ("k",), scan)
+    opened: list[object] = []
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: opened.append(a) or real_connect(*a, **k))
+    kept = project_tree_scan.read(db, ("k",), scan)
+    kept[0]["_lineage_ids"].append("caller")
+    assert project_tree_scan.read(db, ("k",), scan) == [{"id": "row", "_lineage_ids": ["a"]}]
+    assert len(scans) == 1 and opened == []
+    db.close()
+    project_tree_scan.read(db, ("k",), scan)
+    assert len(scans) == 2  # closed: equal to nothing
+    del db
+    gc.collect()
+    assert len(project_tree_scan._KEPT) == 0

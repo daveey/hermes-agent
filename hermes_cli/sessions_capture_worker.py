@@ -125,9 +125,8 @@ def _cleaned():
 
     - join the daemon ``kanban-annotation-refresh`` thread (bounded): it borrows the readers closed
       below and would otherwise be cut off mid-read; still running means no early exit.
-    - close the two ``ProfileSessionScanCache`` observers of ``web_routers.profiles``, and the
-      ``projects.tree`` RPC's (``tui_gateway.project_tree_scan``), under their own locks:
-      read-only, autocommit connections that never hold a transaction.
+    - close the two ``ProfileSessionScanCache`` observers of ``web_routers.profiles`` under their
+      own locks: read-only, autocommit connections that never hold a transaction.
     - close the retained kanban readers (``kanban_waiting_reader`` and ``kanban_reader_retention``,
       i.e. ``cached_ro``) with the very functions their atexit hooks run; one that stays borrowed
       stays in its cache, which is checked empty.
@@ -144,11 +143,9 @@ def _cleaned():
                 return False
     loaded = sys.modules.get
     profiles = loaded('hermes_cli.web_routers.profiles')
-    rpc_tree = loaded('tui_gateway.project_tree_scan')
-    for lock, cache in (() if profiles is None else (
+    for lock, cache in () if profiles is None else (
             (profiles._PROFILE_SESSION_SCAN_LOCK, profiles._PROFILE_SESSION_SCAN_CACHE),
-            (profiles._PROJECT_TREE_SCAN_LOCK, profiles._PROJECT_TREE_SCAN_CACHE))) + (
-            () if rpc_tree is None else ((rpc_tree._LOCK, rpc_tree._CACHE),)):
+            (profiles._PROJECT_TREE_SCAN_LOCK, profiles._PROJECT_TREE_SCAN_CACHE)):
         if not lock.acquire(blocking=False):
             return False
         try:
