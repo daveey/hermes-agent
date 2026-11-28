@@ -2,7 +2,7 @@
 from collections import OrderedDict
 import threading
 
-from hermes_cli.kanban_annotation_watch import signature
+from hermes_cli.kanban_source_signature import signature
 
 _lock = threading.Lock()
 _cache: OrderedDict = OrderedDict()
@@ -18,6 +18,8 @@ def read(conn, path, identity, tables, reader):
     if conn.in_transaction:
         return reader(conn, path, identity, tables)
     raw = signature((), [str(path)], [str(path) + '-shm'])
+    if raw is None:
+        return reader(conn, path, identity, tables)
     key = (conn, str(path), identity, tables)
     with _lock:
         hit = _cache.get(key)

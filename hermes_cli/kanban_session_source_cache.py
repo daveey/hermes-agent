@@ -7,7 +7,7 @@ from copy import deepcopy
 import sqlite3
 from threading import RLock
 
-from hermes_cli.kanban_annotation_watch import signature
+from hermes_cli.kanban_source_signature import signature
 from hermes_cli.kanban_execution_source import transaction
 from hermes_cli.kanban_session_outcome_tasks import select_listed_local_task_set, select_listed_local_tasks
 from hermes_cli.kanban_table_columns import table_columns
@@ -19,7 +19,8 @@ _MAX_CHARS = 131072
 
 
 def _token(conn, path):
-    return signature((), [str(path)], [str(path) + '-shm']), conn.total_changes
+    raw = signature((), [str(path)], [str(path) + '-shm'])
+    return (raw, conn.total_changes) if raw is not None else None
 
 
 @contextmanager
@@ -37,7 +38,7 @@ def selected(conn, path, ids, statuses):
     with transaction(conn) as at:
         conn.row_factory = sqlite3.Row
         conn.execute('SELECT 1 FROM sqlite_master LIMIT 1').fetchone()
-        stable = owned and before == _token(conn, path)
+        stable = owned and before is not None and before == _token(conn, path)
         with _LOCK:
             entry = _MEMO.get(key) if stable else None
             if entry is not None and entry[0] == before:
