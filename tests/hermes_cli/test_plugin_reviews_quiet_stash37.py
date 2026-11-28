@@ -78,4 +78,4 @@ def test_delta_registry_stays_boot_pinned():
 
 
 def test_unapproved_sibling_sources_are_not_enrolled():
-    assert not {'ha-critical-gate', 'pool-llm', 'service-owner-guard', 'core-update', 'skill-outcomes'} & set(enrolled())
+    assert not {'ha-critical-gate', 'pool-llm', 'service-owner-guard', 'core-update'} & set(enrolled())

@@ -464,6 +464,14 @@
       "tests_broker_fences.py": "a0b6bda4e5fdf7a47991df7d9aca55f26f38ffde44a2286a57ecb25ff0c25865",
       "tests_guard.py": "65ad1b0246cf5df43d9453b4b9c5a453aa5ebe9cf44ecc07909b648307ea433d",
       "tests_scoped_uncertainty.py": "4816cb9640c1289ce9e648f2416382398c8e6139811d522593904b58a6cb3d4e"
+    },
+    "skill-outcomes": {
+      "README.md": "52854080e0f15a3e0e111d1269dcc5cbe5c98951f0b14036f28c8218b77bfc89",
+      "__init__.py": "90dabb45f8746c42a502e3151fd73d4bf7a12765e369e97366952e555c209f9b",
+      "outcomes.py": "8c8ebacdf8be473cd094f1f6262fee1d6187abe52de51db84363a16cc447e00f",
+      "plugin.yaml": "2431374c0cdb3730b1764f240865357e3beb4aec9bbd2d7baf8cb910cf7f9add",
+      "tests/test_coach_source.py": "082f725d8588070765f43c7ebbf98014048be7a6e7d3cc7062cff3b99e4922aa",
+      "tests/test_skill_outcomes.py": "d4402f749a347e7cf6d6c558204ca55778bd3b889ecb4974233efb8f21eeb6fb"
     }
   }
 }

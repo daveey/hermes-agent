@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "review_task": "t_01a220b317d44498",
+  "source_commit": "44943439ecc5e99382ea68a16f64f9c4ff44e2b5",
+  "report_sha256": "a96c33911566fa1dfade2ffecd41d42fedaa2fcc9b25b5a669b0954e0b18aca6",
+  "source_only": true,
+  "plugins": {
+    "skill-outcomes": {
+      "verdict": "approve",
+      "files": {
+        "README.md": "52854080e0f15a3e0e111d1269dcc5cbe5c98951f0b14036f28c8218b77bfc89",
+        "__init__.py": "90dabb45f8746c42a502e3151fd73d4bf7a12765e369e97366952e555c209f9b",
+        "outcomes.py": "8c8ebacdf8be473cd094f1f6262fee1d6187abe52de51db84363a16cc447e00f",
+        "plugin.yaml": "2431374c0cdb3730b1764f240865357e3beb4aec9bbd2d7baf8cb910cf7f9add",
+        "tests/test_coach_source.py": "082f725d8588070765f43c7ebbf98014048be7a6e7d3cc7062cff3b99e4922aa",
+        "tests/test_skill_outcomes.py": "d4402f749a347e7cf6d6c558204ca55778bd3b889ecb4974233efb8f21eeb6fb"
+      },
+      "subtree": "b820abc36dda936d44ed59b28de849ab3535e858",
+      "approval_scope": "SOURCE ONLY: skill-outcomes full subtree plus its complete transitive custom executable closure at 44943439. Not registry review, not enrollment, not activation, not installed parity, not runtime against live state.db/core schema, not Mac acceptance. Does not approve the coach plugin.",
+      "closure_file_map": {
+        "plugins/coach/lessons.py": {
+          "git_blob": "391f41d122ff4f66ae498d1ee5226b0a82c33d24",
+          "mode": "100644",
+          "bytes": 9425,
+          "sha256": "8976ee13786528bed37de813669596fbef461aa5504e7aaf2c5289426f66446c"
+        },
+        "plugins/coach/self_heal.py": {
+          "git_blob": "8792d029a7553ee0d5a71c31860ddacf8e9d7442",
+          "mode": "100644",
+          "bytes": 517142,
+          "sha256": "8d0cb395bddc3d19d4ba9c1c07b0e5cd855af1a9a8f3f7fed190df2c95975466"
+        },
+        "plugins/coach/reply_check.py": {
+          "git_blob": "c9a2d38f13c50bbf5dd4471dde9d3c55581e2d32",
+          "mode": "100644",
+          "bytes": 336357,
+          "sha256": "86ec1b4b478e3001d93e62b4492f9b26539dc248b457e72f4c05ecb08a5c2337"
+        },
+        "plugins/coach/module_cache.py": {
+          "git_blob": "16ca9028a031aafe842929c57e30d2967955db15",
+          "mode": "100644",
+          "bytes": 2281,
+          "sha256": "0a0a5abedf3f006ac76f418ef802049d32d03e0b66649901f1f5f1ce69b0b5a8"
+        },
+        "plugins/coach/placement_evidence.py": {
+          "git_blob": "4b684e21dce8e0e623a3ba7df03a62008e1a948b",
+          "mode": "100644",
+          "bytes": 12402,
+          "sha256": "a879baa04f1daf6e1b7ce92925f68020c08ec79ad38e24e9fddf123a65f3948e"
+        }
+      },
+      "installed_layout_binding": "UNVERIFIED; parent must independently verify resolved same-commit sibling coach paths; coach plugin itself NOT APPROVED",
+      "residual_findings": "SO-N1 quadratic parse; SO-N2 init race; SO-N3 ambient classification data; SO-PRIVACY0644; SO-INFO-RW static only. Authenticated source review says nonblocking; not claimed fixed."
+    }
+  }
+}
