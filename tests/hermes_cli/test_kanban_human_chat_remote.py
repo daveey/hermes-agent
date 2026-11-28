@@ -15,6 +15,13 @@ from tests.hermes_cli.test_kanban_human_chat import IPHONE_REQUEST, HUMAN_CHAT
 pytest_plugins = ('tests.hermes_cli.test_kanban_human_chat',)
 
 
+@pytest.fixture(autouse=True)
+def courier_paths(monkeypatch):
+    from hermes_cli import kanban_capability_registry as reg, kanban_placement
+    monkeypatch.setattr(reg, 'hub_cli_path', lambda: '/fixture/bin/hermes-hub')
+    monkeypatch.setattr(kanban_placement, '_sent_row', lambda rid: None)
+
+
 @pytest.fixture
 def worker_shadow(conn, home, monkeypatch):
     path = home / 'worker-shadow.db'
@@ -89,7 +96,7 @@ def test_enqueue_is_exact_idempotent_and_never_writes_task(conn, monkeypatch):
     first = remote.enqueue(card, 'kanban_owner_needs_you')
     assert first == remote.enqueue(card, 'kanban_owner_needs_you')
     assert calls[0] == calls[1]
-    assert calls[0][:4] == ['hermes-hub', 'adopt-task', 'worker-a1', 'default/default/t_01a219b2895e8640']
+    assert calls[0][:4] == ['/fixture/bin/hermes-hub', 'adopt-task', 'worker-a1', 'default/default/t_01a219b2895e8640']
     assert remote.enqueue(card, 'kanban_owner_needs_you_2')['request_id'] != first['request_id']
     monkeypatch.setattr(remote.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=2, stderr='refused'))
     with pytest.raises(RuntimeError, match='refused'):
@@ -121,7 +128,9 @@ def test_profile_routes_are_preserved_and_ambiguous_routes_fail_closed(conn, wor
     assert calls[0][3].startswith('bb-dev/default/')
     monkeypatch.setattr(kanban_origin, '_replica_task_owners', lambda tid, board:
                         [('worker-a1', 'default'), ('worker-a1', 'bb-dev')])
-    assert remote.sweep(conn, apply=True)['failed'] == [{'source': 'replica_discovery'}]
+    assert remote.sweep(conn, apply=True)['failed'] == [
+        {'task': worker_shadow[0], 'gateway': 'worker-a1', 'board': 'default',
+         'error': 'no_unique_courier_owner_route'}]
     assert len(calls) == 1
 
 
@@ -133,6 +142,45 @@ def test_foreign_hash_ownership_requires_unreleased_created_link(conn, worker_sh
         shadow.execute('UPDATE task_chat_links SET chat_gateway=?,chat_session=?,kind=?,released=? WHERE task_id=?',
                        ('macbook', sid, kind, released, tid))
     assert len(remote.candidates(conn)) == expected
+
+
+def test_unroutable_neighbor_does_not_starve_worker_ask(conn, worker_shadow, monkeypatch):
+    from hermes_cli import kanban_origin
+    tid, path = worker_shadow
+    with kbc.connect_closing(path) as shadow:
+        bad = kb.create_task(shadow, title='Missing route', assignee='default')
+        with kb.write_txn(shadow):
+            shadow.execute("UPDATE tasks SET created_on='worker-gone',session_id=NULL WHERE id=?", (bad,))
+            shadow.execute('DELETE FROM task_chat_links WHERE task_id=?', (bad,))
+        assert kb.block_task(shadow, bad, kind='needs_input', human_request=IPHONE_REQUEST)
+    monkeypatch.setattr(kanban_origin, '_replica_task_owners', lambda t, b:
+                        [('worker-a1', 'default')] if t == tid else [])
+    monkeypatch.setattr(remote, 'enqueue', lambda card, sid: card)
+    out = remote.sweep(conn, apply=True)
+    assert [c['task'] for c in out['pending']] == [tid]
+    assert [c['task'] for c in out['failed']] == [bad]
+    assert out['failed'][0]['error'] == 'no_unique_courier_owner_route'
+    assert remote.sweep(conn, apply=False, only=[tid])['failed'] == []
+
+
+@pytest.mark.parametrize('state', ['local', 'queued', 'pending', 'done', 'rejected', 'failed', 'expired'])
+def test_existing_courier_receipt_never_respawns_and_refusal_is_visible(conn, monkeypatch, state):
+    from hermes_cli import kanban_placement
+    card = dict(task='t_fixture', gateway='worker-a1', profile='default', board='default')
+    monkeypatch.setattr(kanban_placement, '_sent_row', lambda rid: (state, 'owner refused', '{}'))
+    monkeypatch.setattr(remote.subprocess, 'run', lambda *a, **kw: pytest.fail('duplicate spawn'))
+    monkeypatch.setattr(remote, 'candidates', lambda c: [card])
+    out = remote.sweep(conn, apply=True)
+    terminal = state in ('rejected', 'failed', 'expired')
+    assert out['failed'] == ([card] if terminal else [])
+    assert bool(out['pending']) is not terminal
+
+
+def test_missing_transport_is_visible(conn, monkeypatch):
+    from hermes_cli import kanban_capability_registry as reg
+    monkeypatch.setattr(reg, 'hub_cli_path', lambda: None)
+    with pytest.raises(RuntimeError, match='transport unavailable'):
+        remote.enqueue(dict(task='t_fixture', gateway='worker-a1', profile='default', board='default'), 'human')
 
 
 def test_command_reports_remote_only_gap_and_pending_is_not_success(conn, worker_shadow, monkeypatch, capsys):

@@ -45,9 +45,11 @@ def candidates(conn) -> list[dict]:
                 continue
             from hermes_cli.kanban_origin import _replica_task_owners
             routes = [(gw, profile) for gw, profile in _replica_task_owners(tid, board) if gw == owner]
+            card = {'task': tid, 'gateway': owner, 'board': board}
             if len(routes) != 1:
-                raise RuntimeError(f'no unique courier owner route for {owner}/{board}/{tid}')
-            out.append({'task': tid, 'gateway': owner, 'profile': routes[0][1], 'board': board})
+                out.append({**card, 'error': 'no_unique_courier_owner_route'})
+                continue
+            out.append({**card, 'profile': routes[0][1]})
     return out
 
 
@@ -55,13 +57,24 @@ def candidates(conn) -> list[dict]:
 def enqueue(card: dict, session: str) -> dict:
     """An idempotent authenticated adoption request, NOT a successful link receipt."""
     from hermes_cli.profiles import get_active_profile_name
+    from hermes_cli import kanban_capability_registry as reg
+    from hermes_cli.kanban_placement import _sent_row
 
     profile = get_active_profile_name()
     target = f"{card['profile']}/{card['board']}/{card['task']}"
     identity = f"{card['gateway']}/{target}/{profile}/{session}"
     rid = 'human-chat-' + hashlib.sha256(identity.encode()).hexdigest()
+    prior = _sent_row(rid)
+    receipt = {**card, 'session': session, 'request_id': rid}
+    if prior:
+        if prior[0] in ('rejected', 'failed', 'expired'):
+            raise RuntimeError(f'origin adoption ended {prior[0]}: {str(prior[1])[:500]}')
+        return receipt  # courier owns retries; even done awaits the owner link in the shadow
+    cli = reg.hub_cli_path()
+    if not cli:
+        raise RuntimeError('origin adoption transport unavailable')
     result = subprocess.run(
-        ['hermes-hub', 'adopt-task', card['gateway'], target, '--origin-session', session,
+        [str(cli), 'adopt-task', card['gateway'], target, '--origin-session', session,
          '--origin-profile', profile, '--id', rid], capture_output=True, text=True,
         encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL, timeout=20, check=False)
     if result.returncode:
@@ -79,6 +92,8 @@ def sweep(conn, *, apply: bool, only=None) -> dict:
         if only is not None:
             wanted = set(only)
             cards = [c for c in cards if c['task'] in wanted]
+        result['failed'] = [c for c in cards if 'error' in c]
+        cards = [c for c in cards if 'error' not in c]
         result['missing'] = cards
         if not apply or not cards:
             return result
