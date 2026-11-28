@@ -175,13 +175,16 @@ def sweep(conn, *, apply: bool = True, only: Optional[Iterable[str]] = None) -> 
     """Link a human chat to each open human ask that lacks one (``only``: just these cards). Returns
     ``{"open_asks", "missing", "linked": [{"task", "source", "session"}], "failed", "refreshed"}``."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_human_chat_remote as remote
+    only = None if only is None else tuple(only)
+    remote_result = remote.sweep(conn, apply=apply, only=only)
     asks = open_asks(conn)
     if only is not None:
         wanted = set(only)
         asks = [t for t in asks if t in wanted]
     gaps = [t for t in asks if not has_human_chat(conn, t)]
     result: dict[str, Any] = {"open_asks": len(asks), "missing": list(gaps), "linked": [], "failed": [],
-                              "refreshed": 0, "home": is_home(conn)}
+                              "refreshed": 0, "home": is_home(conn), "remote": remote_result}
     if not apply or not gaps or not result["home"]:
         return result
     sid: Optional[str] = None
@@ -239,7 +242,8 @@ def command(args) -> int:
         result["after_missing"] = missing(conn) if apply else result["missing"]
     if getattr(args, "json", False):
         print(json.dumps(result, sort_keys=True))
-        return 0
+        return 1 if apply and (result['after_missing'] or result['remote']['missing']
+                               or result['remote']['failed']) else 0
     print(f"{result['open_asks']} open human asks; {len(result['missing'])} had no human chat.")
     for item in result["linked"]:
         print(f"  linked {item['task']} -> {item['session']} ({item['source']})")
@@ -247,4 +251,14 @@ def command(args) -> int:
         print("  pass --apply to link them" + ("" if result["home"] else f" (on {home_gateway()})"))
     for tid in result.get("failed") or ():
         print(f"  FAILED {tid}")
-    return 1 if apply and result["after_missing"] else 0
+    remote = result['remote']
+    print(f"{len(remote['missing'])} remote asks have no human chat.")
+    for item in remote['missing']:
+        print(f"  remote: {item['gateway']}/{item['profile']}/{item['board']}/{item['task']}")
+    for item in remote['failed']:
+        print(f"  FAILED remote: {item}")
+    if not apply and remote['missing']:
+        print("  pass --apply to queue authenticated human-chat adoption")
+    for item in remote['pending']:
+        print(f"  pending origin receipt: {item['task']} -> {item['session']} ({item['request_id']})")
+    return 1 if apply and (result["after_missing"] or remote['missing'] or remote['failed']) else 0
