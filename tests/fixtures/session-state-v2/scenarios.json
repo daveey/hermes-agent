@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "now": 1800000000,
+  "identity": {"gateway": "fixture-gateway", "profile": "default", "session_id": "fixture-chat"},
+  "defaults": {"card_id": "t_1111111111111111", "title": "Fixture work", "board": "default"},
+  "scenarios": [
+    {"id": "running_card", "card": {"status": "running"}},
+    {"id": "human_brief", "card": {"status": "blocked", "block_kind": "needs_input", "human_request": {"action": "Reply A or B. Unblock = apply the pick; archive = drop this work.", "why_human": "Tried: verified both paths. Only you can: choose the desired scope.", "interaction": "reply", "scope": "Situation: Two equally valid scopes remain.\nOptions:\nA) Small scope: keep the change narrow; no added cost; reversible.\nB) Broad scope: include the optional part; no added cost; reversible.\nRecommend: A - preserves the smallest scope.", "evidence": "Both fixture paths pass.", "choices": [{"label": "A: Small scope (recommended)", "value": "small"}, {"label": "B: Broad scope", "value": "broad"}]}}},
+    {"id": "human_no_brief", "card": {"status": "blocked", "block_kind": "needs_input", "human_request": {"action": "Reply A or B. Unblock = apply the pick; archive = drop this work.", "why_human": "Only you can choose the scope.", "interaction": "reply", "scope": "Choose small or broad scope.", "evidence": "Both fixture paths pass.", "choices": [{"label": "Small scope", "value": "small"}, {"label": "Broad scope", "value": "broad"}]}}},
+    {"id": "waiting_card", "card": {"status": "scheduled", "awaiting": {"kind": "card", "ref": "t_2222222222222222"}}, "producer": {"id": "t_2222222222222222", "title": "Fixture prerequisite", "status": "running"}},
+    {"id": "waiting_ci", "card": {"status": "scheduled", "awaiting": {"kind": "ci", "ref": "https://example.com/actions/runs/42", "why": "CI completes"}}},
+    {"id": "waiting_clock", "card": {"status": "scheduled", "awaiting": {"kind": "clock", "why": "Fixture cooldown finishes"}}},
+    {"id": "waiting_deploy", "card": {"status": "scheduled", "awaiting": {"kind": "deploy", "ref": "fixture-release", "why": "Deployment completes"}}},
+    {"id": "triage_599", "card": {"status": "triage", "block_kind": "decision_pending"}, "triage_age_s": 599},
+    {"id": "triage_600", "card": {"status": "triage", "block_kind": "decision_pending"}, "triage_age_s": 600},
+    {"id": "triage_601", "card": {"status": "triage", "block_kind": "decision_pending"}, "triage_age_s": 601},
+    {"id": "stale_replica", "card": {"status": "running", "remote": true, "source": "replica", "gateway": "fixture-remote", "stale": true, "replica_synced_at": 1799999000}},
+    {"id": "unblocked_after_block", "card": {"status": "ready"}, "episodes": ["blocked", "unblocked"]},
+    {"id": "reblocked", "card": {"status": "blocked", "block_kind": "needs_input"}, "human_request_from": "human_brief", "episodes": ["blocked", "unblocked", "blocked"]},
+    {"id": "done", "card": {"status": "done"}},
+    {"id": "subagent_running", "card": null, "runtime": {"kind": "subagent", "state": "running", "id": "fixture-child", "title": "Fixture research"}},
+    {"id": "process_running", "card": null, "runtime": {"kind": "process", "state": "running", "id": "fixture-process", "title": "Fixture command"}},
+    {"id": "turn_failed", "card": null, "turn": "failed"}
+  ]
+}

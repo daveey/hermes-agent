@@ -1,0 +1,4656 @@
+{
+  "cases": [
+    {
+      "card": {
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "running",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 1,
+            "kind": "created",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "created",
+          "assignee": null,
+          "block_kind": null,
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "running",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created"
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "running"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "running",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "running"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_running"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "2dc789d3b2748684",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "running_card",
+      "input": {
+        "card": {
+          "status": "running"
+        },
+        "id": "running_card"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "running"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "running",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "running"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_running"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "2dc789d3b2748684",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 0,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "running"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "running",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "running"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_running"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "2dc789d3b2748684",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "block_kind": "needs_input",
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "human_request": {
+          "action": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+          "choices": [
+            {
+              "label": "A: Small scope (recommended)",
+              "value": "small"
+            },
+            {
+              "label": "B: Broad scope",
+              "value": "broad"
+            }
+          ],
+          "evidence": "Both fixture paths pass.",
+          "interaction": "reply",
+          "scope": "Situation: Two equally valid scopes remain.\nOptions:\nA) Small scope: keep the change narrow; no added cost; reversible.\nB) Broad scope: include the optional part; no added cost; reversible.\nRecommend: A - preserves the smallest scope.",
+          "why_human": "Tried: verified both paths. Only you can: choose the desired scope."
+        },
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "blocked",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 1,
+            "kind": "created",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "created",
+          "assignee": null,
+          "block_kind": "needs_input",
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": "{\"action\": \"Reply A or B. Unblock = apply the pick; archive = drop this work.\", \"why_human\": \"Tried: verified both paths. Only you can: choose the desired scope.\", \"interaction\": \"reply\", \"scope\": \"Situation: Two equally valid scopes remain.\\nOptions:\\nA) Small scope: keep the change narrow; no added cost; reversible.\\nB) Broad scope: include the optional part; no added cost; reversible.\\nRecommend: A - preserves the smallest scope.\", \"evidence\": \"Both fixture paths pass.\", \"choices\": [{\"label\": \"A: Small scope (recommended)\", \"value\": \"small\"}, {\"label\": \"B: Broad scope\", \"value\": \"broad\"}]}",
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "blocked",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "premise": null,
+            "wait_state": "human",
+            "waiting_on": "you",
+            "waiting_since": null
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "A: Small scope (recommended)",
+                    "value": "small"
+                  },
+                  {
+                    "label": "B: Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "1a26fbd3b0f11929",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "human_brief",
+      "input": {
+        "card": {
+          "block_kind": "needs_input",
+          "human_request": {
+            "action": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+            "choices": [
+              {
+                "label": "A: Small scope (recommended)",
+                "value": "small"
+              },
+              {
+                "label": "B: Broad scope",
+                "value": "broad"
+              }
+            ],
+            "evidence": "Both fixture paths pass.",
+            "interaction": "reply",
+            "scope": "Situation: Two equally valid scopes remain.\nOptions:\nA) Small scope: keep the change narrow; no added cost; reversible.\nB) Broad scope: include the optional part; no added cost; reversible.\nRecommend: A - preserves the smallest scope.",
+            "why_human": "Tried: verified both paths. Only you can: choose the desired scope."
+          },
+          "status": "blocked"
+        },
+        "id": "human_brief"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "items": [
+          {
+            "card_id": "t_1111111111111111",
+            "choices": [
+              {
+                "label": "A: Small scope (recommended)",
+                "value": "small"
+              },
+              {
+                "label": "B: Broad scope",
+                "value": "broad"
+              }
+            ],
+            "id": "card:t_1111111111111111",
+            "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+            "state": "open"
+          }
+        ],
+        "kind": "decision",
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "presentation": {
+            "reason_codes": [
+              "human_ask"
+            ],
+            "stripe": "stuck"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "1a26fbd3b0f11929",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_blocked": 1,
+        "kanban_blocked_on": [
+          "default/t_1111111111111111"
+        ],
+        "kanban_observed_at": 1800000000,
+        "kanban_timed_cards": [
+          {
+            "id": "default/t_1111111111111111",
+            "since": 1800000000.0,
+            "state": "blocked",
+            "title": "Fixture work"
+          }
+        ],
+        "kanban_timed_more": 0,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "needs_you": [
+          {
+            "kind": "card",
+            "question": "",
+            "ref": "default/t_1111111111111111"
+          }
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "A: Small scope (recommended)",
+                    "value": "small"
+                  },
+                  {
+                    "label": "B: Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "1a26fbd3b0f11929",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "block_kind": "needs_input",
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "human_request": {
+          "action": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+          "choices": [
+            {
+              "label": "Small scope",
+              "value": "small"
+            },
+            {
+              "label": "Broad scope",
+              "value": "broad"
+            }
+          ],
+          "evidence": "Both fixture paths pass.",
+          "interaction": "reply",
+          "scope": "Choose small or broad scope.",
+          "why_human": "Only you can choose the scope."
+        },
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "blocked",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 1,
+            "kind": "created",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "created",
+          "assignee": null,
+          "block_kind": "needs_input",
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": "{\"action\": \"Reply A or B. Unblock = apply the pick; archive = drop this work.\", \"why_human\": \"Only you can choose the scope.\", \"interaction\": \"reply\", \"scope\": \"Choose small or broad scope.\", \"evidence\": \"Both fixture paths pass.\", \"choices\": [{\"label\": \"Small scope\", \"value\": \"small\"}, {\"label\": \"Broad scope\", \"value\": \"broad\"}]}",
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "blocked",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "premise": null,
+            "wait_state": "human",
+            "waiting_on": "you",
+            "waiting_since": null
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "Small scope",
+                  "value": "small"
+                },
+                {
+                  "label": "Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "Small scope",
+                    "value": "small"
+                  },
+                  {
+                    "label": "Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "811ea93f9973decb",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "human_no_brief",
+      "input": {
+        "card": {
+          "block_kind": "needs_input",
+          "human_request": {
+            "action": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+            "choices": [
+              {
+                "label": "Small scope",
+                "value": "small"
+              },
+              {
+                "label": "Broad scope",
+                "value": "broad"
+              }
+            ],
+            "evidence": "Both fixture paths pass.",
+            "interaction": "reply",
+            "scope": "Choose small or broad scope.",
+            "why_human": "Only you can choose the scope."
+          },
+          "status": "blocked"
+        },
+        "id": "human_no_brief"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "items": [
+          {
+            "card_id": "t_1111111111111111",
+            "choices": [
+              {
+                "label": "Small scope",
+                "value": "small"
+              },
+              {
+                "label": "Broad scope",
+                "value": "broad"
+              }
+            ],
+            "id": "card:t_1111111111111111",
+            "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+            "state": "open"
+          }
+        ],
+        "kind": "decision",
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "Small scope",
+                  "value": "small"
+                },
+                {
+                  "label": "Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "presentation": {
+            "reason_codes": [
+              "human_ask"
+            ],
+            "stripe": "stuck"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "811ea93f9973decb",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_blocked": 1,
+        "kanban_blocked_on": [
+          "default/t_1111111111111111"
+        ],
+        "kanban_observed_at": 1800000000,
+        "kanban_timed_cards": [
+          {
+            "id": "default/t_1111111111111111",
+            "since": 1800000000.0,
+            "state": "blocked",
+            "title": "Fixture work"
+          }
+        ],
+        "kanban_timed_more": 0,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "needs_you": [
+          {
+            "kind": "card",
+            "question": "",
+            "ref": "default/t_1111111111111111"
+          }
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "Small scope",
+                  "value": "small"
+                },
+                {
+                  "label": "Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "Small scope",
+                    "value": "small"
+                  },
+                  {
+                    "label": "Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "811ea93f9973decb",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "awaiting": {
+          "kind": "card",
+          "ref": "t_2222222222222222"
+        },
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "scheduled",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 1,
+            "kind": "scheduled",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "scheduled",
+          "assignee": null,
+          "block_kind": null,
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "scheduled",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "next_actor": "card t_2222222222222222",
+            "premise": null,
+            "producer_wait": {
+              "id": "t_2222222222222222",
+              "since": 1799999940.0
+            },
+            "wait_state": "waiting",
+            "waiting_on": "card t_2222222222222222",
+            "waiting_since": 1799999940.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "producer_wait"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "producer_wait"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_card_producer_wait"
+              ],
+              "stripe": "external"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "37c12f5fa5ef6658",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "waiting_card",
+      "input": {
+        "card": {
+          "awaiting": {
+            "kind": "card",
+            "ref": "t_2222222222222222"
+          },
+          "status": "scheduled"
+        },
+        "id": "waiting_card",
+        "producer": {
+          "id": "t_2222222222222222",
+          "status": "running",
+          "title": "Fixture prerequisite"
+        }
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "producer_wait"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "producer_wait"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_card_producer_wait"
+            ],
+            "stripe": "external"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "37c12f5fa5ef6658",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 1,
+        "kanban_timed_cards": [
+          {
+            "id": "default/t_1111111111111111",
+            "since": 1799999940.0,
+            "state": "waiting",
+            "title": "Fixture work"
+          }
+        ],
+        "kanban_timed_more": 0,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "producer_wait"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "producer_wait"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_card_producer_wait"
+              ],
+              "stripe": "external"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "37c12f5fa5ef6658",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "awaiting": {
+          "kind": "ci",
+          "ref": "https://example.com/actions/runs/42",
+          "why": "CI completes"
+        },
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "scheduled",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 1,
+            "kind": "scheduled",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "scheduled",
+          "assignee": null,
+          "block_kind": null,
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "scheduled",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "estimate_source": "no history yet",
+            "expected_s": null,
+            "external": {
+              "adapter": "shell",
+              "health": "watch_missing",
+              "job": "unknown",
+              "next_due_at": null,
+              "observed_at": null,
+              "reason": "nothing is watching this wait: no adapter and no probe",
+              "service": "external probe",
+              "url": null
+            },
+            "next_actor": "ci https://example.com/actions/runs/42",
+            "premise": null,
+            "prerequisite": "CI completes",
+            "wait_kind": "ci",
+            "wait_state": "external_down",
+            "wait_target": "",
+            "waited_since": 1799999940.0,
+            "waiting_on": "ci https://example.com/actions/runs/42",
+            "waiting_since": 1799999940.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "estimate_source": "no history yet",
+              "expected_s": null,
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "scheduled",
+              "wait_kind": "ci",
+              "waited_since": 1799999940.0
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "scheduled"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "c79c75ce329800a6",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "waiting_ci",
+      "input": {
+        "card": {
+          "awaiting": {
+            "kind": "ci",
+            "ref": "https://example.com/actions/runs/42",
+            "why": "CI completes"
+          },
+          "status": "scheduled"
+        },
+        "id": "waiting_ci"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "estimate_source": "no history yet",
+            "expected_s": null,
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "scheduled",
+            "wait_kind": "ci",
+            "waited_since": 1799999940.0
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "scheduled"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "c79c75ce329800a6",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 1,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "estimate_source": "no history yet",
+              "expected_s": null,
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "scheduled",
+              "wait_kind": "ci",
+              "waited_since": 1799999940.0
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "scheduled"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "c79c75ce329800a6",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "awaiting": {
+          "kind": "clock",
+          "why": "Fixture cooldown finishes"
+        },
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "scheduled",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 1,
+            "kind": "scheduled",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "scheduled",
+          "assignee": null,
+          "block_kind": null,
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "scheduled",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "estimate_source": "no wake time",
+            "expected_s": null,
+            "next_actor": "the clock (timed check)",
+            "premise": null,
+            "prerequisite": "Fixture cooldown finishes",
+            "wait_kind": "clock",
+            "wait_state": "waiting",
+            "wait_target": "",
+            "waited_since": 1799999940.0,
+            "waiting_on": "a declared window (Fixture cooldown finishes)",
+            "waiting_since": 1799999940.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "estimate_source": "no wake time",
+              "expected_s": null,
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "scheduled",
+              "wait_kind": "clock",
+              "waited_since": 1799999940.0
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "scheduled"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "c1e8e5f5369ce5b6",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "waiting_clock",
+      "input": {
+        "card": {
+          "awaiting": {
+            "kind": "clock",
+            "why": "Fixture cooldown finishes"
+          },
+          "status": "scheduled"
+        },
+        "id": "waiting_clock"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "estimate_source": "no wake time",
+            "expected_s": null,
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "scheduled",
+            "wait_kind": "clock",
+            "waited_since": 1799999940.0
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "scheduled"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "c1e8e5f5369ce5b6",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 1,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "estimate_source": "no wake time",
+              "expected_s": null,
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "scheduled",
+              "wait_kind": "clock",
+              "waited_since": 1799999940.0
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "scheduled"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "c1e8e5f5369ce5b6",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "awaiting": {
+          "kind": "deploy",
+          "ref": "fixture-release",
+          "why": "Deployment completes"
+        },
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "scheduled",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 1,
+            "kind": "scheduled",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "scheduled",
+          "assignee": null,
+          "block_kind": null,
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "scheduled",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "estimate_source": "no history yet",
+            "expected_s": null,
+            "external": {
+              "adapter": "shell",
+              "health": "watch_missing",
+              "job": "unknown",
+              "next_due_at": null,
+              "observed_at": null,
+              "reason": "nothing is watching this wait: no adapter and no probe",
+              "service": "external probe",
+              "url": null
+            },
+            "next_actor": "deploy fixture-release",
+            "premise": null,
+            "prerequisite": "Deployment completes",
+            "wait_kind": "deploy",
+            "wait_state": "external_down",
+            "wait_target": "fixture-release",
+            "waited_since": 1799999940.0,
+            "waiting_on": "deploy fixture-release",
+            "waiting_since": 1799999940.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "estimate_source": "no history yet",
+              "expected_s": null,
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "scheduled",
+              "wait_kind": "deploy",
+              "waited_since": 1799999940.0
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "scheduled"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "95c95ccc1dfe4bd4",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "waiting_deploy",
+      "input": {
+        "card": {
+          "awaiting": {
+            "kind": "deploy",
+            "ref": "fixture-release",
+            "why": "Deployment completes"
+          },
+          "status": "scheduled"
+        },
+        "id": "waiting_deploy"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "estimate_source": "no history yet",
+            "expected_s": null,
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "scheduled",
+            "wait_kind": "deploy",
+            "waited_since": 1799999940.0
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "scheduled"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "95c95ccc1dfe4bd4",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 1,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "estimate_source": "no history yet",
+              "expected_s": null,
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "scheduled",
+              "wait_kind": "deploy",
+              "waited_since": 1799999940.0
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "scheduled"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "95c95ccc1dfe4bd4",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "block_kind": "decision_pending",
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "triage",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999401.0,
+            "id": 1,
+            "kind": "status",
+            "run_id": null
+          },
+          "activity_at": 1799999401.0,
+          "activity_kind": "status",
+          "assignee": null,
+          "block_kind": "decision_pending",
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "triage",
+          "title": "Fixture work",
+          "triage_entered_at": 1799999401.0,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "premise": null,
+            "wait_state": "waiting",
+            "waiting_on": "triage",
+            "waiting_since": 1799999401.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "triage"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "triage"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "d196251147fb3862",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "triage_599",
+      "input": {
+        "card": {
+          "block_kind": "decision_pending",
+          "status": "triage"
+        },
+        "id": "triage_599",
+        "triage_age_s": 599
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "triage"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "triage"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "d196251147fb3862",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 1,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "triage"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "triage"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "d196251147fb3862",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "block_kind": "decision_pending",
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "triage",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999400.0,
+            "id": 1,
+            "kind": "status",
+            "run_id": null
+          },
+          "activity_at": 1799999400.0,
+          "activity_kind": "status",
+          "assignee": null,
+          "block_kind": "decision_pending",
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "triage",
+          "title": "Fixture work",
+          "triage_entered_at": 1799999400.0,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "premise": null,
+            "wait_state": "waiting",
+            "waiting_on": "triage",
+            "waiting_since": 1799999400.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "triage"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "triage"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "d196251147fb3862",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "triage_600",
+      "input": {
+        "card": {
+          "block_kind": "decision_pending",
+          "status": "triage"
+        },
+        "id": "triage_600",
+        "triage_age_s": 600
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "triage"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "triage"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "d196251147fb3862",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 1,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "triage"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "triage"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "d196251147fb3862",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "block_kind": "decision_pending",
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "triage",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999399.0,
+            "id": 1,
+            "kind": "status",
+            "run_id": null
+          },
+          "activity_at": 1799999399.0,
+          "activity_kind": "status",
+          "assignee": null,
+          "block_kind": "decision_pending",
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": null,
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "triage",
+          "title": "Fixture work",
+          "triage_entered_at": 1799999399.0,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "premise": null,
+            "wait_state": "waiting",
+            "waiting_on": "triage",
+            "waiting_since": 1799999399.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "triage_overdue"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "triage_overdue"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open",
+                "triage_overdue"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "ab1e4d997901472a",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "triage_601",
+      "input": {
+        "card": {
+          "block_kind": "decision_pending",
+          "status": "triage"
+        },
+        "id": "triage_601",
+        "triage_age_s": 601
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "triage_overdue"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "triage_overdue"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open",
+              "triage_overdue"
+            ],
+            "stripe": "stuck"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "ab1e4d997901472a",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 1,
+        "kanban_triage_attention": {
+          "count": 1,
+          "held": 0,
+          "parked": 1,
+          "refs": [
+            "default/t_1111111111111111"
+          ],
+          "stalled": 0
+        },
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "triage_overdue"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "triage_overdue"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open",
+                "triage_overdue"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "ab1e4d997901472a",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "board": "default",
+        "gateway": "fixture-remote",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "remote": true,
+        "replica_synced_at": 1799999000,
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "source": "replica",
+        "stale": true,
+        "status": "running",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "board": "default",
+          "gateway": "fixture-remote",
+          "id": "t_1111111111111111",
+          "key": "default/t_1111111111111111",
+          "profile": "default",
+          "remote": true,
+          "replica_synced_at": 1799999000,
+          "session": "fixture-chat",
+          "session_id": "fixture-chat",
+          "source": "replica",
+          "stale": true,
+          "status": "running",
+          "title": "Fixture work"
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "source_unknown": "card_status_unavailable",
+              "state": "source_unknown"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [
+                "cards:card_status_unavailable"
+              ],
+              "state": "unknown"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "source_unknown"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_status_unknown"
+              ],
+              "stripe": "none"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "7ea2309c08074dc5",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "stale_replica",
+      "input": {
+        "card": {
+          "gateway": "fixture-remote",
+          "remote": true,
+          "replica_synced_at": 1799999000,
+          "source": "replica",
+          "stale": true,
+          "status": "running"
+        },
+        "id": "stale_replica"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "source_unknown": "card_status_unavailable",
+            "state": "source_unknown"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [
+              "cards:card_status_unavailable"
+            ],
+            "state": "unknown"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "source_unknown"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_status_unknown"
+            ],
+            "stripe": "none"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "7ea2309c08074dc5",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 0,
+        "kanban_remote_stale": 1,
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "source_unknown": "card_status_unavailable",
+              "state": "source_unknown"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [
+                "cards:card_status_unavailable"
+              ],
+              "state": "unknown"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "source_unknown"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_status_unknown"
+              ],
+              "stripe": "none"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "7ea2309c08074dc5",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "ready",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 2,
+            "kind": "unblocked",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "unblocked",
+          "assignee": null,
+          "block_kind": null,
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": "null",
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "ready",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created"
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "A: Small scope (recommended)",
+                    "value": "small"
+                  },
+                  {
+                    "label": "B: Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "1a26fbd3b0f11929",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "ready"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "ready"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 2,
+            "source_revisions": {
+              "cards": "f15a16969c901728",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "unblocked_after_block",
+      "input": {
+        "card": {
+          "status": "ready"
+        },
+        "episodes": [
+          "blocked",
+          "unblocked"
+        ],
+        "id": "unblocked_after_block"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "t_1111111111111111",
+            "kind": "card",
+            "label": "Fixture work",
+            "state": "ready"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "card:t_1111111111111111",
+              "kind": "card",
+              "state": "ready"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 2,
+          "source_revisions": {
+            "cards": "f15a16969c901728",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_active": 1,
+        "kanban_observed_at": 1800000000,
+        "kanban_parked": 0,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "ready"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "ready"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 2,
+            "source_revisions": {
+              "cards": "f15a16969c901728",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "block_kind": "needs_input",
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "human_request": {
+          "action": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+          "choices": [
+            {
+              "label": "A: Small scope (recommended)",
+              "value": "small"
+            },
+            {
+              "label": "B: Broad scope",
+              "value": "broad"
+            }
+          ],
+          "evidence": "Both fixture paths pass.",
+          "interaction": "reply",
+          "scope": "Situation: Two equally valid scopes remain.\nOptions:\nA) Small scope: keep the change narrow; no added cost; reversible.\nB) Broad scope: include the optional part; no added cost; reversible.\nRecommend: A - preserves the smallest scope.",
+          "why_human": "Tried: verified both paths. Only you can: choose the desired scope."
+        },
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "blocked",
+        "title": "Fixture work"
+      },
+      "cards": [
+        {
+          "_execution_event": {
+            "created_at": 1799999940.0,
+            "id": 3,
+            "kind": "blocked",
+            "run_id": null
+          },
+          "activity_at": 1799999940.0,
+          "activity_kind": "blocked",
+          "assignee": null,
+          "block_kind": "needs_input",
+          "board": "default",
+          "created_at": 1799999100.0,
+          "current_run_id": null,
+          "current_run_started_at": null,
+          "human_request": "{\"action\": \"Reply A or B. Unblock = apply the pick; archive = drop this work.\", \"why_human\": \"Tried: verified both paths. Only you can: choose the desired scope.\", \"interaction\": \"reply\", \"scope\": \"Situation: Two equally valid scopes remain.\\nOptions:\\nA) Small scope: keep the change narrow; no added cost; reversible.\\nB) Broad scope: include the optional part; no added cost; reversible.\\nRecommend: A - preserves the smallest scope.\", \"evidence\": \"Both fixture paths pass.\", \"choices\": [{\"label\": \"A: Small scope (recommended)\", \"value\": \"small\"}, {\"label\": \"B: Broad scope\", \"value\": \"broad\"}]}",
+          "id": "t_1111111111111111",
+          "last_heartbeat_at": null,
+          "ready_since": null,
+          "session_id": "fixture-chat",
+          "started_at": null,
+          "status": "blocked",
+          "title": "Fixture work",
+          "triage_entered_at": null,
+          "via": "created",
+          "wait": {
+            "agent_owned": false,
+            "agent_owned_certain": true,
+            "premise": null,
+            "wait_state": "human",
+            "waiting_on": "you",
+            "waiting_since": 1799999940.0
+          }
+        }
+      ],
+      "history": [
+        {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "A: Small scope (recommended)",
+                    "value": "small"
+                  },
+                  {
+                    "label": "B: Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "1a26fbd3b0f11929",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "t_1111111111111111",
+              "kind": "card",
+              "label": "Fixture work",
+              "state": "ready"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "card:t_1111111111111111",
+                "kind": "card",
+                "state": "ready"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 2,
+            "source_revisions": {
+              "cards": "f15a16969c901728",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "A: Small scope (recommended)",
+                    "value": "small"
+                  },
+                  {
+                    "label": "B: Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 3,
+            "source_revisions": {
+              "cards": "1a26fbd3b0f11929",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "reblocked",
+      "input": {
+        "card": {
+          "block_kind": "needs_input",
+          "status": "blocked"
+        },
+        "episodes": [
+          "blocked",
+          "unblocked",
+          "blocked"
+        ],
+        "human_request_from": "human_brief",
+        "id": "reblocked"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "items": [
+          {
+            "card_id": "t_1111111111111111",
+            "choices": [
+              {
+                "label": "A: Small scope (recommended)",
+                "value": "small"
+              },
+              {
+                "label": "B: Broad scope",
+                "value": "broad"
+              }
+            ],
+            "id": "card:t_1111111111111111",
+            "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+            "state": "open"
+          }
+        ],
+        "kind": "decision",
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "presentation": {
+            "reason_codes": [
+              "human_ask"
+            ],
+            "stripe": "stuck"
+          },
+          "revision": 3,
+          "source_revisions": {
+            "cards": "1a26fbd3b0f11929",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [],
+            "freshness": "unknown",
+            "identity": {
+              "board": "default",
+              "kind": "card",
+              "work_id": "t_1111111111111111"
+            },
+            "last_activity": null,
+            "last_activity_kind": null,
+            "last_known_state": null,
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": null,
+            "owner": {
+              "gateway": null,
+              "profile": null
+            },
+            "source": "kanban.card",
+            "source_revision": null,
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": null,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_blocked": 1,
+        "kanban_blocked_on": [
+          "default/t_1111111111111111"
+        ],
+        "kanban_observed_at": 1800000000,
+        "kanban_timed_cards": [
+          {
+            "id": "default/t_1111111111111111",
+            "since": 1799999940.0,
+            "state": "blocked",
+            "title": "Fixture work"
+          }
+        ],
+        "kanban_timed_more": 0,
+        "kanban_waiting_on": [
+          "t_1111111111111111"
+        ],
+        "needs_you": [
+          {
+            "kind": "card",
+            "question": "",
+            "ref": "default/t_1111111111111111"
+          }
+        ],
+        "outcome": {
+          "at": 1800000000,
+          "items": [
+            {
+              "card_id": "t_1111111111111111",
+              "choices": [
+                {
+                  "label": "A: Small scope (recommended)",
+                  "value": "small"
+                },
+                {
+                  "label": "B: Broad scope",
+                  "value": "broad"
+                }
+              ],
+              "id": "card:t_1111111111111111",
+              "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+              "state": "open"
+            }
+          ],
+          "kind": "decision",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "items": [
+              {
+                "card_id": "t_1111111111111111",
+                "choices": [
+                  {
+                    "label": "A: Small scope (recommended)",
+                    "value": "small"
+                  },
+                  {
+                    "label": "B: Broad scope",
+                    "value": "broad"
+                  }
+                ],
+                "id": "card:t_1111111111111111",
+                "question": "Reply A or B. Unblock = apply the pick; archive = drop this work.",
+                "state": "open"
+              }
+            ],
+            "kind": "decision",
+            "presentation": {
+              "reason_codes": [
+                "human_ask"
+              ],
+              "stripe": "stuck"
+            },
+            "revision": 3,
+            "source_revisions": {
+              "cards": "1a26fbd3b0f11929",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": {
+        "board": "default",
+        "gateway": "fixture-gateway",
+        "id": "t_1111111111111111",
+        "key": "default/t_1111111111111111",
+        "profile": "default",
+        "session": "fixture-chat",
+        "session_id": "fixture-chat",
+        "status": "done",
+        "title": "Fixture work"
+      },
+      "cards": [],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "done",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "done",
+            "presentation": {
+              "reason_codes": [
+                "work_settled"
+              ],
+              "stripe": "done"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          },
+          "summary": "Implemented the fixture work; verified all checks pass."
+        }
+      ],
+      "id": "done",
+      "input": {
+        "card": {
+          "status": "done"
+        },
+        "id": "done"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "done",
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "done",
+          "presentation": {
+            "reason_codes": [
+              "work_settled"
+            ],
+            "stripe": "done"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "643d5437104296e2",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        },
+        "summary": "Implemented the fixture work; verified all checks pass."
+      },
+      "session_row": {
+        "id": "fixture-chat",
+        "kanban_observed_at": 1800000000,
+        "outcome": {
+          "at": 1800000000,
+          "kind": "done",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "done",
+            "presentation": {
+              "reason_codes": [
+                "work_settled"
+              ],
+              "stripe": "done"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          },
+          "summary": "Implemented the fixture work; verified all checks pass."
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": null,
+      "cards": [],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "fixture-child",
+              "kind": "subagent",
+              "label": "Fixture research",
+              "state": "running"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "subagent:fixture-child",
+                "kind": "subagent",
+                "state": "running"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "4ad23c65d81978b0",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "subagent_running",
+      "input": {
+        "card": null,
+        "id": "subagent_running",
+        "runtime": {
+          "id": "fixture-child",
+          "kind": "subagent",
+          "state": "running",
+          "title": "Fixture research"
+        }
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "fixture-child",
+            "kind": "subagent",
+            "label": "Fixture research",
+            "state": "running"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "subagent:fixture-child",
+              "kind": "subagent",
+              "state": "running"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "643d5437104296e2",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "4ad23c65d81978b0",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "execution_observations": [
+          {
+            "age_seconds": 0.0,
+            "evidence_refs": [
+              "subagent.activity/fixture-child"
+            ],
+            "freshness": "current",
+            "identity": {
+              "gateway": "fixture-gateway",
+              "generation": "session=fixture-child",
+              "kind": "subagent",
+              "profile": "default",
+              "session": "fixture-chat",
+              "work_id": "fixture-child"
+            },
+            "last_activity": null,
+            "last_known_state": "running",
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": 1800000000.0,
+            "owner": {
+              "gateway": "fixture-gateway",
+              "profile": "default",
+              "session": "fixture-chat"
+            },
+            "source": "subagent.activity",
+            "source_revision": "subagent.activity/fixture-child@1800000000.0",
+            "state": "running",
+            "valid_until": 1800000180.0,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_observed_at": 1800000000,
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "fixture-child",
+              "kind": "subagent",
+              "label": "Fixture research",
+              "state": "running"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "subagent:fixture-child",
+                "kind": "subagent",
+                "state": "running"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "4ad23c65d81978b0",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": null,
+      "cards": [],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "fixture-process",
+              "kind": "process",
+              "label": "Fixture command",
+              "state": "running"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "process:fixture-process",
+                "kind": "process",
+                "state": "running"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4fecce6a4f4a2edd",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "process_running",
+      "input": {
+        "card": null,
+        "id": "process_running",
+        "runtime": {
+          "id": "fixture-process",
+          "kind": "process",
+          "state": "running",
+          "title": "Fixture command"
+        }
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "waiting",
+        "on": [
+          {
+            "id": "fixture-process",
+            "kind": "process",
+            "label": "Fixture command",
+            "state": "running"
+          }
+        ],
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "process:fixture-process",
+              "kind": "process",
+              "state": "running"
+            }
+          ],
+          "presentation": {
+            "reason_codes": [
+              "linked_work_open"
+            ],
+            "stripe": "waiting"
+          },
+          "revision": 1,
+          "source_revisions": {
+            "cards": "643d5437104296e2",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4fecce6a4f4a2edd",
+            "subagents": "643d5437104296e2",
+            "turn": "ed4280eccaa71ea2"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "background_active": 1,
+        "background_processes": [
+          {
+            "command": "Fixture command",
+            "id": "fixture-process",
+            "started_at": 1799999940.0
+          }
+        ],
+        "execution_observations": [
+          {
+            "age_seconds": null,
+            "evidence_refs": [
+              "process.registry/fixture-process"
+            ],
+            "freshness": "unknown",
+            "identity": {
+              "gateway": "fixture-gateway",
+              "kind": "process",
+              "profile": "default",
+              "session": "fixture-chat",
+              "work_id": "fixture-process"
+            },
+            "last_activity": null,
+            "last_known_state": "running",
+            "last_progress": null,
+            "last_progress_kind": null,
+            "last_progress_ref": null,
+            "observed_at": 1800000000,
+            "owner": {
+              "gateway": "fixture-gateway",
+              "profile": "default",
+              "session": "fixture-chat"
+            },
+            "source": "process.registry",
+            "source_revision": "process.registry/fixture-process@1800000000",
+            "state": "unknown",
+            "unknown_reason": "missing_qualified_identity",
+            "valid_until": 1800000180,
+            "version": 1,
+            "wait": null
+          }
+        ],
+        "id": "fixture-chat",
+        "kanban_observed_at": 1800000000,
+        "outcome": {
+          "at": 1800000000,
+          "kind": "waiting",
+          "on": [
+            {
+              "id": "fixture-process",
+              "kind": "process",
+              "label": "Fixture command",
+              "state": "running"
+            }
+          ],
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "waiting",
+            "on": [
+              {
+                "id": "process:fixture-process",
+                "kind": "process",
+                "state": "running"
+              }
+            ],
+            "presentation": {
+              "reason_codes": [
+                "linked_work_open"
+              ],
+              "stripe": "waiting"
+            },
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4fecce6a4f4a2edd",
+              "subagents": "643d5437104296e2",
+              "turn": "ed4280eccaa71ea2"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    },
+    {
+      "card": null,
+      "cards": [],
+      "history": [
+        {
+          "at": 1800000000,
+          "kind": "unresolved",
+          "reason": "turn_failed",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [
+              {
+                "generation": 1,
+                "id": "own_turn",
+                "state": "failed"
+              }
+            ],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "unresolved",
+            "presentation": {
+              "reason_codes": [
+                "turn_failed"
+              ],
+              "stripe": "attention"
+            },
+            "reason": "turn_failed",
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "cc51948f202b5794"
+            },
+            "status_version": 1
+          }
+        }
+      ],
+      "id": "turn_failed",
+      "input": {
+        "card": null,
+        "id": "turn_failed",
+        "turn": "failed"
+      },
+      "outcome": {
+        "at": 1800000000,
+        "kind": "unresolved",
+        "reason": "turn_failed",
+        "source": "derived",
+        "status": {
+          "coverage": {
+            "reasons": [],
+            "state": "complete"
+          },
+          "failures": [
+            {
+              "generation": 1,
+              "id": "own_turn",
+              "state": "failed"
+            }
+          ],
+          "generation": 1,
+          "identity": {
+            "gateway": "fixture-gateway",
+            "owner_epoch": "lineage:fixture-chat",
+            "profile": "default",
+            "session_id": "fixture-chat"
+          },
+          "kind": "unresolved",
+          "presentation": {
+            "reason_codes": [
+              "turn_failed"
+            ],
+            "stripe": "attention"
+          },
+          "reason": "turn_failed",
+          "revision": 1,
+          "source_revisions": {
+            "cards": "643d5437104296e2",
+            "controls": "643d5437104296e2",
+            "goals": "4f53cda18c2baa0c",
+            "processes": "4f53cda18c2baa0c",
+            "subagents": "643d5437104296e2",
+            "turn": "cc51948f202b5794"
+          },
+          "status_version": 1
+        }
+      },
+      "session_row": {
+        "id": "fixture-chat",
+        "kanban_observed_at": 1800000000,
+        "outcome": {
+          "at": 1800000000,
+          "kind": "unresolved",
+          "reason": "turn_failed",
+          "source": "derived",
+          "status": {
+            "coverage": {
+              "reasons": [],
+              "state": "complete"
+            },
+            "failures": [
+              {
+                "generation": 1,
+                "id": "own_turn",
+                "state": "failed"
+              }
+            ],
+            "generation": 1,
+            "identity": {
+              "gateway": "fixture-gateway",
+              "owner_epoch": "lineage:fixture-chat",
+              "profile": "default",
+              "session_id": "fixture-chat"
+            },
+            "kind": "unresolved",
+            "presentation": {
+              "reason_codes": [
+                "turn_failed"
+              ],
+              "stripe": "attention"
+            },
+            "reason": "turn_failed",
+            "revision": 1,
+            "source_revisions": {
+              "cards": "643d5437104296e2",
+              "controls": "643d5437104296e2",
+              "goals": "4f53cda18c2baa0c",
+              "processes": "4f53cda18c2baa0c",
+              "subagents": "643d5437104296e2",
+              "turn": "cc51948f202b5794"
+            },
+            "status_version": 1
+          }
+        },
+        "profile": "default"
+      }
+    }
+  ],
+  "now": 1800000000,
+  "schema_version": 1
+}
