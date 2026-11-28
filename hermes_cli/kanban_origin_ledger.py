@@ -301,6 +301,7 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
         annotate(conn, [payload])
     else:
         payload.pop('triage_entered_at', None)
+        payload.pop('triage_quiet_until', None)
         payload.pop('retained_stop', None)
     observation = {
         'schema': 1,
@@ -744,6 +745,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     **diagnostic_fields(task, owner, current=current and not final, now=now),
                     **remote_fields(task, **owner),
                     **({'retained_stop': task['retained_stop']} if task.get('retained_stop') else {}),
+                    **({'triage_quiet_until': task['triage_quiet_until']} if task.get('triage_quiet_until') else {}),
                     **{k: task.get(k) for k in ('title', 'assignee', 'block_kind', 'created_at', 'started_at', 'priority', 'triage_entered_at')},
                     **owner, 'id': owner['task_id'],
                     'key': '/'.join(owner[k] for k in ('gateway', 'profile', 'board', 'task_id')),

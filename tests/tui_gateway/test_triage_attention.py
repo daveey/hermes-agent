@@ -139,3 +139,34 @@ def test_same_status_reentry_is_semantic_in_both_remote_memo_paths(db):
     before = fanout._ledger_content_key([row])
     row['triage_entered_at'] = 1601
     assert fanout._ledger_content_key([row]) != before
+
+
+def test_keep_parked_quiets_the_real_canonical_stripe_and_session_count_for_a_day(db, monkeypatch):
+    now = [1_800_000_000.]
+    monkeypatch.setattr(fanout.time, 'time', lambda: now[0])
+    tid = helpers._card(done=False)
+    hold(tid, now[0] - 7200)
+    with contextlib.closing(kbc.connect()) as conn:
+        from hermes_cli.kanban_db_sync import apply_sync_schema_steps
+        apply_sync_schema_steps(conn)
+        before = fanout._task_prints(conn, [tid])
+        conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,?,?,'{}')",
+                     (tid, attention.PARK_ACK, int(now[0]) - 60))
+        conn.commit()
+        assert fanout._task_prints(conn, [tid]) != before  # the remote memo sees the acknowledgement
+    activity._reset_cache_for_tests()
+    from hermes_state_outcome import refresh_outcome
+    outcome = refresh_outcome(helpers.CHAT, 'card_change', db=db)
+    assert outcome['status']['presentation']['stripe'] != 'stuck'
+    card = next(c for c in activity.session_tasks([helpers.CHAT]) if c['id'] == tid)
+    assert card['triage_entered_at'] == now[0] - 7200
+    assert card['triage_quiet_until'] == int(now[0]) - 60 + attention.PARK_QUIET_S
+    markers = attention.marker(card) | {(card['key'], 'active', True)}
+    row = {}
+    attention.project(row, markers, now=now[0])
+    assert 'kanban_triage_attention' not in row
+    now[0] += attention.PARK_QUIET_S
+    activity._reset_cache_for_tests()
+    assert refresh_outcome(helpers.CHAT, 'card_change', db=db)['status']['presentation']['stripe'] == 'stuck'
+    attention.project(row, markers, now=now[0])
+    assert row['kanban_triage_attention']['refs'] == [card['key']]

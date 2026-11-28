@@ -1055,7 +1055,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             }
             out[pair].update(upstream_fields(r))
             out[pair]['triage_entered_at'] = r.get('triage_entered_at')
-            out[pair].update({k: r[k] for k in ('retained_stop',) if r.get(k)})
+            out[pair].update({k: r[k] for k in ('retained_stop', 'triage_quiet_until') if r.get(k)})
             out[pair].update({k: v for k, v in r.items() if k.startswith('timer_')})
             out[pair].update(_ledger_wait(index, owner, owner_profile, board, tid, status,
                                           named=named and not unknown))

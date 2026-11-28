@@ -73,6 +73,7 @@ def card_rows(tkey: tuple, t: dict[str, Any], *, sids, closed: bool, synced, sta
         out.append(((sid, ref), {
             **historical,
             **({"retained_stop": t["retained_stop"]} if t.get("retained_stop") else {}),
+            **({"triage_quiet_until": t["triage_quiet_until"]} if t.get("triage_quiet_until") else {}),
             **({"blocked_upstream": t["blocked_upstream"]} if t.get("blocked_upstream") else {}),
             **{f: t.get(f) for f in _REMOTE_FIELDS},
             "id": tid, "board": board, "gateway": gw, "key": ref, "session": sid,

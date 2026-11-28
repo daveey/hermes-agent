@@ -21,7 +21,7 @@ def local(conn, ident, top, *, now):
     if not changed and top != hit[1]:
         changed = conn.execute(
             'SELECT 1 FROM task_events WHERE id > ? AND kind IN (SELECT value FROM json_each(?)) LIMIT 1',
-            (hit[1], __import__('json').dumps(attention.LIFECYCLE_KINDS))).fetchone() is not None
+            (hit[1], __import__('json').dumps(attention.ATTENTION_KINDS))).fetchone() is not None
     if changed:
         cards = [dict(id=tid, status='triage') for tid, in conn.execute("SELECT id FROM tasks WHERE status='triage'")]
         attention.annotate(conn, cards)

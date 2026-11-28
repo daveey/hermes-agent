@@ -316,7 +316,8 @@ def _remote_inputs_key() -> Optional[tuple]:
 # The ledger-card fields ``kanban_chat_links.replica_cards`` reads (owner labels, profile-board cards, cold-start
 # fallback) and the pass keeps (key, status, chat, origin chat, unfinished).
 _LEDGER_KEY_FIELDS = ("key", "board", "id", "gateway", "profile", "session", "origin_session", "origin_gateway",
-                      "origin_profile", "status", "unfinished", "released", "ownership_state", "triage_entered_at")
+                      "origin_profile", "status", "unfinished", "released", "ownership_state", "triage_entered_at",
+                      "triage_quiet_until")
 
 
 def _ledger_content_key(cards: list[dict]) -> str:
@@ -370,7 +371,8 @@ def _task_prints(conn: sqlite3.Connection, ids: list) -> dict:
         from hermes_cli.kanban_triage_attention import annotate
         triage = [{'id': tid, 'status': 'triage'} for tid in chunk if tid in out and out[tid][0][0] == 'triage']
         for card in annotate(conn, triage):
-            out[card['id']][0] += (card['triage_entered_at'],)
+            quiet = card.get('triage_quiet_until')
+            out[card['id']][0] += (card['triage_entered_at'],) + ((('quiet', quiet),) if quiet is not None else ())
         for row in conn.execute(f"SELECT task_id, chat_gateway, chat_profile, chat_session, kind, released "
                                 f"FROM task_chat_links WHERE task_id IN ({marks})", chunk):
             if row[0] in out:

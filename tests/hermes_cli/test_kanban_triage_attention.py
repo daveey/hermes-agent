@@ -195,3 +195,76 @@ def test_an_explicitly_stopped_retained_scope_ages_like_every_other_triage_cause
     row = {'status': 'triage', 'triage_entered_at': NOW - age, 'retained_stop': {'reason': 'scope_stopped'}}
     assert attention.overdue(row, now=NOW) is red
     assert (attention.next_transition(row, now=NOW) is None) is red
+
+
+ACK = attention.PARK_ACK
+DAY = attention.PARK_QUIET_S
+
+
+def _parked(*extra):
+    return {'status': 'triage', 'events': [event('created', 1, status='ready'), event('decision_retained', NOW - 7200),
+                                           event(ACK, NOW - 60, by='desktop'), *extra]}
+
+
+def test_keep_parked_quiets_overdue_for_a_day_then_ages_again():
+    row = _parked()
+    assert attention.current_entry(row) == NOW - 7200  # the episode clock (shown age) is unchanged
+    assert attention.quiet_until(row) == NOW - 60 + DAY
+    assert not attention.overdue(row, now=NOW)
+    assert attention.next_transition(row, now=NOW) > NOW - 60 + DAY
+    assert not attention.overdue(row, now=NOW - 60 + DAY - 1)
+    assert attention.overdue(row, now=NOW - 60 + DAY)
+    assert attention.next_transition(row, now=NOW - 60 + DAY) is None
+
+
+@pytest.mark.parametrize('kind,payload', [('decision_retained', {}), ('spend_budget_held', {'status': 'triage'}),
+                                          ('blocked', {'status': 'triage'})])
+def test_the_next_lifecycle_event_ends_the_acknowledgement(kind, payload):
+    row = _parked(event(kind, NOW - 30, **payload))
+    assert attention.quiet_until(row) is None
+    assert attention.overdue(row, now=NOW)
+
+
+def test_an_acknowledgement_never_carries_into_a_new_episode():
+    row = _parked(event('unblocked', NOW - 50), event('decision_retained', NOW - 40))
+    assert attention.current_entry(row) == NOW - 40
+    assert attention.quiet_until(row) is None
+    assert attention.overdue(row, now=NOW - 40 + 601)
+    # Left triage entirely: nothing to quiet.
+    assert attention.quiet_until({**_parked(event('unblocked', NOW - 5)), 'status': 'ready'}) is None
+
+
+@pytest.mark.parametrize('value', [None, True, '100', 0, -1, math.nan, math.inf, NOW + 1])
+def test_an_unreadable_acknowledgement_clock_quiets_nothing(value):
+    row = {'status': 'triage', 'events': [event('decision_retained', NOW - 7200), event(ACK, value)]}
+    assert not attention.quiet(row, now=NOW)
+    assert attention.overdue(row, now=NOW)
+
+
+def test_acknowledgement_travels_detached_through_annotate_markers_and_projection():
+    import json
+    import sqlite3
+    conn = sqlite3.connect(':memory:')
+    conn.execute('CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER)')
+    for tid, kinds in (('t_acked', ('decision_retained', ACK)), ('t_plain', ('decision_retained',))):
+        for offset, kind in enumerate(kinds):
+            conn.execute('INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?,?,?,?)',
+                         (tid, kind, json.dumps({}), NOW - 7200 + offset * 7000))
+    acked, plain = attention.annotate(conn, [{'id': 't_acked', 'status': 'triage'}, {'id': 't_plain', 'status': 'triage'}])
+    assert acked['triage_quiet_until'] == NOW - 200 + DAY
+    assert 'triage_quiet_until' not in plain  # unacknowledged cards keep their exact detached shape
+    markers = attention.marker({**acked, 'key': 'b/t_acked'}) | attention.marker({**plain, 'key': 'b/t_plain'})
+    row = {}
+    attention.project(row, markers, now=NOW)
+    assert row['kanban_triage_attention']['refs'] == ['b/t_plain']
+    assert attention.deadlines(markers, now=NOW) == [math.nextafter(NOW - 200 + DAY, math.inf)]
+    attention.project(row, markers, now=NOW - 200 + DAY)
+    assert row['kanban_triage_attention']['refs'] == ['b/t_acked', 'b/t_plain']
+    # A later annotate after the next lifecycle event clears the stale detached field.
+    conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES ('t_acked', 'decision_retained', '{}', ?)", (NOW,))
+    assert 'triage_quiet_until' not in attention.annotate(conn, [acked])[0]
+
+
+def test_acknowledgement_is_not_a_lifecycle_kind():
+    assert ACK not in attention.LIFECYCLE_KINDS and ACK in attention.ATTENTION_KINDS
+    assert attention.landing(ACK, {'status': 'ready'}) is None

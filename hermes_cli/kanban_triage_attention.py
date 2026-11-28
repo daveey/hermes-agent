@@ -36,6 +36,12 @@ _STATUSES = frozenset({'triage', 'todo', 'ready', 'running', 'blocked', 'schedul
 # kanban_transfer.import_board parks dir/worktree cards in triage and records it only as ``parked``.
 _IMPORTED = 'imported'
 LIFECYCLE_KINDS = tuple(sorted(set(_FIXED) | _PAYLOAD | _PROMOTED | {_IMPORTED}))
+# [daveey] A person's "Keep parked" on an overdue triage card (user-steps writes it from the Desktop decision
+# operation). Not a lifecycle move: the card stays in triage. It quiets overdue attention for PARK_QUIET_S, or until
+# the next lifecycle event (a repeated hold included), whichever comes first. Never an ask, release or permission.
+PARK_ACK = 'triage_park_acknowledged'
+PARK_QUIET_S = 86400
+ATTENTION_KINDS = tuple(sorted(set(LIFECYCLE_KINDS) | {PARK_ACK}))
 
 
 def landing(kind, payload):
@@ -119,18 +125,51 @@ def current_entry(row):
     return entered
 
 
+def quiet_until(row):
+    """End of a person's Keep-parked acknowledgement of the current triage episode, else None.
+
+    Only an acknowledgement that is the newest lifecycle-or-ack event of the current episode counts: any later
+    lifecycle event (a repeated hold, a landing elsewhere) ends it. Detached rows carry ``triage_quiet_until``.
+    """
+    if 'triage_quiet_until' in row:
+        return _epoch(row['triage_quiet_until'])
+    entered = current_entry(row)
+    if entered is None:
+        return None
+    events = [event for event in row.get('events') or () if isinstance(event, dict)
+              and (event.get('kind') == PARK_ACK
+                   or landing(event.get('kind'), _obj(event.get('payload'))) is not None)]
+    if not events or any(_epoch(event.get('created_at')) is None for event in events):
+        return None
+    last = max(events, key=_event_order)
+    if last.get('kind') != PARK_ACK or last['created_at'] < entered:
+        return None
+    return last['created_at'] + PARK_QUIET_S
+
+
+def quiet(row, *, now):
+    # A future-dated acknowledgement cannot stretch the window beyond a day from now.
+    until = quiet_until(row)
+    return until is not None and until - PARK_QUIET_S <= now < until
+
+
 def overdue(row, *, now):
     # Every triage cause ages, an explicitly stopped retained scope included: red is overdue attention only,
-    # never an ask, a release or a claim that execution is pending.
+    # never an ask, a release or a claim that execution is pending. A current Keep-parked acknowledgement quiets it.
     entered = current_entry(row)
-    return entered is not None and entered <= now and now - entered > TRIAGE_AFTER_S
+    return (entered is not None and entered <= now and now - entered > TRIAGE_AFTER_S
+            and not quiet(row, now=now))
 
 
 def next_transition(row, *, now):
     entered = current_entry(row)
     if entered is None or entered > now or overdue(row, now=now):
         return None
-    return math.nextafter(entered + TRIAGE_AFTER_S, math.inf)
+    crossing = entered + TRIAGE_AFTER_S
+    until = quiet_until(row)
+    if until is not None and quiet(row, now=now):
+        crossing = max(crossing, until)
+    return math.nextafter(crossing, math.inf)
 
 
 def annotate(conn, rows):
@@ -152,7 +191,7 @@ def annotate(conn, rows):
                 'SELECT * FROM task_events '
                 'WHERE task_id IN (SELECT value FROM json_each(?)) '
                 'AND kind IN (SELECT value FROM json_each(?)) ORDER BY id',
-                (json.dumps(sorted(targets)), json.dumps(sorted(set(LIFECYCLE_KINDS) | retained._RELEVANT))))
+                (json.dumps(sorted(targets)), json.dumps(sorted(set(ATTENTION_KINDS) | retained._RELEVANT))))
             # Legacy unsynced schemas lack uid. Capture optional portable identity
             # without another schema query or turning those working boards unknown.
             columns = [column[0] for column in cursor.description]
@@ -161,12 +200,19 @@ def annotate(conn, rows):
             if 'no such' not in str(exc):
                 raise
         for event in found or ():
-            if event['kind'] in LIFECYCLE_KINDS:
+            if event['kind'] in ATTENTION_KINDS:
                 events[str(event['task_id'])].append(event)
     # Both reducers see the caller's same source snapshot; shared rows are hydrated once.
     retained.annotate(conn, rows, events=found)
     for row in rows:
-        row['triage_entered_at'] = current_entry({'status': row.get('status'), 'events': events.get(str(row['id']), ())})
+        history = {'status': row.get('status'), 'events': events.get(str(row['id']), ())}
+        row['triage_entered_at'] = current_entry(history)
+        # Present only while acknowledged, so unacknowledged cards keep their exact detached shape.
+        until = quiet_until(history)
+        if until is None:
+            row.pop('triage_quiet_until', None)
+        else:
+            row['triage_quiet_until'] = until
     return rows
 
 
@@ -175,7 +221,11 @@ def marker(card):
     if entered is None:
         return set()
     key = str(card.get('key') or card['id'])
-    return {(key, 'triage:' + json.dumps({'entered_at': entered}, sort_keys=True), False)}
+    clock = {'entered_at': entered}
+    until = quiet_until(card)
+    if until is not None:
+        clock['quiet_until'] = until
+    return {(key, 'triage:' + json.dumps(clock, sort_keys=True), False)}
 
 
 def entries(markers):
@@ -183,11 +233,15 @@ def entries(markers):
     return {key: json.loads(bucket[len('triage:'):]) for key, bucket, _ in markers if bucket.startswith('triage:')}
 
 
+def _detached(value):
+    return {'status': 'triage', 'triage_entered_at': value['entered_at'],
+            **({'triage_quiet_until': value['quiet_until']} if 'quiet_until' in value else {})}
+
+
 def project(row, markers, *, now):
     """Operational red counts, kept separate from human-only needs_you."""
     clocks = entries(markers)
-    aged = {key for key, value in clocks.items()
-            if overdue({'status': 'triage', 'triage_entered_at': value['entered_at']}, now=now)}
+    aged = {key for key, value in clocks.items() if overdue(_detached(value), now=now)}
     # Human asks are already red. Count each card exactly once, including lineage aliases.
     aged -= {key for key, bucket, _ in markers if bucket == 'blocked'}
     if aged:
@@ -203,4 +257,4 @@ def project(row, markers, *, now):
 
 def deadlines(markers, *, now):
     return [at for value in entries(markers).values()
-            if (at := next_transition({'status': 'triage', 'triage_entered_at': value['entered_at']}, now=now)) is not None]
+            if (at := next_transition(_detached(value), now=now)) is not None]
