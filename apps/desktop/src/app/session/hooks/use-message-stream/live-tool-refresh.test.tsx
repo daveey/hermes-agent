@@ -12,9 +12,18 @@ import { renderMessageStream } from './test-harness'
 
 afterEach(cleanup)
 
-it.each([false, true])('retains live tool parts across a stale background refresh (interim=%s)', async interim => {
+it.each([
+  { interim: false, optimistic: false },
+  { interim: true, optimistic: false },
+  { interim: false, optimistic: true },
+  { interim: true, optimistic: true }
+])('retains live tools across refresh ($interim, optimistic=$optimistic)', async ({ interim, optimistic }) => {
   const sid = 'live-tools'
-  const page = toChatMessages([{ id: 1, role: 'user', content: 'inspect' }])
+
+  const page: ChatMessage[] = optimistic
+    ? [{ id: 'user-submission', role: 'user', parts: [{ type: 'text', text: 'inspect' }] }]
+    : toChatMessages([{ id: 1, role: 'user', content: 'inspect' }])
+
   const states = new Map([[sid, { ...createClientSessionState(), messages: page }]])
   const stream = renderMessageStream(sid, { states })
 
@@ -53,4 +62,5 @@ it.each([false, true])('retains live tool parts across a stale background refres
 
   expect(tools(refresh())).toEqual(tools(live))
   expect(tools(refresh()).map(part => part.toolCallId)).toEqual(['read', 'check'])
+  expect(tools(preserveLocalPendingTurnMessages(refresh(), live))).toEqual(tools(live))
 })

@@ -2,7 +2,7 @@
 import { resolveSessionRpcOwner } from '@/app/contrib/wiring-routing'
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
 import { getSession } from '@/hermes'
-import { concatPartsByToolCall, sameAttachmentTurn, spliceOlderPreservedRows } from '@/lib/chat-messages'
+import { concatPartsByToolCall, spliceOlderPreservedRows } from '@/lib/chat-messages'
 import {
   assistantTextPart,
   type ChatMessage,
@@ -76,7 +76,7 @@ import {
   replyAfterLastTool
 } from './committed-reply'
 import { appendCurrentSegment, projectionCorrections } from './current-segment'
-import { retainLiveTurnTools } from './live-turn-tools'
+import { optimisticPromptTwin, retainLiveTurnTools } from './live-turn-tools'
 import { chatMessageArraysEquivalent, chatMessagesEquivalent } from './message-equivalence'
 import {
   isLiveTailRow,
@@ -668,6 +668,8 @@ export function preserveLocalPendingTurnMessages(
   // avoids painting both the empty inflight shell and the full stream bubble.
   const replacements = new Map<string, ChatMessage>()
   let crossedUserBoundary = false
+  const lastLocalUser = previousMessages.findLast(message => message.role === 'user')
+  const promptTwins = new Map<ChatMessage, ChatMessage>()
 
   for (const [index, message] of previousMessages.entries()) {
     if (index <= acknowledged.localIndex || isGatewaySystemMarker(message)) {
@@ -770,21 +772,11 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
-    if (
-      isOptimisticUser &&
-      acknowledgedUserCandidates.some(
-        candidate =>
-          // #122079: the tolerant arm widens the TEXT compare only — it stays
-          // inside the identity gate, so a rowId-bearing optimistic row is
-          // never swallowed by a committed row it provably is not (a genuine
-          // repeat of the same captioned paste). The rowId-less paste from
-          // #120978 carries no identity and keeps matching tolerantly.
-          !conflictingTranscriptIdentity(message, candidate) &&
-          (textWithoutReferenceLines(chatMessageText(candidate)) ===
-            textWithoutReferenceLines(chatMessageText(message)) ||
-            sameAttachmentTurn(candidate, message))
-      )
-    ) {
+    const committedTwin = optimisticPromptTwin(message, acknowledgedUserCandidates)
+
+    if (committedTwin) {
+      promptTwins.set(message, committedTwin)
+
       continue
     }
 
@@ -901,7 +893,8 @@ export function preserveLocalPendingTurnMessages(
 
   return retainLiveTurnTools(
     preserved.length ? spliceOlderPreservedRows(withReplacements, preserved) : withReplacements,
-    previousMessages
+    previousMessages,
+    promptTwins.get(lastLocalUser!)
   )
 }
 

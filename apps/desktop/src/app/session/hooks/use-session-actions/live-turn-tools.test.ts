@@ -42,6 +42,14 @@ it('a later prompt closes ownership even with identical text', () => {
   expect(retainLiveTurnTools(next, [user, live])).toBe(next)
 })
 
+it('uses the reconciled optimistic twin, not the text of a newer identical prompt', () => {
+  const optimistic = { ...user, id: 'user-submission', rowId: undefined }
+  const next = [user, shell]
+  expect(retainLiveTurnTools(next, [optimistic, live], user)[1].parts).toEqual([tool])
+  const later = [...next, { ...user, id: 'new-prompt', rowId: 3 }]
+  expect(retainLiveTurnTools(later, [optimistic, live], user)).toBe(later)
+})
+
 it('does not duplicate a tool already present in both a fold and live segment', () => {
   const next = retainLiveTurnTools([user, shell, live], [user, live])
   expect(next.flatMap(message => message.parts.filter(part => part.type === 'tool-call'))).toEqual([tool])

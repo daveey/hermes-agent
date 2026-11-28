@@ -1,4 +1,21 @@
-import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
+import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
+import { type ChatMessage, chatMessageText, sameAttachmentTurn } from '@/lib/chat-messages'
+
+import { conflictingTranscriptIdentity } from './pending-turn-identity'
+
+/** Reuse the deduplication boundary, never match an older acknowledged repeat. */
+export function optimisticPromptTwin(message: ChatMessage, candidates: ChatMessage[]): ChatMessage | undefined {
+  if (message.role !== 'user' || !message.id.startsWith('user-')) {
+    return undefined
+  }
+
+  return candidates.find(
+    candidate =>
+      !conflictingTranscriptIdentity(message, candidate) &&
+      (textWithoutReferenceLines(chatMessageText(candidate)) === textWithoutReferenceLines(chatMessageText(message)) ||
+        sameAttachmentTurn(candidate, message))
+  )
+}
 
 function completedAnswerCoversTools(next: ChatMessage[], live: ChatMessage[]): boolean {
   const pending = live.findLast(message => message.pending)
@@ -33,7 +50,11 @@ function completedAnswerCoversTools(next: ChatMessage[], live: ChatMessage[]): b
  * Match the prompt by identity, never prose; the next prompt closes ownership.
  * Reconcile by call ID so a page-local fold and a live segment paint only once.
  */
-export function retainLiveTurnTools(next: ChatMessage[], previous: ChatMessage[]): ChatMessage[] {
+export function retainLiveTurnTools(
+  next: ChatMessage[],
+  previous: ChatMessage[],
+  promptTwin?: ChatMessage
+): ChatMessage[] {
   const userIndex = previous.findLastIndex(message => message.role === 'user')
   const user = previous[userIndex]
   const live = previous.slice(userIndex + 1)
@@ -49,7 +70,9 @@ export function retainLiveTurnTools(next: ChatMessage[], previous: ChatMessage[]
   const nextUser = next.findLastIndex(message => message.role === 'user')
   const prompt = next[nextUser]
 
-  if (!prompt || !(prompt.id === user.id || (user.rowId !== undefined && prompt.rowId === user.rowId))) {
+  const identity = promptTwin ?? user
+
+  if (!prompt || !(prompt.id === identity.id || (identity.rowId !== undefined && prompt.rowId === identity.rowId))) {
     return next
   }
 
