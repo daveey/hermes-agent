@@ -15,6 +15,7 @@ import { Intro, type IntroProps } from '@/components/chat/intro'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { UiLatencyTranscriptProbe } from '@/lib/ui-latency-probes'
 import { $webappSignedOut } from '@/store/boot'
 import { notifyError } from '@/store/notifications'
 
@@ -49,6 +50,8 @@ interface ThreadProps {
   sessionId?: string | null
   sessionKey?: string | null
   scrollProfile?: string
+  /** Stored id of the session whose transcript this pane shows (ends `ui.session_switch`). */
+  storedSessionId?: string | null
 }
 
 // memo'd on purpose, and load-bearing for session-switch cost. ChatView
@@ -70,7 +73,8 @@ export const Thread = memo(function Thread({
   onRestoreToMessage,
   sessionId = null,
   scrollProfile,
-  sessionKey
+  sessionKey,
+  storedSessionId
 }: ThreadProps) {
   const { t } = useI18n()
   const copy = t.assistant.thread
@@ -201,6 +205,7 @@ export const Thread = memo(function Thread({
               sessionKey={sessionKey}
               sessionLoading={loading === 'session'}
             />
+            <UiLatencyTranscriptProbe loading={loading === 'session'} storedSessionId={storedSessionId} />
             {loading === 'session' && <CenteredThreadSpinner />}
             <ThreadTimeline />
           </>

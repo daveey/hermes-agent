@@ -34,11 +34,29 @@ export interface ClientLocalGatewayEventMap {
    *  events stamped with the owner's `execution_generation`; Desktop's canonical protocol
    *  layer projects them onto the named prompt listeners and answers over `approval.respond`
    *  / `clarify.respond`. Not part of the generated `tui_gateway` contract. */
-  'approval.request': CanonicalPromptEvent & { command?: string; description?: string; choices?: string[]; edit?: unknown }
+  'approval.request': CanonicalPromptEvent & {
+    command?: string
+    description?: string
+    choices?: string[]
+    edit?: unknown
+  }
   'approval.settled': CanonicalPromptEvent
   'clarify.request': CanonicalPromptEvent & { question?: string; choices?: string[]; multi_select?: boolean }
   'clarify.settled': CanonicalPromptEvent
   'dashboard.new_session_requested': { reason?: string }
+  /** Desktop UI latency span (`lib/ui-latency.ts`): click → visible result. Local to the renderer,
+   *  never sent by a backend. Identifiers only — no titles, text or paths. `start_ms` is the Unix
+   *  epoch ms of the click; `duration_ms` is a monotonic (performance.now) delta. */
+  'desktop.ui_latency': {
+    board?: string
+    card_id?: string
+    duration_ms: number
+    gateway?: string
+    name: 'ui.card_create' | 'ui.card_read' | 'ui.new_session' | 'ui.session_switch'
+    profile?: string
+    session_id?: string
+    start_ms: number
+  }
   'gateway.protocol_error': { preview?: string }
   'gateway.reconnecting': { attempt?: number; delay_ms?: number }
   'gateway.start_timeout': { cwd?: string; python?: string; stderr_tail?: string }

@@ -1082,11 +1082,7 @@ export const host = {
         }
       }
     } catch (error) {
-      if (
-        options.awaitHydration &&
-        openingStillCurrent() &&
-        isBotWakeTimeout(error)
-      ) {
+      if (options.awaitHydration && openingStillCurrent() && isBotWakeTimeout(error)) {
         const timedOutAt = Date.now()
 
         logBotWake('hydration timed out', {
@@ -1494,7 +1490,9 @@ export const host = {
 
 const sessionTasksSdkCheck = sessionTasksHostCustody(host)
 
-export function sessionTasksSdkCurrent(): boolean { return sessionTasksSdkCheck() }
+export function sessionTasksSdkCurrent(): boolean {
+  return sessionTasksSdkCheck()
+}
 
 // -- react bridge -------------------------------------------------------------
 
@@ -1504,6 +1502,7 @@ export * from './sidebar-sections'
 // -- ui: the design language --------------------------------------------------
 
 export * from './theme'
+export * from './ui-latency'
 export type { ViewportRect } from './viewport'
 /** THE whole Capabilities surface (Skills / Tools / MCP tabs, installed
  *  lists, full-skill detail pane, embedded hub picker with one-click

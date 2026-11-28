@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { prepaintClickedTranscript } from '@/app/session/hooks/use-session-actions/provisional-transcript'
 import type { SessionInfo } from '@/hermes'
 import { markOpenClick } from '@/lib/open-timing'
+import { cancelUiLatency, startUiLatency } from '@/lib/ui-latency'
 import { clearAsleepOpen, hasCachedTranscriptFor, markAsleepOpen } from '@/store/asleep-session'
 import { $sidebarFallbackSessions } from '@/store/boot-snapshot'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
@@ -66,6 +67,13 @@ export function useOfflineFallback(
   const onResumeSession = useCallback(
     (sessionId: string, session?: SessionInfo) => {
       markOpenClick(sessionId, session?.connection_id)
+      // [daveey] ui.session_switch: this click is the clock. It covers resuming into main AND fronting a chat
+      // that is already a tile (openStoredSession → focusOpenSession); the transcript pane ends it after paint.
+      startUiLatency('ui.session_switch', {
+        gateway: session?.connection_id,
+        profile: session?.profile,
+        session_id: sessionId
+      })
 
       if (session?.offline_stale_list) {
         // [daveey] Only its last list failed: the gateway may be busy, not gone. Say so and resume live.
@@ -76,6 +84,7 @@ export function useOfflineFallback(
         // read-only (resumeSession never dials it). Without one, refuse as before.
         if (!hasCachedTranscriptFor(session)) {
           notify({ durationMs: 6_000, kind: 'warning', message: offlineOpenNotice(session) })
+          cancelUiLatency('ui.session_switch')
 
           return
         }

@@ -11,9 +11,11 @@
 
 import {
   Button,
+  cancelUiLatency,
   cn,
   Codicon,
   compactNumber,
+  completeUiLatency,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -43,6 +45,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  startUiLatency,
   Switch,
   Textarea,
   Tip,
@@ -740,6 +743,8 @@ function NewTaskDialog({
 
     setBusy(true)
     setError(null)
+    // [daveey] ui.card_create: submit is the clock; it ends when the card exists (below), never on failure.
+    startUiLatency('ui.card_create', { board: $boardSlug.get(), gateway })
 
     try {
       const skillList = skills
@@ -771,6 +776,12 @@ function NewTaskDialog({
         await patchTask(task.id, { status: target })
       }
 
+      if (task?.id) {
+        completeUiLatency('ui.card_create', { card_id: task.id })
+      } else {
+        cancelUiLatency('ui.card_create')
+      }
+
       // Dispatcher-presence warning ("this ready task will sit idle") — not an
       // error, but the user should know.
       if (warning) {
@@ -780,6 +791,7 @@ function NewTaskDialog({
       await qc.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
       onClose()
     } catch (err) {
+      cancelUiLatency('ui.card_create')
       setError(errText(err))
       setBusy(false)
     }
@@ -1606,7 +1618,11 @@ export function KanbanBoardPage() {
                 onDelete={id => deleteMut.mutate(id)}
                 onDropTask={onMove}
                 onMove={onMove}
-                onOpen={id => setOpenTask({ taskId: id, board: slug })}
+                onOpen={id => {
+                  // [daveey] ui.card_read: the click is the clock; the drawer ends it after its detail paints.
+                  startUiLatency('ui.card_read', { board: slug, card_id: id })
+                  setOpenTask({ taskId: id, board: slug })
+                }}
                 onToggle={() => toggleLane(col.name, auto)}
                 onToggleSelect={toggleSelect}
                 selected={selected}

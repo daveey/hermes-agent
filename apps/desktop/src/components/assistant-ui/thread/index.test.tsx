@@ -26,6 +26,11 @@ vi.mock('@/components/assistant-ui/thread/timeline', () => ({
   ThreadTimeline: () => null
 }))
 
+// [daveey] The ui-latency probe reads the assistant-ui store, which this runtime-less render has none of.
+vi.mock('@/lib/ui-latency-probes', () => ({
+  UiLatencyTranscriptProbe: () => null
+}))
+
 vi.mock('@/components/assistant-ui/thread/status', () => ({
   BackgroundResumeNotice: () => null,
   CenteredThreadSpinner: () => null

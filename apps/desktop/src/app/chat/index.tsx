@@ -483,6 +483,12 @@ export const ChatView = memo(function ChatView(props: ChatViewProps) {
   )
 })
 
+function useTranscriptStoredId(activeSessionId: null | string) {
+  return useStoreSelector($sessionStates, states =>
+    activeSessionId ? (states[activeSessionId]?.storedSessionId ?? null) : null
+  )
+}
+
 const ChatViewContent = memo(function ChatViewContent({
   className,
   gateway,
@@ -529,9 +535,7 @@ const ChatViewContent = memo(function ChatViewContent({
   const guideStarted = useStoreSelector($introView, introView => introView === 'intro' || introView === 'ended')
   const activeSessionId = useStore(view.$runtimeId)
 
-  const transcriptStoredSessionId = useStoreSelector($sessionStates, states =>
-    activeSessionId ? (states[activeSessionId]?.storedSessionId ?? null) : null
-  )
+  const transcriptStoredSessionId = useTranscriptStoredId(activeSessionId)
 
   const storedId = useStore(view.$storedId)
   const setupChat = useSetupChatView()
@@ -806,6 +810,7 @@ const ChatViewContent = memo(function ChatViewContent({
             scrollProfile={modelOptionsProfile || activeGatewayProfile}
             sessionId={activeSessionId}
             sessionKey={threadKey}
+            storedSessionId={selectedSessionId}
           />
           {isPrimary && isMainWindow() && <IntroCopy />}
           {resumeExhausted && routedSessionId && (

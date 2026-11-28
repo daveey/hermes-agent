@@ -1,14 +1,6 @@
 import { ComposerPrimitive } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import {
-  type ClipboardEvent,
-  type FormEvent,
-  type KeyboardEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef
-} from 'react'
+import { type ClipboardEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef } from 'react'
 
 import { useTourMarker } from '@/app/chat/tour-marker'
 import type { GatewayRequester } from '@/app/contrib/types'
@@ -25,6 +17,7 @@ import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
 import { triggerHaptic } from '@/lib/haptics'
 import { type StopOrigin } from '@/lib/stop-origin'
 import { $touchPointer } from '@/lib/touch-interaction'
+import { UiLatencyComposerProbe } from '@/lib/ui-latency-probes'
 import { useStoreSelector, useStoresSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { sessionCompacting } from '@/store/compaction'
@@ -180,9 +173,7 @@ export function ChatBar({
   const surfaceId = useComposerSurfaceId()
   const scrollSessionId = sessionId ?? surfaceId
 
-  const scrolledUp = useStoreSelector($threadScrolledUpBySession, map =>
-    Boolean(scrollSessionId && map[scrollSessionId])
-  )
+  const scrolledUp = useStoreSelector($threadScrolledUpBySession, m => Boolean(scrollSessionId && m[scrollSessionId]))
 
   const autoSpeak = useStore($autoSpeakReplies)
   const textDirection = useForcedTextDirection()
@@ -1239,6 +1230,7 @@ export function ChatBar({
         suppressContentEditableWarning
       />
       <ComposerDirectiveActions editorRef={editorRef} />
+      <UiLatencyComposerProbe disabled={inputDisabled} editorRef={editorRef} runtimeId={sessionId} />
       {/* assistant-ui requires ComposerPrimitive.Input somewhere in the tree
         so the composer-state binding (text + IME + paste + form-submit hookup)
         wires up. We render the real input UI ourselves above via the
@@ -1458,7 +1450,8 @@ export function ChatBar({
                   // track past the surface — and every `w-full` child (the fade,
                   // the input/controls row) laid out against that phantom width
                   // and got clipped by overflow-hidden, send button first.
-                  'group/composer-surface relative z-4 isolate grid grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr] overflow-hidden rounded-[inherit]', composerSurfaceRing,
+                  'group/composer-surface relative z-4 isolate grid grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr] overflow-hidden rounded-[inherit]',
+                  composerSurfaceRing,
                   COMPOSER_DROP_FADE_CLASS,
                   dragActive && COMPOSER_DROP_ACTIVE_CLASS
                 )}
@@ -1559,7 +1552,12 @@ export function ChatBarFallback() {
       )}
       data-slot="composer-root"
     >
-      <div className={cn('composer-fallback-surface relative isolate h-(--composer-fallback-height) w-full rounded-[inherit]', composerSurfaceRing)}>
+      <div
+        className={cn(
+          'composer-fallback-surface relative isolate h-(--composer-fallback-height) w-full rounded-[inherit]',
+          composerSurfaceRing
+        )}
+      >
         <div aria-hidden className={composerInputBacking} />
       </div>
     </div>

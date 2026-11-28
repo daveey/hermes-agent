@@ -92,6 +92,7 @@ import {
   useDefaultAssignee,
   useKanban
 } from './ui'
+import { useCardReadLatency } from './ui-latency'
 
 /**
  * Turn a task_events row into an operator-readable line. The backend logs
@@ -319,7 +320,7 @@ function AssigneeMenu({
   const { data: roster } = useQuery({
     enabled: query => !!owner || routedToScope(query),
     queryKey: profilesKey(scope, owner),
-    queryFn: () => owner ? fetchOwnerProfiles(owner) : fetchProfiles(),
+    queryFn: () => (owner ? fetchOwnerProfiles(owner) : fetchProfiles()),
     staleTime: 60_000
   })
 
@@ -962,6 +963,9 @@ export function TaskDrawer({
   const canAttach = Array.isArray(detail?.attachments)
   const drop = useFileDrop(files => uploadMut.mutate(files), canAttach && !uploadMut.isPending)
 
+  // [daveey] ui.card_read ends two frames after THIS card's detail committed; a failed read cancels it.
+  useCardReadLatency(id, task?.id === id, Boolean(error))
+
   if (!id) {
     return null
   }
@@ -1055,7 +1059,9 @@ export function TaskDrawer({
                       {k.copyTitle}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onSelect={mutate(() => patchTask(task.id, { status: 'archived' }, owner), onClose)}>
+                    <DropdownMenuItem
+                      onSelect={mutate(() => patchTask(task.id, { status: 'archived' }, owner), onClose)}
+                    >
                       <Codicon name="archive" size="0.85rem" />
                       {k.archive}
                     </DropdownMenuItem>
@@ -1200,7 +1206,11 @@ export function TaskDrawer({
                   (['parents', 'children'] as const).map(side =>
                     detail.links[side].length > 0 ? (
                       <MetaRow key={side} label={side === 'parents' ? k.blockedBy : k.blocks}>
-                        <LinkChips ids={detail.links[side]} linkTitles={linkTitles} onOpen={linked => owner ? onOpen(linked, owner) : onOpen(linked)} />
+                        <LinkChips
+                          ids={detail.links[side]}
+                          linkTitles={linkTitles}
+                          onOpen={linked => (owner ? onOpen(linked, owner) : onOpen(linked))}
+                        />
                       </MetaRow>
                     ) : null
                   )}

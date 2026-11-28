@@ -181,6 +181,7 @@ import { captureDisplayHydration } from './display-hydration'
 import { overlayCacheWithoutEarlyClarify, withoutEarlyClarifyProjection } from './early-clarify-projection'
 import { type FreshSessionDraftOptions, normalizeNewChatWorkspaceTarget } from './fresh-draft-options'
 import { goneSessionSwitchInFlight } from './gone-session-switch'
+import { newSessionLatency } from './new-session-latency'
 import {
   dispatchedConnectionId,
   findForeignSessionOwner,
@@ -223,6 +224,7 @@ import {
 import { backgroundRuntimeOptions, runtimeOwner, runtimeOwnerProfile } from './runtime-owner'
 import { createGatewaySession, desktopSessionCreateParams } from './session-create-request'
 import { publishWarmSessionRuntime } from './session-usage'
+import { applyStoredUsage } from './stored-usage'
 import {
   createPersistedDisplayTranscriptProvenance,
   hasPersistedDisplayTranscriptProvenance,
@@ -300,20 +302,9 @@ export interface BranchLoadedSessionOptions {
 // if the router never lands on the pending stored id (stuck navigate / lost race).
 const CREATE_GUARD_RELEASE_MS = 3_000
 
-// Reflect a stored row's persisted token counts into the live usage atom
-// (total is derived, so callers can't drift it out of sync with input/output).
-function applyStoredUsage(stored: { input_tokens?: number | null; output_tokens?: number | null }) {
-  const input = stored.input_tokens || 0
-  const output = stored.output_tokens || 0
-
-  setCurrentUsage(current => ({ ...current, input, output, total: input + output }))
-}
-
-
 /** resumeSession's per-attempt options plus the connections an owner-follow
  *  already ruled out ([daveey], see `followedFrom` in resumeSession). */
 type ResumeSessionOptions = ResumeAttemptOptions & { followedFrom?: readonly string[] }
-
 
 export function useSessionActions({
   activeSessionId,
@@ -422,7 +413,9 @@ export function useSessionActions({
 
   // Drop the create/fork guard once the router catches up — or if the user
   // navigates somewhere other than the pending id (left the pre-create route).
-  useEffect(() => {void reportDroppedArchiveQueues()}, [])
+  useEffect(() => {
+    void reportDroppedArchiveQueues()
+  }, [])
   useEffect(() => {
     const pending = pendingCreatedStoredSessionIdRef.current
 
@@ -543,6 +536,7 @@ export function useSessionActions({
     (options: boolean | FreshSessionDraftOptions = false) => {
       const draftOptions = typeof options === 'boolean' ? { replaceRoute: options } : options
       const preserveRoute = draftOptions.preserveRoute ?? false
+      newSessionLatency.draft(options) // [daveey] ui.new_session clock: a user's New session only
       createIntentRef.current = null
       const replaceRoute = draftOptions.replaceRoute ?? false
 
@@ -987,6 +981,8 @@ export function useSessionActions({
     ) => {
       const listed = options?.listed ?? true
 
+      newSessionLatency.tileClick() // [daveey] ui.new_session (tile form)
+
       try {
         // A tile anchored at a project path belongs to the profile the project
         // tree is rendered under — the same owner the fresh-draft "+" pins
@@ -1136,6 +1132,7 @@ export function useSessionActions({
 
           await closeCreated.catch(() => undefined)
           notify({ kind: 'error', title: copy.sessionUnavailable, message: copy.createSessionFailed })
+          newSessionLatency.cancel()
 
           return
         }
@@ -1168,6 +1165,7 @@ export function useSessionActions({
 
         openSessionTile(stored, dir, options?.anchor, options?.before, workspaceScope)
         patchSessionTile(stored, { runtimeId: created.session_id })
+        newSessionLatency.tileCreated(capturedRoute, stored, created.session_id)
 
         if (dir === 'center' && runtimeInfo?.cwd) {
           setCurrentCwdTransient(runtimeInfo.cwd)
@@ -1180,6 +1178,7 @@ export function useSessionActions({
           broadcastSessionsChanged()
         }
       } catch (error) {
+        newSessionLatency.cancel()
         notifyError(error, copy.createSessionFailed)
       }
     },
@@ -2002,7 +2001,9 @@ export function useSessionActions({
                 // Keep the existing array when the content is unchanged —
                 // same guard the cold-resume path uses below.
                 const messages = preserveEquivalentTranscript(state.messages, visibleActivatedMessages)
+
                 const snapshotRowId = running && !state.streamId ? pendingSnapshotRowId(messages, cachedRuntimeId) : null
+
                 const streamTarget = snapshotRowId ?? state.streamId
 
                 return {
@@ -2159,7 +2160,7 @@ export function useSessionActions({
             ? null
             : earlyRest && JSON.stringify(earlyRestScope) === JSON.stringify(sessionRestScope)
               ? earlyRest
-            : getLatestSessionMessages(storedSessionId, sessionRestScope)
+              : getLatestSessionMessages(storedSessionId, sessionRestScope)
 
         let resumeRuntimeBaselineMessages: ChatMessage[] = []
         const resumeStartedAt = Date.now() / 1000
@@ -2516,7 +2517,6 @@ export function useSessionActions({
         if (!chatMessageArraysEquivalent($messages.get(), visibleMessagesForView)) {
           setMessages(visibleMessagesForView)
         }
-
       } catch (err) {
         if (!isCurrentResume()) {
           return
