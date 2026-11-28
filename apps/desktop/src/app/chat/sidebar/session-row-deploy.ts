@@ -23,3 +23,23 @@ export function allDeployWaits(session: SessionInfo): boolean {
 
   return count > 0 && count === session.kanban_active && !session.kanban_external_down
 }
+
+export function timerColour(
+  session: SessionInfo,
+  timer: NonNullable<SessionInfo['kanban_timed_cards']>[number],
+  now: number
+): string {
+  if (timer.state === 'blocked') {
+    return 'text-red-500'
+  }
+
+  if (timer.state !== 'waiting' || timer.wait_kind !== 'deploy') {
+    return 'text-sky-400'
+  }
+
+  const external = session.kanban_external_cards?.find(
+    card => timer.id === card.task_id || (!card.task_id.includes('/') && timer.id.endsWith(`/${card.task_id}`))
+  )
+
+  return deriveExternalVisual(external?.external, now) === 'down' ? 'text-red-500' : 'text-[#a371f7]'
+}

@@ -5,6 +5,7 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { hasFreshKanbanObservation } from '@/store/kanban-observation'
 
+import { timerColour } from './session-row-deploy'
 import { rememberRowTimers, rowTimers } from './session-row-timer-memory'
 import { useWaitClock } from './use-wait-clock'
 
@@ -114,13 +115,7 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
       >
         {visible.map(c => (
           <span
-            className={
-              c.state === 'blocked'
-                ? 'text-red-500'
-                : c.state === 'waiting' && c.wait_kind === 'deploy'
-                  ? 'text-[#a371f7]'
-                  : 'text-sky-400'
-            }
+            className={timerColour(session, c, now)}
             data-card-timer={c.state}
             data-wait-kind={c.state === 'waiting' ? c.wait_kind : undefined}
             key={c.id}

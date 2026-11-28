@@ -167,6 +167,9 @@ it('keeps down deploy evidence out of purple squares, ETA and stripe', () => {
   const session = row({
     kanban_external: 0,
     kanban_external_down: 1,
+    kanban_timed_cards: [
+      { id: 'default/down-card', title: 'Down deploy', state: 'waiting', since: NOW - 60, wait_kind: 'deploy' }
+    ],
     kanban_external_cards: [
       {
         task_id: 'down-card',
@@ -179,5 +182,6 @@ it('keeps down deploy evidence out of purple squares, ETA and stripe', () => {
   expect(sessionCardColours(session, 0)).toEqual([{ colour: 'grey', count: 1 }])
   const { container } = draw(session, 'external_down')
   expect(container.querySelector('[data-card-colour="deploy"], [data-eta="left"]')).toBeNull()
+  expect(container.querySelector('[data-card-timer="waiting"]')?.className).toContain('text-red-500')
   expect(container.querySelector('[data-slot="session-status-stripe"]')?.getAttribute('style')).toBeNull()
 })
