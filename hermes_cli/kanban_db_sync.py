@@ -1652,8 +1652,18 @@ def _local_row_is_newer(conn: sqlite3.Connection, table: str, ch: RemoteChange, 
     gone) or the Board's lease-grant copy, pulled after the run ended here, reopened it as ``running`` and the next
     push sent that back to the Board."""
     if table == "task_runs" and ch.fields.get("ended_at") is not None and board_mode(conn) == "primary":
-        local = conn.execute("SELECT ended_at, sync_version FROM task_runs WHERE id = ?", (row_id,)).fetchone()
-        if local["ended_at"] is None and ch.version > (local["sync_version"] or 0):
+        local = conn.execute("SELECT ended_at, sync_version, status, outcome, error FROM task_runs WHERE id = ?",
+                             (row_id,)).fetchone()
+        newer = ch.version > (local["sync_version"] or 0)
+        if (newer and local["status"] == "reclaimed" and local["outcome"] == "reclaimed"
+                and local["ended_at"] is not None
+                and local["error"] == "dangling run: no longer the card's current run"
+                and ch.fields.get("status") not in (None, "running", "reclaimed")
+                and ch.fields.get("outcome") not in (None, "reclaimed")):
+            # Local maintenance is not newer evidence than the authoritative result.
+            # Unsent child ops serialize the repaired row; issued envelopes stay frozen.
+            return False
+        if local["ended_at"] is None and newer:
             # A Board lease can expire before the local run's initial insert is
             # pushed. That pending startup is not newer than an authoritative
             # end. The push reserializes the now-ended row, retaining its end.

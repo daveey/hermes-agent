@@ -11,6 +11,7 @@ Service: the in-memory Board fake with Board-faithful lease runs (``kanban_sync_
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -134,6 +135,41 @@ def test_pending_run_start_does_not_mask_newer_authoritative_end(
     change = sync.RemoteChange(seq=1, table="task_runs", uid=uid, op="upsert", version=version,
                                hlc="", origin_gateway="server",
                                fields={"task_id": tid, "ended_at": remote_end, "status": "reclaimed"})
+    assert sync._local_row_is_newer(live, "task_runs", change, rid) is expected
+
+
+@pytest.mark.parametrize("mode,local_patch,remote_patch,version,expected", [
+    ("primary", {}, {}, 3, False),
+    ("primary", {}, {"status": "blocked", "outcome": "blocked"}, 3, False),
+    ("primary", {}, {"status": "crashed", "outcome": "crashed"}, 3, False),
+    ("shadow", {}, {}, 3, True),
+    ("primary", {}, {}, 2, True),
+    ("primary", {}, {}, 1, True),
+    ("primary", {"error": "another reclaim reason"}, {}, 3, True),
+    ("primary", {"error": None}, {}, 3, True),
+    ("primary", {"status": "done"}, {}, 3, True),
+    ("primary", {"outcome": "completed"}, {}, 3, True),
+    ("primary", {}, {"ended_at": None}, 3, True),
+    ("primary", {}, {"status": "running"}, 3, True),
+    ("primary", {}, {"status": None}, 3, True),
+    ("primary", {}, {"status": "reclaimed"}, 3, True),
+    ("primary", {}, {"outcome": "reclaimed"}, 3, True),
+    ("primary", {}, {"outcome": None}, 3, True),
+])
+def test_pending_dangling_override_is_narrow(live, kanban_home, svc, mode, local_patch,
+                                            remote_patch, version, expected):
+    tid, uid = _claimed(live, kanban_home, svc, "narrow dangling override")
+    values = {"status": "reclaimed", "outcome": "reclaimed", "ended_at": 9, "sync_version": 2,
+              "error": "dangling run: no longer the card's current run", **local_patch}
+    with kbc.write_txn(live):
+        live.execute("UPDATE task_runs SET " + ", ".join(f"{key}=?" for key in values) + " WHERE uid=?",
+                     (*values.values(), uid))
+    sync.set_mode(live, mode)
+    rid = live.execute("SELECT id FROM task_runs WHERE uid=?", (uid,)).fetchone()[0]
+    change = sync.RemoteChange(seq=1, table="task_runs", uid=uid, op="upsert", version=version,
+                               hlc="", origin_gateway="worker-a4",
+                               fields={"task_id": tid, "ended_at": 10, "status": "done",
+                                       "outcome": "completed", **remote_patch})
     assert sync._local_row_is_newer(live, "task_runs", change, rid) is expected
 
 
@@ -277,6 +313,51 @@ def test_the_dispatcher_closes_a_dangling_run_and_the_board_follows(live, kanban
     assert _run(live, live_uid)["status"] == "running" and _board_run(svc, live_uid)["status"] == "running"
     assert live.execute("SELECT count(*) FROM task_runs WHERE task_id = ? AND status = 'running'",
                         (young,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["unsent", "frozen-retry"])
+def test_authoritative_completion_replaces_pending_synthetic_dangling_end(live, kanban_home, svc, frozen):
+    from hermes_cli import kanban_sync_envelope as envelopes
+
+    tid, uid = _claimed(live, kanban_home, svc, "completion versus stale cleanup")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET current_run_id=NULL WHERE id=?", (tid,))
+        live.execute("UPDATE task_runs SET started_at=? WHERE uid=?",
+                     (int(time.time()) - kd.DANGLING_RUN_MIN_AGE_SECONDS - 1, uid))
+    assert kd.close_dangling_runs(live)
+    pending = dict(live.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='task_runs' "
+                                "AND row_uid=? AND state='pending' ORDER BY rowid DESC LIMIT 1", (uid,)).fetchone())
+    saved = None
+    if frozen:
+        with kbc.write_txn(live):
+            envelopes.outbound(live, pending, lambda: ksc.wire_ops.translate(
+                ksc._full_row_if_unseen(live, pending), ksc._next_hlc(live, ME)))
+        saved = tuple(live.execute("SELECT op_id, hlc, wire_json FROM kanban_sync_outbox WHERE op_id=?",
+                                  (pending["op_id"],)).fetchone())
+        assert saved[2] is not None
+        assert json.loads(saved[2])["fields"]["outcome"] == "reclaimed"
+    metadata = json.dumps({"verdict": "approve", "pr_url": "https://github.com/example/repo/pull/573",
+                           "head_sha": "6b4d4f1f5f6f16440999a4dcce83dc065eedd1c8"})
+    svc._put(svc.board(BOARD), "task_runs", uid,
+             {"status": "done", "outcome": "completed", "ended_at": 123, "summary": "review passed",
+              "metadata": metadata, "error": None}, "worker-a4", None, "9999999999999-0000-worker-a4")
+    version = _board_run(svc, uid)["version"]
+    ksc.pull(live, svc.hub(ME), BOARD, observers=False)
+    row = live.execute("SELECT status, outcome, ended_at, summary, metadata, error, sync_version "
+                       "FROM task_runs WHERE uid=?", (uid,)).fetchone()
+    assert tuple(row) == ("done", "completed", 123, "review passed", metadata, None, version)
+    if frozen:
+        assert saved is not None
+        assert tuple(live.execute("SELECT op_id, hlc, wire_json FROM kanban_sync_outbox WHERE op_id=?",
+                                  (pending["op_id"],)).fetchone()) == saved
+        replay = envelopes.outbound(live, pending, lambda: pytest.fail("must not rebuild frozen cleanup"))
+        assert replay == json.loads(saved[2])
+    else:
+        _round(kanban_home, svc)
+        assert _board_run(svc, uid)["outcome"] == "completed"
+        assert _board_run(svc, uid)["metadata"] == metadata
 
 
 def test_dispatch_pass_runs_the_dangling_run_sweep(live, monkeypatch):
