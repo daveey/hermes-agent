@@ -39,7 +39,9 @@ try:
 except SystemExit as exc:
     assert exc.code in (None, 0), exc.code
 for name in ('hermes_cli.kanban', 'hermes_cli.kanban_db', 'hermes_cli.kanban_db_dispatch',
-             'hermes_cli.kanban_governors_explain', 'hermes_cli.kanban_governors_cli'):
+             'hermes_cli.kanban_governors_explain', 'hermes_cli.kanban_governors_cli',
+             'hermes_cli.kanban_sync_cpu', 'hermes_cli.loop_accounting',
+             'hermes_cli.http_body_accounting', 'hermes_cli.loop_callback_latency'):
     assert name not in sys.modules, name
 if '--json' in sys.argv:
     assert 'hermes_cli.kanban_governors' not in sys.modules

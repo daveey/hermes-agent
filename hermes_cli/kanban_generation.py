@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import os
 import sqlite3
+import sys
 import threading
 import time
 import types
@@ -245,11 +246,17 @@ def prepare_connection(conn, timeout):
     lets existing readers close without waiting for a native writer's budget.
     """
     from hermes_cli.kanban_lockguard import guard
-    from hermes_cli import kanban_sync_cpu as sync_cpu
+    # A sync step can only be active after its accounting module is initialized.
+    # Cold snapshot readers need the same strict preparation, not its import graph.
+    mark = getattr(sys.modules.get("hermes_cli.kanban_sync_cpu"), "mark", None)
 
     conn.execute("PRAGMA busy_timeout=0")
-    sync_cpu.mark("prepare.guard", guard, conn, strict=True)
-    sync_cpu.mark("prepare.remember", remember, conn, strict=True)
+    if mark is None:  # also safe during a reentrant/partial accounting import
+        guard(conn, strict=True)
+        remember(conn, strict=True)
+    else:
+        mark("prepare.guard", guard, conn, strict=True)
+        mark("prepare.remember", remember, conn, strict=True)
     conn.execute(f"PRAGMA busy_timeout={max(0, int(float(timeout) * 1000))}")
 
 

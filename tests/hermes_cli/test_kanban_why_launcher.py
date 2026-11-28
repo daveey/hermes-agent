@@ -56,7 +56,8 @@ sys.meta_path.insert(0, Guard())
 
 
 @pytest.mark.parametrize('json_mode', [False, True])
-def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch, tmp_path, capsys, json_mode):
+@pytest.mark.parametrize('guard', [False, True])
+def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch, tmp_path, capsys, json_mode, guard):
     helpers._usage(monkeypatch, [helpers.RESERVE + 7])
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='launcher snapshot', assignee='default')
@@ -64,7 +65,9 @@ def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch
         from hermes_cli.kanban_governors_cli import why
         expected = why(conn, tid)
     args = ['kanban', 'why', tid, '--board', 'default'] + (['--json'] if json_mode else [])
-    result = _launch(tmp_path, board, args)
+    # guard=False preserves byte-exact managed-stub attestation. The import
+    # tripwire prelude changes that route, so keep both as separate controls.
+    result = _launch(tmp_path, board, args, guard=guard)
     assert result.returncode == 0, result.stderr
     if not json_mode:
         from hermes_cli.kanban_governors_cli import _print_why
