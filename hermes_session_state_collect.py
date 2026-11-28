@@ -62,8 +62,36 @@ def _rows(conn: sqlite3.Connection, ids: set[str]) -> dict[str, dict[str, Any]]:
         f"SELECT {select} FROM tasks WHERE id IN (SELECT value FROM json_each(?))", (_json_list(ids),))}
 
 
+def _ask_digests(conn: sqlite3.Connection, ids: set[str]) -> dict[str, str]:
+    """``task id -> kanban_release.ask_digest`` of each card's stored ``human_request`` (cards with one only)."""
+    from hermes_cli.kanban_release import ask_digest
+    from hermes_cli.kanban_table_columns import table_columns
+
+    if "human_request" not in table_columns(conn, "tasks"):
+        return {}
+    out: dict[str, str] = {}
+    for tid, raw in conn.execute("SELECT id, human_request FROM tasks WHERE id IN (SELECT value FROM json_each(?)) "
+                                 "AND human_request IS NOT NULL AND human_request != ''", (_json_list(ids),)):
+        try:
+            ask = json.loads(raw)
+        except (TypeError, ValueError):
+            ask = raw  # unparseable text is still an identity: a changed string is a different ask
+        if ask is not None:
+            out[str(tid)] = ask_digest(ask)[:16]
+    return out
+
+
 def block_episodes(conn: sqlite3.Connection, ids: set[str]) -> dict[str, str]:
-    """``task id -> 'evt:<id>'`` of the lifecycle event that began each card's current blocked/triage episode."""
+    """``task id -> 'evt:<id>'`` of the lifecycle event that began each card's current blocked/triage episode,
+    suffixed ``/ask:<digest>`` with the identity of the card's stored ask when it has one. The ask is part of the
+    episode: a new or changed ask filed while the card stays blocked/triage (no new lifecycle event) is a new
+    episode, so a click on the earlier state is stale and a resolution of the earlier ask does not cover it."""
+    start = _block_starts(conn, ids)
+    digests = _ask_digests(conn, set(start))
+    return {tid: f"{evt}/ask:{digests[tid]}" if tid in digests else evt for tid, evt in start.items()}
+
+
+def _block_starts(conn: sqlite3.Connection, ids: set[str]) -> dict[str, str]:
     from hermes_cli.kanban_triage_attention import LIFECYCLE_KINDS, _obj, landing
 
     if not ids:

@@ -301,6 +301,68 @@ def test_release_is_refused_without_a_standing_offer_or_on_a_stale_episode(store
                          (task,)).fetchone()[0] == 0
 
 
+def test_release_is_refused_when_the_offer_was_filed_after_the_shown_state(store, board, client):
+    """The card spend-stops in triage and is shown with no ask; the stranded-park sweep then files the release ask
+    without a new lifecycle event. A click naming the shown (ask-less) episode must not release it."""
+    import json
+
+    from hermes_cli import kanban_release
+    from hermes_cli import kanban_spend_decision as decision
+
+    task = kb.create_task(board, title="Retained work", assignee="default", session_id="chat")
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status='triage' WHERE id=?", (task,))
+        kb._append_event(board, task, decision.EVENT, {"reason": "Spend budget: 15 runs"})
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    assert shown and "/ask:" not in shown
+    offer = kanban_release.offer(board, task)
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET human_request=? WHERE id=?",
+                      (json.dumps({**HUMAN_REQUEST, "release_target": offer}), task))
+        kb._append_event(board, task, "stranded_park_escalated", {"request": True, "release_target": offer})
+    now = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    assert now.startswith(shown + "/ask:")
+    reply = _post(client, "release", task, shown, request_id="rel-unseen")
+    assert reply.status_code == 409 and reply.json()["refusal"] == "stale_episode", reply.json()
+    assert kb.get_task(board, task).status == "triage" and store.resolutions("chat") == []
+    assert board.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='stop_released'",
+                         (task,)).fetchone()[0] == 0
+    reply = _post(client, "release", task, now, request_id="rel-seen")  # the ask actually shown releases
+    assert reply.status_code == 200, reply.json()
+
+
+def test_unblock_is_refused_when_a_different_ask_replaced_the_shown_one(store, board, client):
+    """A blocked card is shown with one ask; a different human_request lands while it stays blocked (same span).
+    A click on the shown ask must not unblock the new one, and the shown ask's resolution must not cover it."""
+    import json
+
+    from hermes_session_state_actions import register_answer_handler
+
+    task = kb.create_task(board, title="Deploy", assignee="worker", session_id="chat")
+    assert kb.block_task(board, task, kind="needs_input", human_request=HUMAN_REQUEST)
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    assert "/ask:" in shown
+    register_answer_handler(lambda request: {"ok": True})
+    try:  # the shown ask is answered (the card stays blocked until its owner acts) ...
+        assert _post(client, "answer", task, shown, request_id="answered", choice_id="a").status_code == 200
+    finally:
+        register_answer_handler(None)
+    assert store.get("chat")["cards"][f"default/{task}"]["red"] is False
+    other = {**HUMAN_REQUEST, "action": "Reply B in this chat. Unblock = ship B; archive = drop it."}
+    with kb.write_txn(board):  # ... then a different ask lands while it stays blocked
+        board.execute("UPDATE tasks SET human_request=? WHERE id=?", (json.dumps(other), task))
+        kb._append_event(board, task, "blocked", {"kind": "needs_input"})
+    now = store.recompute("chat")["cards"][f"default/{task}"]
+    assert now["block_episode"] not in (None, shown) and now["red"] is True and now["resolution"] is None
+    before = _unblocked_events(board, task)
+    reply = _post(client, "unblock", task, shown, request_id="stale-ask")
+    assert reply.status_code == 409 and reply.json()["refusal"] == "stale_episode", reply.json()
+    assert _unblocked_events(board, task) == before and kb.get_task(board, task).status == "blocked"
+    assert [r["request_id"] for r in store.resolutions("chat")] == ["answered"]
+    reply = _post(client, "unblock", task, now["block_episode"], request_id="fresh-ask")
+    assert reply.status_code == 200 and kb.get_task(board, task).status != "blocked"
+
+
 def test_routes_answer_503_without_a_store(monkeypatch):
     from hermes_session_state_store import install
 

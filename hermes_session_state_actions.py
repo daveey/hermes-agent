@@ -3,9 +3,10 @@
 One operation for unblock / answer / archive / release of a card shown in a session's object:
 
 1. the caller names the block episode it was shown (``episode``: the card's ``block_episode``, null when it was
-   not blocked); every transition is fenced to it inside its write transaction, so a click on an ask that was
-   answered and re-blocked since (a new episode) is refused ``stale_episode`` and never resolves an ask the user
-   did not see;
+   not blocked; it carries the stored ask's digest); every transition is fenced to it inside its write
+   transaction, so a click on an ask that was answered and re-blocked since, or whose ask was filed or replaced
+   after the shown state (a new episode), is refused ``stale_episode`` and never resolves an ask the user did not
+   see;
 2. commit the transition on the card's local board (``unblock_task`` / ``archive_task``; ``release`` only on the
    home-filed ``release_target`` offer, as an explicit human writer, like ``kanban_card_answer._release``;
    ``answer`` goes through the fenced decision handler registered with :func:`register_answer_handler`; without
