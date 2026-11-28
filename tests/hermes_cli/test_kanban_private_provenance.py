@@ -63,3 +63,68 @@ def test_safety_and_unknown_sources_never_suggest_guarded_release(board, monkeyp
     assert newest['kind'] == kind and newest['cause'] == payload['cause']
     assert newest['release']['authority'] == 'unavailable'
     assert 'capability_episode' not in newest['release']
+
+
+@pytest.mark.parametrize('synced', [False, True])
+@pytest.mark.parametrize('home', [None, 'home-gateway'])
+@pytest.mark.parametrize('kind,payload', [
+    ('spend_budget_triaged', {}),
+    ('spend_budget_triaged', {'cause': 'scope_stopped'}),
+    ('spend_budget_triaged', {'cause': 'capability_unavailable'}),
+    ('decision_hold_restricted', {'cause': 'capability_unavailable'}),
+    ('spend_budget_triaged', 'invalid-json'),
+])
+def test_private_source_details_contract(synced, home, kind, payload):
+    """Pure source-contract controls; no lifecycle writes or liveness claims."""
+    from types import SimpleNamespace
+    from hermes_cli.kanban_actionability_restrictions import details
+
+    event = {'uid': 'stop', 'kind': kind, 'ord': 1, 'payload': payload}
+    reader = SimpleNamespace(synced=synced, events=lambda _tid: [])
+    row, = details({'id': 'fixture', 'created_on': home}, reader, [event], frozenset(), frozenset())
+    assert row['source_uid'] == 'stop'
+    assert row['home_gateway'] == home
+    assert row['evidence_state'] == ('unknown' if synced else 'known')
+    releasable = kind == 'spend_budget_triaged' and isinstance(payload, dict)
+    assert row['release']['authority'] == ('existing_lifecycle_gates' if releasable else 'unavailable')
+    if releasable:
+        condition = row['release']['condition']
+        assert (home or 'resolve home custody first') in condition
+        capability = payload.get('cause') == 'capability_unavailable'
+        assert ('--capability-episode stop' in condition) == capability
+        assert ('capability_episode' in row['release']) == capability
+
+
+@pytest.mark.parametrize('explain', [False, True])
+@pytest.mark.parametrize('failure', ['incomplete', 'sql', 'empty', 'uidless'])
+def test_private_reason_missing_evidence_has_typed_empty_result(explain, failure):
+    import sqlite3
+    from types import SimpleNamespace
+    from hermes_cli.kanban_actionability_sources import _private_reason
+
+    def rows(*_args):
+        if failure == 'sql':
+            raise sqlite3.OperationalError('fixture unavailable')
+        return [{'kind': 'spend_budget_triaged'}] if failure == 'uidless' else []
+
+    reader = SimpleNamespace(events_complete=failure != 'incomplete', event_columns=set(),
+                             rows=rows, uid=lambda _row: None)
+    assert _private_reason(None, {'id': 'fixture'}, reader, explain=explain) == ([] if explain else None)
+
+
+def test_details_excludes_resolved_sources_and_nonstop_context():
+    from types import SimpleNamespace
+    from hermes_cli.kanban_actionability_restrictions import details
+
+    events = [
+        {'uid': 'budget', 'kind': 'spend_budget_triaged', 'ord': 1, 'payload': {}},
+        {'uid': 'capability', 'kind': 'spend_budget_triaged', 'ord': 2,
+         'payload': {'cause': 'capability_unavailable'}},
+        {'uid': 'promoted', 'kind': 'promoted_manual', 'ord': 3, 'payload': {}},
+        {'uid': 'renewal', 'kind': 'scope_renewed', 'ord': 4,
+         'payload': {'covered_restriction_uids': ['resolved-scope']}},
+    ]
+    reader = SimpleNamespace(synced=False, events=lambda _tid: [])
+    rows = details({'id': 'fixture'}, reader, events, frozenset({'resolved-scope'}), frozenset())
+    assert [(row['source_uid'], row['reason']) for row in rows] == [
+        ('capability', 'restriction_unattributable')]
