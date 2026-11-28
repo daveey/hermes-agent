@@ -180,7 +180,7 @@ def test_row_text_is_injective_and_never_vouches_for_a_real_zero():
         sql = f"SELECT {beh.row_text(('v',))} FROM t ORDER BY k"
         texts = [r[0] for r in conn.execute(sql)]
         assert len(set(texts)) == len(values)
-        assert not any("," in t for t in texts)
+        assert not any("\n" in t for t in texts)
         conn.execute("INSERT INTO t (v) VALUES (-0.0)")
         zero = f"SELECT {beh.row_text(('v',))} FROM t WHERE k = (SELECT MAX(k) FROM t)"
         assert conn.execute(zero).fetchone()[0] != conn.execute(zero).fetchone()[0]

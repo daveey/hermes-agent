@@ -47,15 +47,20 @@ ORDERED_AGGREGATES = sqlite3.sqlite_version_info >= (3, 44, 0)
 
 
 def row_text(columns) -> str:
-    """SQL text of one row, injective over SQLite storage values: storage class, then integers,
-    text and blobs as hex of their bytes, reals as ``quote`` (round-trip exact). A real zero adds
-    random hex: ``quote`` drops the sign of -0.0, so a zero never vouches for itself (always a miss).
-    Only ``[a-z0-9A-F.:|+-]`` appear, never the ``,`` that separates rows."""
+    """SQL row encoding, injective over SQLite storage values, without hex-expanding text.
+
+    JSON natively distinguishes NULL, integers and text; blobs and reals use tagged objects
+    (a stored TEXT cannot become an object). Reals retain ``quote``'s round-trip representation,
+    not JSON's lossy float rendering. A real zero adds random hex: ``quote`` drops -0.0's sign,
+    so zero still never vouches for itself. JSON escapes every literal newline, our row separator.
+    Read the aggregate as BLOB: even legacy TEXT containing invalid UTF-8 stays byte-exact.
+    """
     def one(name):
         c = '"' + name.replace('"', '""') + '"'
-        return (f"typeof({c})||':'||CASE typeof({c}) WHEN 'real' THEN quote({c})||"
-                f"CASE WHEN {c} = 0 THEN hex(randomblob(8)) ELSE '' END ELSE hex({c}) END")
-    return "||'|'||".join(one(name) for name in columns)
+        return (f"CASE typeof({c}) WHEN 'blob' THEN json_object('b',hex({c})) "
+                f"WHEN 'real' THEN json_object('r',quote({c}),'z',"
+                f"CASE WHEN {c} = 0 THEN hex(randomblob(8)) ELSE '' END) ELSE {c} END")
+    return "json_array(" + ",".join(one(name) for name in columns) + ")"
 
 
 # The newest rows of a history are re-read on every refresh that moves it, never vouched for by
@@ -64,17 +69,17 @@ def row_text(columns) -> str:
 RECENT = 16
 
 
-def _seal(columns: tuple, text: str) -> tuple:
+def _seal(columns: tuple, text: bytes) -> tuple:
     """``(columns, rows, length, hash, stable rows, stable length, stable hash)`` of ``text``:
     the whole history, and its head without the ``RECENT`` newest rows."""
-    rows = text.count(",") + 1 if text else 0
+    rows = text.count(b"\n") + 1 if text else 0
     stable = max(rows - RECENT, 0)
     cut = len(text)
     for _ in range(RECENT if stable else 0):
-        cut = text.rindex(",", 0, cut)
-    h = hashlib.blake2b(text[:cut if stable else 0].encode(), digest_size=32)
+        cut = text.rindex(b"\n", 0, cut)
+    h = hashlib.blake2b(text[:cut if stable else 0], digest_size=32)
     head = h.digest()
-    h.update(text[cut if stable else 0:].encode())
+    h.update(text[cut if stable else 0:])
     return columns, rows, len(text), h.digest(), stable, cut if stable else 0, head
 
 
@@ -90,7 +95,7 @@ def extend(conn, wanted: dict) -> tuple[dict, dict]:
     start with the retained history's sealed head (all but its ``RECENT`` newest rows); it is that
     head plus the rows after it, read again (or the old object itself when the whole history is
     unchanged). ``seals`` holds the current seal of every wanted task, to retain with whatever the
-    caller then holds for it. A seal hashes the ``row_text`` rows joined by ``,`` in id order:
+    caller then holds for it. A seal hashes the ``row_text`` rows joined by newlines in id order:
     SQLite builds that text in C and returns one row per task, so a 9k-event history costs one row
     instead of 9k. Seals are only exact inside one read snapshot (the caller's transaction):
     outside one, nothing is sealed or extended.
@@ -105,13 +110,13 @@ def extend(conn, wanted: dict) -> tuple[dict, dict]:
         columns = tuple(d[0] for d in cur.execute("SELECT * FROM task_events LIMIT 0").description)
         ids = tuple(wanted)
         texts = dict(cur.execute(
-            f"SELECT task_id, group_concat({row_text(columns)}, ',' ORDER BY id) FROM task_events "
+            f"SELECT task_id, CAST(group_concat({row_text(columns)}, char(10) ORDER BY id) AS BLOB) FROM task_events "
             f"WHERE task_id IN ({_ph(len(ids))}) GROUP BY task_id", ids).fetchall())
     finally:
         cur.close()
     seals, keep, after = {}, {}, {}
     for tid, (history, seal) in wanted.items():
-        text = texts.get(tid) or ""
+        text = texts.get(tid) or b""
         seals[tid] = now = _seal(columns, text)
         if not _usable(history, seal, columns, EventHistory):
             continue
@@ -119,10 +124,10 @@ def extend(conn, wanted: dict) -> tuple[dict, dict]:
             keep[tid] = history  # nothing changed
             continue
         stable, cut, head = seal[4:]
-        if len(text) < cut or (cut and len(text) > cut and text[cut] != ",") \
-                or hashlib.blake2b(text[:cut].encode(), digest_size=32).digest() != head:
+        if len(text) < cut or (cut and len(text) > cut and text[cut:cut + 1] != b"\n") \
+                or hashlib.blake2b(text[:cut], digest_size=32).digest() != head:
             continue  # an older row changed, moved or went away: the caller reloads it
-        count = text.count(",", cut) + (1 if text and not cut else 0)
+        count = text.count(b"\n", cut) + (1 if text and not cut else 0)
         after[tid] = (history[:stable], history[stable - 1]["id"] if stable else None, count)
     keep.update(_tails(conn, after, columns, EventHistory))
     return keep, seals
