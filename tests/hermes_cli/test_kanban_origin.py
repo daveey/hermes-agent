@@ -160,13 +160,48 @@ def test_this_gateway_session_link_is_accepted_as_origin(hub_gateway, ref):
     assert _hub_subs(res["task_id"]) == [] and "origin_binding" not in res
 
 
-def test_this_gateway_origin_without_hub_keeps_local_ownership(hub_gateway, monkeypatch, tmp_path):
+@pytest.mark.parametrize("profile", ["default", "work"])
+def test_hubless_cross_profile_origin_refuses_before_creation(hub_gateway, monkeypatch, tmp_path, profile):
+    from hermes_cli import profiles
     from tools import kanban_tools as kt
 
     monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "absent-hub"))
     monkeypatch.setenv("HERMES_MAIL_CONFIG", str(tmp_path / "absent-mail.json"))
+    monkeypatch.setattr(profiles, "current_profile_name", lambda default=None: profile)
+    other = "work" if profile == "default" else "default"
+    ref = f"@session:{other}/20261122_233430_28d354"
+    with pytest.raises(ko.OriginError) as error:
+        ko.resolve(ref)
+    assert error.value.code == "hub_not_installed"
+    res = json.loads(kt._handle_create({"title": "unreachable cross-profile", "origin_session": ref}))
+    assert not res.get("ok") and "hub_not_installed" in json.dumps(res), res
+    with kbc.connect_closing() as conn:
+        assert kb.list_tasks(conn) == []
+
+
+def test_this_gateway_cross_profile_origin_matches_qualified(hub_gateway, monkeypatch):
+    from hermes_cli import profiles
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles, "current_profile_name", lambda default=None: "default")
+    ref = "@session:work/20261122_233430_28d354"
+    assert ko.resolve(ref) == ko.resolve("hub/work/20261122_233430_28d354")
+    res = json.loads(kt._handle_create({"title": "cross-profile", "origin_session": ref}))
+    assert res.get("ok"), res
+    assert _hub_subs(res["task_id"]) == ["hub/work/20261122_233430_28d354"]
+
+
+@pytest.mark.parametrize("profile", ["default", "work"])
+def test_this_gateway_origin_without_hub_keeps_local_ownership(hub_gateway, monkeypatch, tmp_path, profile):
+    from hermes_cli import profiles
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles, "current_profile_name", lambda default=None: profile)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: profile)
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "absent-hub"))
+    monkeypatch.setenv("HERMES_MAIL_CONFIG", str(tmp_path / "absent-mail.json"))
     assert ko.gateway_names()[0] == ""
-    ref = "@session:default/20261122_233430_28d354"
+    ref = f"@session:{profile}/20261122_233430_28d354"
     res = json.loads(kt._handle_create({"title": "local without hub", "assignee": "default", "origin_session": ref}))
     assert res.get("ok"), res
     assert "origin_binding" not in res

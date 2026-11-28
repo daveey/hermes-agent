@@ -252,8 +252,14 @@ def resolve(explicit: Optional[str] = None) -> Optional[Origin]:
     raw = (explicit or "").strip() or ambient_origin_ref()
     if not raw:
         return None
-    if _LOCAL_FORM.match(raw):  # names this very gateway: its chat already owns its cards
-        return None
+    local = _LOCAL_FORM.match(raw)
+    if local:
+        from hermes_cli.profiles import current_profile_name
+
+        # Same gateway does not mean same profile: cross-profile owners still need
+        # the qualified routing validation below, including hub availability.
+        if local["profile"] == current_profile_name("default"):
+            return None
     origin = parse_origin(raw)
     me, known = gateway_names()
     if not me:
