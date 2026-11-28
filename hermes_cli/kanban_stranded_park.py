@@ -247,6 +247,27 @@ def live_owner(conn: sqlite3.Connection, task_id: str, *, own: str, liveness: Li
 
 # --- park episode --------------------------------------------------------------------------------------------------
 
+HUMAN_ONLY_NOTE = ("A live owner holds this card, but its stop is human-only: the Board's ten fresh-lease reviewer "
+                   "allowance is exhausted and an agent release refuses it (allowance_exhausted)")
+
+
+def human_only_stop(conn: sqlite3.Connection, task_id: str) -> bool:
+    """The card's pending stop is one no owner agent can lift: it is held on its own pending spend/scope stop, the
+    Board's reviewer allowance is its budget, and the Board reports that allowance active with no fresh lease
+    left (the ``allowance_exhausted`` refusal ``kanban_release._board_allowance`` gives every agent authority).
+    A live owner then owns nothing a release could act on, so it must not suppress the human release offer.
+    One authenticated Board read outside any transaction; an unknown or unreadable answer is never human-only."""
+    from hermes_cli import kanban_allowance_observation as observation
+    from hermes_cli import kanban_release
+    from hermes_cli import kanban_spend_allowance as allowance
+    if conn.in_transaction or kanban_release.held(conn, task_id) != task_id:
+        return False
+    if not allowance.history(conn, task_id) or allowance.state(conn, task_id) != allowance.BOARD:
+        return False
+    seen = observation.board_state(conn, task_id)
+    return isinstance(seen, dict) and seen.get("state") == "active" and seen.get("remaining") == 0
+
+
 def _payload(raw: Any) -> dict:
     try:
         data = json.loads(raw) if raw else {}
@@ -428,7 +449,7 @@ def _request(conn: sqlite3.Connection, row: dict, entry: Optional[dict], age: in
 
 
 def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int, defer: int,
-              desk, contained: bool) -> bool:
+              desk, contained: bool, human_only: bool = False) -> bool:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_ask_resolved import store_request
     from hermes_cli.kanban_human_request import NONHUMAN_KINDS
@@ -446,13 +467,18 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
         if (fresh["status"] not in PARKED or _excluded(conn, _gated(conn, fresh), now, age=age, defer=defer)
                 or _escalated(conn, tid, entry)):
             return False
+        if human_only and contained:
+            return False  # a containment hold keeps it: no release offer, so a live owner keeps the card
         if not contained:
             kind = fresh.get("block_kind")
             if kind in NONHUMAN_KINDS:
                 kind = "needs_input"
+            filed = _request(conn, fresh, entry, age, HUMAN_ONLY_NOTE if human_only else
+                             "No unreleased chat link to a live chat and no open spend-decision supervisor card", kind)
+            if human_only and not filed.get("release_target"):
+                return False  # no release offer to deliver (restricted, or the stop moved): the owner keeps it
+            if kind != fresh.get("block_kind"):
                 conn.execute("UPDATE tasks SET block_kind = ? WHERE id = ?", (kind, tid))
-            filed = _request(conn, fresh, entry, age, "No unreleased chat link to a live chat and no "
-                             "open spend-decision supervisor card", kind)
             store_request(conn, tid, filed)
         if desk is not None:
             _subscribe_desk(conn, tid, desk)
@@ -674,10 +700,13 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                 if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
                         or _excluded(conn, _gated(conn, row), now, age=age, defer=defer_s)):
                     continue
+                human_only = False
                 if live_owner(conn, tid, own=own, liveness=liveness):
-                    continue
+                    human_only = human_only_stop(conn, tid)
+                    if not human_only:
+                        continue
                 if _escalate(conn, row, entry, now=now, age=age, defer=defer_s, desk=desk,
-                             contained=containment.held(conn, tid)):
+                             contained=containment.held(conn, tid), human_only=human_only):
                     escalated.append(tid)
             except Exception:  # health: allow BLE001 -- one card's failure must not stop the backstop for the rest
                 logger.warning("kanban: stranded-park escalation failed for %s", tid, exc_info=True)
