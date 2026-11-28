@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { atom } from 'nanostores'
-import { useEffect } from 'react'
+import { type CSSProperties, useEffect } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
@@ -24,6 +24,7 @@ import {
   setStripeReasonReporter
 } from '@/store/session-dot-state'
 
+import { allDeployWaits, DEPLOY_COLOUR } from './session-row-deploy'
 import { externalClockOnly, sessionExternalStripeTip, unknownExternalCloud } from './session-row-stripe-external'
 
 // [daveey] Every red edge (with its reasons) also goes to the session's own gateway, where the agent can read it.
@@ -176,6 +177,11 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
         data-slot="session-status-stripe"
         data-status-stripe={statusStripe}
         role={tipText ? 'img' : undefined}
+        style={
+          statusStripe === 'external' && allDeployWaits(session)
+            ? ({ '--session-status-color': DEPLOY_COLOUR } as CSSProperties)
+            : undefined
+        }
       >
         {/* `periodic`: a live cron job, it recurs so it is never "done". `waiting`: open kanban cards hold it — the
             card glyph (amber when `stalled`). A finished chat's cron keeps the loop glyph, in the green of `done`.

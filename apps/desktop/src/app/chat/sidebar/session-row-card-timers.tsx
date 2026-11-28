@@ -45,8 +45,8 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
         (c.state === 'running' ||
           c.state === 'blocked' ||
           (c.state === 'waiting' &&
-            hasFreshKanbanObservation(session) &&
-            !session.kanban_unknown &&
+            ((hasFreshKanbanObservation(session) && !session.kanban_unknown) ||
+              (c.wait_kind === 'deploy' && timers.confirmedAt > 0)) &&
             c.since <= Date.now() / 1000))
     )
     .sort(
@@ -84,7 +84,7 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
   const label = cards
     .map(
       c =>
-        `${c.title} · ${c.state === 'waiting' ? t.sidebar.row.outcomeWaiting : t.sidebar.row.cardColours[c.state === 'running' ? 'blue' : 'red']} · ${text(c)}`
+        `${c.title} · ${c.state === 'waiting' ? (c.wait_kind === 'deploy' ? t.sidebar.row.cardColours.deploy : t.sidebar.row.outcomeWaiting) : t.sidebar.row.cardColours[c.state === 'running' ? 'blue' : 'red']} · ${text(c)}`
     )
     .join('\n')
 
@@ -114,8 +114,15 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
       >
         {visible.map(c => (
           <span
-            className={c.state === 'blocked' ? 'text-red-500' : 'text-sky-400'}
+            className={
+              c.state === 'blocked'
+                ? 'text-red-500'
+                : c.state === 'waiting' && c.wait_kind === 'deploy'
+                  ? 'text-[#a371f7]'
+                  : 'text-sky-400'
+            }
             data-card-timer={c.state}
+            data-wait-kind={c.state === 'waiting' ? c.wait_kind : undefined}
             key={c.id}
           >
             {text(c)}

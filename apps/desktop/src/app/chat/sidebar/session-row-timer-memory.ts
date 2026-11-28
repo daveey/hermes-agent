@@ -1,4 +1,5 @@
 import type { SessionInfo } from '@/hermes'
+import { hasFreshKanbanObservation } from '@/store/kanban-observation'
 
 type Cards = NonNullable<SessionInfo['kanban_timed_cards']>
 type ConfirmedTimers = { cards: Cards; more: number; confirmedAt: number }
@@ -14,7 +15,11 @@ export function rememberRowTimers(session: SessionInfo): void {
   }
 
   const id = key(session)
-  const cards = (session.kanban_timed_cards ?? []).filter(c => c.state === 'running' || c.state === 'blocked')
+
+  const cards = (session.kanban_timed_cards ?? []).filter(
+    c => c.state === 'running' || c.state === 'blocked' || (c.state === 'waiting' && c.wait_kind === 'deploy')
+  )
+
   retained.delete(id)
 
   if (!cards.length) {
@@ -46,7 +51,28 @@ export function rowTimers(session: SessionInfo): ConfirmedTimers {
   }
 
   if (session.kanban_timed_cards?.length) {
-    return { cards: session.kanban_timed_cards, more: session.kanban_timed_more ?? 0, confirmedAt: 0 }
+    const uncertain = session.kanban_unknown || !hasFreshKanbanObservation(session)
+
+    const unknownDeploy = Boolean(
+      session.kanban_external_unknown &&
+      session.kanban_timed_cards.some(c => c.state === 'waiting' && c.wait_kind === 'deploy')
+    )
+
+    const observed = (session.kanban_observed_at ?? 0) * 1000
+    const age = Date.now() - observed
+
+    const cards = session.kanban_timed_cards.filter(
+      c =>
+        !uncertain ||
+        c.state !== 'waiting' ||
+        (c.wait_kind === 'deploy' && age >= 0 && age < MAX_AGE_MS && observed > 0)
+    )
+
+    return {
+      cards,
+      more: session.kanban_timed_more ?? 0,
+      confirmedAt: (uncertain || unknownDeploy) && cards.some(c => c.state === 'waiting') ? observed : 0
+    }
   }
 
   const entry = retained.get(key(session))

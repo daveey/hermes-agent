@@ -2,6 +2,7 @@
  *  row's stored outcome (session-outcome contract). Part of `Translations['sidebar']['row']`. */
 export interface SessionRowStatusCopy {
   cardColours: {
+    deploy: string
     red: string
     pink: string
     orange: string

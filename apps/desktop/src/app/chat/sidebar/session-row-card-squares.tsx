@@ -14,6 +14,7 @@ import { sidebarCardWork } from '@/store/sidebar-card-work'
 
 import { CardCountsContext } from './card-counts-context'
 import { SessionRowCardTimers } from './session-row-card-timers'
+import { DEPLOY_COLOUR, deployCardCount } from './session-row-deploy'
 import { rowTimers } from './session-row-timer-memory'
 import { useWaitClock } from './use-wait-clock'
 
@@ -23,6 +24,7 @@ const COLOURS = {
   orange: 'bg-orange-500',
   green: 'bg-emerald-500',
   amber: 'bg-amber-500',
+  deploy: 'bg-[#a371f7]',
   blue: 'bg-sky-400 dark:bg-sky-500',
   grey: 'bg-zinc-400 dark:bg-zinc-500',
   violet: 'bg-violet-500',
@@ -47,6 +49,8 @@ export function sessionCardColours(
   const work = sidebarCardWork(session)
   const queued = Math.min(live, work.queued)
   const quiet = Math.min(Math.max(0, live - queued), work.quiet)
+  const parkedDeploy = Math.min(Math.max(0, parked - stalled), deployCardCount(session))
+  const liveDeploy = Math.min(live - queued - quiet, Math.max(0, deployCardCount(session) - parkedDeploy))
 
   const counts: Record<CardColour, number> = {
     red: (session.needs_you?.length ?? session.kanban_blocked ?? 0) + aged,
@@ -54,8 +58,9 @@ export function sessionCardColours(
     orange: stalled + quiet,
     green: queued,
     amber: session.kanban_attention ?? 0,
-    blue: live - queued - quiet,
-    grey: Math.max(0, parked - stalled) + executionUnknown + Number(Boolean(session.kanban_unknown)),
+    deploy: parkedDeploy + liveDeploy,
+    blue: live - queued - quiet - liveDeploy,
+    grey: Math.max(0, parked - stalled) - parkedDeploy + executionUnknown + Number(Boolean(session.kanban_unknown)),
     violet: session.kanban_unseen ?? 0,
     unknown: 0
   }
@@ -240,7 +245,15 @@ export function flatRowCardMarks(
 export function SessionRowEtaReadout({ etas }: { etas: WaitEta[] }) {
   const [fast, setFast] = useState(false)
   const now = useWaitClock(fast)
-  const readouts = etas.map(eta => waitReadout(eta, now)).filter((r): r is WaitReadout => r !== null)
+
+  const readouts = etas
+    .map(eta => {
+      const readout = waitReadout(eta, now)
+
+      return readout && { ...readout, deploy: eta.wait_kind === 'deploy' }
+    })
+    .filter(r => r !== null)
+
   const [lead] = [...readouts].sort(byLeft)
 
   const nearMinute = lead !== undefined && Math.min(lead.waitedS, Math.abs(lead.leftS ?? Infinity)) < 60
@@ -271,9 +284,9 @@ export function SessionRowEtaReadout({ etas }: { etas: WaitEta[] }) {
           / {lead.expected ?? '?'}
         </span>
         <span
-          className={lead.unknown ? undefined : cn('font-medium', !lead.over && 'text-sky-400')}
+          className={lead.unknown ? undefined : cn('font-medium', !lead.over && !lead.deploy && 'text-sky-400')}
           data-eta="left"
-          style={lead.over ? { color: ORANGE_OVER } : undefined}
+          style={lead.over ? { color: ORANGE_OVER } : lead.deploy ? { color: DEPLOY_COLOUR } : undefined}
         >
           {lead.left}
         </span>

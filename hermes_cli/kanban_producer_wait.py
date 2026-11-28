@@ -70,5 +70,8 @@ def stamp(conn, rows):
         overlay(conn, info, parked)
         for row in rows:
             row['timer_producer_wait'] = info.get(row['id'], {}).get('producer_wait')
+            wait = info.get(row['id'], {})
+            if wait.get('wait_kind') in ('ci', 'clock', 'deploy'):
+                row['timer_external_wait'] = wait
     except (sqlite3.Error, ValueError, TypeError):
         return

@@ -18,7 +18,13 @@ export interface SessionBackgroundProcess {
 
 export interface SessionActivityFields {
   /** Per-card display clocks: cap six, running first, oldest first within each state. */
-  kanban_timed_cards?: { id: string; title: string; state: 'running' | 'blocked' | 'waiting'; since: number }[]
+  kanban_timed_cards?: {
+    id: string
+    title: string
+    state: 'running' | 'blocked' | 'waiting'
+    since: number
+    wait_kind?: 'ci' | 'clock' | 'deploy'
+  }[]
   /** Timed cards beyond the wire cap; absent when there are no clocks. */
   kanban_timed_more?: number
   /** [daveey] Kanban tasks this conversation created (`kanban_create`) that

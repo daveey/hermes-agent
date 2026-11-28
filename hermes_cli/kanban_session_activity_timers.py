@@ -51,12 +51,18 @@ def card_timer(card):
     elif status == 'scheduled' and isinstance(card.get('timer_producer_wait'), dict):
         state = 'waiting'
         since = _epoch(card['timer_producer_wait'].get('since'))
+    elif status == 'scheduled' and isinstance(card.get('timer_external_wait'), dict):
+        state = 'waiting'
+        since = _epoch(card['timer_external_wait'].get('waiting_since'))
     else:
         return None
     if since is None:
         return None
-    return {'id': str(card.get('key') or card['id']), 'title': str(card.get('title') or ''),
-            'state': state, 'since': since}
+    result = {'id': str(card.get('key') or card['id']), 'title': str(card.get('title') or ''),
+              'state': state, 'since': since}
+    if state == 'waiting' and card.get('timer_external_wait'):
+        result['wait_kind'] = card['timer_external_wait']['wait_kind']
+    return result
 
 
 def marker(card):

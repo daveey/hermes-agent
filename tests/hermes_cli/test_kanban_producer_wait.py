@@ -61,6 +61,22 @@ def test_selected_board_identity_reaches_status_and_timer(
             assert (timers.card_timer(raw) is not None) is expected
 
 
+@pytest.mark.parametrize('kind', ['ci', 'deploy', 'clock'])
+def test_external_park_category_reaches_local_and_replica_timers(board, kind):
+    from hermes_cli.kanban_producer_wait import stamp
+    board.execute('UPDATE tasks SET awaiting=? WHERE id=?',
+                  (json.dumps({'kind': kind, 'ref': 'producer'}), 'owner'))
+    raw = timers.local(board, {('ordinary', 'owner')})['owner']
+    assert timers.card_timer(raw) == {
+        'id': 'owner', 'title': 'Waiting on review', 'state': 'waiting', 'since': 100, 'wait_kind': kind}
+    replica = {'id': 'owner', 'key': 'hub/default/default/owner', 'title': 'Remote', 'status': 'scheduled'}
+    stamp(board, [replica])
+    result = {}
+    timers.stamp(result, timers.marker(replica))
+    assert result['kanban_timed_cards'] == [{
+        'id': 'hub/default/default/owner', 'title': 'Remote', 'state': 'waiting', 'since': 100, 'wait_kind': kind}]
+
+
 def test_explicit_board_without_selected_identity_is_unknown(board):
     board.execute('UPDATE tasks SET awaiting=? WHERE id=?',
                   (json.dumps({'kind': 'card', 'ref': 'review', 'board': 'default'}), 'owner'))
