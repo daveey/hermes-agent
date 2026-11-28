@@ -755,11 +755,11 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
             return []
     texts = _kb_poll_board_now(_kb, _kbc, _kbn, slug, session_key, claims)
     from tui_gateway.notification_idle import board_quiet
-    if reclaimed and sig is not None and board_quiet(db_path, session_key):
+    if texts is not None and reclaimed and sig is not None and board_quiet(db_path, session_key):
         seen[db_path] = (session_key, sig)
     elif seen is not None:
         seen.pop(db_path, None)
-    return texts
+    return texts or []
 
 
 def _kb_stray_delegate_keys(session: dict, session_key: str) -> tuple:
@@ -798,12 +798,13 @@ def _kb_reclaim_stray_subs(_kbn, slug: str, session_key: str, stray: tuple) -> b
         return False
 
 
-def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: list | None) -> list:
+def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: list | None) -> list | None:
+    """Return notices after a successful poll, or None when no poll could complete."""
     from tui_gateway.notification_idle import board_quiet
     with contextlib.suppress(Exception):
         path = _kb.kanban_db_path(board=slug)
         if not path.exists():
-            return []  # Polling must not recreate a deleted or not-yet-created board.
+            return None  # No completed poll; do not recreate or cache an absent board.
         # A global event hint wakes quiet historical subscribers too. Prove
         # absence before acquiring a writable/migrating handle, not just after.
         # In-flight claims and unknown reads still enter clock/liveness recovery.
@@ -815,7 +816,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
     try:
         conn = _kbc.connect(board=slug)
     except Exception:
-        return []
+        return None
     texts: list = []
     from tui_gateway.kanban_leg_custody import chat_lineage, gateway_claims
     chats = chat_lineage(session_key, _session_lineage)  # its local rows may sit on the lineage root
@@ -826,7 +827,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key, pending_only=True,
                                          pending_kinds={"tui": _KANBAN_NOTIFY_KINDS})
         except Exception:
-            return []
+            return None
         if subs:
             # A claim whose holder process died (serve replaced mid-turn) goes back to the cursor. [daveey]
             with contextlib.suppress(Exception):

@@ -140,3 +140,35 @@ def test_event_committed_after_empty_probe_is_delivered_next_tick(board, monkeyp
     seen = {}
     assert server._kb_poll_board(kb, kb.DEFAULT_BOARD, CHAT, [], seen) == []
     assert server._kb_poll_board(kb, kb.DEFAULT_BOARD, CHAT, [], seen)
+
+
+@pytest.mark.parametrize('failure', ['connect', 'subscriptions', 'missing'])
+def test_failed_poll_never_seeds_quiet_health_cache(board, monkeypatch, failure):
+    path, _own, _other = board
+    polled = []
+    attempts = []
+    seen = {}
+    monkeypatch.setattr(health, 'polled', lambda *args: polled.append(args))
+    monkeypatch.setattr(server, '_kb_board_file_sig', lambda *args: 'stable')
+    # A later quiet observation cannot retroactively certify a failed poll.
+    quiet = [False]
+    monkeypatch.setattr(idle, 'board_quiet', lambda *args: quiet[0])
+
+    def unavailable(*args, **kwargs):
+        attempts.append(1)
+        quiet[0] = True
+        raise OSError('unreadable board')
+
+    if failure == 'missing':
+        monkeypatch.setattr(kb, 'kanban_db_path', lambda **kwargs: path / 'missing.db')
+        quiet[0] = True
+    else:
+        monkeypatch.setattr(kbc if failure == 'connect' else kbn,
+                            'connect' if failure == 'connect' else 'list_notify_subs', unavailable)
+    for _ in range(2):
+        assert server._kb_poll_board(kb, kb.DEFAULT_BOARD, CHAT, [], seen) == []
+        assert seen == {}, 'failed polls must not authorize the unchanged-board shortcut'
+        assert polled == [], 'failed polls must not certify consumer health'
+        quiet[0] = failure == 'missing'
+    if failure != 'missing':
+        assert attempts == [1, 1], 'an unchanged signature must still retry the failed read'
