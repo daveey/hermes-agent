@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from hermes_cli import always_on_rollover as ro
+from hermes_cli import always_on_sessions as aos
 from tests.hermes_cli import test_always_on_rollover as helpers
 
 home = helpers.home
@@ -363,6 +365,81 @@ def test_successor_unit_that_died_is_not_waited_for(home):
     assert roller.roll("died") is False
     assert roller.clock() - started < 1.0
     assert ro.read_active()["port"] == 9148
+
+
+@pytest.mark.parametrize("probe", ["/api/host/identity", "/api/ssh/ownership"])
+@pytest.mark.parametrize("answer", [(401, None), (403, None), (404, None), (200, {"ok": False})])
+def test_definitive_incarnation_refusal_fails_promptly(home, capsys, probe, answer):
+    # A refused credential or missing route is an answer, not "not yet": it must not spend the
+    # bounded boot budget waiting (a >=400 pending rule would retry it until the deadline).
+    roller, _host = native_roller(home)
+    original = roller.get
+    calls = []
+
+    def get(port, path, timeout):
+        if path == probe:
+            calls.append(timeout)
+            return answer[0], timeout, answer[1]
+        return original(port, path, timeout)
+
+    roller.get = get
+    started = roller.clock()
+    assert roller.roll("refused") is False
+    assert roller.clock() - started < 1.0
+    assert calls == [pytest.approx(.25)]  # asked once, with the fast probe
+    assert ro.read_active()["port"] == 9148
+    assert "incarnation pending" not in capsys.readouterr().err
+
+
+def test_identity_slower_than_fast_probe_gets_retry_allowance(home):
+    # A successor whose identity answer takes longer than one 0.25 s probe (busy loop right after
+    # the listener handoff) must be asked again with the full RETRY_S allowance, not 0.25 s forever.
+    roller, _host = native_roller(home)
+    original = roller.get
+    timeouts = []
+
+    def get(port, path, timeout):
+        if path == "/api/host/identity":
+            timeouts.append(timeout)
+            if timeout < .6:
+                roller.sleep(timeout)
+                return None, timeout, None
+        return original(port, path, timeout)
+
+    roller.get = get
+    roller.replay_paths = lambda pid: []
+    assert roller.roll("slow identity") is True
+    assert ro.read_active()["port"] == 9149
+    assert timeouts[0] == pytest.approx(.25)
+    assert timeouts[-1] >= .6  # escalated past the fast probe (capped only by the roll deadline)
+    assert max(timeouts) <= aos.RETRY_S
+
+
+def test_unknown_unit_state_while_pid_missing_stays_pending(home, capsys):
+    # systemctl show and is-active both timing out under boot load (state None) is not evidence the
+    # unit is gone: keep asking until the deadline instead of abandoning.
+    roller, _host = native_roller(home)
+    real_pid, real_state = roller.unit_pid, roller._unit_state
+    misses = {"pid": 1, "state": 1}
+
+    def unit_pid(port, timeout=15):
+        if misses["pid"] > 0 and sys._getframe(1).f_code.co_name == "_incarnation_once":
+            misses["pid"] -= 1
+            return 0
+        return real_pid(port, timeout=timeout)
+
+    def unit_state(port, timeout=15):
+        if misses["state"] > 0 and sys._getframe(1).f_code.co_name == "_incarnation_once":
+            misses["state"] -= 1
+            return None
+        return real_state(port, timeout)
+
+    roller.unit_pid, roller._unit_state = unit_pid, unit_state
+    roller.replay_paths = lambda pid: []
+    assert roller.roll("systemctl timeouts") is True
+    assert ro.read_active()["port"] == 9149
+    assert misses == {"pid": 0, "state": 0}
+    assert "incarnation pending (unit pid, state None)" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("selector", [LIST, SIDEBAR])
