@@ -108,6 +108,61 @@ def test_reserved_revision_sweep_closes_ask_without_releasing(kanban_home, own_g
             offers.offer_release(conn, tid)
 
 
+def test_explicit_offer_commits_pending_cleanup(kanban_home, own_gateway, board_allowance, monkeypatch):
+    with kbc.connect_closing() as conn:
+        tid, _, _ = setup(conn, kanban_home, monkeypatch, board_allowance)
+        with pytest.raises(offers.OfferRefused, match='reserved'):
+            offers.offer_release(conn, tid)
+        assert answers.snapshot(conn, tid) is None
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='release_application_pending'",
+                            (tid,)).fetchone()[0] == 1
+
+
+def test_material_scope_change_preserved(kanban_home, own_gateway, board_allowance, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    with kbc.connect_closing() as conn:
+        tid, ask, _ = setup(conn, kanban_home, monkeypatch, board_allowance)
+        with kb.write_txn(conn):
+            conn.execute('UPDATE tasks SET body=? WHERE id=?', ('Different work requiring a separate decision', tid))
+            row = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+            replacement = offers.request(conn, row, 'allowance_exhausted', gateway='own-gw')
+            assert replacement['action'] == ask['action']
+            assert replacement['scope'] != ask['scope']
+            conn.execute('UPDATE tasks SET human_request=? WHERE id=?', (_dump(replacement), tid))
+            kb._append_event(conn, tid, stranded.EVENT, stranded._record(replacement))
+        park._sweep(conn, now=park._later(3), cfg={})
+        assert offer_tests._ask(conn, tid) == replacement
+
+
+@pytest.mark.parametrize('filed', [True, False])
+def test_regenerated_context_offer_closeout(kanban_home, own_gateway, board_allowance, monkeypatch, filed):
+    from hermes_cli import kanban_db as kb
+    with kbc.connect_closing() as conn:
+        tid, ask, path = setup(conn, kanban_home, monkeypatch, board_allowance)
+        original = path.read_bytes()
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, 'blocked', {
+                'reason': 'Superseded ask: recorded approval has both caps; application unresolved',
+                'metadata_only': True})
+            row = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+            replacement = offers.request(conn, row, 'allowance_exhausted', gateway='own-gw')
+            assert replacement != ask
+            assert replacement['action'] == ask['action']
+            conn.execute('UPDATE tasks SET human_request=? WHERE id=?', (_dump(replacement), tid))
+            if filed:
+                kb._append_event(conn, tid, stranded.EVENT, stranded._record(replacement))
+        before = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+        park._sweep(conn, now=park._later(3), cfg={})
+        after = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+        assert after['human_request'] == (None if filed else before['human_request'])
+        assert {k: v for k, v in before.items() if k != 'human_request'} == {
+            k: v for k, v in after.items() if k != 'human_request'}
+        if filed:
+            assert answers.snapshot(conn, tid) is None
+        assert path.read_bytes() == original
+        assert not board_allowance['renewed'] and offer_tests._released(conn, tid) == 0
+
+
 @pytest.mark.parametrize('mutation', [
     "UPDATE kanban_projections SET snapshot=json_set(snapshot,'$.ask.release_target.episode','other-stop')",
     "UPDATE operations SET namespace='foreign'",
@@ -219,7 +274,7 @@ def test_direct_filing_paths_recheck_reservation(kanban_home, own_gateway, board
         tid, _, _ = setup(conn, kanban_home, monkeypatch, board_allowance)
         row = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
         entry = stranded.park_entry(conn, tid)
-        kwargs = dict(now=park._later(3), age=10800)
+        kwargs: dict = dict(now=park._later(3), age=10800)
         if entrypoint == 'escalate':
             kwargs.update(defer=0, desk=None, contained=False)
         method = {'escalate': stranded._escalate, 'refile': stranded._refile}[entrypoint]

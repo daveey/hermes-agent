@@ -136,7 +136,21 @@ def reconcile(conn, task, *, for_filing=False):
         if proof is None or not _filed(conn, task, proof['projected_ask']):
             return False
         ask = json.loads(row['human_request'] or 'null')
-        exact = ask == proof['projected_ask']
+        projected = proof['projected_ask']
+        # A later HOME producer can refresh contextual scope/evidence without
+        # changing the decision. Require its own complete filing digest too;
+        # a matching stamp on an edited column alone has no custody.
+        # Only the producer's single stop-reason line may change in scope.
+        # Body/summary, cost and options remain decision content, not context.
+        def decision(value):
+            result = {k: v for k, v in value.items() if k != 'evidence'}
+            lines = str(value.get('scope', '')).splitlines()
+            if sum(line.startswith('Why it stopped: ') for line in lines) == 1:
+                result['scope'] = '\n'.join('Why it stopped: ' if line.startswith('Why it stopped: ') else line
+                                            for line in lines)
+            return result
+        exact = ask == projected or (isinstance(ask, dict) and decision(ask) == decision(projected)
+                                     and _filed(conn, task, ask))
         if exact:
             store_request(conn, task, None)
         record = {k: v for k, v in proof.items() if k != 'projected_ask'}

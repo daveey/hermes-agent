@@ -180,9 +180,17 @@ def _bind_chats(conn: sqlite3.Connection, task_id: str, chats, gateway: str, now
             stranded._link_desk(conn, task_id, chat, now)
 
 
-def file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(), gateway: str,
-         episode_entry: Optional[dict] = None, sweep: bool = False, now: Optional[int] = None,
-         note: Optional[str] = None) -> dict:
+def file(conn: sqlite3.Connection, task_id: str, **kwargs) -> dict:
+    """Commit reserved-approval cleanup before reporting a filing refusal."""
+    result = _file(conn, task_id, **kwargs)
+    if isinstance(result, OfferRefused):
+        raise result
+    return result
+
+
+def _file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(), gateway: str,
+          episode_entry: Optional[dict] = None, sweep: bool = False, now: Optional[int] = None,
+          note: Optional[str] = None) -> dict | OfferRefused:
     """File (or confirm) the stamped human-only offer on ``task_id`` and bind ``chats``. Releases nothing.
 
     ``sweep``: the stranded-park sweep's once-per-park-episode filing, rechecked under the write lock
@@ -197,7 +205,7 @@ def file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(
     with kb.write_txn(conn):
         refused = _refusal(conn, task_id)
         if refused is not None:
-            raise refused
+            return refused  # let the transaction commit suppression before the public refusal
         row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
         if row["status"] not in stranded.PARKED:
             raise OfferRefused("not_held", f"{task_id} is {row['status']}, not parked on a stop")
