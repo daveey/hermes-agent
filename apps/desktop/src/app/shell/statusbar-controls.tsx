@@ -84,9 +84,6 @@ export interface StatusbarItem {
   toggleLabel?: string
   /** Reserved for the Command Center recovery entry. */
   lockedVisible?: boolean
-  /** Actions shown at the top of the bar's right-click menu when the
-   *  right-click lands on this item (e.g. the backend pill's "Force update"). */
-  contextMenuItems?: readonly StatusbarMenuItem[]
 }
 
 export interface StatusbarSelectModifiers {
@@ -114,21 +111,11 @@ export function StatusbarControls({
   className,
   leftItems = [],
   items = [],
-  onContextMenuCapture,
+
   ...props
 }: StatusbarControlsProps) {
   const navigate = useNavigate()
   const hiddenIds = useStore($statusbarHiddenIds)
-  // The item a right-click landed on: its own actions head the bar's one context menu.
-  const [contextItemId, setContextItemId] = useState<null | string>(null)
-
-  const contextActions = useMemo(
-    () =>
-      [...leftItems, ...items]
-        .find(item => item.id === contextItemId)
-        ?.contextMenuItems?.filter(action => !action.hidden) ?? [],
-    [contextItemId, items, leftItems]
-  )
 
   const visible = (item: StatusbarItem) => !item.hidden && (item.lockedVisible || !hiddenIds.includes(item.id))
 
@@ -141,11 +128,7 @@ export function StatusbarControls({
             className
           )}
           data-slot="statusbar"
-          onContextMenuCapture={event => {
-            const target = event.target instanceof Element ? event.target.closest('[data-statusbar-item]') : null
-            setContextItemId(target?.getAttribute('data-statusbar-item') ?? null)
-            onContextMenuCapture?.(event)
-          }}
+
           {...props}
         >
           {/* `overflow-x-clip` (not `overflow-x-auto`) so a wide status item — for
@@ -164,7 +147,7 @@ export function StatusbarControls({
           </div>
         </footer>
       </ContextMenuTrigger>
-      <StatusbarVisibilityMenu actions={contextActions} hiddenIds={hiddenIds} items={items} leftItems={leftItems} />
+      <StatusbarVisibilityMenu hiddenIds={hiddenIds} items={items} leftItems={leftItems} />
     </ContextMenu>
   )
 }
@@ -174,12 +157,10 @@ export function StatusbarControls({
  *  menu reads like the surface it edits. Hiding the whole bar lives at the
  *  bottom — VS Code puts it on the same context menu. */
 function StatusbarVisibilityMenu({
-  actions,
   hiddenIds,
   items,
   leftItems
 }: {
-  actions: readonly StatusbarMenuItem[]
   hiddenIds: readonly string[]
   items: readonly StatusbarItem[]
   leftItems: readonly StatusbarItem[]
@@ -206,23 +187,6 @@ function StatusbarVisibilityMenu({
 
   return (
     <ContextMenuContent className="w-52">
-      {actions.length > 0 && (
-        <>
-          {actions.map(action => (
-            <ContextMenuItem
-              className={action.className}
-              disabled={action.disabled}
-              key={action.id}
-              onSelect={() => action.onSelect?.()}
-              title={action.title}
-            >
-              {action.icon}
-              <span className="truncate">{action.label}</span>
-            </ContextMenuItem>
-          ))}
-          <ContextMenuSeparator />
-        </>
-      )}
       {toggles.length > 0 && (
         <>
           <ContextMenuLabel>{copy.customizeTitle}</ContextMenuLabel>

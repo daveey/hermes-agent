@@ -9,7 +9,6 @@ import type { CommandCenterSection } from '@/app/command-center'
 import { toggleTerminalPane } from '@/app/right-sidebar/terminal/reveal-focus'
 import { useApprovalModeStatusbarItem } from '@/app/shell/approval-mode-menu'
 import { ContextMeterDetail, ContextUsagePanel } from '@/app/shell/context-usage-panel'
-import { forceBackendUpdate } from '@/app/shell/force-backend-update'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { useChangeWorkspaceItem } from '@/app/shell/hooks/use-change-workspace'
 import { useCompactConversation } from '@/app/shell/hooks/use-compact-conversation'
@@ -21,33 +20,17 @@ import { Badge } from '@/components/ui/badge'
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
-import { type BackgroundUpdateView, describeBackgroundUpdate } from '@/lib/background-update'
 import { displayPath, pathLeaf } from '@/lib/display-path'
 import { statusBarGatewayHealth } from '@/lib/gateway-health-pill'
-import {
-  Activity,
-  AlertCircle,
-  Clock,
-  Command,
-  FolderOpen,
-  Globe,
-  Hash,
-  Layers3,
-  Loader2,
-  Terminal,
-  Zap
-} from '@/lib/icons'
+import { Activity, AlertCircle, Clock, Command, FolderOpen, Globe, Layers3, Loader2, Terminal, Zap } from '@/lib/icons'
 import { type RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { resolveSessionTimerSince } from '@/lib/session-timer-since'
 import { cacheHitLabel, contextBarLabel, LiveDuration, tokensPerSecondLabel, usageContextLabel } from '@/lib/statusbar'
-import { rollbackSentence } from '@/lib/update-copy'
 import { formatPercentUsed, formatResetsIn } from '@/lib/usage-percent'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
-import { resolveVersionStatus } from '@/lib/version-status'
 import { requestGatewayForActiveRoute } from '@/store/active-route-request'
 import type { ApprovalModeRequester } from '@/store/approval-mode'
-import { $cloudOwnsUpdates } from '@/store/cloud-updates'
 import { copyFilePath, revealFile, shouldOfferLocalReveal } from '@/store/file-actions'
 import { $freeTierSignInOpen, $freeTierStatus, FREE_TIER_MODEL } from '@/store/free-tier'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
@@ -74,16 +57,6 @@ import { $focusedRuntimeId, $focusedSessionState, $sessionTiles, isSessionRemote
 import { $statusbarHiddenIds } from '@/store/statusbar-prefs'
 import { $subagentsBySession, activeSubagentCount, failedSubagentCount } from '@/store/subagents'
 import { $gatewayRestarting } from '@/store/system-actions'
-import {
-  $backendUpdateApply,
-  $backendUpdateProgress,
-  $backendUpdateStatus,
-  $clientUpdateProgress,
-  $desktopVersion,
-  $updateApply,
-  $updateStatus,
-  openUpdateOverlayFor
-} from '@/store/updates'
 import type { FreeTierStatus, StatusResponse, UsageStats } from '@/types/hermes'
 
 import { CRON_ROUTE, SETTINGS_ROUTE, WEBHOOKS_ROUTE } from '../../routes'
@@ -106,67 +79,6 @@ interface StatusbarItemsOptions {
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
   statusSnapshot: StatusResponse | null
   toggleCommandCenter: () => void
-}
-
-/** [daveey] The thin bar under a version pill while its host updates itself: filling toward the drainer's
- *  target, or a sweeping sliver when the end is not measurable (installing, or past the target). */
-function UpdateProgressBar({ fraction }: { fraction: null | number }) {
-  return (
-    <span
-      aria-hidden
-      className="pointer-events-none absolute inset-x-1.5 bottom-0.5 h-0.5 overflow-hidden rounded-full bg-primary/20"
-      data-slot="version-update-bar"
-    >
-      {fraction === null ? (
-        <span className="update-bar-sweep block h-full w-1/3 rounded-full bg-primary" />
-      ) : (
-        <span
-          className="block h-full rounded-full bg-primary transition-[width] duration-700"
-          style={{ width: `${Math.round(fraction * 100)}%` }}
-        />
-      )}
-    </span>
-  )
-}
-
-/** The statusbar row for one update target: the client, or the connected backend. */
-function versionItem(
-  target: 'backend' | 'client',
-  status: ReturnType<typeof resolveVersionStatus>,
-  applying: boolean,
-  toggleLabel: string,
-  hidden = false,
-  background: BackgroundUpdateView | null = null,
-  contextMenuItems?: StatusbarItem['contextMenuItems']
-): StatusbarItem {
-  // An apply Desktop started owns the pill; a host's own background update shows only otherwise.
-  const bg = applying ? null : background
-  const busy = applying || Boolean(bg?.busy)
-  const text = bg ? `${status.label} · ${bg.suffix}` : status.label
-
-  const spinner = busy ? <Loader2 className="size-3 animate-spin" /> : <Hash className="size-3" />
-
-  return {
-    // `relative` anchors the bar to the pill's button; it rides the icon slot because the label sits in a
-    // truncating (overflow-hidden) span that would clip anything drawn under the text.
-    className: cn((status.hasUpdate || busy) && 'text-primary hover:text-primary', bg?.bar && 'relative'),
-    contextMenuItems,
-    hidden: status.unknown || hidden,
-    icon: bg?.bar ? (
-      <>
-        {spinner}
-        <UpdateProgressBar fraction={bg.bar.fraction} />
-      </>
-    ) : (
-      spinner
-    ),
-    id: `version-${target}`,
-    label: text,
-    onSelect: () => openUpdateOverlayFor(target),
-    title: bg ? [bg.tooltip, status.tooltip].filter(Boolean).join('\n\n') : status.tooltip,
-    toggleLabel,
-    variant: 'action'
-  }
 }
 
 /** The free model a trial runs on, named on the Sign in chip; null for a guest without the trial. */
@@ -243,15 +155,7 @@ export function useStatusbarItems({
   // and comes back when the setup ends.
   const freeTierSignInOpen = useStore($freeTierSignInOpen)
   const trialModel = freeTierTrialModel(freeTier)
-  const updateStatus = useStore($updateStatus)
-  const updateApply = useStore($updateApply)
-  const backendUpdateStatus = useStore($backendUpdateStatus)
-  const backendUpdateApply = useStore($backendUpdateApply)
-  const clientUpdateProgress = useStore($clientUpdateProgress)
-  const backendUpdateProgress = useStore($backendUpdateProgress)
-  const desktopVersion = useStore($desktopVersion)
   const connection = useStore($connection)
-  const cloudOwnsUpdates = useStore($cloudOwnsUpdates)
 
   // The FOCUSED session (interacted tile, else the primary — the same
   // derivation the titlebar title follows): every session-scoped readout
@@ -478,89 +382,6 @@ export function useStatusbarItems({
     : gatewayDegraded
       ? 'text-amber-600 hover:text-amber-600'
       : 'text-destructive hover:text-destructive'
-
-  const rollbackBody = t.settings.about.channel.rollbackBody
-
-  const clientVersionItem = useMemo<StatusbarItem>(() => {
-    const applying = updateApply.applying || updateApply.stage === 'restart'
-
-    const status = resolveVersionStatus({
-      applying,
-      applyMessage: updateApply.message,
-      behind: updateStatus?.behind ?? 0,
-      branch: updateStatus?.branch,
-      channel: updateStatus?.channel === 'stable' ? 'stable' : 'main',
-      copy,
-      latestTag: updateStatus?.latestTag,
-      remote: connection?.mode === 'remote',
-      restarting: updateApply.stage === 'restart',
-      rollback: rollbackSentence(updateStatus, rollbackBody),
-      sha: updateStatus?.currentSha?.slice(0, 7) ?? null,
-      target: 'client',
-      updateAvailable: updateStatus?.updateAvailable,
-      version: desktopVersion?.appVersion
-    })
-
-    const background = describeBackgroundUpdate(clientUpdateProgress, Date.now(), copy.backgroundUpdate)
-
-    // A Webapp served by Hermes Cloud: Cloud updates it, so there is no version/update pill to open.
-    return versionItem('client', status, applying, copy.toggleVersion, cloudOwnsUpdates.client, background)
-  }, [
-    clientUpdateProgress,
-    cloudOwnsUpdates.client,
-    desktopVersion?.appVersion,
-    connection?.mode,
-    copy,
-    updateApply.applying,
-    updateApply.message,
-    updateApply.stage,
-    updateStatus,
-    rollbackBody
-  ])
-
-  const backendVersionItem = useMemo<StatusbarItem | null>(() => {
-    // Hermes Cloud updates its agents itself: no backend pill, as outside remote mode.
-    if (connection?.mode !== 'remote' || cloudOwnsUpdates.backend) {
-      return null
-    }
-
-    const applying = backendUpdateApply.applying || backendUpdateApply.stage === 'restart'
-
-    const status = resolveVersionStatus({
-      applying,
-      applyMessage: backendUpdateApply.message,
-      behind: backendUpdateStatus?.behind ?? 0,
-      copy,
-      remote: true,
-      restarting: backendUpdateApply.stage === 'restart',
-      rollback: rollbackSentence(backendUpdateStatus, rollbackBody),
-      target: 'backend',
-      updateAvailable: backendUpdateStatus?.updateAvailable,
-      version: statusSnapshot?.version
-    })
-
-    const background = describeBackgroundUpdate(backendUpdateProgress, Date.now(), copy.backgroundUpdate)
-
-    // [daveey] Right-click: push the host's pending core update through now (hermes-sync), stopping running turns.
-    const forceUpdate = {
-      id: 'force-update',
-      label: copy.forceUpdate.menuItem,
-      onSelect: () => void forceBackendUpdate(copy.forceUpdate)
-    }
-
-    return versionItem('backend', status, applying, copy.toggleBackendVersion, false, background, [forceUpdate])
-  }, [
-    backendUpdateProgress,
-    cloudOwnsUpdates.backend,
-    connection?.mode,
-    statusSnapshot?.version,
-    backendUpdateStatus,
-    rollbackBody,
-    backendUpdateApply.applying,
-    backendUpdateApply.message,
-    backendUpdateApply.stage,
-    copy
-  ])
 
   const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
@@ -852,17 +673,15 @@ export function useStatusbarItems({
         title: terminalShowing ? copy.hideTerminal : copy.showTerminal,
         toggleLabel: copy.toggleTerminal,
         variant: 'action'
-      },
-      clientVersionItem,
-      ...(backendVersionItem ? [backendVersionItem] : [])
+      }
     ],
     [
       approvalModeItem,
-      backendVersionItem,
+
       busy,
       cacheHit,
       chatOpen,
-      clientVersionItem,
+
       compactConversation,
       contextBar,
       contextBreakdown,

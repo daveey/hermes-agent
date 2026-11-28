@@ -1,7 +1,6 @@
 import { act, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import type { WritableAtom } from 'nanostores'
 import { isValidElement, type ReactNode } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -27,12 +26,7 @@ import {
 } from '@/store/session'
 import { $focusedTreePaneId as $focusedTreePaneIdMock } from '@/store/session-focus'
 import { $sessionStates, $sessionTiles } from '@/store/session-states'
-import {
-  $statusbarHiddenIds,
-  $statusbarVisible,
-  resetStatusbarLayout,
-  setStatusbarItemVisible
-} from '@/store/statusbar-prefs'
+import { $statusbarVisible, setStatusbarItemVisible } from '@/store/statusbar-prefs'
 import { $backendUpdateProgress, $clientUpdateProgress, $desktopVersion, $updateStatus } from '@/store/updates'
 import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 import type { ContextBreakdown, FreeTierStatus, UsageStats } from '@/types/hermes'
@@ -143,163 +137,24 @@ afterEach(() => {
   $backendUpdateProgress.set(null)
 })
 
-describe('statusbar update channel vocabulary', () => {
-  it('names a stable release update without presenting its commit distance', () => {
-    act(() => {
-      $desktopVersion.set({
-        appVersion: '0.21.6',
-        electronVersion: '37',
-        hermesRoot: '/h',
-        nodeVersion: '22',
-        platform: 'linux'
-      })
-      $updateStatus.set({
-        behind: 4,
-        channel: 'stable',
-        latestTag: 'v0.21.7',
-        supported: true,
-        updateAvailable: true
-      })
-    })
-
-    const version = renderStatusbarItems().statusbarItems.find(item => item.id === 'version-client')
-
-    expect(version?.label).toBe('v0.21.6 (update)')
-    expect(version?.title).toContain('v0.21.7 is available')
-  })
-
-  it('names a stable release older than the checkout as a rollback', () => {
-    act(() => {
-      $desktopVersion.set({
-        appVersion: '0.21.7',
-        electronVersion: '37',
-        hermesRoot: '/h',
-        nodeVersion: '22',
-        platform: 'linux'
-      })
-      $updateStatus.set({
-        behind: -1,
-        channel: 'stable',
-        rollback: true,
-        sourceVersion: '0.21.7',
-        supported: true,
-        updateAvailable: true
-      })
-    })
-
-    const version = renderStatusbarItems().statusbarItems.find(item => item.id === 'version-client')
-
-    expect(version?.title).toContain(en.settings.about.channel.rollbackBody('v0.21.7'))
-    expect(version?.title).not.toContain(en.shell.statusbar.update)
-  })
-})
-
-describe('statusbar Force update (hermes-sync)', () => {
-  it('offers Force update on the backend pill context menu and not on the client pill', () => {
-    act(() => {
-      $connection.set({ mode: 'remote' } as never)
-      $desktopVersion.set({
-        appVersion: '0.23.1',
-        electronVersion: '37',
-        hermesRoot: '/h',
-        nodeVersion: '22',
-        platform: 'darwin'
-      })
-      $updateStatus.set({ behind: 0, supported: true })
-    })
-
-    const items = renderStatusbarItems().statusbarItems
-    const backend = items.find(item => item.id === 'version-backend')
-    const client = items.find(item => item.id === 'version-client')
-
-    expect(backend?.contextMenuItems?.map(action => action.label)).toEqual([en.shell.statusbar.forceUpdate.menuItem])
-    expect(client).toBeDefined()
-    expect(client?.contextMenuItems ?? []).toEqual([])
-  })
-})
-
-describe('statusbar background core update (hermes-sync)', () => {
-  const desktop = {
-    appVersion: '0.23.1',
-    electronVersion: '37',
-    hermesRoot: '/h',
-    nodeVersion: '22',
-    platform: 'darwin'
-  }
-
-  const markup = (node: ReactNode) => renderToStaticMarkup(<>{node}</>)
-
-  it('spins the client pill, names the update and draws a bar filling toward the drainer cap', () => {
-    act(() => {
-      $desktopVersion.set(desktop)
-      $updateStatus.set({ behind: 0, supported: true })
+describe('version and update controls live in the Hub, not the footer', () => {
+  it.each(['local', 'remote'])(
+    'contributes neither version pill for %s connections, including pending updates',
+    mode => {
+      $connection.set({ mode } as never)
+      $updateStatus.set({ behind: 4, supported: true, updateAvailable: true })
       $clientUpdateProgress.set({
-        stateElapsedS: 30,
-        state: 'draining',
-        elapsedS: 30,
-        capS: 60,
-        waitingOn: ['default:s1'],
-        fetchedAt: Date.now()
-      })
-    })
-
-    const version = renderStatusbarItems().statusbarItems.find(item => item.id === 'version-client')
-    const icon = markup(version?.icon)
-
-    // The bar rides the icon slot, outside the label's truncating (overflow-hidden) span, anchored to the button.
-    expect(version?.label).toBe('v0.23.1 · updating')
-    expect(icon).toContain('animate-spin')
-    expect(icon).toContain('data-slot="version-update-bar"')
-    expect(icon).toMatch(/width:\s*50%/)
-    expect(version?.className).toContain('text-primary')
-    expect(version?.className).toContain('relative')
-    expect(version?.title).toContain(en.shell.statusbar.backgroundUpdate.waitingOn('default:s1'))
-  })
-
-  it('shows the remote host installing on the backend pill with a sweeping bar', () => {
-    act(() => {
-      $connection.set({ mode: 'remote' } as never)
-      $backendUpdateProgress.set({
         state: 'applying',
-        stateElapsedS: 120,
-        elapsedS: 720,
-        capS: 60,
-        waitingOn: [],
-        fetchedAt: Date.now()
-      })
-    })
-
-    const items = renderStatusbarItems().statusbarItems
-    const backend = items.find(item => item.id === 'version-backend')
-
-    // No backend version known yet in this fixture: the pill stays hidden, but carries the update state.
-    expect(markup(backend?.icon)).toContain('update-bar-sweep')
-    expect(backend?.title).toContain(en.shell.statusbar.backgroundUpdate.tooltipApplying('12m'))
-  })
-
-  it('a batched update only adds when it applies; no update leaves the pill as it was', () => {
-    act(() => {
-      $desktopVersion.set(desktop)
-      $updateStatus.set({ behind: 0, supported: true })
-      $clientUpdateProgress.set({
-        stateElapsedS: 0,
-        state: 'batching',
-        elapsedS: -1860,
+        stateElapsedS: 1,
+        elapsedS: 1,
         capS: null,
         waitingOn: [],
         fetchedAt: Date.now()
       })
-    })
-
-    let version = renderStatusbarItems().statusbarItems.find(item => item.id === 'version-client')
-
-    expect(version?.label).toBe(`v0.23.1 · ${en.shell.statusbar.backgroundUpdate.dueIn('31m')}`)
-    expect(markup(version?.icon)).not.toContain('animate-spin')
-
-    act(() => $clientUpdateProgress.set(null))
-    version = renderStatusbarItems().statusbarItems.find(item => item.id === 'version-client')
-    expect(version?.label).toBe('v0.23.1')
-  })
+      const items = renderStatusbarItems().statusbarItems
+      expect(items.some(item => item.id.startsWith('version-'))).toBe(false)
+    }
+  )
 })
 
 describe('statusbar workspace menu — "Open containing folder"', () => {
@@ -408,31 +263,14 @@ describe('production statusbar visibility contract', () => {
     }
   })
 
-  it('hides known production versions by default and enables independent real menu toggles', async () => {
+  it('does not offer retired version controls in the footer menu', async () => {
     stubMenuDomApis()
     stubResizeObserver()
-    resetStatusbarLayout()
-    $connection.set({ mode: 'remote' } as never)
-    $desktopVersion.set({
-      appVersion: '0.23.1',
-      electronVersion: '37',
-      hermesRoot: '/h',
-      nodeVersion: '22',
-      platform: 'linux'
-    })
 
     function Bar() {
-      const { leftStatusbarItems, statusbarItems } = useStatusbarItems({
-        ...statusbarOptions,
-        statusSnapshot: { version: '0.23.2' } as never
-      })
+      const { leftStatusbarItems, statusbarItems } = useStatusbarItems(statusbarOptions)
 
-      return (
-        <StatusbarControls
-          items={statusbarItems.filter(item => item.id.startsWith('version-'))}
-          leftItems={leftStatusbarItems.filter(item => item.id === 'command-center')}
-        />
-      )
+      return <StatusbarControls items={statusbarItems} leftItems={leftStatusbarItems} />
     }
 
     render(
@@ -441,28 +279,12 @@ describe('production statusbar visibility contract', () => {
       </MemoryRouter>
     )
     const bar = screen.getByRole('contentinfo')
-    expect(bar.querySelector('[data-statusbar-item="version-client"]')).toBeNull()
-    expect(bar.querySelector('[data-statusbar-item="version-backend"]')).toBeNull()
     fireEvent.pointerDown(bar, { button: 2, ctrlKey: false, pointerType: 'mouse' })
     fireEvent.contextMenu(bar, { button: 2 })
-    const client = await screen.findByRole('menuitemcheckbox', { name: en.shell.statusbar.toggleVersion })
-    const backend = screen.getByRole('menuitemcheckbox', { name: en.shell.statusbar.toggleBackendVersion })
-
-    for (const row of [client, backend]) {
-      expect(row.getAttribute('data-disabled')).toBeNull()
-      expect(row.getAttribute('aria-checked')).toBe('false')
-    }
-
-    fireEvent.click(client)
-    expect(bar.querySelector('[data-statusbar-item="version-client"]')).not.toBeNull()
-    expect(bar.querySelector('[data-statusbar-item="version-backend"]')).toBeNull()
-    fireEvent.click(backend)
-    expect(bar.querySelector('[data-statusbar-item="version-backend"]')).not.toBeNull()
-    fireEvent.click(client)
-    expect(bar.querySelector('[data-statusbar-item="version-client"]')).toBeNull()
-    expect($statusbarHiddenIds.get()).toContain('version-client')
-    expect($statusbarHiddenIds.get()).not.toContain('version-backend')
-    resetStatusbarLayout()
+    expect(await screen.findByRole('menuitemcheckbox', { name: en.shell.statusbar.toggleCommandCenter })).toBeTruthy()
+    expect(screen.queryByRole('menuitemcheckbox', { name: en.shell.statusbar.toggleVersion })).toBeNull()
+    expect(screen.queryByRole('menuitemcheckbox', { name: en.shell.statusbar.toggleBackendVersion })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Force update' })).toBeNull()
   })
 })
 

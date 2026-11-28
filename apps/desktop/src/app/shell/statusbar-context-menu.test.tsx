@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { AppContextMenu } from '@/app/context-menu/app-context-menu'
 import { $contextMenu } from '@/app/context-menu/store'
@@ -56,52 +56,5 @@ describe('statusbar context menu coordination', () => {
     expect(await screen.findByRole('menuitemcheckbox', { name: 'Context meter' })).toBeTruthy()
     expect(screen.queryByText('Settings')).toBeNull()
     expect($contextMenu.get()).toBeNull()
-  })
-})
-
-describe('statusbar item context actions', () => {
-  beforeEach(() => $statusbarHiddenIds.set([])) // These tests explicitly opt the version pills in.
-  const onForce = vi.fn()
-
-  const items = [
-    {
-      contextMenuItems: [{ id: 'force-update', label: 'Force update', onSelect: onForce }],
-      id: 'version-backend',
-      label: 'backend v1',
-      toggleLabel: 'Backend version',
-      variant: 'action' as const
-    },
-    { id: 'version-client', label: 'client v1', toggleLabel: 'Client version', variant: 'action' as const }
-  ]
-
-  function rightClick(target: HTMLElement) {
-    fireEvent.pointerDown(target, { button: 2, ctrlKey: false, pointerType: 'mouse' })
-    fireEvent.contextMenu(target, { button: 2 })
-  }
-
-  it('heads the menu with the right-clicked item’s own actions and runs them', async () => {
-    render(
-      <MemoryRouter>
-        <StatusbarControls items={items} />
-      </MemoryRouter>
-    )
-
-    rightClick(screen.getByText('backend v1'))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Force update' }))
-
-    expect(onForce).toHaveBeenCalledTimes(1)
-  })
-
-  it('does not offer them for another item', async () => {
-    render(
-      <MemoryRouter>
-        <StatusbarControls items={items} />
-      </MemoryRouter>
-    )
-
-    rightClick(screen.getByText('client v1'))
-
-    expect(await screen.findByRole('menuitemcheckbox', { name: 'Client version' })).toBeTruthy()
-    expect(screen.queryByRole('menuitem', { name: 'Force update' })).toBeNull()
   })
 })
