@@ -18,6 +18,16 @@ _logging = sys.modules.get('logging')
 logger = _logging.getLogger(__name__) if _logging is not None else None
 
 
+def classify_module_file(self, name, filename, path, owner):
+    if owner is not None or path is None or not self._trusted_stdlib_path(path):
+        if owner is None and path is not None and self._dependency_module_path(name, path):
+            return
+        if not str(filename).endswith(".py"):
+            self.mark_unknown("non-source-module:" + name)
+        elif owner is None:
+            self._extension_unknown("unrooted-module:" + name, filename)
+
+
 class InventoryDiagnostics:
     def __init__(self):
         global logger

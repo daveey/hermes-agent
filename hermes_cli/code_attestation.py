@@ -26,7 +26,9 @@ from typing import TYPE_CHECKING
 
 # Load the stdlib-only observer before an audit ledger can be activated. A lazy
 # import inside its first inventory would itself change the observed code graph.
-from hermes_cli.code_inventory_diagnostics import InventoryObservation, inventory_modules
+from hermes_cli.code_inventory_diagnostics import (
+    InventoryObservation, classify_module_file, inventory_modules,
+)
 
 if TYPE_CHECKING:
     from hermes_cli.code_attestation_snapshot import DiagnosticSnapshot
@@ -1174,14 +1176,7 @@ class Attestation:
             return diagnostics.call('classify', self._classify_module_file, name, filename, path, owner)
         return self._classify_module_file(name, filename, path, owner)
 
-    def _classify_module_file(self, name, filename, path, owner):
-        if owner is not None or path is None or not self._trusted_stdlib_path(path):
-            if owner is None and path is not None and self._dependency_module_path(name, path):
-                return
-            if not str(filename).endswith(".py"):
-                self.mark_unknown("non-source-module:" + name)
-            elif owner is None:
-                self._extension_unknown("unrooted-module:" + name, filename)
+    _classify_module_file = classify_module_file
 
     def _inventory_modules_diagnostic(self, *, deadline=None, progress=None):
         from hermes_cli.code_attestation_inventory import inventory_modules
