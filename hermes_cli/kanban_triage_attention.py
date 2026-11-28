@@ -99,15 +99,24 @@ def current_entry(row):
     # clock cannot be positioned safely; do not sort it before an exit and invent age.
     if any(_epoch(event.get('created_at')) is None for event in events):
         return None
-    phase, entered = None, None
-    for event in sorted(events, key=_event_order):
+    phase, entered, episode = None, None, []
+    # ``arrived`` is the caller's order (annotate reads ORDER BY id).
+    for arrived, event in sorted(enumerate(events), key=lambda item: _event_order(item[1])):
         landed = landing(event.get('kind'), _obj(event.get('payload')))
         if landed == 'triage' and phase != 'triage':
-            entered = _epoch(event.get('created_at'))
+            entered, episode = event['created_at'], []
         elif landed != 'triage':
             entered = None
+        episode.append(arrived)
         phase = landed
-    return entered if phase == 'triage' else None
+    if phase != 'triage':
+        return None
+    # An episode event that arrived before the chosen entry but carries a strictly later clock (a future-dated
+    # entry followed by a sane repeated hold) leaves the real entry unknowable: never let the repeat stand in.
+    first = episode[0]
+    if any(arrived < first and events[arrived]['created_at'] > entered for arrived in episode):
+        return None
+    return entered
 
 
 def overdue(row, *, now):

@@ -104,3 +104,46 @@ def test_fractional_times_and_future_clocks_preserve_existing_meaning():
     assert attention.current_entry(row) == NOW + 1
     assert not attention.overdue(row, now=NOW)
     assert attention.next_transition(row, now=NOW) is None
+
+
+@pytest.mark.parametrize('stored', [False, True])
+@pytest.mark.parametrize('ahead', [20, 6 * 86400])
+@pytest.mark.parametrize('repeat_age', [1, 601])
+def test_future_entry_never_lets_a_later_repeated_hold_become_the_entry(stored, ahead, repeat_age):
+    """Mirrors session-panel's fixture: created, a future-dated entry, then a sane repeated hold."""
+    events = [event('created', 1, status='ready'), event('decision_retained', NOW + ahead),
+              event('decision_retained', NOW - repeat_age)]
+    entered = entry(events, stored=stored)
+    assert entered is None
+    for now in (NOW, NOW + 601, NOW + ahead + 601):
+        assert not attention.overdue({'status': 'triage', 'events': events}, now=now)
+        assert attention.next_transition({'status': 'triage', 'events': events}, now=now) is None
+    # Same evidence after a real exit and re-entry starts a fresh, knowable episode.
+    events += [event('unblocked', NOW + ahead + 1), event('decision_retained', NOW + ahead + 2)]
+    assert entry(events, stored=stored) == NOW + ahead + 2
+
+
+@pytest.mark.parametrize('stored', [False, True])
+def test_future_repeated_hold_after_a_valid_entry_keeps_the_entry(stored):
+    """Arrival and clock agree on who began the episode; a skewed later repeat does not reset or hide it."""
+    events = [event('spawned', NOW - 900), event('contained', NOW - 601), event('decision_retained', NOW + 20)]
+    assert entry(events, stored=stored) == NOW - 601
+    assert attention.overdue({'status': 'triage', 'events': events}, now=NOW)
+
+
+def test_same_second_hold_arriving_first_does_not_hide_the_precise_entry():
+    """Only a strictly later clock is an inversion; same-second ties keep UUID/ID order."""
+    at = NOW - 601
+    events = [event('spawned', at - 100), event('decision_retained', at, uid=v7(at * 1000 + 800)),
+              event('contained', at, uid=v7(at * 1000 + 100))]
+    assert entry(events) == at
+
+
+def test_rehomed_same_second_restored_holds_still_enter_before_imported_history():
+    """The reported rehomed card: restored holds share the entry second and arrive first."""
+    at = 1795423619
+    events = [event('spend_budget_triaged', at, identity=-2), event('decision_retained', at, identity=-1),
+              event('created', 1795233019, status='ready', identity=5), event('claimed', at - 31, identity=6),
+              event('spawned', at - 30, identity=7)]
+    assert entry(events) == at
+    assert attention.overdue({'status': 'triage', 'events': events}, now=at + 601)
