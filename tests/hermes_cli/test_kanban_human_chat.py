@@ -177,6 +177,13 @@ def test_a_deleted_needs_you_chat_is_replaced_by_its_next_generation(conn, monke
     assert not khc.is_needs_you_session(owner.session_id("kanban_dispatcher"))
 
 
+@pytest.mark.parametrize("generation", range(1, owner._GENERATIONS + 1))
+def test_every_reachable_needs_you_generation_is_a_human_chat(generation):
+    """Review 6094747089: ensure() can return any generation up to ``_GENERATIONS`` (10 included)."""
+    assert khc.is_needs_you_session(owner.session_id(khc.NEEDS_YOU, generation))
+    assert not khc.is_needs_you_session(owner.session_id(khc.NEEDS_YOU, owner._GENERATIONS + 1))
+
+
 def test_the_needs_you_chat_is_red_while_another_of_its_cards_runs(conn, home, monkeypatch):
     """Point 2: a linked human ask makes the outcome ``decision`` (the red stripe) even beside running work."""
     unforged = _unforged(conn)
