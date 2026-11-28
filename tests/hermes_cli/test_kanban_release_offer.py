@@ -104,6 +104,22 @@ def test_live_owner_that_cannot_release_gets_the_stamped_offer_once(kanban_home,
         assert len(park._events(conn, tid, stranded.EVENT)) == 1
 
 
+@pytest.mark.parametrize("live_chat", [False, True])
+def test_young_supervisor_owned_stop_is_not_offered(kanban_home, own_gateway, board_allowance, live_chat):
+    with kbc.connect_closing() as conn:
+        tid = _held(conn)
+        supervisor = park._legacy_wrapper(conn, tid)
+        if live_chat:
+            park._link(conn, tid, MAC, "default", CHAT)
+        board_allowance["arm"]()
+        assert stranded.open_decision_card(conn, tid) == supervisor
+        before = park._row(conn, tid)
+        assert tid not in park._sweep(conn, now=park._later(0.1), cfg={})
+        assert park._row(conn, tid) == before
+        assert not park._events(conn, tid, stranded.EVENT)
+        assert board_allowance["reads"] == 0
+
+
 def test_live_owner_that_can_release_is_left_alone(kanban_home, own_gateway, board_allowance):
     board_allowance["seen"] = {"state": "active", "remaining": 4}
     with kbc.connect_closing() as conn:

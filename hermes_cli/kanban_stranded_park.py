@@ -746,7 +746,8 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                 owner = None if young else live_owner(conn, tid, own=own, liveness=liveness)
                 if young or owner:
                     # A live chat (or none yet) that cannot release a human-only stop owns nothing it can act on.
-                    if not str(owner or "").startswith("supervisor ") and _offer_human_only(
+                    # Check supervisor custody independently: young parks skip live_owner, and chats win there.
+                    if not open_decision_card(conn, tid) and _offer_human_only(
                             conn, tid, entry, own=own, desk=desk, now=now, owned=bool(owner)):
                         escalated.append(tid)
                         continue
