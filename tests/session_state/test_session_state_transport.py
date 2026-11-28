@@ -30,7 +30,11 @@ def _triage_card(board):
 
 def test_next_change_at_fires_the_600s_triage_threshold(store, board, clock):
     task = _triage_card(board)
-    clock.now = time.time()  # the entry is stamped after the fixture clock was taken
+    # Anchor to the committed episode, not elapsed wall time after create_task's post-commit work.
+    clock.now = board.execute(
+        "SELECT created_at FROM task_events WHERE task_id = ? AND kind = 'created' ORDER BY id LIMIT 1",
+        (task,),
+    ).fetchone()[0]
     first = store.recompute("chat")
     card = first["cards"][f"default/{task}"]
     assert card["lifecycle"] == "triage" and card["red"] is False
