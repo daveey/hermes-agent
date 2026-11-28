@@ -140,19 +140,19 @@ def annotate(conn, rows):
     their existing source revision memo; elapsed clock passes never call here.
     """
     rows = list(rows)
-    from hermes_cli.kanban_retained_status import annotate as retained_status
-    retained_status(conn, rows)
+    from hermes_cli import kanban_retained_status as retained
     targets = {str(row['id']) for row in rows if row.get('status') == 'triage'}
     events = {tid: [] for tid in targets}
     # One statement per call and none without a triage card: hot membership passes call this per status set,
     # so no schema probe. A board without the event columns reads as unknown entry, never a fabricated age.
+    found = None
     if targets:
         try:
             cursor = conn.execute(
                 'SELECT * FROM task_events '
                 'WHERE task_id IN (SELECT value FROM json_each(?)) '
                 'AND kind IN (SELECT value FROM json_each(?)) ORDER BY id',
-                (json.dumps(sorted(targets)), json.dumps(LIFECYCLE_KINDS)))
+                (json.dumps(sorted(targets)), json.dumps(sorted(set(LIFECYCLE_KINDS) | retained._RELEVANT))))
             # Legacy unsynced schemas lack uid. Capture optional portable identity
             # without another schema query or turning those working boards unknown.
             columns = [column[0] for column in cursor.description]
@@ -160,9 +160,11 @@ def annotate(conn, rows):
         except sqlite3.OperationalError as exc:
             if 'no such' not in str(exc):
                 raise
-            found = ()
-        for event in found:
-            events[str(event['task_id'])].append(event)
+        for event in found or ():
+            if event['kind'] in LIFECYCLE_KINDS:
+                events[str(event['task_id'])].append(event)
+    # Both reducers see the caller's same source snapshot; shared rows are hydrated once.
+    retained.annotate(conn, rows, events=found)
     for row in rows:
         row['triage_entered_at'] = current_entry({'status': row.get('status'), 'events': events.get(str(row['id']), ())})
     return rows

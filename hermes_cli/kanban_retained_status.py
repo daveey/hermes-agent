@@ -10,11 +10,13 @@ _RELEVANT = _LEFT_PARK | {'decision_retained', 'scope_renewed', 'claimed', 'sche
                         'blocked', 'review_requested'}
 
 
-def annotate(conn, rows):
+def annotate(conn, rows, *, events=None):
     """Capture from the same board snapshot, including rehomed SQL replicas.
 
     Missing schema/history leaves ordinary triage untouched. Any later execution,
     renewal or park invalidates this display-only receipt, even if status stayed triage.
+    ``events`` may supply complete union history captured from this same source snapshot;
+    only this reducer's kinds participate. None retains the standalone acquisition path.
     """
     targets = {str(row['id']) for row in rows if row.get('status') == 'triage'}
     if not targets:
@@ -25,19 +27,20 @@ def annotate(conn, rows):
             "CASE WHEN EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id=tasks.id "
             "AND r.status='running' AND r.ended_at IS NULL) THEN 1 ELSE NULL END FROM tasks "
             'WHERE id IN (SELECT value FROM json_each(?))', (json.dumps(sorted(targets)),))}
-        cursor = conn.execute(
-            'SELECT * FROM task_events WHERE task_id IN '
-            '(SELECT value FROM json_each(?)) AND kind IN (SELECT value FROM json_each(?))',
-            (json.dumps(sorted(targets)), json.dumps(sorted(_RELEVANT))))
-        columns = [column[0] for column in cursor.description]
-        events = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        if events is None:
+            cursor = conn.execute(
+                'SELECT * FROM task_events WHERE task_id IN '
+                '(SELECT value FROM json_each(?)) AND kind IN (SELECT value FROM json_each(?))',
+                (json.dumps(sorted(targets)), json.dumps(sorted(_RELEVANT))))
+            columns = [column[0] for column in cursor.description]
+            events = [dict(zip(columns, row)) for row in cursor.fetchall()]
     except sqlite3.OperationalError as exc:
         if 'no such' not in str(exc):
             raise
         return
 
     latest = {event['task_id']: (event['kind'], event['payload'])
-              for event in sorted(events, key=_event_order)}
+              for event in sorted((event for event in events if event['kind'] in _RELEVANT), key=_event_order)}
     for row in rows:
         row.pop('retained_stop', None)
         tid = str(row['id'])
