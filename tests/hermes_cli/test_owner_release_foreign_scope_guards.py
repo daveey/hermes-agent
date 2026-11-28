@@ -271,13 +271,16 @@ def test_empty_unvalidated_projection_is_defensively_refused(assembly, monkeypat
         scope.evidence(a.conn, damaged)
 
 
-@pytest.mark.parametrize('shape', ['single', 'aggregate'])
+@pytest.mark.parametrize('shape', ['single', 'aggregate', 'unicode'])
 def test_sql_projection_bounds_materialized_payload_bytes(foreign, shape):
     """A post-fetch JSON limit must not materialize an unbounded history first."""
     a = foreign
-    count, width = (1, cert.MAX_BYTES + 1) if shape == 'single' else (3, cert.MAX_BYTES // 2)
-    ignored = cert.encode(dict(superseded_by_safety_stop=False,
-                               disposition=dict(reason='other'), filler='x' * width))
+    count, width = {'single': (1, cert.MAX_BYTES + 1),
+                    'aggregate': (3, cert.MAX_BYTES // 2),
+                    'unicode': (1, cert.MAX_BYTES // 2)}[shape]
+    ignored = json.dumps(dict(superseded_by_safety_stop=False,
+                              disposition=dict(reason='other'),
+                              filler=('€' if shape == 'unicode' else 'x') * width), ensure_ascii=False)
     with kb.write_txn(a.conn):
         a.conn.executemany("INSERT INTO task_events(uid,task_id,kind,payload,created_at) "
                            "VALUES (?,?,'decision_retained',?,90)",
