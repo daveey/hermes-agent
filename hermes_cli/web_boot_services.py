@@ -22,6 +22,12 @@ def defer_plugin_api_sweep():
 
 _DISPLAY_PATHS = frozenset(('/api/health', '/api/profiles/sessions',
                             '/api/profiles/sessions/sidebar', '/api/profiles/sessions/stamps'))
+# Token-gated process identity (pid, launch nonce, runtime marker), fixed before the listener hands
+# off. The always-on roller binds native sessions to this incarnation before it routes the proxy;
+# held behind service warmup, the proxy stayed on the predecessor ~4 s after the successor's real
+# rows were ready (run71 natural canary: direct 4.95 s, proxy 9.41 s from unit start).
+_IDENTITY_PATHS = frozenset(('/api/host/identity', '/api/ssh/ownership'))
+_WARMUP_PATHS = _DISPLAY_PATHS | _IDENTITY_PATHS
 
 
 class BootServicesMiddleware:
@@ -37,7 +43,7 @@ class BootServicesMiddleware:
                     await send({'type': 'websocket.accept'})
                     await send({'type': 'websocket.close', 'code': 1013})
                     return
-                if scope['method'] != 'GET' or scope['path'] not in _DISPLAY_PATHS:
+                if scope['method'] != 'GET' or scope['path'] not in _WARMUP_PATHS:
                     response = JSONResponse({'detail': 'Backend services warming'}, status_code=503,
                                             headers={'Retry-After': '1'})
                     await response(scope, receive, send)
