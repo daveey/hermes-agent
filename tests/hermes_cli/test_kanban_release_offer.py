@@ -141,6 +141,22 @@ def test_release_answer_releases_as_the_human_and_renews_runs(kanban_home, own_g
         assert _released(conn, tid) == 1
 
 
+def test_release_answer_needs_no_seen_after_an_unread_refusal(kanban_home, own_gateway, board_allowance):
+    """David's repro: his "release" comment is unread and a read-first refusal already bounced a release
+    (``release_unread_shown``); the recorded answer still releases, with no ``--seen`` step for him."""
+    with kbc.connect_closing() as conn:
+        tid = _stopped_with_live_chat(conn, board_allowance)
+        said = kb.add_comment(conn, tid, "david", "release", writer_kind="human")
+        agent = ("agent", "20261128_agent", "4242:HERMES_SESSION_ID")
+        with pytest.raises(kanban_release._Refusal):
+            kanban_release.read_first(conn, tid, decision.pending_episode(conn, tid), agent, None, None)
+        shown = park._events(conn, tid, kanban_release.SHOWN)
+        assert shown and said in shown[-1]["comment_ids"]
+        assert park._sweep(conn, now=park._later(0.1), cfg={}) == [tid]
+        assert _answer(conn, tid, "release")["choice"] == "release"
+        assert kb.get_task(conn, tid).status in ("ready", "todo") and _released(conn, tid) == 1
+
+
 def test_dont_answer_leaves_the_card_untouched(kanban_home, own_gateway, board_allowance):
     with kbc.connect_closing() as conn:
         tid = _stopped_with_live_chat(conn, board_allowance)
