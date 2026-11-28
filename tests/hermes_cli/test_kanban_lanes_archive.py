@@ -112,6 +112,25 @@ def test_condition_cleared_uses_only_the_operator_registered_check(conn, configu
         assert archived_event(conn, card)["condition"] == {"state": "clear", "evidence": f"card {card}"}
 
 
+def test_condition_check_refused_by_worker_drain_archives_nothing(conn, configured, tmp_path, monkeypatch):
+    from hermes_cli import worker_drain_fence as fence
+    card = held(conn, creator="ci-main-watch", key=f"ci-red:daveey/hermes:{SHA}#4", age=60)
+    marker = tmp_path / "ran"
+    script = tmp_path / "check_marks.py"
+    script.write_text(f"import json, pathlib\npathlib.Path({str(marker)!r}).write_text('x')\n"
+                      "print(json.dumps({'state': 'clear'}))\n")
+    configured(archive_checks={"ci-main-watch": [sys.executable, str(script)]})
+
+    def refuse(purpose, **_):
+        assert purpose == "kanban.lanes.archive_check"
+        raise fence.DrainRefused("latched", "draining")
+
+    monkeypatch.setattr(fence, "admit", refuse)
+    result = archive(conn, card, basis="condition_cleared")
+    assert not result["applied"] and status(conn, card) == "triage"
+    assert not marker.exists()  # the check never spawned while draining
+
+
 def test_condition_check_is_rebound_to_the_key_inside_the_write(conn, configured, tmp_path, monkeypatch):
     card = held(conn, creator="ci-main-watch", key=f"ci-red:daveey/hermes:{SHA}", age=60)
     configured(archive_checks={"ci-main-watch": _checker(tmp_path, "clear")})

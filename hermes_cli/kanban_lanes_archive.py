@@ -181,13 +181,22 @@ def run_check(prod, row) -> tuple[str, str]:
     argv = checker(prod)
     if argv is None:
         return "unknown", f"no condition check is registered for {prod.name}"
+    from hermes_cli.worker_drain_fence import DrainRefused, admit, lease_scope
     try:
-        done = subprocess.run([*argv, row["id"], row["idempotency_key"]], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace",
-                              timeout=CHECK_TIMEOUT_S, check=False)
+        lease = admit("kanban.lanes.archive_check")
+    except DrainRefused as exc:  # a draining node runs no new checks: unknown, so nothing is archived
+        return "unknown", f"condition check refused by worker drain: {exc}"
+    try:
+        with lease_scope(lease):
+            done = subprocess.run([*argv, row["id"], row["idempotency_key"]], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=CHECK_TIMEOUT_S, check=False)
         doc = json.loads(done.stdout or "{}")
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return "unknown", f"condition check failed: {type(exc).__name__}"
+    finally:
+        if lease is not None:
+            lease.close()
     if not isinstance(doc, dict):
         return "unknown", "condition check printed no JSON object"
     state, evidence = doc.get("state"), str(doc.get("evidence") or "")[:500]

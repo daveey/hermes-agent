@@ -505,6 +505,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/kanban_lanes_archive.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
   "hermes_cli/kanban_lanes_flow_pr.py": {
    "direct": 1,
    "routed": 0,
