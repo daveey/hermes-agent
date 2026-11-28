@@ -261,18 +261,24 @@ def _read_parked(path: Path) -> tuple[dict[str, int], dict[str, int]]:
     ``task_links`` classify by status alone."""
     conn = _open_ro(path)
     try:
-        return _parked_on(conn)
+        inputs = _capture_parked(conn)
     finally:
         conn.close()
+    return _derive_parked(inputs)
 
 
 def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]]:
+    return _derive_parked(_capture_parked(conn))
+
+
+def _capture_parked(conn: sqlite3.Connection, pairs=None):
+    from hermes_cli.kanban_session_activity_parked import capture
+    if pairs is not None:
+        return capture(conn, pairs, table_columns(conn, "tasks"))
     cols = table_columns(conn, "tasks")
     if "session_id" not in cols:
-        return {}, {}
+        return capture(conn, set(), cols)
     match, params = _status_filter(conn, ACTIVE_STATUSES)
-    evidence = "t.human_request" if "human_request" in cols else "NULL"
-    kind = "t.block_kind" if "block_kind" in cols else "NULL"
     pairs: set[tuple[str, str]] = {
         (str(sid), str(tid)) for sid, tid in conn.execute(
             f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL AND session_id != '' AND {match}",
@@ -287,52 +293,16 @@ def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]
         pass
     pairs.update((str(sid), str(tid)) for sid, tid in
                  _created_chat_rows(conn, "l.chat_session, t.id", match, params))
-    if not pairs:
-        return {}, {}
-    info: dict[str, tuple[str, bool]] = {
-        str(tid): (status, bool(human)) for tid, status, human in conn.execute(
-            f"SELECT t.id, t.status, kanban_open_ask(t.status, {kind}, {evidence}) FROM tasks t "
-            f"WHERE t.status NOT IN ({','.join('?' * len(_FINISHED_STATUSES))})", _FINISHED_STATUSES)}
-    parents: dict[str, list[str]] = {}
-    try:
-        from hermes_cli.kanban_session_activity_parked import open_parent_edges
-        parents = open_parent_edges(conn, info)
-    except sqlite3.Error:  # board predates dependencies
-        pass
+    return capture(conn, pairs, cols)
 
-    def open_parents(tid: str) -> list[str]:
-        return [p for p in parents.get(tid, ()) if p in info]  # finished/unknown parents never wait
 
-    def waits_on_human(tid: str) -> bool:
-        seen: set[str] = set()
-        stack = open_parents(tid)
-        while stack:
-            p = stack.pop()
-            if p in seen:
-                continue
-            seen.add(p)
-            status, human = info[p]
-            if status in BLOCKED_STATUSES and human:
-                return True
-            stack.extend(open_parents(p))
-        return False
-
-    parked: dict[str, int] = {}
-    held: dict[str, int] = {}
-    for sid, tid in pairs:
-        status = info.get(tid, ("", False))[0]
-        if status == "todo":
-            if not open_parents(tid):
-                continue
-            into = held if waits_on_human(tid) else parked
-        elif status in PARKED_STATUSES:
-            into = parked
-        else:
-            continue
-        into[sid] = into.get(sid, 0) + 1
-        captured = getattr(_parked_sink, "pairs", None)
-        if captured is not None:
-            captured[0 if into is parked else 1].add((sid, tid))
+def _derive_parked(inputs):
+    from hermes_cli.kanban_session_activity_parked import derive
+    parked, held, parked_pairs, held_pairs = derive(inputs, card_is_open_human_ask)
+    captured = getattr(_parked_sink, "pairs", None)
+    if captured is not None:
+        captured[0].update(parked_pairs)
+        captured[1].update(held_pairs)
     return parked, held
 
 
@@ -1419,12 +1389,7 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 counted_sub_clause=_counted_sub_clause, authority=_require_local_execution_authority,
                 window=ATTENTION_WINDOW_S)
             if parked:
-                _parked_sink.pairs = (set(), set())
-                try:
-                    reads["parked"] = _parked_on(conn)
-                    reads["parked_pairs"], reads["held_pairs"] = _parked_sink.pairs
-                finally:
-                    _parked_sink.pairs = None
+                parked_inputs = _capture_parked(conn, reads["active_pairs"])
             if stalled:
                 try:
                     reads["stall_rows"] = _stall_rows_on(conn)
@@ -1434,6 +1399,13 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                     complete = False
         finally:
             conn.execute("COMMIT")
+    if parked:
+        _parked_sink.pairs = (set(), set())
+        try:
+            reads["parked"] = _derive_parked(parked_inputs)
+            reads["parked_pairs"], reads["held_pairs"] = _parked_sink.pairs
+        finally:
+            _parked_sink.pairs = None
     try:
         if sources is not None:
             reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
