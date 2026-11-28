@@ -8,7 +8,6 @@ card details and ``add_cards``.
 
 from __future__ import annotations
 
-from contextlib import closing
 import json
 import logging
 import sqlite3
@@ -109,13 +108,14 @@ def append_remote_listed_cards(out: list[dict[str, Any]], ids: list[str], status
 
 
 def _read_lean_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -> list[dict[str, Any]]:
-    from hermes_cli.kanban_session_activity import _board_slug, _execution_transaction, _open_ro
+    from hermes_cli.kanban_session_activity import _board_slug, _execution_transaction
+    from hermes_cli.kanban_waiting_reader import reading
     from hermes_cli.kanban_session_wait_rows import _local_wait_info
 
-    # Outcome evidence must not queue behind sidebar enrichment on the shared
-    # reader. Own this short transaction and close through the generation guard;
-    # real SQLite/lifecycle contention still uses the existing bounded retry.
-    with closing(_open_ro(path, timeout=0.5)) as conn, _execution_transaction(conn):
+    # Waiting-evidence custody is separate from sidebar enrichment. Its bounded
+    # retained reader keeps no snapshot or answers; concurrent/nested borrows use
+    # the original private guarded admission and close path without waiting.
+    with reading(path, busy_budget=0.5) as conn, _execution_transaction(conn):
         conn.row_factory = sqlite3.Row
         found = select_listed_local_tasks(conn, ids, statuses)
         from hermes_cli.kanban_retained_wait import annotate as _retained_wait

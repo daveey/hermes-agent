@@ -126,6 +126,9 @@ def test_lean_reader_releases_owned_connection_on_return_and_error(kanban_root, 
         return reader
 
     monkeypatch.setattr(ksa, "_open_ro", capture_open)
+    from hermes_cli import kanban_waiting_reader as waiting
+    # A concurrent waiting-evidence borrower forces the unchanged private path.
+    assert waiting._read_lock.acquire(blocking=False)
     if read_raises:
         def fail_selection(*args):
             raise ValueError("selection failed")
@@ -142,6 +145,7 @@ def test_lean_reader_releases_owned_connection_on_return_and_error(kanban_root, 
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             opened[0].execute("SELECT 1")
     finally:
+        waiting._read_lock.release()
         for reader in opened:
             reader.close()
 
