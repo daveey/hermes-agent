@@ -47,7 +47,14 @@ def create_origin(conn, intent, options):
         placement_checked insert_guard placement_audit admission_class admission_frees self_work""".split()
     options = {key: options[key] for key in fields if key in options}
     options["parents"] = tuple(options["parents"])
-    result = prepare_classification(conn, options["parents"], options["initial_status"],
+    from hermes_cli import kanban_db as kb
+
+    # Optional classification must not preempt the origin ledger's exact replay
+    # or its transactional, typed no-write parent refusal. Keep wire options intact.
+    linkable = tuple(p for p in options["parents"] if p)
+    if kb._missing_task_ids(conn, linkable):
+        return create_with_origin(conn, intent, options)
+    result = prepare_classification(conn, linkable, options["initial_status"],
                                     options["triage"], options["tenant"], options)
     with prepared(result, options):
         return create_with_origin(conn, intent, options)

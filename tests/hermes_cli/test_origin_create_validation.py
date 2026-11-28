@@ -9,6 +9,21 @@ from tests.hermes_cli import test_kanban_origin_owner as helpers
 world = helpers.world
 
 
+@pytest.fixture(autouse=True, params=[False, True], ids=['no-lanes', 'active-lanes'])
+def lane_policy(world, tmp_path, monkeypatch, request):
+    """Production enables lane preflight; no-policy fixtures used to skip it."""
+    if request.param:
+        from hermes_cli import kanban_lanes as lanes
+
+        config = {'kanban': {'sync': {'enabled': True},
+                             'admission': {'lanes': {'other': {'share': 1}}, 'lane_shadow': False}}}
+        (tmp_path / 'config.yaml').write_text(json.dumps(config))
+        monkeypatch.setattr(lanes, '_fallback_lane', lambda *args: 'other')
+        policy = lanes.safe_policy()
+        assert policy is not None
+        assert policy.shadow is False
+
+
 def _counts():
     with kbc.connect_closing() as conn:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -93,3 +108,21 @@ def test_mixed_empty_and_missing_parent_rejects_naming_only_missing(world, monke
     assert str(missing_dependency_error(['t_missing_parent'])) in result['error']
     assert str(missing_dependency_error(['', 't_missing_parent'])) not in result['error']
     assert _counts() == before
+
+
+def test_valid_origin_keeps_optional_classification_before_write(world, monkeypatch, capsys):
+    from hermes_cli import kanban_lanes as lanes
+
+    original = lanes.prepare_classification
+    calls = []
+
+    def observed(conn, *args):
+        calls.append(conn.in_transaction)
+        return original(conn, *args)
+
+    monkeypatch.setattr(lanes, 'prepare_classification', observed)
+    result = helpers.invoke(world, monkeypatch, capsys)
+    assert result.get('created') is True, result
+    assert calls[0] is False
+    with kbc.connect_closing() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM origin_creation_intents').fetchone()[0] == 1
