@@ -30,6 +30,11 @@ def test_restore_refuses_live_authority_without_changing_data(tmp_path):
         'model': {'provider': 'custom', 'default': 'fixture', 'base_url': url},
         'auxiliary': {'title_generation': {'enabled': False}},
         'platform_toolsets': {'cli': []},
+        # The source-unchanged assertions below need a quiescent daemon while the turn is blocked. The
+        # SessionState shadow store is an independent asynchronous writer (it projects each turn into
+        # state.db after a watcher tick, later under load), so it is off here; its own no-op recomputes
+        # being write-free is pinned by tests/session_state (test_identical_recompute_writes_nothing...).
+        'session_state': {'enabled': False},
     }))
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),

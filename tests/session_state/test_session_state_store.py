@@ -31,6 +31,22 @@ def test_identical_recompute_does_not_churn_rev_or_push(store, board, clock):
     assert store.metrics()["unchanged"] == 1 and store.current_rev() == first["rev"]
 
 
+def test_identical_recompute_writes_nothing_to_state_db(store, board, db, clock):
+    """Digest no-churn is write-free: a no-op recompute leaves state.db's commit counter where it was."""
+    import sqlite3
+    from contextlib import closing
+
+    kb.create_task(board, title="Work", assignee="worker", session_id="chat")
+    store.recompute("chat")
+    with closing(sqlite3.connect(str(db.db_path))) as observer:
+        before = observer.execute("PRAGMA data_version").fetchone()[0]
+        clock.now += 5
+        store.recompute("chat")
+        assert observer.execute("PRAGMA data_version").fetchone()[0] == before
+        db.create_session("other", source="desktop")  # positive control: another connection's commit moves it
+        assert observer.execute("PRAGMA data_version").fetchone()[0] != before
+
+
 def test_rev_is_monotonic_across_a_store_restart(store, board, db, clock):
     task = kb.create_task(board, title="Work", assignee="worker", session_id="chat")
     first = store.recompute("chat")

@@ -36,6 +36,7 @@ _NON_MIRROR_DIRS = {
     "fakes", "fixtures", "install", "integration", "manual",
     "monitoring", "perf_guards", "scripts", "secret_sources",
     "security", "skills", "verify", "website", "computer_use", "hermes_state",
+    "session_state",  # SessionState v2 store/reducer/events/transport: root hermes_session_state_* modules + router
 }
 
 # Root-level modules whose tests sit directly in tests/ (no package to mirror).

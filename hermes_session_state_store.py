@@ -194,6 +194,27 @@ class SessionStateStore:
         ids = sorted({lineage, tip, *(str(i) for i in (inputs.get("parts") or {}).get("ids") or ())})
         cards = sorted(obj.get("cards") or {})
 
+        def unchanged(conn) -> Optional[dict]:
+            """The persisted object when nothing (object, card index, aliases) would change, else None."""
+            row = conn.execute("SELECT digest, body FROM session_state WHERE lineage = ?", (lineage,)).fetchone()
+            if row is None or row[0] != new_digest:
+                return None
+            have_cards = [str(r[0]) for r in conn.execute(
+                "SELECT card_key FROM session_state_cards WHERE lineage = ? ORDER BY card_key", (lineage,))]
+            have_ids = {str(r[0]): str(r[1]) for r in conn.execute(
+                "SELECT session_id, lineage FROM session_state_alias WHERE session_id IN "
+                "(SELECT value FROM json_each(?))", (json.dumps(ids),))}
+            if have_cards != cards or have_ids != {sid: lineage for sid in ids}:
+                return None
+            return json.loads(row[1])
+
+        # Digest no-churn means no write at all: a no-op recompute must not touch state.db (WAL churn on every
+        # event, and a live writer under backup/recovery source-unchanged checks).
+        with self.db._read_ctx() as conn:
+            kept = unchanged(conn)
+        if kept is not None:
+            return False, kept
+
         def write(conn):
             row = conn.execute("SELECT digest, body FROM session_state WHERE lineage = ?", (lineage,)).fetchone()
             conn.execute("DELETE FROM session_state_cards WHERE lineage = ?", (lineage,))
