@@ -46,22 +46,24 @@ function openRef() {
 function mountDelegate() {
   const ambient = vi.fn()
   const states = new Map<string, ReturnType<typeof createClientSessionState>>()
-  renderHook(() => useSessionTileDelegate({
-    archiveSession: vi.fn(),
-    branchLoadedSession: vi.fn(),
-    branchStoredSession: vi.fn(),
-    executeSlashCommand: vi.fn(),
-    removeSession: vi.fn(),
-    requestGateway: ambient,
-    runtimeIdByStoredSessionIdRef: { current: new Map() },
-    sessionStateByRuntimeIdRef: { current: states },
-    updateSessionState: (id, update, stored) => {
-      const state = update(states.get(id) ?? createClientSessionState(stored ?? null))
-      states.set(id, state)
+  renderHook(() =>
+    useSessionTileDelegate({
+      archiveSession: vi.fn(),
+      branchLoadedSession: vi.fn(),
+      branchStoredSession: vi.fn(),
+      executeSlashCommand: vi.fn(),
+      removeSession: vi.fn(),
+      requestGateway: ambient,
+      runtimeIdByStoredSessionIdRef: { current: new Map() },
+      sessionStateByRuntimeIdRef: { current: states },
+      updateSessionState: (id, update, stored) => {
+        const state = update(states.get(id) ?? createClientSessionState(stored ?? null))
+        states.set(id, state)
 
-      return state
-    }
-  } as Parameters<typeof useSessionTileDelegate>[0]))
+        return state
+      }
+    } as Parameters<typeof useSessionTileDelegate>[0])
+  )
 
   return { ambient, states }
 }
@@ -74,14 +76,20 @@ describe('owner-routed session reference tile lifecycle', () => {
         { id: 'local', kind: 'local', label: 'This device' },
         { id: 'hermes-hub', kind: 'ssh', label: 'hub (EC2)' }
       ],
-      primary: 'local', version: 2
+      primary: 'local',
+      version: 2
     } as never)
     $connection.set({ connectionId: 'local', mode: 'local' } as never)
     vi.mocked(getLatestSessionMessages).mockResolvedValue({
-      messages: [{ content: 'owner transcript', role: 'user', timestamp: 1 }], session_id: storedId
+      messages: [{ content: 'owner transcript', role: 'user', timestamp: 1 }],
+      session_id: storedId
     } as never)
     vi.mocked(requestGatewayForAgent).mockResolvedValue({
-      info: {}, messages: [], messages_omitted: true, session_id: 'rt-hub', session_key: storedId
+      info: {},
+      messages: [],
+      messages_omitted: true,
+      session_id: 'rt-hub',
+      session_key: storedId
     } as never)
   })
 
@@ -104,7 +112,10 @@ describe('owner-routed session reference tile lifecycle', () => {
     expect(states.get(runtimeId)?.messages).toHaveLength(1)
     expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, { connectionId: 'hermes-hub', profile: 'default' })
     expect(requestGatewayForAgent).toHaveBeenCalledWith('hermes-hub', 'default', 'session.resume', {
-      session_id: storedId, cols: 96, omit_messages: true, profile: 'default'
+      session_id: storedId,
+      cols: 96,
+      omit_messages: true,
+      profile: 'default'
     })
 
     for (const connection of [
@@ -144,7 +155,11 @@ describe('owner-routed session reference tile lifecycle', () => {
     vi.mocked(getSession).mockRejectedValue(new Error('404: Session not found'))
     const { ambient } = mountDelegate()
     $gatewayState.set('open')
-    render(<QueryClientProvider client={new QueryClient()}><SessionTilePane storedSessionId={storedId} /></QueryClientProvider>)
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <SessionTilePane storedSessionId={storedId} />
+      </QueryClientProvider>
+    )
     await screen.findByText('Session unavailable — you can retry resuming it.')
     expect($sessionTiles.get()[0]?.error).not.toMatch(/wrong backend/i)
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
@@ -156,10 +171,16 @@ describe('owner-routed session reference tile lifecycle', () => {
 
   it('reconnect retries an existing wrong-backend error through the explicit owner', async () => {
     openRef()
-    patchSessionTile(storedId, { error: 'Wrong backend — this session lives on another connection. Reconnect to that backend to open it.' })
+    patchSessionTile(storedId, {
+      error: 'Wrong backend — this session lives on another connection. Reconnect to that backend to open it.'
+    })
     const { ambient } = mountDelegate()
     $gatewayState.set('idle')
-    render(<QueryClientProvider client={new QueryClient()}><SessionTilePane storedSessionId={storedId} /></QueryClientProvider>)
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <SessionTilePane storedSessionId={storedId} />
+      </QueryClientProvider>
+    )
     expect(requestGatewayForAgent).not.toHaveBeenCalled()
     act(() => $gatewayState.set('open'))
     await waitFor(() => expect($sessionTiles.get()[0]?.runtimeId).toBe('rt-hub'))

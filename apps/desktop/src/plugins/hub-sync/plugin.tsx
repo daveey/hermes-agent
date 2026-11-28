@@ -19,7 +19,8 @@ const FULL_MS = 30_000
 const plugin: HermesPlugin = {
   id: 'hub-sync',
   name: 'Hub Sync',
-  description: "Keeps sessions of gateways that are offline right now in the sidebar, from this gateway's hermes-hub replica.",
+  description:
+    "Keeps sessions of gateways that are offline right now in the sidebar, from this gateway's hermes-hub replica.",
   defaultEnabled: true,
   register(ctx) {
     let disposed = false

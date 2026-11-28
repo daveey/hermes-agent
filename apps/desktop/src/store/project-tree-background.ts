@@ -25,10 +25,16 @@ export async function fetchRemoteProjectTree(
       timeoutMs
     })
   } catch (error) {
-    if (connectionId === 'local') {throw error}
+    if (connectionId === 'local') {
+      throw error
+    }
 
     return requestGatewayForAgent<ProjectTreePayload>(
-      connectionId, profile, 'projects.tree', { preview_limit: previewLimit }, timeoutMs
+      connectionId,
+      profile,
+      'projects.tree',
+      { preview_limit: previewLimit },
+      timeoutMs
     )
   }
 }

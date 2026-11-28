@@ -83,9 +83,7 @@ export function dispatchedConnectionId(owner: SessionOwnerScope): string {
 }
 
 function registryConnectionIds(): string[] {
-  return ($connectionsRegistry.get()?.connections ?? [])
-    .map(connection => connection.id?.trim() ?? '')
-    .filter(Boolean)
+  return ($connectionsRegistry.get()?.connections ?? []).map(connection => connection.id?.trim() ?? '').filter(Boolean)
 }
 
 /**
@@ -247,8 +245,7 @@ export function noteRpcStoredSessionId(runtimeId: null | string | undefined, sto
 function rpcSessionIds(params: Record<string, unknown>): { paramId: string; storedId: string } {
   const paramId = typeof params.session_id === 'string' ? params.session_id.trim() : ''
 
-  const storedId =
-    (paramId && (storedSessionIdForRuntimeId(paramId) ?? translatedRuntimeIds.get(paramId))) || paramId
+  const storedId = (paramId && (storedSessionIdForRuntimeId(paramId) ?? translatedRuntimeIds.get(paramId))) || paramId
 
   return { paramId, storedId }
 }

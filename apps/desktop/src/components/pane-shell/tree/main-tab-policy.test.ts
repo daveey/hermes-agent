@@ -21,7 +21,9 @@ it('shares hidden, unregistered and narrow-collapsed eligibility with keyboard s
 
 it('retains the active main slot and all standing side/tool panels', () => {
   expect(singleMainTabPanes({ active: 'session-tile:a', panes }, panes, isMain, true)).toEqual([
-    'session-tile:a', 'terminal', 'files'
+    'session-tile:a',
+    'terminal',
+    'files'
   ])
 })
 
@@ -34,7 +36,9 @@ it('does not close background owners or mutate their persisted tree', () => {
 
 it('retains a main slot while a side panel is active', () => {
   expect(singleMainTabPanes({ active: 'terminal', panes }, panes, isMain, true)).toEqual([
-    'workspace', 'terminal', 'files'
+    'workspace',
+    'terminal',
+    'files'
   ])
 })
 
@@ -44,7 +48,8 @@ it('never revives a pane excluded by visibility or registry filtering', () => {
 
 it('does not collapse side-panel-only tab groups', () => {
   expect(singleMainTabPanes({ active: 'terminal', panes }, ['terminal', 'files'], isMain, true)).toEqual([
-    'terminal', 'files'
+    'terminal',
+    'files'
   ])
 })
 
@@ -118,9 +123,9 @@ describe('Single main slots through the actual tree store', () => {
   })
 })
 
-it("keeps every Browser tab in a preview-only zone under Single", () => {
-  const previews = ["preview-tile:url:one", "preview-tile:url:two"]
-  const all = (id: string) => id.startsWith("preview-tile:")
+it('keeps every Browser tab in a preview-only zone under Single', () => {
+  const previews = ['preview-tile:url:one', 'preview-tile:url:two']
+  const all = (id: string) => id.startsWith('preview-tile:')
 
   expect(singleMainTabPanes({ active: previews[1]!, panes: previews }, previews, all, true)).toEqual(previews)
 })

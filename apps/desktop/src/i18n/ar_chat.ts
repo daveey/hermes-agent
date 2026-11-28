@@ -108,7 +108,8 @@ export const arChat = {
       '/topup': 'عرض رصيد Nous وإدارة الفواتير',
       '/platform': 'إيقاف منصة بوابة متعثرة مؤقتًا أو استئنافها أو عرضها',
       '/version': 'عرض إصدار Hermes Agent',
-      '/debug': 'تقرير تصحيح الأخطاء (الإصدارات وأسماء مفاتيح الإعداد وأعداد الأخطاء؛ دون نص السجلات): يعرض إشعار الخصوصية أولًا؛ /debug upload يشارك الروابط',
+      '/debug':
+        'تقرير تصحيح الأخطاء (الإصدارات وأسماء مفاتيح الإعداد وأعداد الأخطاء؛ دون نص السجلات): يعرض إشعار الخصوصية أولًا؛ /debug upload يشارك الروابط',
       '/model': 'تبديل نموذج هذه الجلسة'
     },
     hotkeyDescs: {
@@ -446,7 +447,8 @@ export const arChat = {
     archiveLinkedConfirm: 'أرشفة على أي حال',
     archiveLinkedCancel: 'إبقاء المحادثة',
     archiveLinkedTasksLabel: 'مهام كانبان',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} مفتوحة` : '', blocked ? `${blocked} محظورة` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksValue: (open: number, blocked: number) =>
+      [open ? `${open} مفتوحة` : '', blocked ? `${blocked} محظورة` : ''].filter(Boolean).join(' · '),
     archiveLinkedTasksUnknown: 'حالة المهام غير متاحة؛ قد يكون العمل غير مكتمل بعد.',
     restored: 'تمت الاستعادة',
     unarchiveFailed: 'فشل إلغاء الأرشفة',

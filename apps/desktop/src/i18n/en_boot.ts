@@ -20,8 +20,7 @@ export const enBoot = {
       backgroundExitedDuringStartup: 'Hermes stopped right after it started.',
       backendStopped: 'Hermes stopped working in the background',
       backendUpdating: 'Updating Hermes…',
-      backendUpdatingMessage:
-        'Hermes is restarting to finish an update. Your chats will reconnect on their own.',
+      backendUpdatingMessage: 'Hermes is restarting to finish an update. Your chats will reconnect on their own.',
       restartHermes: 'Restart Hermes',
       openLogs: 'Open logs',
       desktopBootFailed: "Hermes couldn't start",

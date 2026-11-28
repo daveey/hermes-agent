@@ -14,9 +14,9 @@ import { defineLocale, type TranslationOverrides } from './define-locale'
 
 export const arOverrides = {
   gatewayGroupOpen: {
-    opening: "جارٍ فتح محادثة المجموعة…",
-    lookupFailed: "تعذّر العثور على هذه المجموعة على البوابة. حاول مجددًا.",
-    missing: "لم تعد محادثة المجموعة هذه موجودة."
+    opening: 'جارٍ فتح محادثة المجموعة…',
+    lookupFailed: 'تعذّر العثور على هذه المجموعة على البوابة. حاول مجددًا.',
+    missing: 'لم تعد محادثة المجموعة هذه موجودة.'
   },
 
   catalog: {
@@ -125,7 +125,8 @@ export const arOverrides = {
     ...arChat.composer,
     redirect: 'إعادة توجيه التشغيل الحالي',
     queueLostNote: 'فُقد الدور أثناء إعادة التشغيل',
-    queueUpdateNote: (started: string | undefined) => `بانتظار تحديث Hermes${started ? ` (بدأ ${started})` : ''}، سيتم الإرسال تلقائيًا`,
+    queueUpdateNote: (started: string | undefined) =>
+      `بانتظار تحديث Hermes${started ? ` (بدأ ${started})` : ''}، سيتم الإرسال تلقائيًا`,
     restoreImageDraft: 'استعادة مسودة الصورة',
     queueCancelFailed: 'تعذّر إزالة الدور المنتظر',
     queueLostDiscard: 'تجاهل',

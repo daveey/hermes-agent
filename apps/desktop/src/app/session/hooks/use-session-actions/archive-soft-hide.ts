@@ -23,15 +23,26 @@ import { dropListedSession, type findListedSession, resolveSessionProfile, resto
 // Rows whose connection came from the registry primary pin, not from the row itself.
 const primaryPinned = new WeakSet<object>()
 
-export function captureArchiveOwner(storedSessionId: string, selectedRow: SessionInfo | undefined, listed: ReturnType<typeof findListedSession>): SessionInfo {
+export function captureArchiveOwner(
+  storedSessionId: string,
+  selectedRow: SessionInfo | undefined,
+  listed: ReturnType<typeof findListedSession>
+): SessionInfo {
   let row = sessionActionRow(storedSessionId, selectedRow) ?? listed?.session
 
   // Explicit selection is authoritative; other entry paths resolve like resume.
-  if (!selectedRow) {row = archiveOwnerRow(storedSessionId, row)}
+  if (!selectedRow) {
+    row = archiveOwnerRow(storedSessionId, row)
+  }
 
-  const captured = { ...row, connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined } as SessionInfo
+  const captured = {
+    ...row,
+    connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined
+  } as SessionInfo
 
-  if (!row?.connection_id) {primaryPinned.add(captured)}
+  if (!row?.connection_id) {
+    primaryPinned.add(captured)
+  }
 
   return captured
 }
@@ -125,7 +136,12 @@ export async function archivePreflight(
   const stampedProfile = archived?.profile?.trim()
   const resolvedProfile = stampedProfile || (await resolveSessionProfile(storedSessionId))
 
-  if (listed && !stampedProfile && !resolvedProfile?.trim() && $profiles.get().filter(item => item.name.trim()).length > 1) {
+  if (
+    listed &&
+    !stampedProfile &&
+    !resolvedProfile?.trim() &&
+    $profiles.get().filter(item => item.name.trim()).length > 1
+  ) {
     hidden.restore()
     notifyError(new Error('Session ownership could not be resolved'), copy.archiveFailed)
 
@@ -156,7 +172,6 @@ export async function archivePreflight(
     // Offline-or-live is decided from the pre-hide row: once a live row is
     // dropped, re-resolving could land on another cached copy.
     if (archived?.offline_cached && (await archiveIfOfflineCached(storedSessionId, copy, archived))) {
-
       return false
     }
   } catch (err) {

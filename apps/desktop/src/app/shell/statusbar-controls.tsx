@@ -107,12 +107,7 @@ interface StatusbarControlsProps extends ComponentProps<'footer'> {
   items?: readonly StatusbarItem[]
 }
 
-export function StatusbarControls({
-  className,
-  leftItems = [],
-  items = [],
-  ...props
-}: StatusbarControlsProps) {
+export function StatusbarControls({ className, leftItems = [], items = [], ...props }: StatusbarControlsProps) {
   const navigate = useNavigate()
   const hiddenIds = useStore($statusbarHiddenIds)
 

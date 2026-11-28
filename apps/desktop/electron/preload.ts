@@ -52,7 +52,8 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
       return () => ipcRenderer.removeListener('hermes:ui-preferences:changed', listener)
     }
   },
-  getConnection: (profile, opts) => ipcRenderer.invoke('hermes:connection', profile, opts).then(unwrapConnectionDeadline),
+  getConnection: (profile, opts) =>
+    ipcRenderer.invoke('hermes:connection', profile, opts).then(unwrapConnectionDeadline),
   getStartupConnection: async route => {
     const result = await (route?.connectionId
       ? ipcRenderer.invoke('hermes:connection:for', route)

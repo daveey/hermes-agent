@@ -18,21 +18,35 @@ describe('isHiddenAgentTestInstance', () => {
 
   it('hides a packaged build a worker started on a scratch profile', () => {
     expect(
-      isHiddenAgentTestInstance({ leakedWorkerEnv: leaked, isPackaged: true, argv: ['/x/Hermes', '--user-data-dir', '/tmp/p'], env: {} })
+      isHiddenAgentTestInstance({
+        leakedWorkerEnv: leaked,
+        isPackaged: true,
+        argv: ['/x/Hermes', '--user-data-dir', '/tmp/p'],
+        env: {}
+      })
     ).toBe(true)
   })
 
   it("keeps the owner's packaged Desktop visible when a worker reopens it", () => {
-    expect(isHiddenAgentTestInstance({ leakedWorkerEnv: leaked, isPackaged: true, argv: ['/x/Hermes'], env: {} })).toBe(false)
+    expect(isHiddenAgentTestInstance({ leakedWorkerEnv: leaked, isPackaged: true, argv: ['/x/Hermes'], env: {} })).toBe(
+      false
+    )
   })
 
   it('never hides a Desktop no worker launched', () => {
-    expect(isHiddenAgentTestInstance({ leakedWorkerEnv: [], isPackaged: false, argv: ['/x/Electron', '.'], env: {} })).toBe(false)
+    expect(
+      isHiddenAgentTestInstance({ leakedWorkerEnv: [], isPackaged: false, argv: ['/x/Electron', '.'], env: {} })
+    ).toBe(false)
   })
 
   it('HERMES_DESKTOP_AGENT_VISIBLE=1 opts a test instance back in', () => {
     expect(
-      isHiddenAgentTestInstance({ leakedWorkerEnv: leaked, isPackaged: false, argv: ['/x/Electron', '.'], env: { HERMES_DESKTOP_AGENT_VISIBLE: '1' } })
+      isHiddenAgentTestInstance({
+        leakedWorkerEnv: leaked,
+        isPackaged: false,
+        argv: ['/x/Electron', '.'],
+        env: { HERMES_DESKTOP_AGENT_VISIBLE: '1' }
+      })
     ).toBe(false)
   })
 })

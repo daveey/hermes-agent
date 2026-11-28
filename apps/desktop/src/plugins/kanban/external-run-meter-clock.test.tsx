@@ -34,7 +34,10 @@ vi.mock('./api', async importOriginal => ({
   bindApi: () => () => {},
   useKanbanScope: () => 'clock-fixture'
 }))
-vi.mock('./open-task', async original => ({ ...await original<typeof OpenTask>(), installOpenTaskHook: () => () => {} }))
+vi.mock('./open-task', async original => ({
+  ...(await original<typeof OpenTask>()),
+  installOpenTaskHook: () => () => {}
+}))
 
 afterEach(() => {
   cleanup()

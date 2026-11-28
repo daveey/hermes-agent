@@ -42,10 +42,14 @@ describe('boot timeout recovery', () => {
   })
 
   it('limits automatic recovery to readiness timeouts', () => {
-    expect(isBackendReadinessTimeout(backendReadinessTimeout('diagnostic wording is not a contract'), 'connected')).toBe(false)
+    expect(
+      isBackendReadinessTimeout(backendReadinessTimeout('diagnostic wording is not a contract'), 'connected')
+    ).toBe(false)
     expect(isBackendReadinessTimeout(backendReadinessTimeout('diagnostic wording is not a contract'))).toBe(true)
     expect(
-      isBackendReadinessTimeout(backendReadinessTimeout('Timed out waiting for Hermes backend port announcement (180000ms)'))
+      isBackendReadinessTimeout(
+        backendReadinessTimeout('Timed out waiting for Hermes backend port announcement (180000ms)')
+      )
     ).toBe(true)
 
     for (const error of [

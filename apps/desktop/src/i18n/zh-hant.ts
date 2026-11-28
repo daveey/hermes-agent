@@ -15,9 +15,9 @@ import { zhHantSettings } from './zh-hant_settings'
 
 export const zhHantOverrides = {
   gatewayGroupOpen: {
-    opening: "正在開啟群組聊天…",
-    lookupFailed: "無法在閘道上查找此群組，請重試。",
-    missing: "此群組聊天已不存在。"
+    opening: '正在開啟群組聊天…',
+    lookupFailed: '無法在閘道上查找此群組，請重試。',
+    missing: '此群組聊天已不存在。'
   },
 
   catalog: {
@@ -176,7 +176,8 @@ export const zhHantOverrides = {
     ...zhHantChat.composer,
     redirect: '重新導向目前的執行',
     queueLostNote: '重新啟動期間該回合已遺失',
-    queueUpdateNote: (started: string | undefined) => `正在等待 Hermes 更新${started ? `（開始於 ${started}）` : ''}，將自動傳送`,
+    queueUpdateNote: (started: string | undefined) =>
+      `正在等待 Hermes 更新${started ? `（開始於 ${started}）` : ''}，將自動傳送`,
     restoreImageDraft: '還原圖片草稿',
     queueCancelFailed: '無法移除排隊的回合',
     queueLostDiscard: '捨棄',

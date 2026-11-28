@@ -148,7 +148,9 @@ export function SidebarSectionRow({
     <span
       className={cn(
         'items-center gap-0.5',
-        meta ? 'hidden group-focus-within/contrib-row:flex group-hover/contrib-row:flex' : 'flex opacity-0 group-focus-within/contrib-row:opacity-100 group-hover/contrib-row:opacity-100'
+        meta
+          ? 'hidden group-focus-within/contrib-row:flex group-hover/contrib-row:flex'
+          : 'flex opacity-0 group-focus-within/contrib-row:opacity-100 group-hover/contrib-row:opacity-100'
       )}
       data-slot="sidebar-section-row-actions"
     >

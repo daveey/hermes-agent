@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { _resetSessionOwnerHintsForTests, getSessionOwnerHints, hydrateSessionOwnerHints, setSessionOwnerHint } from '@/store/session'
+import {
+  _resetSessionOwnerHintsForTests,
+  getSessionOwnerHints,
+  hydrateSessionOwnerHints,
+  setSessionOwnerHint
+} from '@/store/session'
 
 const KEY = 'hermes.desktop.sessionOwnerHints.v1'
 

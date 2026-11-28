@@ -96,7 +96,12 @@ function respondWith(handler: (call: RelayCall) => unknown) {
 
   ;(hostMock.requestProfile as ReturnType<typeof vi.fn>).mockImplementation(
     async (target: ProfileRoute, method: string, params: Record<string, unknown>) => {
-      const call = { connectionId: target.connectionId, method, params: structuredClone(params ?? {}), route: structuredClone(target) }
+      const call = {
+        connectionId: target.connectionId,
+        method,
+        params: structuredClone(params ?? {}),
+        route: structuredClone(target)
+      }
 
       calls.push(call)
 
@@ -385,7 +390,12 @@ describe('relay-route socket retention (#93594)', () => {
     // default route speaks for all its profiles; the local source is never polled.
     // Two profiles of one connection are not peers: no profiles.list, nothing pinned.
     expect(calls).toEqual([
-      { connectionId: 'remote-primary', method: 'bot_relay.roster.sync', params: { agents: [] }, route: route('remote-primary', { primary: true }) }
+      {
+        connectionId: 'remote-primary',
+        method: 'bot_relay.roster.sync',
+        params: { agents: [] },
+        route: route('remote-primary', { primary: true })
+      }
     ])
     expect(pins).toHaveLength(0)
 
@@ -944,18 +954,29 @@ describe('the drain loop wires drain → deliver → reply', () => {
     hostMock.profileRoutes = vi.fn(async () => [ops, route('a'), route('b')])
 
     const calls = respondWith(call => {
-      if (call.method === 'bot_relay.outbox.drain') {return { envelopes: call.connectionId === 'a' ? [{ ...envelope, from_profile: 'ops' }] : [] }}
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [{ ...envelope, from_profile: 'ops' }] : [] }
+      }
 
-      if (call.method === 'bot_relay.deliver') {return {status: 'settled', delivery_id: envelope.id, admission_id: 'admission', reply: 'isolated'}}
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: envelope.id, admission_id: 'admission', reply: 'isolated' }
+      }
 
       return {}
     })
 
-    const {startBotRelay, stopBotRelay} = await loadRelay()
+    const { startBotRelay, stopBotRelay } = await loadRelay()
     startBotRelay()
     await pushAndSettle()
-    expect(calls.filter(call => call.method === 'bot_relay.outbox.drain').map(call => call.route)).toEqual([route('a'), route('b')])
-    expect(calls.find(call => call.method === 'bot_relay.deliver')?.route).toEqual({...route('b'), profile: 'ops', targetProfile: 'ops'})
+    expect(calls.filter(call => call.method === 'bot_relay.outbox.drain').map(call => call.route)).toEqual([
+      route('a'),
+      route('b')
+    ])
+    expect(calls.find(call => call.method === 'bot_relay.deliver')?.route).toEqual({
+      ...route('b'),
+      profile: 'ops',
+      targetProfile: 'ops'
+    })
     expect(calls.find(call => call.method === 'bot_relay.reply')?.route).toEqual(route('a'))
     expect(calls.some(call => call.route.profile === 'ops' && call.route.connectionId === 'a')).toBe(false)
     stopBotRelay()
@@ -967,7 +988,9 @@ describe('the drain loop wires drain → deliver → reply', () => {
 
     const calls = respondWith(call => {
       if (call.method === 'bot_relay.outbox.drain') {
-        if (call.connectionId !== 'a' || drained) {return { envelopes: [] }}
+        if (call.connectionId !== 'a' || drained) {
+          return { envelopes: [] }
+        }
         drained = true
 
         return { envelopes: [envelope] }
@@ -976,10 +999,16 @@ describe('the drain loop wires drain → deliver → reply', () => {
       if (call.method === 'bot_relay.deliver') {
         attempts += 1
 
-        if (attempts === 1) {throw new Error('socket lost after commit')}
+        if (attempts === 1) {
+          throw new Error('socket lost after commit')
+        }
 
-        return { status: attempts === 2 ? 'queued' : 'settled', delivery_id: envelope.id,
-          admission_id: 'exact-admission', reply: attempts === 2 ? '' : 'exact reply' }
+        return {
+          status: attempts === 2 ? 'queued' : 'settled',
+          delivery_id: envelope.id,
+          admission_id: 'exact-admission',
+          reply: attempts === 2 ? '' : 'exact reply'
+        }
       }
 
       return {}
@@ -995,7 +1024,10 @@ describe('the drain loop wires drain → deliver → reply', () => {
     const deliveries = calls.filter(call => call.method === 'bot_relay.deliver')
     expect(deliveries).toHaveLength(3)
     expect(deliveries.every(call => call.params.id === envelope.id)).toBe(true)
-    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toEqual({id: envelope.id, reply: 'exact reply'})
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toEqual({
+      id: envelope.id,
+      reply: 'exact reply'
+    })
     stopBotRelay()
   })
 
@@ -1003,11 +1035,19 @@ describe('the drain loop wires drain → deliver → reply', () => {
     // A same-id resend after the FIFO refused the delivery (nothing committed) answers the
     // declared refused result: terminal, so the refusal reaches the sender instead of staying retained.
     const calls = respondWith(call => {
-      if (call.method === 'bot_relay.outbox.drain') {return { envelopes: call.connectionId === 'a' ? [envelope] : [] }}
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
 
       if (call.method === 'bot_relay.deliver') {
-        return { status: 'failed', refused: true, delivery_id: envelope.id, error: 'Bot Chat delivery refused',
-          reason: 'agent_blocked', reply: '' }
+        return {
+          status: 'failed',
+          refused: true,
+          delivery_id: envelope.id,
+          error: 'Bot Chat delivery refused',
+          reason: 'agent_blocked',
+          reply: ''
+        }
       }
 
       return {}
@@ -1017,16 +1057,22 @@ describe('the drain loop wires drain → deliver → reply', () => {
     startBotRelay()
     await pushAndSettle()
     expect(calls.find(call => call.method === 'bot_relay.reply')?.params).toEqual({
-      id: envelope.id, error: 'Bot Chat delivery refused', reason: 'agent_blocked'
+      id: envelope.id,
+      error: 'Bot Chat delivery refused',
+      reason: 'agent_blocked'
     })
     stopBotRelay()
   })
 
   it('retains an answer with neither an admission nor a refusal', async () => {
     const calls = respondWith(call => {
-      if (call.method === 'bot_relay.outbox.drain') {return { envelopes: call.connectionId === 'a' ? [envelope] : [] }}
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
 
-      if (call.method === 'bot_relay.deliver') {return { status: 'failed', delivery_id: envelope.id, error: 'lost' }}
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'failed', delivery_id: envelope.id, error: 'lost' }
+      }
 
       return {}
     })
@@ -1322,10 +1368,20 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
   // and the sender's waiter is finite.
   type RelayEnvelopeFixture = { id: string; message: string; target_connection: string; target_profile: string }
   const toB: RelayEnvelopeFixture = { id: 'env-1', message: 'long job', target_connection: 'b', target_profile: 'ops' }
-  const toA: RelayEnvelopeFixture = { id: 'env-2', message: 'quick one', target_connection: 'a', target_profile: 'default' }
+  const toA: RelayEnvelopeFixture = {
+    id: 'env-2',
+    message: 'quick one',
+    target_connection: 'a',
+    target_profile: 'default'
+  }
   // Canonical `bot_relay.deliver` answers carry the exact delivery identity;
   // a reply without it is retained for recovery, never ACKed to the sender.
-  const settled = (id: string, reply: string) => ({ status: 'settled', delivery_id: id, admission_id: `adm-${id}`, reply })
+  const settled = (id: string, reply: string) => ({
+    status: 'settled',
+    delivery_id: id,
+    admission_id: `adm-${id}`,
+    reply
+  })
 
   it('claims every outbox first and delivers to different targets concurrently', async () => {
     let releaseB!: (value: { reply: string }) => void

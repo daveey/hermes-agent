@@ -158,6 +158,7 @@ it('inventories the full navigation cross product with no duplicate cells', () =
 it.each(cells)('navigation matrix %j', async cell => {
   const unrelated = makeSessionInfo({ id: 'U', title: 'NAV OTHER', cwd: '/code/other', message_count: 1 })
   const primary = { ...base, id: cell.auto ? '/code/app' : 'p_app', isAuto: cell.auto }
+
   const other: SidebarProjectTree = {
     id: 'other',
     label: 'other',
@@ -167,9 +168,11 @@ it.each(cells)('navigation matrix %j', async cell => {
     sessionIds: [unrelated.id],
     previewSessions: [unrelated]
   }
+
   // A null registry is the supported single-gateway topology: both folders come from that backend.
   // A populated registry exercises the synthetic live foreign member instead.
   const secondRow = { ...remote, connection_id: cell.registry ? 'studio' : undefined }
+
   const second: SidebarProjectTree = {
     ...base,
     id: remoteId,
@@ -178,6 +181,7 @@ it.each(cells)('navigation matrix %j', async cell => {
     sessionIds: [secondRow.id],
     previewSessions: [secondRow]
   }
+
   const tree = cell.registry ? [primary, other] : [primary, second, other]
   $connectionsRegistry.set(
     cell.registry ? { version: 2, primary: 'local', secureTokenStorage: true, connections: [] } : null
@@ -239,6 +243,7 @@ it('a foreign-only name enters both raw pipelines and keeps the most recent owne
     git_repo_root: '/lab/app',
     last_active: 200
   }
+
   $projectTree.set([])
   $sessions.set([{ ...remote, last_active: 100 }, lab])
   $projectScope.set(remoteId)

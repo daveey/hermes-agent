@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-
-
 // ⌘1…⌘9 / ⌃Tab must index the same tabs the strip paints. A chrome-hidden
 // pane (Focus layout's `files`) stays in `group.panes` but isn't a chip —
 // indexing the raw array made ⌘2 land on the strip's first session tab.

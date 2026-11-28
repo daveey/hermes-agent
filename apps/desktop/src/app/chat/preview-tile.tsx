@@ -358,11 +358,12 @@ const watchPreviewTileMirror = paneMirror<{ id: string }>({
     (tabs, offView, popped, requested) => {
       const known = new Map<string, (typeof tabs)[number]>([...offView, ...tabs].map(tab => [tab.id, tab]))
 
-      return [...requested].flatMap(id => {
-        const tab = known.get(id)
+      return [...requested]
+        .flatMap(id => {
+          const tab = known.get(id)
 
-        return tab && !popped.has(tab.id) ? [tab] : []
-      })
+          return tab && !popped.has(tab.id) ? [tab] : []
+        })
         .slice(-HIDDEN_LIVE_PREVIEW_LIMIT)
     }
   ),

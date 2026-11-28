@@ -10,7 +10,14 @@ const sdk = vi.hoisted(() => ({
   unavailable: [] as string[]
 }))
 
-const ROW = (gateway: string, id: string) => ({ gateway, id, key: `default/${id}`, profile: 'default', title: id, message_count: 3 })
+const ROW = (gateway: string, id: string) => ({
+  gateway,
+  id,
+  key: `default/${id}`,
+  profile: 'default',
+  title: id,
+  message_count: 3
+})
 
 vi.mock('@hermes/plugin-sdk', () => ({
   connectionForHubGateway: (g: string) => ({ hub: 'hermes-hub', mini: 'mac-mini' })[g],
@@ -56,7 +63,7 @@ describe('loadReplicaSidebarRows', () => {
     expect(sdk.statusCalls).toBeGreaterThan(0) // probes still run, in the background
   })
 
-  it('hides a gateway\'s replica rows once its live list is fresh', async () => {
+  it("hides a gateway's replica rows once its live list is fresh", async () => {
     sdk.fresh.add('mac-mini')
     const rows = (await loadReplicaSidebarRows()) as Array<{ id: string }>
 

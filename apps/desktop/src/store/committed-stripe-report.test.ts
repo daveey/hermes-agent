@@ -266,7 +266,9 @@ describe('committed stripe report', () => {
     reportCommittedStripe(row, outcome, 'row', 'done', 2)
     reportCommittedStripe(row, outcome, 'row', 'done', 1, false)
     expect(send.mock.calls.map(call => [call[1].observation_lifetime, call[1].mounted])).toEqual([
-      [1, true], [1, false], [2, true]
+      [1, true],
+      [1, false],
+      [2, true]
     ])
   })
 
@@ -277,12 +279,17 @@ describe('committed stripe report', () => {
     reportCommittedStripe(row, outcome, 'row', 'done', 2, false)
     reportCommittedStripe(row, outcome, 'row', 'done', 1, false)
     expect(send.mock.calls.map(call => [call[1].observation_lifetime, call[1].mounted])).toEqual([
-      [1, true], [2, true], [2, false], [1, false]
+      [1, true],
+      [2, true],
+      [2, false],
+      [1, false]
     ])
     const events = send.mock.calls.map(call => call[1])
     expect(new Set(events.map(event => event.observation_client)).size).toBe(1)
     expect(events[0].observation_client).toEqual(expect.any(String))
-    expect(events.map(event => event.observation_order)).toEqual([...events.map(event => event.observation_order)].sort((a, b) => a - b))
+    expect(events.map(event => event.observation_order)).toEqual(
+      [...events.map(event => event.observation_order)].sort((a, b) => a - b)
+    )
   })
 
   it('a repaint back to an acknowledged stripe supersedes a different in-flight paint', async () => {
@@ -296,7 +303,12 @@ describe('committed stripe report', () => {
 
   it('a late acknowledgement cannot ack a newer paint or cancel its retry', async () => {
     let finish!: (result: unknown) => void
-    send.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    send.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finish = resolve
+        })
+    )
     reportCommittedStripe(row, canonicalOutcome('done'), 'row', 'done', 1)
     send.mockRejectedValueOnce(new Error('offline'))
     reportCommittedStripe(row, canonicalOutcome('done'), 'row', 'waiting', 1)
@@ -331,7 +343,12 @@ describe('committed stripe report', () => {
 
   it('reconnect cannot duplicate an in-flight send or exceed its budget', async () => {
     let reject!: (error: Error) => void
-    send.mockImplementation(() => new Promise((_resolve, fail) => { reject = fail }))
+    send.mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail
+        })
+    )
     report(row, canonicalOutcome('done'), 'row')
     await flushCommittedStripeReports()
     await flushCommittedStripeReports()
@@ -340,7 +357,9 @@ describe('committed stripe report', () => {
     await vi.advanceTimersByTimeAsync(0)
     send.mockRejectedValue(new Error('offline'))
 
-    for (let i = 0; i < 10; i++) {await flushCommittedStripeReports()}
+    for (let i = 0; i < 10; i++) {
+      await flushCommittedStripeReports()
+    }
     expect(send).toHaveBeenCalledTimes(COMMITTED_STRIPE_MAX_ATTEMPTS)
   })
 

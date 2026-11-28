@@ -42,7 +42,10 @@ describe('formatApiRequestFailure', () => {
   })
   it('logs a remote-down fast-fail as one line without a stack', () => {
     const fastFail = new RemoteBackendDownError('conn:hermes-hub::default', 'read ECONNRESET', 3000, 1000)
-    const line = formatApiRequestFailure({ connectionId: 'hermes-hub', path: '/api/plugins/hub-sync/status' } as any, fastFail)
+    const line = formatApiRequestFailure(
+      { connectionId: 'hermes-hub', path: '/api/plugins/hub-sync/status' } as any,
+      fastFail
+    )
 
     expect(line).toContain('conn=hermes-hub Remote backend "conn:hermes-hub::default" is down')
     expect(line).not.toContain('\n')

@@ -4,7 +4,9 @@ import type { ManagedConnectionUpdateGate } from './managed-ssh-update'
 import { createRegistryReconnector, type RegistryReconnectTarget } from './registry-reconnect'
 import { createRegistryRetirementClient } from './registry-retirement-http'
 
-interface PoolEntry<D> { connectionPromise: Promise<D> }
+interface PoolEntry<D> {
+  connectionPromise: Promise<D>
+}
 interface OwnedState {
   registryConnectionId: string
   primaryRegistryScope?: boolean
@@ -29,8 +31,16 @@ interface ServiceDeps<D, E extends PoolEntry<D>, S extends OwnedState> {
 /** The connection gate fences registry edits and all bootstrap publications;
  * the coordinator fences only this resident's teardown and uncertain retries.
  */
-export function createRegistryReconnectService<D, E extends PoolEntry<D>, S extends OwnedState>(deps: ServiceDeps<D, E, S>) {
-  interface Resident { entry: E; state: S; descriptor: Promise<D>; generation: string; key: string }
+export function createRegistryReconnectService<D, E extends PoolEntry<D>, S extends OwnedState>(
+  deps: ServiceDeps<D, E, S>
+) {
+  interface Resident {
+    entry: E
+    state: S
+    descriptor: Promise<D>
+    generation: string
+    key: string
+  }
   const residents = new WeakMap<E, Resident>()
   const correlations = new Map<string, string>()
   const claimedProfiles = new Map<string, string>()
@@ -44,10 +54,19 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
     // Only Linux has runtime-independent, identity-bound termination today.
     // Windows uses the possibly deleted managed Python; Darwin lacks pidfd.
     // Refuse before committing an irreversible backend admission fence.
-    if (!state || state.remotePlatform !== 'Linux') { return undefined }
+    if (!state || state.remotePlatform !== 'Linux') {
+      return undefined
+    }
 
-    if (!deps.isSsh(connectionId) || !entry || !state || state.primaryRegistryScope ||
-        state.registryConnectionId !== connectionId || !state.spawnNonce || deps.inFlight(key)) {
+    if (
+      !deps.isSsh(connectionId) ||
+      !entry ||
+      !state ||
+      state.primaryRegistryScope ||
+      state.registryConnectionId !== connectionId ||
+      !state.spawnNonce ||
+      deps.inFlight(key)
+    ) {
       return undefined
     }
 
@@ -62,8 +81,11 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
   }
 
   async function cleanup(resident: Resident) {
-    if (deps.pool.get(resident.key) !== resident.entry || deps.states.get(resident.key) !== resident.state ||
-        resident.entry.connectionPromise !== resident.descriptor) {
+    if (
+      deps.pool.get(resident.key) !== resident.entry ||
+      deps.states.get(resident.key) !== resident.state ||
+      resident.entry.connectionPromise !== resident.descriptor
+    ) {
       throw new Error('Registry backend changed during termination')
     }
 
@@ -85,7 +107,9 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
     commit: async (resident, token) => client.commit(await resident.descriptor, token),
     cancel: async (resident, token) => client.cancel(await resident.descriptor, token),
     recoverStopped: async resident => {
-      if (!(await deps.proveStopped(resident.state))) { return false }
+      if (!(await deps.proveStopped(resident.state))) {
+        return false
+      }
       await cleanup(resident)
 
       return true
@@ -98,7 +122,9 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
       await deps.reopen(connectionId, profile, correlations.get(connectionId)!)
       const replacement = current(connectionId, profile)
 
-      if (!replacement) { throw new Error('Registry backend reconnect did not publish an owned resident') }
+      if (!replacement) {
+        throw new Error('Registry backend reconnect did not publish an owned resident')
+      }
 
       return replacement.generation
     }
@@ -115,7 +141,9 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
       // not dispatch to already resident, unrelated profiles (including primary).
       const held = correlations.get(connectionId)
 
-      if (held && deps.gate.owner(connectionId) === held && claimedProfiles.get(connectionId) !== profile) { return }
+      if (held && deps.gate.owner(connectionId) === held && claimedProfiles.get(connectionId) !== profile) {
+        return
+      }
       deps.gate.assertCanDial(connectionId, correlation)
     },
     assertCanStop: (key: string) => {
@@ -126,19 +154,31 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
       }
     },
     run: async (target: RegistryReconnectTarget) => {
-      if (!target || typeof target.connectionId !== 'string' || typeof target.profile !== 'string' ||
-          typeof target.generation !== 'string') { return { ok: false } }
+      if (
+        !target ||
+        typeof target.connectionId !== 'string' ||
+        typeof target.profile !== 'string' ||
+        typeof target.generation !== 'string'
+      ) {
+        return { ok: false }
+      }
 
       const resident = current(target.connectionId, target.profile)
 
-      if (!resident || resident.generation !== target.generation) { return { ok: false } }
+      if (!resident || resident.generation !== target.generation) {
+        return { ok: false }
+      }
       const held = correlations.get(target.connectionId)
 
-      if (held && claimedProfiles.get(target.connectionId) !== target.profile) { return { ok: false } }
+      if (held && claimedProfiles.get(target.connectionId) !== target.profile) {
+        return { ok: false }
+      }
       const correlation: string = held || randomUUID()
 
       if (!held) {
-        if (!deps.gate.claim(target.connectionId, correlation)) { return { ok: false } }
+        if (!deps.gate.claim(target.connectionId, correlation)) {
+          return { ok: false }
+        }
         correlations.set(target.connectionId, correlation)
         claimedProfiles.set(target.connectionId, target.profile)
       }
@@ -150,7 +190,12 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
         // exact-generation retry can reconcile it; never cancel on ambiguity.
         let clear = false
 
-        try { coordinator.assertCanDial(target.connectionId, target.profile); clear = true } catch { /* fenced */ }
+        try {
+          coordinator.assertCanDial(target.connectionId, target.profile)
+          clear = true
+        } catch {
+          /* fenced */
+        }
 
         if (clear) {
           correlations.delete(target.connectionId)

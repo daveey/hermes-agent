@@ -326,7 +326,11 @@ describe('moveSessionToProject into a lane whose folder this gateway lacks', () 
     )
 
     await expect(moveSessionToProject('local-s', 'p_docker', 'default')).rejects.toThrow(/Permission denied/)
-    expect(localCalls.map(([m]) => m).filter(m => m !== 'projects.tree')).toEqual(['session.workspace.move', 'projects.list', 'shell.exec'])
+    expect(localCalls.map(([m]) => m).filter(m => m !== 'projects.tree')).toEqual([
+      'session.workspace.move',
+      'projects.list',
+      'shell.exec'
+    ])
     expect(localCalls.some(([m]) => m === 'projects.create')).toBe(false)
   })
 

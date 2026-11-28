@@ -26,7 +26,14 @@ const row = (title: string, multiWord: boolean): Unstable_TriggerItem => ({
   id: title,
   type: 'simple',
   label: title,
-  metadata: { icon: 'session', display: title, meta: '', rawText: `@session:${title}`, insertId: '', multiWord: multiWord ? '1' : '' }
+  metadata: {
+    icon: 'session',
+    display: title,
+    meta: '',
+    rawText: `@session:${title}`,
+    insertId: '',
+    multiWord: multiWord ? '1' : ''
+  }
 })
 
 /** Every query word must prefix a word of the title — the session source's rule. */
@@ -38,7 +45,14 @@ function sourceAdapter(titles: string[], multiWord = true): Unstable_TriggerAdap
       const q = query.toLowerCase().split(/\s+/).filter(Boolean)
 
       return titles
-        .filter(t => q.every(w => t.toLowerCase().split(/\s+/).some(tw => tw.startsWith(w))))
+        .filter(t =>
+          q.every(w =>
+            t
+              .toLowerCase()
+              .split(/\s+/)
+              .some(tw => tw.startsWith(w))
+          )
+        )
         .map(t => row(t, multiWord))
     }
   }
@@ -135,7 +149,12 @@ describe('continueAtTrigger', () => {
   const prev = { kind: '@' as const, query: 'baby', tokenLength: 5, value: 'baby' }
 
   it('widens the same token across a space', () => {
-    expect(continueAtTrigger('hi @baby ', prev, true)).toEqual({ kind: '@', query: 'baby ', tokenLength: 6, value: 'baby ' })
+    expect(continueAtTrigger('hi @baby ', prev, true)).toEqual({
+      kind: '@',
+      query: 'baby ',
+      tokenLength: 6,
+      value: 'baby '
+    })
   })
 
   it('refuses without a multi-word row, a scope, a newline, or a different token', () => {

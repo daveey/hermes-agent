@@ -975,7 +975,10 @@ test('buildSpawnCommand tells the remote backend which Mac drives it, shell-safe
   assert.match(hostile, /HERMES_DESKTOP_CLIENT_HOST=eviltouchtmppwned /)
   assert.ok(!hostile.includes('touch /tmp'))
 
-  const none = buildSpawnCommand('/x/hermes', 'work', { clientHost: '', logPath: spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE) })
+  const none = buildSpawnCommand('/x/hermes', 'work', {
+    clientHost: '',
+    logPath: spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE)
+  })
 
   assert.doesNotMatch(none, /HERMES_DESKTOP_CLIENT_HOST/)
 })

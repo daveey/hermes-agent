@@ -35,7 +35,9 @@ function apply(value: Record<string, unknown>, patch: Patch) {
     const keys = path.split('.')
     let parent = value
 
-    for (const key of keys.slice(0, -1)) {parent = parent[key] as Record<string, unknown>}
+    for (const key of keys.slice(0, -1)) {
+      parent = parent[key] as Record<string, unknown>
+    }
 
     parent[keys.at(-1)!] = clone(replacement)
   }
@@ -44,7 +46,9 @@ function apply(value: Record<string, unknown>, patch: Patch) {
     const keys = path.split('.')
     let parent = value
 
-    for (const key of keys.slice(0, -1)) {parent = parent[key] as Record<string, unknown>}
+    for (const key of keys.slice(0, -1)) {
+      parent = parent[key] as Record<string, unknown>
+    }
 
     delete parent[keys.at(-1)!]
   }
@@ -58,25 +62,41 @@ const itemInput = (item: Item) => ('raw' in item ? clone(item.raw) : caseInput(i
 it.each([false, true])('expires cached nested reason independently (missing identity %s)', missingIdentity => {
   const raw = caseInput({})
 
-  if (missingIdentity) {delete (raw.identity as Record<string, unknown>).run_id}
+  if (missingIdentity) {
+    delete (raw.identity as Record<string, unknown>).run_id
+  }
   raw.non_running_reason = {
-    code: 'usage_accounting_pending', family: 'accounting', actor: 'agent', disposition: 'blocked',
-    summary: 'Run usage accounting is unsettled', next_action: 'Recover the original source accounting evidence, then retry normal admission',
-    freshness: 'current', observed_at: 990, valid_until: 1010,
-    evidence_ref: 'dispatch:original', source_revision: 'original'
+    code: 'usage_accounting_pending',
+    family: 'accounting',
+    actor: 'agent',
+    disposition: 'blocked',
+    summary: 'Run usage accounting is unsettled',
+    next_action: 'Recover the original source accounting evidence, then retry normal admission',
+    freshness: 'current',
+    observed_at: 990,
+    valid_until: 1010,
+    evidence_ref: 'dispatch:original',
+    source_revision: 'original'
   }
   const before = clone(raw)
   const first = projectExecutionObservation(raw, 1005, 'sidebar')
   expect((first.non_running_reason as Record<string, unknown>).freshness).toBe('current')
   const stale = projectExecutionObservation(first, 1010, 'sidebar').non_running_reason as Record<string, unknown>
-  expect(stale).toMatchObject({ freshness: 'unknown', disposition: 'unknown', observed_at: 990, unknown_reason: 'dispatcher_evidence_stale' })
+  expect(stale).toMatchObject({
+    freshness: 'unknown',
+    disposition: 'unknown',
+    observed_at: 990,
+    unknown_reason: 'dispatcher_evidence_stale'
+  })
   expect(raw).toEqual(before)
 })
 
 /** Recursive subset: bool is distinct from number, missing is not null. */
 function subset(actual: unknown, expected: unknown): boolean {
   if (isObject(expected)) {
-    return isObject(actual) && Object.entries(expected).every(([k, v]) => Object.hasOwn(actual, k) && subset(actual[k], v))
+    return (
+      isObject(actual) && Object.entries(expected).every(([k, v]) => Object.hasOwn(actual, k) && subset(actual[k], v))
+    )
   }
 
   if (Array.isArray(expected)) {
@@ -89,13 +109,17 @@ function subset(actual: unknown, expected: unknown): boolean {
 function present(value: unknown, path: string): boolean {
   for (const key of path.split('.')) {
     if (Array.isArray(value) && /^\d+$/.test(key)) {
-      if (Number(key) >= value.length) {return false}
+      if (Number(key) >= value.length) {
+        return false
+      }
       value = value[Number(key)]
 
       continue
     }
 
-    if (!isObject(value) || !Object.hasOwn(value, key)) {return false}
+    if (!isObject(value) || !Object.hasOwn(value, key)) {
+      return false
+    }
 
     value = value[key]
   }
@@ -104,13 +128,17 @@ function present(value: unknown, path: string): boolean {
 }
 
 function check(actual: Record<string, unknown>, test: Case) {
-  if (test.full_output) {expect(actual).toEqual(test.expected)}
+  if (test.full_output) {
+    expect(actual).toEqual(test.expected)
+  }
   const observations = (actual.observations ?? []) as { state: string }[]
   const view = { ...actual, states: observations.map(o => o.state) }
 
   expect(subset(view, test.expected), JSON.stringify({ expected: test.expected, actual: view })).toBe(true)
 
-  for (const path of test.expected_absent ?? []) {expect(present(actual, path), path).toBe(false)}
+  for (const path of test.expected_absent ?? []) {
+    expect(present(actual, path), path).toBe(false)
+  }
 }
 
 // Passed through verbatim: an invalid class must be rejected by the projector, not normalised by the test.
@@ -147,7 +175,9 @@ describe('shared execution observation semantic contract', () => {
   for (const test of selectCases) {
     it(`select: ${test.id}`, () => {
       const items = 'values_raw' in test ? clone(test.values_raw) : test.items!.map(itemInput)
-      const values = test.repeat_count ? Array.from({ length: test.repeat_count }, () => (items as unknown[])[0]) : items
+      const values = test.repeat_count
+        ? Array.from({ length: test.repeat_count }, () => (items as unknown[])[0])
+        : items
       const before = clone(values)
       const identity = test.identity ?? fixture.base.identity
       const result = selectExecutionObservation(values as unknown[], clone(identity), test.now as number, cls(test))
@@ -162,8 +192,11 @@ describe('shared execution observation semantic contract', () => {
       }
 
       if (test.outstanding !== undefined) {
-        for (const observation of [result, projectExecutionObservation(result, test.now as number),
-          selectExecutionObservation([result], identity, test.now as number)]) {
+        for (const observation of [
+          result,
+          projectExecutionObservation(result, test.now as number),
+          selectExecutionObservation([result], identity, test.now as number)
+        ]) {
           expect(observation.retained_human_requests).toEqual(result.retained_human_requests)
           expect(observation.historical_delivery_receipts).toEqual(result.historical_delivery_receipts)
 
@@ -190,7 +223,10 @@ describe('shared execution observation semantic contract', () => {
       const values = 'values_raw' in test ? clone(test.values_raw) : test.items!.map(itemInput)
       const before = clone(values)
 
-      check(summarizeExecutionObservations(values as unknown[], test.now as number) as unknown as Record<string, unknown>, test)
+      check(
+        summarizeExecutionObservations(values as unknown[], test.now as number) as unknown as Record<string, unknown>,
+        test
+      )
       expect(values).toEqual(before)
     })
   }
@@ -203,8 +239,12 @@ describe('shared execution observation semantic contract', () => {
   })
 
   it('treats 7 and 7.0 as one identity but "7" as another', () => {
-    expect(executionIdentityKey({ ...fixture.base.identity, run_id: 7.0 })).toBe(executionIdentityKey(fixture.base.identity))
-    expect(executionIdentityKey({ ...fixture.base.identity, run_id: '7' })).not.toBe(executionIdentityKey(fixture.base.identity))
+    expect(executionIdentityKey({ ...fixture.base.identity, run_id: 7.0 })).toBe(
+      executionIdentityKey(fixture.base.identity)
+    )
+    expect(executionIdentityKey({ ...fixture.base.identity, run_id: '7' })).not.toBe(
+      executionIdentityKey(fixture.base.identity)
+    )
   })
 
   it.each([NaN, Infinity, -Infinity, true, '1000'])('rejects invalid clock %s', observed_at => {
@@ -212,7 +252,10 @@ describe('shared execution observation semantic contract', () => {
   })
 
   it('returns a deep copy: mutating output never touches the input', () => {
-    const value = { ...clone(fixture.base), human_request: { action: 'a', nested: { deep: [1] } } } as Record<string, any>
+    const value = { ...clone(fixture.base), human_request: { action: 'a', nested: { deep: [1] } } } as Record<
+      string,
+      any
+    >
     const before = clone(value)
     const result = projectExecutionObservation(value, 1001) as Record<string, any>
 
@@ -227,7 +270,9 @@ describe('shared execution observation semantic contract', () => {
 
     Object.assign(inherited, { observed_at: 900, valid_until: 1600 })
     // Inherited source_class is not an own property, so the envelope's class applies.
-    expect(projectExecutionObservation({ ...clone(fixture.base), required_sources: [inherited] }, 1001).state).toBe('running')
+    expect(projectExecutionObservation({ ...clone(fixture.base), required_sources: [inherited] }, 1001).state).toBe(
+      'running'
+    )
 
     const polluted = Object.create({ version: 1, state: 'running' })
 
@@ -235,7 +280,9 @@ describe('shared execution observation semantic contract', () => {
   })
 
   it('copies an own __proto__ key as data without changing a prototype', () => {
-    const value = JSON.parse(JSON.stringify(fixture.base).replace('"version":1', '"version":1,"__proto__":{"state":"failed","x":1}'))
+    const value = JSON.parse(
+      JSON.stringify(fixture.base).replace('"version":1', '"version":1,"__proto__":{"state":"failed","x":1}')
+    )
     const result = projectExecutionObservation(value, 1001)
 
     expect(result.state).toBe('running')

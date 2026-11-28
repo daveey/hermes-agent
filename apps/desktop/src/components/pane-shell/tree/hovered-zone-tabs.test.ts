@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-
-
 // The tab verbs (⌘1…⌘9, ⌃Tab, ⌘W / ⌘T) target the zone under the POINTER when
 // there is one, so hovering a pane and hitting ⌘2 lands there without clicking
 // in first. Pointer off the panes falls back to the last interacted zone.

@@ -96,7 +96,9 @@ export function createNoReplyRecovery(deps: RecoveryDeps) {
         }
 
         if (applied || attempt >= ENDED_TURN_STORE_RETRY_MS.length) {
-          logSilentTurnCheck(`[silent-turn] runtime=${runtimeId} recovery store_read=${applied ? 'applied' : 'none'} attempts=${attempt + 1}`)
+          logSilentTurnCheck(
+            `[silent-turn] runtime=${runtimeId} recovery store_read=${applied ? 'applied' : 'none'} attempts=${attempt + 1}`
+          )
 
           // A missing store answer is not proof that running the prompt again is safe.
           if (applied) {

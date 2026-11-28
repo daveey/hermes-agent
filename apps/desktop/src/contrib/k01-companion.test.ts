@@ -6,7 +6,10 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { companionIdentity, readK01Companion } from './k01-companion.test-helpers'
 
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs() })
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllEnvs()
+})
 
 it('canonical default loads the complete pinned actual companion offline', () => {
   vi.stubEnv('HERMES_K01_COMPANION', undefined)

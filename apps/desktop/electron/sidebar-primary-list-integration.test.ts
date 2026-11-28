@@ -10,24 +10,48 @@ import * as ownerRoute from './session-owner-list-route'
 import { fetchSidebarPrimaryListBatch } from './sidebar-primary-list-batch'
 
 // Execute the production main-process handlers without booting Electron.
-const source = ts.createSourceFile('main.ts', readFileSync(new URL('./main.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
+const source = ts.createSourceFile(
+  'main.ts',
+  readFileSync(new URL('./main.ts', import.meta.url), 'utf8'),
+  ts.ScriptTarget.Latest,
+  true
+)
 const names = ['interceptSessionRequestForRemote', 'fetchProfilesSessionSlice', 'mergeRemoteProfileSessions']
 const functions = source.statements.filter(n => ts.isFunctionDeclaration(n) && names.includes(n.name?.text ?? ''))
 assert.equal(functions.length, names.length)
-const code = ts.transpileModule(functions.map(n => n.getText(source)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+const code = ts.transpileModule(functions.map(n => n.getText(source)).join('\n'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 }
+}).outputText
 
 test('production sidebar intercept and merge retain parity while eliminating primary slice reads', async () => {
-  const query = 'recents_profile=all&recents_limit=2&cron_limit=2&messaging_limit=2&recents_exclude=cron&messaging_exclude=cli,cron'
-  const slice = (kind: string) => ({ sessions: [{ id: kind, profile: 'default', last_active: 10 }], total: 1, profile_totals: { default: 1 }, errors: [] })
+  const query =
+    'recents_profile=all&recents_limit=2&cron_limit=2&messaging_limit=2&recents_exclude=cron&messaging_exclude=cli,cron'
+  const slice = (kind: string) => ({
+    sessions: [{ id: kind, profile: 'default', last_active: 10 }],
+    total: 1,
+    profile_totals: { default: 1 },
+    errors: []
+  })
   const bases = { recents: slice('chat'), cron: slice('cron'), messaging: slice('telegram') }
 
   const run = async (batchSupported: boolean) => {
     const reads: string[] = []
 
     const context = vm.createContext({
-      ...routing, ...ownerRoute, fetchSidebarPrimaryListBatch, URLSearchParams,
+      ...routing,
+      ...ownerRoute,
+      fetchSidebarPrimaryListBatch,
+      URLSearchParams,
       configuredRemoteProfileNames: () => [],
-      pooledRegistrySessionSources: async () => [{ connectionId: 'hub', reusesPrimary: true, kind: 'ssh', backends: [{ descriptor: {}, profile: 'default' }], installId: 'primary' }],
+      pooledRegistrySessionSources: async () => [
+        {
+          connectionId: 'hub',
+          reusesPrimary: true,
+          kind: 'ssh',
+          backends: [{ descriptor: {}, profile: 'default' }],
+          installId: 'primary'
+        }
+      ],
       globalRemoteActive: () => true,
       readDesktopConnectionsRegistry: () => ({ primary: 'hub' }),
       profileHasRemoteOverride: () => false,
@@ -37,15 +61,26 @@ test('production sidebar intercept and merge retain parity while eliminating pri
       fetchJsonForProfile: async (_profile: unknown, path: string) => {
         reads.push(path)
 
-        if (path.includes('/sidebar?')) {return batchSupported ? { list_slices_version: 1, ...structuredClone(bases) } : {}}
+        if (path.includes('/sidebar?')) {
+          return batchSupported ? { list_slices_version: 1, ...structuredClone(bases) } : {}
+        }
         const sp = new URL(path, 'http://test').searchParams
 
-        return structuredClone(sp.get('source') === 'cron' ? bases.cron : sp.get('exclude_sources') === 'cli,cron' ? bases.messaging : bases.recents)
+        return structuredClone(
+          sp.get('source') === 'cron'
+            ? bases.cron
+            : sp.get('exclude_sources') === 'cli,cron'
+              ? bases.messaging
+              : bases.recents
+        )
       }
     })
 
     vm.runInContext(code, context)
-    const result = await vm.runInContext(`interceptSessionRequestForRemote({path: '/api/profiles/sessions/sidebar?${query}'})`, context)
+    const result = await vm.runInContext(
+      `interceptSessionRequestForRemote({path: '/api/profiles/sessions/sidebar?${query}'})`,
+      context
+    )
 
     return { result: JSON.parse(JSON.stringify(result)), reads }
   }

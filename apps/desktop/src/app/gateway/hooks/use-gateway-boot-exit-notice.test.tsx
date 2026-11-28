@@ -131,7 +131,11 @@ async function flushAsync() {
   })
 }
 
-const errorIds = () => $notifications.get().filter(entry => entry.kind === 'error').map(entry => entry.id)
+const errorIds = () =>
+  $notifications
+    .get()
+    .filter(entry => entry.kind === 'error')
+    .map(entry => entry.id)
 
 it('a planned core-update exit after boot shows one quiet updating notice and no crash card', async () => {
   render(<Harness />)

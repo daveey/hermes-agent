@@ -27,6 +27,7 @@ export async function captureStartupDeadline<T>(connection: Promise<T>): Promise
 /** Runs in the renderer, AFTER contextBridge has copied the plain result. */
 export function unwrapStartupConnection<T>(result: StartupConnectionResult<T>): T {
   if (isStartupDeadlineResult(result)) { throw backendReadinessTimeout(result.message) }
+
   if (result.ok !== true) { throw new Error('Invalid startup connection result') }
 
   return result.connection

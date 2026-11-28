@@ -118,7 +118,13 @@ function deferred<T>() {
 }
 
 /** One window surface running the real `resumeSession` for the chat. */
-function ChatResume({ onReady, requestGateway }: { onReady: (resume: ResumeSession) => void; requestGateway: Gateway }) {
+function ChatResume({
+  onReady,
+  requestGateway
+}: {
+  onReady: (resume: ResumeSession) => void
+  requestGateway: Gateway
+}) {
   const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
   const stateMapRef = ref(new Map<string, ClientSessionState>())
 
@@ -215,7 +221,9 @@ async function sendIntoUnboundChat(path: 'direct' | 'routed' | 'routed-throws') 
       onReady={handle => (prompt = handle)}
       refreshSessions={async () => undefined}
       requestGateway={requestGateway}
-      resumeStoredSession={async id => void (await (path === 'routed-throws' ? resumeRpc.promise : routeResume?.(id, true)))}
+      resumeStoredSession={async id =>
+        void (await (path === 'routed-throws' ? resumeRpc.promise : routeResume?.(id, true)))
+      }
       selectedStoredSessionIdRef={selectedStoredSessionIdRef}
       storedSessionId={STORED_SESSION_ID}
     />
@@ -267,7 +275,12 @@ async function startConcurrentChatResume(flight: 'first' | 'joins' | 'queued') {
 
   let settled!: Promise<unknown>
   await act(async () => {
-    settled = resume(STORED_SESSION_ID, true, undefined, flight === 'queued' ? { authoritativeSnapshot: true } : undefined)
+    settled = resume(
+      STORED_SESSION_ID,
+      true,
+      undefined,
+      flight === 'queued' ? { authoritativeSnapshot: true } : undefined
+    )
   })
 
   const settle = (answer: () => void) => async () => {
@@ -397,7 +410,9 @@ async function chatWithRetainedSend() {
     activeSessionIdRef.current = bound ? RUNTIME_SESSION_ID : null
     runtimeIdByStoredSessionIdRef.current.clear()
 
-    if (bound) { runtimeIdByStoredSessionIdRef.current.set(STORED_SESSION_ID, RUNTIME_SESSION_ID) }
+    if (bound) {
+      runtimeIdByStoredSessionIdRef.current.set(STORED_SESSION_ID, RUNTIME_SESSION_ID)
+    }
   }
 
   return {
@@ -574,25 +589,85 @@ describe('the notice says where the words are', () => {
 
   it.each<[string, FirstAttempt[], string, string]>([
     // The first attempt reaches the backend and its answer never comes back.
-    ['is unknown: the retry cannot say it was not sent', [{ submit: () => { throw submitTimeout() } }],
-      'unknown', unconfirmed],
+    [
+      'is unknown: the retry cannot say it was not sent',
+      [
+        {
+          submit: () => {
+            throw submitTimeout()
+          }
+        }
+      ],
+      'unknown',
+      unconfirmed
+    ],
     // The owner answered that it admitted nothing (another window holds the chat).
-    ['was a definite refusal: the retry says it was not sent', [{ submit: () => { throw ownerRefusal() } }],
-      'refused', NOT_SENT_BACK_IN_COMPOSER],
+    [
+      'was a definite refusal: the retry says it was not sent',
+      [
+        {
+          submit: () => {
+            throw ownerRefusal()
+          }
+        }
+      ],
+      'refused',
+      NOT_SENT_BACK_IN_COMPOSER
+    ],
     // The user switched chats after the journal entry was written and before the submit left.
-    ['was aborted before the send: the retry says it was not sent', [{ driftOnJournalWrite: true }],
-      'aborted', NOT_SENT_BACK_IN_COMPOSER],
+    [
+      'was aborted before the send: the retry says it was not sent',
+      [{ driftOnJournalWrite: true }],
+      'aborted',
+      NOT_SENT_BACK_IN_COMPOSER
+    ],
     // Attempt 1 may have been admitted; attempt 2 aborting before it sent cannot make that "not sent".
-    ['was unknown, then a retry aborted before sending: still unconfirmed',
-      [{ submit: () => { throw submitTimeout() } }, { driftOnJournalWrite: true }], 'unknown', unconfirmed],
+    [
+      'was unknown, then a retry aborted before sending: still unconfirmed',
+      [
+        {
+          submit: () => {
+            throw submitTimeout()
+          }
+        },
+        { driftOnJournalWrite: true }
+      ],
+      'unknown',
+      unconfirmed
+    ],
     // Nor can a later definite refusal of a retry: the owner may hold attempt 1 under another state.
-    ['was unknown, then a retry was refused: still unconfirmed',
-      [{ submit: () => { throw submitTimeout() } }, { submit: () => { throw ownerRefusal() } }], 'unknown', unconfirmed],
+    [
+      'was unknown, then a retry was refused: still unconfirmed',
+      [
+        {
+          submit: () => {
+            throw submitTimeout()
+          }
+        },
+        {
+          submit: () => {
+            throw ownerRefusal()
+          }
+        }
+      ],
+      'unknown',
+      unconfirmed
+    ],
     // Inside one attempt: the submit timed out (maybe admitted), the timeout recovery resumed the chat
     // and resubmitted, and that resubmit was refused. The first submit is still unaccounted for.
-    ['timed out, was resubmitted by the timeout recovery and then refused: unconfirmed',
-      [{ submit: n => { throw n === 1 ? submitTimeout() : ownerRefusal() }, resume: () => ({ session_id: 'rt-recovered' }) }],
-      'unknown', unconfirmed]
+    [
+      'timed out, was resubmitted by the timeout recovery and then refused: unconfirmed',
+      [
+        {
+          submit: n => {
+            throw n === 1 ? submitTimeout() : ownerRefusal()
+          },
+          resume: () => ({ session_id: 'rt-recovered' })
+        }
+      ],
+      'unknown',
+      unconfirmed
+    ]
   ])('a retry of a send whose earlier attempt %s', async (_label, attempts, outcome, notice) => {
     const chat = await chatWithRetainedSend()
 

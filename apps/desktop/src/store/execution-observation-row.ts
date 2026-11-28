@@ -49,38 +49,55 @@ const legacyCardsWithoutObservations = (row: Partial<Stamped> | undefined): numb
     : 0
 
 function ownerSource(owner: ReturnType<typeof knownOwnerForSession>) {
-  if (isSessionOwnerRoute(owner)) {return gatewayRouteState(owner.connectionId, owner.profile).key}
+  if (isSessionOwnerRoute(owner)) {
+    return gatewayRouteState(owner.connectionId, owner.profile).key
+  }
 
-  if (owner) {return gatewayRouteState(null, String(owner)).key}
+  if (owner) {
+    return gatewayRouteState(null, String(owner)).key
+  }
 
   return isActivePrimary() ? gatewayRouteState(null, activeGatewayProfileKey()).key : 'ambient'
 }
 
-export function rowExecution(row: Partial<Stamped> | undefined, nowSeconds: number = Date.now() / 1000): null | RowExecution {
+export function rowExecution(
+  row: Partial<Stamped> | undefined,
+  nowSeconds: number = Date.now() / 1000
+): null | RowExecution {
   const owner = row?.id ? knownOwnerForSession(row.id, [row as SessionInfo]) : undefined
 
   const source = ownerSource(owner)
 
-  const roster = row?.id ? rosterRowEvidence($liveWorkRoster.get(), source, lineageAliases(row.id, $sessions.get())) : { records: [], missing: 0 }
+  const roster = row?.id
+    ? rosterRowEvidence($liveWorkRoster.get(), source, lineageAliases(row.id, $sessions.get()))
+    : { records: [], missing: 0 }
   const list = [...(Array.isArray(row?.execution_observations) ? row.execution_observations : []), ...roster.records]
   let missing = roster.missing + legacyCardsWithoutObservations(row)
 
   if (row?.id) {
     const aliases = lineageAliases(row.id, $sessions.get())
 
-    const matches = (runtime: string) => aliases.includes($sessionStates.get()[runtime]?.storedSessionId ?? runtime) &&
+    const matches = (runtime: string) =>
+      aliases.includes($sessionStates.get()[runtime]?.storedSessionId ?? runtime) &&
       ownerSource(knownOwnerForSession(runtime)) === source
 
-    for (const [kind, store] of [['process', $backgroundStatusBySession.get()], ['subagent', $subagentsBySession.get()]] as const) {
-      const items = Object.entries(store).flatMap(([runtime, entries]) => matches(runtime) ? entries : [])
+    for (const [kind, store] of [
+      ['process', $backgroundStatusBySession.get()],
+      ['subagent', $subagentsBySession.get()]
+    ] as const) {
+      const items = Object.entries(store).flatMap(([runtime, entries]) => (matches(runtime) ? entries : []))
       const active = items.filter(item => ('state' in item ? item.state : item.status) === 'running')
       list.push(...active.flatMap(item => item.executionObservations ?? []))
 
       // Do not count a missing event copy again when the source's roster/row has its evidence.
-      const supplied = list.filter(record => record && typeof record === 'object' &&
-        (record as { identity?: { kind?: string } }).identity?.kind === kind).length
+      const supplied = list.filter(
+        record =>
+          record && typeof record === 'object' && (record as { identity?: { kind?: string } }).identity?.kind === kind
+      ).length
 
-      if (roster.records.length === 0 && roster.missing === 0) {missing += Math.max(0, active.length - supplied)}
+      if (roster.records.length === 0 && roster.missing === 0) {
+        missing += Math.max(0, active.length - supplied)
+      }
     }
   }
 
@@ -117,14 +134,18 @@ export function rowExecution(row: Partial<Stamped> | undefined, nowSeconds: numb
 /** [daveey] `rowExecution`'s only read of `$sessionStates` is each runtime's stored id. That store is republished per
  *  streaming token; this key changes only when a runtime binds to (or leaves) a stored session. */
 const $runtimeBindings = computed($sessionStates, states =>
-  Object.entries(states).map(([runtime, state]) => `${runtime}=${state?.storedSessionId ?? ''}`).join('\n')
+  Object.entries(states)
+    .map(([runtime, state]) => `${runtime}=${state?.storedSessionId ?? ''}`)
+    .join('\n')
 )
 
 /** [daveey] What owner resolution (`knownOwnerForSession`) reads off the tiles: each tile's stored id, bound runtime
  *  and owner route/profile. Layout-only tile edits (dock, anchor, error) leave the key unchanged. */
 const $tileOwnerBindings = computed($sessionTiles, tiles =>
   tiles
-    .map(tile => JSON.stringify([tile.storedSessionId, tile.runtimeId ?? '', tile.ownerProfile ?? '', tile.ownerRoute ?? null]))
+    .map(tile =>
+      JSON.stringify([tile.storedSessionId, tile.runtimeId ?? '', tile.ownerProfile ?? '', tile.ownerRoute ?? null])
+    )
     .join('\n')
 )
 

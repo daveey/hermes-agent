@@ -5,7 +5,12 @@ import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { $backgroundRunningSessionIds } from '@/store/composer-status'
 import { $gateway, activeGatewayProfileKey, gatewayRouteState, isActivePrimary } from '@/store/gateway'
 import { $primaryGatewayRoute } from '@/store/gateway-primary-route'
-import { $liveWorkRoster, failLiveWorkRosterSource, rosterSourceHasWork, setLiveWorkRosterSource } from '@/store/live-work-roster'
+import {
+  $liveWorkRoster,
+  failLiveWorkRosterSource,
+  rosterSourceHasWork,
+  setLiveWorkRosterSource
+} from '@/store/live-work-roster'
 import { $gatewayState, ownerLookupSessionRows } from '@/store/session'
 import { $delegatingSessionIds } from '@/store/session-dot-state'
 import { ambientRequestFor } from '@/store/session-gone-latch'

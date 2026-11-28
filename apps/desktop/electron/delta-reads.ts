@@ -29,7 +29,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
-import { decodeResponseBody, displayTranscriptHeaders, GzipExpansionError, isDisplayTranscriptRead } from './display-transcript'
+import {
+  decodeResponseBody,
+  displayTranscriptHeaders,
+  GzipExpansionError,
+  isDisplayTranscriptRead
+} from './display-transcript'
 
 export const DELTA_ACCEPT_HEADER = 'X-Hermes-Delta-Accept'
 export const DELTA_BASE_HEADER = 'X-Hermes-Delta-Base'
@@ -289,7 +294,9 @@ export class DeltaBodyStore {
 
   /** Write changed copies off the request path. Dirty ownership lasts until publication, including during quit. */
   async flush(): Promise<void> {
-    while (this.#flushing) {await this.#flushing}
+    while (this.#flushing) {
+      await this.#flushing
+    }
 
     const pending = this.#flushPending()
 
@@ -298,14 +305,18 @@ export class DeltaBodyStore {
     try {
       await pending
     } finally {
-      if (this.#flushing === pending) {this.#flushing = null}
+      if (this.#flushing === pending) {
+        this.#flushing = null
+      }
     }
   }
 
   async #flushPending(): Promise<void> {
     const disk = this.#disk
 
-    if (!disk) {return}
+    if (!disk) {
+      return
+    }
 
     if (disk.timer) {
       clearTimeout(disk.timer)
@@ -319,7 +330,9 @@ export class DeltaBodyStore {
       await fs.promises.mkdir(disk.dir, { mode: 0o700, recursive: true })
 
       for (const key of keys) {
-        if (epoch !== this.#flushEpoch || disk !== this.#disk) {return}
+        if (epoch !== this.#flushEpoch || disk !== this.#disk) {
+          return
+        }
 
         const copy = this.#copies.get(key)?.at(-1)
         const target = path.join(disk.dir, diskName(key))
@@ -331,7 +344,9 @@ export class DeltaBodyStore {
             await fs.promises.writeFile(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
 
             // No await between validation and rename: delete/put/quit cannot interleave with publication.
-            if (epoch !== this.#flushEpoch || disk !== this.#disk || this.#copies.get(key)?.at(-1) !== copy) {continue}
+            if (epoch !== this.#flushEpoch || disk !== this.#disk || this.#copies.get(key)?.at(-1) !== copy) {
+              continue
+            }
             fs.renameSync(tmp, target)
             disk.saved.set(key, { at: Date.now(), hash: copy.hash })
           } finally {
@@ -347,7 +362,9 @@ export class DeltaBodyStore {
     } catch {
       // Persistence is an optimisation: an unwritable directory leaves the copies in memory and dirty for retry.
     } finally {
-      if (epoch === this.#flushEpoch) {this.#trimDisk(disk.dir)}
+      if (epoch === this.#flushEpoch) {
+        this.#trimDisk(disk.dir)
+      }
     }
   }
 
@@ -561,7 +578,11 @@ export function readEncodingHeaders(
   const delta = deltaRequestHeaders(method, url, store)
 
   return Object.keys(transcript).length > 0
-    ? { ...transcript, ...delta, ...(delta[DELTA_ACCEPT_HEADER] ? { [DELTA_ACCEPT_HEADER]: DELTA_GZIP_CAPABILITY } : {}) }
+    ? {
+        ...transcript,
+        ...delta,
+        ...(delta[DELTA_ACCEPT_HEADER] ? { [DELTA_ACCEPT_HEADER]: DELTA_GZIP_CAPABILITY } : {})
+      }
     : delta
 }
 
@@ -590,11 +611,15 @@ function decodeWholeEntity(
     text = decodeResponseBody(body, headers['content-encoding'])
   } catch (error) {
     if (error instanceof GzipExpansionError) {
-      if (key) { store.delete(key) }
+      if (key) {
+        store.delete(key)
+      }
       throw error
     }
 
-    if (compressedBase) { return fail(`bad gzip entity: ${String(error).slice(0, 80)}`) }
+    if (compressedBase) {
+      return fail(`bad gzip entity: ${String(error).slice(0, 80)}`)
+    }
     throw error
   }
 
@@ -625,7 +650,9 @@ export function decodeDeltaBody(
 
   // Every failure drops this read's copies, so the bounded transport retry names no base.
   const fail = (why: string): never => {
-    if (key) { store.delete(key) }
+    if (key) {
+      store.delete(key)
+    }
     throw new DeltaRetryError(url, why)
   }
 

@@ -18,14 +18,22 @@ const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 4, source: 'desktop', started_at: 0, title: id, ...extra }) as SessionInfo
 
 it('operational overdue triage paints red without asking for a decision', () => {
-  const outcome = canonicalOutcome('stuck', { kind: 'waiting',
-    presentation: { stripe: 'stuck', reason_codes: ['open_work', 'triage_overdue'] } },
-    { kind: 'waiting', on: [{ kind: 'card', id: 't_owned', state: 'triage_overdue' }] })
+  const outcome = canonicalOutcome(
+    'stuck',
+    { kind: 'waiting', presentation: { stripe: 'stuck', reason_codes: ['open_work', 'triage_overdue'] } },
+    { kind: 'waiting', on: [{ kind: 'card', id: 't_owned', state: 'triage_overdue' }] }
+  )
 
   const session = row('triage-chat', { outcome, kanban_active: 1, needs_you: [] })
   setSessions([session])
   const { result } = renderHook(() => useSessionRowStripe(session, 'background', true))
-  const { container } = render(<SessionRowStatusStripe outcomePainted={result.current.outcomePainted} session={session} statusStripe={result.current.statusStripe} />)
+  const { container } = render(
+    <SessionRowStatusStripe
+      outcomePainted={result.current.outcomePainted}
+      session={session}
+      statusStripe={result.current.statusStripe}
+    />
+  )
   expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('stuck')
   expect(stripe(container)?.className).toContain('--color-red-500')
   expect(stripe(container)?.getAttribute('aria-label')).toContain("overdue triage · waiting on this chat's agent")
@@ -34,7 +42,10 @@ it('operational overdue triage paints red without asking for a decision', () => 
 
 it.each(['ci', 'deploy'])('a replica %s park paints the canonical light-blue hollow cloud', () => {
   const session = row('replica-wait', {
-    kanban_active: 1, kanban_parked: 1, kanban_external: 1, kanban_external_unknown: 1,
+    kanban_active: 1,
+    kanban_parked: 1,
+    kanban_external: 1,
+    kanban_external_unknown: 1,
     outcome: canonicalOutcome('external')
   })
 
@@ -43,8 +54,11 @@ it.each(['ci', 'deploy'])('a replica %s park paints the canonical light-blue hol
   expect(result.current.statusStripe).toBe('external')
 
   const { container } = render(
-    <SessionRowStatusStripe outcomePainted={result.current.outcomePainted} session={session}
-      statusStripe={result.current.statusStripe} />
+    <SessionRowStatusStripe
+      outcomePainted={result.current.outcomePainted}
+      session={session}
+      statusStripe={result.current.statusStripe}
+    />
   )
 
   expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('external')
@@ -438,12 +452,16 @@ it('missing external fields keep today: no Running-on claim on a waiting stripe'
 // [daveey] A timer (clock wait) joins CI and deploy as the canonical light-blue stripe, drawn as a plain bar: no cloud.
 it('a clock wait paints the canonical sky-400 stripe without a cloud', () => {
   const session = row('clock-wait', {
-    kanban_active: 1, kanban_parked: 1, kanban_external: 1,
-    kanban_external_cards: [{
-      eta: { estimate_source: 'wakes 14:30', expected_s: 14_400, wait_kind: 'clock', waited_since: 1 },
-      external: { adapter: 'clock', health: 'ok', job: 'running', service: 'timer' },
-      task_id: 't_clock'
-    }],
+    kanban_active: 1,
+    kanban_parked: 1,
+    kanban_external: 1,
+    kanban_external_cards: [
+      {
+        eta: { estimate_source: 'wakes 14:30', expected_s: 14_400, wait_kind: 'clock', waited_since: 1 },
+        external: { adapter: 'clock', health: 'ok', job: 'running', service: 'timer' },
+        task_id: 't_clock'
+      }
+    ],
     outcome: canonicalOutcome('external')
   })
 
@@ -452,8 +470,11 @@ it('a clock wait paints the canonical sky-400 stripe without a cloud', () => {
   expect(result.current.statusStripe).toBe('external')
 
   const { container } = render(
-    <SessionRowStatusStripe outcomePainted={result.current.outcomePainted} session={session}
-      statusStripe={result.current.statusStripe} />
+    <SessionRowStatusStripe
+      outcomePainted={result.current.outcomePainted}
+      session={session}
+      statusStripe={result.current.statusStripe}
+    />
   )
 
   expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('external')
@@ -464,8 +485,12 @@ it('a clock wait paints the canonical sky-400 stripe without a cloud', () => {
 
 it('a CI wait still draws its cloud', () => {
   const session = row('ci-wait', {
-    kanban_active: 1, kanban_parked: 1, kanban_external: 1,
-    kanban_external_cards: [{ external: { adapter: 'github_run', health: 'ok', job: 'running', service: 'GitHub Actions' }, task_id: 't_ci' }],
+    kanban_active: 1,
+    kanban_parked: 1,
+    kanban_external: 1,
+    kanban_external_cards: [
+      { external: { adapter: 'github_run', health: 'ok', job: 'running', service: 'GitHub Actions' }, task_id: 't_ci' }
+    ],
     outcome: canonicalOutcome('external')
   })
 

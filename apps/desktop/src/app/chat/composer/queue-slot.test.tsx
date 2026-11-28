@@ -9,7 +9,11 @@ import { reconcilePendingSubmissions } from '@/store/pending-submissions'
 
 import { renderComposerQueueSlot } from './queue-slot'
 
-afterEach(() => { cleanup(); $queuedPromptsBySession.set({}); localStorage.clear() })
+afterEach(() => {
+  cleanup()
+  $queuedPromptsBySession.set({})
+  localStorage.clear()
+})
 
 function renderSlot(
   request = vi.fn(async () => ({})),
@@ -62,15 +66,23 @@ const labels = (row: ReturnType<typeof within>) =>
     .filter(Boolean)
 
 it.each([false, true])('Delete cancels a server-queued card at the authority (update-held: %s)', async held => {
-  reconcilePendingSubmissions('stored', [{ admission_id: 'adm-1', status: 'queued', user: 'later please',
-    ...(held ? { queued_reason: 'core_update', queued_started_at: null } : {}) }])
+  reconcilePendingSubmissions('stored', [
+    {
+      admission_id: 'adm-1',
+      status: 'queued',
+      user: 'later please',
+      ...(held ? { queued_reason: 'core_update', queued_started_at: null } : {})
+    }
+  ])
   const request = vi.fn(async () => ({ admission_id: 'adm-1', status: 'terminal', outcome: 'cancelled' }))
   renderSlot(request)
 
   fireEvent.click(await screen.findByRole('button', { name: /queued/i }))
   fireEvent.click(screen.getByRole('button', { name: en.composer.queueDelete }))
 
-  await vi.waitFor(() => expect(request).toHaveBeenCalledWith('prompt.cancel', { session_id: 'runtime-1', admission_id: 'adm-1' }))
+  await vi.waitFor(() =>
+    expect(request).toHaveBeenCalledWith('prompt.cancel', { session_id: 'runtime-1', admission_id: 'adm-1' })
+  )
 })
 
 it('a server-queued card shows the Steer and Edit its owner serves, and never Next (RT-35)', async () => {

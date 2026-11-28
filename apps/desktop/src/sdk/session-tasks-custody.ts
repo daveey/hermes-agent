@@ -9,7 +9,13 @@ interface HostGraph {
 
 /** Called once immediately after SDK construction, never against published globals. */
 export function sessionTasksHostCustody(host: HostGraph): () => boolean {
-  const checks = [descriptorCustody(host), descriptorCustody(host.sessions), descriptorCustody(host.composer), descriptorCustody(host.diagnostics), descriptorCustody(host.state)]
+  const checks = [
+    descriptorCustody(host),
+    descriptorCustody(host.sessions),
+    descriptorCustody(host.composer),
+    descriptorCustody(host.diagnostics),
+    descriptorCustody(host.state)
+  ]
   const names = Reflect.ownKeys(host.state)
 
   for (let i = 0; i < names.length; i++) {
@@ -23,7 +29,9 @@ export function sessionTasksHostCustody(host: HostGraph): () => boolean {
 
   return () => {
     for (let i = 0; i < checks.length; i++) {
-      if (!checks[i]()) { return false }
+      if (!checks[i]()) {
+        return false
+      }
     }
 
     return true

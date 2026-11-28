@@ -32,7 +32,9 @@ import {
 } from './offline-sessions'
 import { $projectTree } from './project-tree'
 
-type BootSnapshotWire = NonNullable<ReturnType<NonNullable<NonNullable<Window['hermesDesktop']>['bootSnapshot']>['read']>>
+type BootSnapshotWire = NonNullable<
+  ReturnType<NonNullable<NonNullable<Window['hermesDesktop']>['bootSnapshot']>['read']>
+>
 
 interface BootState {
   appStartMs: null | number

@@ -332,7 +332,10 @@ describe('ModelPill with a stored model and no live agent', () => {
 
     const { container } = render(
       <SessionViewProvider value={view}>
-        <ModelPill disabled={false} model={modelState({ model: '', provider: '', modelMenuContent: liveMenu ? <div /> : undefined })} />
+        <ModelPill
+          disabled={false}
+          model={modelState({ model: '', provider: '', modelMenuContent: liveMenu ? <div /> : undefined })}
+        />
       </SessionViewProvider>
     )
 

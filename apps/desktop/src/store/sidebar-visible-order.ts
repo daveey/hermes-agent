@@ -123,8 +123,10 @@ export function sessionHasStatusStripe(id: string): boolean {
   }
 
   // Off-screen rows consume the same published status as mounted rows; no row means no stop.
-  const session = [...sections.values()].flatMap(entry => entry.rows ?? []).find(s => s.id === id) ??
-    $sessions.get().find(s => s.id === id) ?? $messagingSessions.get().find(s => s.id === id)
+  const session =
+    [...sections.values()].flatMap(entry => entry.rows ?? []).find(s => s.id === id) ??
+    $sessions.get().find(s => s.id === id) ??
+    $messagingSessions.get().find(s => s.id === id)
 
   return Boolean(session) && sessionHasStepStripe(canonicalOutcomeStatus(session?.outcome).stripe)
 }

@@ -173,9 +173,13 @@ describe('work-source owner authority context', () => {
     setSessions([makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local' })])
     publishSessionState('rt-a', createClientSessionState('stored-chat'))
     publishSessionState('rt-b', createClientSessionState('stored-chat'))
-    $sessionTiles.set([{ storedSessionId: 'stored-chat', runtimeId: 'rt-a', ownerRoute: { connectionId: 'local', profile: 'default' } }])
+    $sessionTiles.set([
+      { storedSessionId: 'stored-chat', runtimeId: 'rt-a', ownerRoute: { connectionId: 'local', profile: 'default' } }
+    ])
     const first = workSourceAuthorityForSession('local', 'default', 'stored-chat')
-    $sessionTiles.set([{ storedSessionId: 'stored-chat', runtimeId: 'rt-b', ownerRoute: { connectionId: 'local', profile: 'default' } }])
+    $sessionTiles.set([
+      { storedSessionId: 'stored-chat', runtimeId: 'rt-b', ownerRoute: { connectionId: 'local', profile: 'default' } }
+    ])
     expect(workSourceAuthorityForSession('local', 'default', 'stored-chat').runtime).not.toBe(first.runtime)
   })
 
@@ -451,7 +455,8 @@ describe('work-source owner authority context', () => {
     publishSessionState('rt-a', createClientSessionState('stored-chat'))
     publishSessionState('rt-b', createClientSessionState('stored-chat'))
     const route = { connectionId: 'local', profile: 'default' }
-    const tile = (runtimeId: string) => $sessionTiles.set([{ storedSessionId: 'stored-chat', runtimeId, ownerRoute: route }])
+    const tile = (runtimeId: string) =>
+      $sessionTiles.set([{ storedSessionId: 'stored-chat', runtimeId, ownerRoute: route }])
     tile('rt-a')
     const first = workSourceAuthorityForSession('local', 'default', 'stored-chat')
     tile('rt-b')
@@ -476,7 +481,9 @@ describe('work-source owner authority context', () => {
   })
 
   it('builds the owner candidate index once per row-list change, even with an unlisted draft', () => {
-    const rows = Array.from({ length: 200 }, (_, i) => makeSessionInfo({ id: `idx-${i}`, profile: 'default', connection_id: 'local' }))
+    const rows = Array.from({ length: 200 }, (_, i) =>
+      makeSessionInfo({ id: `idx-${i}`, profile: 'default', connection_id: 'local' })
+    )
     $unlistedSessionOwnerRows.set([makeSessionInfo({ id: 'draft', profile: 'default', connection_id: 'local' })])
     setSessions(rows)
 
@@ -504,7 +511,11 @@ describe('work-source owner authority context', () => {
   })
 
   it.each([false, true])('review: realistic structural cost with unlisted stub %s', withStub => {
-    if (withStub) {$unlistedSessionOwnerRows.set([makeSessionInfo({ id: 'unlisted-draft', profile: 'default', connection_id: 'local' })])}
+    if (withStub) {
+      $unlistedSessionOwnerRows.set([
+        makeSessionInfo({ id: 'unlisted-draft', profile: 'default', connection_id: 'local' })
+      ])
+    }
 
     const rows = Array.from({ length: 1000 }, (_, i) =>
       makeSessionInfo({ id: `perf-${i}`, profile: 'default', connection_id: 'local' })

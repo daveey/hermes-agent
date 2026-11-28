@@ -12,8 +12,7 @@ export function isPowerSettlingRejection(reason: unknown): boolean {
     return true
   }
 
-  const message =
-    typeof reason === 'string' ? reason : String((reason as { message?: unknown } | null)?.message ?? '')
+  const message = typeof reason === 'string' ? reason : String((reason as { message?: unknown } | null)?.message ?? '')
 
   return message.includes(POWER_SETTLING_MARKER)
 }

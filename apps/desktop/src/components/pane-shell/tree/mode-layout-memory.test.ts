@@ -2,7 +2,6 @@ import { assert, beforeEach, expect, it, vi } from 'vitest'
 
 import type { LayoutNode } from './model'
 
-
 beforeEach(() => {
   window.localStorage.clear()
   window.localStorage.setItem('hermes.desktop.tabStripDefault', 'auto') // multi-tab fixtures predate Single

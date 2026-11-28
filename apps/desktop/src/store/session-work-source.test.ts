@@ -82,7 +82,7 @@ describe('work-source diagnostics remain separate from published status authorit
       available: true
     })
     expect(workSourceUnavailable('gateway', 'default', ['chat'])).toBe(true)
-      expect(painted(row, true)).toBe('done')
+    expect(painted(row, true)).toBe('done')
   })
 
   it.each([

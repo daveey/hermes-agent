@@ -1,6 +1,11 @@
 import { atom } from 'nanostores'
 
-import { executionIdentityKey, projectExecutionObservation, selectExecutionObservation, summarizeExecutionObservations } from '@/lib/execution-observations'
+import {
+  executionIdentityKey,
+  projectExecutionObservation,
+  selectExecutionObservation,
+  summarizeExecutionObservations
+} from '@/lib/execution-observations'
 
 import { lineageAliases } from './session'
 
@@ -92,17 +97,25 @@ export function rosterLiveIds(
   const ids = new Set<string>()
 
   for (const { at, sessions: bucket, failed } of Object.values(roster)) {
-    if (failed) {continue}
+    if (failed) {
+      continue
+    }
 
     for (const [storedId, counts] of Object.entries(bucket)) {
       const work = (counts.execution_observations ?? []).filter(record => {
         const identity = record && typeof record === 'object' ? (record as Record<string, unknown>).identity : null
 
-        return identity && typeof identity === 'object' &&
+        return (
+          identity &&
+          typeof identity === 'object' &&
           (identity as Record<string, unknown>).kind === (kind === 'background' ? 'process' : 'subagent')
+        )
       })
 
-      if (summarizeExecutionObservations(selectWorkObservations(work, Date.now() / 1000), Date.now() / 1000, 'sidebar').counts.running <= 0) {
+      if (
+        summarizeExecutionObservations(selectWorkObservations(work, Date.now() / 1000), Date.now() / 1000, 'sidebar')
+          .counts.running <= 0
+      ) {
         continue
       }
 
@@ -135,7 +148,8 @@ export function rosterSaysIdle(
 ): boolean {
   return Object.values(roster).some(
     ({ at, covers, sessions, failed }) =>
-      !failed && at > eventAt &&
+      !failed &&
+      at > eventAt &&
       aliases.some(alias => covers.has(alias)) &&
       aliases.every(alias => (sessions[alias]?.[kind] ?? 0) <= 0)
   )
@@ -183,16 +197,25 @@ export function rosterRowEvidence(roster: LiveWorkRoster, source: string, aliase
       continue
     }
 
-    if (!counts) {continue}
+    if (!counts) {
+      continue
+    }
     const observations = counts.execution_observations ?? []
     records.push(...observations)
 
-    for (const [kind, count] of [['process', counts.background], ['subagent', counts.subagents]] as const) {
-      const keys = new Set(observations.flatMap(record => {
-        const id = record && typeof record === 'object' ? (record as Record<string, unknown>).identity : null
+    for (const [kind, count] of [
+      ['process', counts.background],
+      ['subagent', counts.subagents]
+    ] as const) {
+      const keys = new Set(
+        observations.flatMap(record => {
+          const id = record && typeof record === 'object' ? (record as Record<string, unknown>).identity : null
 
-        return id && typeof id === 'object' && (id as Record<string, unknown>).kind === kind ? [JSON.stringify(id)] : []
-      }))
+          return id && typeof id === 'object' && (id as Record<string, unknown>).kind === kind
+            ? [JSON.stringify(id)]
+            : []
+        })
+      )
 
       missing += Math.max(0, count - keys.size)
     }
@@ -217,9 +240,11 @@ export function selectWorkObservations(records: readonly unknown[], now: number)
     const identity = record && typeof record === 'object' ? (record as Record<string, unknown>).identity : undefined
     const key = executionIdentityKey(identity)
 
-    if (!key) { selected.push(record);
+    if (!key) {
+      selected.push(record)
 
- continue }
+      continue
+    }
 
     const group = groups.get(key) ?? { identity, records: [] }
     // RPC and row projections of the same cached probe have different derived ages.
@@ -228,7 +253,9 @@ export function selectWorkObservations(records: readonly unknown[], now: number)
     groups.set(key, group)
   }
 
-  for (const group of groups.values()) {selected.push(selectExecutionObservation(group.records, group.identity, now, 'sidebar'))}
+  for (const group of groups.values()) {
+    selected.push(selectExecutionObservation(group.records, group.identity, now, 'sidebar'))
+  }
 
   return selected
 }

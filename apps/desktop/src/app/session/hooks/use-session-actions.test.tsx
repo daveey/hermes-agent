@@ -571,7 +571,10 @@ describe('connection-qualified session deletion', () => {
     expect(requestGateway).toHaveBeenCalledWith('session.interrupt', { origin: 'delete', session_id: 'runtime-bg' })
     expect(requestGateway).toHaveBeenCalledWith('session.close', { session_id: 'runtime-bg' })
     // The selected session's runtime must not be touched by another row's delete.
-    expect(requestGateway).not.toHaveBeenCalledWith('session.interrupt', expect.objectContaining({ session_id: 'runtime-foreground' }))
+    expect(requestGateway).not.toHaveBeenCalledWith(
+      'session.interrupt',
+      expect.objectContaining({ session_id: 'runtime-foreground' })
+    )
     expect(requestGateway).not.toHaveBeenCalledWith('session.close', { session_id: 'runtime-foreground' })
     // Marked interrupted BEFORE the RPCs so a queued blocking-input frame is
     // declined instead of parked.
@@ -7332,7 +7335,9 @@ describe('[daveey] instant opens from the durable transcript cache', () => {
     resetOpenTimings()
     setMessages([])
     vi.mocked(getSession).mockReset()
-    vi.mocked(ensureGatewayAgent).mockReset().mockResolvedValue(undefined as never)
+    vi.mocked(ensureGatewayAgent)
+      .mockReset()
+      .mockResolvedValue(undefined as never)
     vi.mocked(getLatestSessionMessages).mockReset()
     vi.mocked(requestGatewayForAgent).mockReset()
   })
@@ -7425,10 +7430,16 @@ describe('[daveey] instant opens from the durable transcript cache', () => {
     $offlineSessions.set([])
   })
 
-  it('an asleep gateway\'s replica row does not become the owner of a resume', async () => {
+  it("an asleep gateway's replica row does not become the owner of a resume", async () => {
     saveTranscriptTail('stored-asleep', [row(1, 'user', 'asleep question')], owner)
     $offlineSessions.set([
-      { connection_id: 'mac-mini', id: 'stored-asleep', offline_cached: true, profile: 'default', title: 'Asleep' } as never
+      {
+        connection_id: 'mac-mini',
+        id: 'stored-asleep',
+        offline_cached: true,
+        profile: 'default',
+        title: 'Asleep'
+      } as never
     ])
     vi.mocked(getSession).mockReturnValue(new Promise(() => {}) as never)
 
@@ -7461,7 +7472,9 @@ describe('[daveey] instant opens from the durable transcript cache', () => {
     expect(ensureGatewayAgent).not.toHaveBeenCalled() // still waiting on the owner lookup
     expect(lastTiming()).toMatchObject({ changed: true, id: 'stored-slow', outcome: 'rest', paint: 'cache' })
 
-    lookup.resolve(storedSession({ connection_id: 'mac-mini', id: 'stored-slow', message_count: 2, profile: 'default' }))
+    lookup.resolve(
+      storedSession({ connection_id: 'mac-mini', id: 'stored-slow', message_count: 2, profile: 'default' })
+    )
     resumed.resolve(resumedAck('stored-slow'))
     await pending
 

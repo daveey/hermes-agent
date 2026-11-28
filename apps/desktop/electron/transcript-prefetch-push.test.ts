@@ -545,7 +545,9 @@ describe('measurement: one streaming turn', () => {
   it('reports fetches before/after and keeps the cache within a second of the turn', async () => {
     const before = await simulate(false)
     const after = await simulate(true)
-    console.log(`[transcript-push measurement] 60 s turn, 1 row / 500 ms: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`)
+    console.log(
+      `[transcript-push measurement] 60 s turn, 1 row / 500 ms: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`
+    )
 
     expect(after.latestPageFetches).toBe(0)
     expect(after.maxRowsBehind).toBeLessThanOrEqual(2) // at most one push window (1 s = 2 rows)

@@ -582,10 +582,7 @@ function insertPreservedErrorRuns(
   )
 }
 
-export function preserveLocalAssistantErrors(
-  nextMessages: ChatMessage[],
-  localMessages: ChatMessage[]
-): ChatMessage[] {
+export function preserveLocalAssistantErrors(nextMessages: ChatMessage[], localMessages: ChatMessage[]): ChatMessage[] {
   const currentMessages: ChatMessage[] = withoutDisprovedNoReplyNotice(nextMessages, localMessages)
   const reconciled: ChatMessage[] = reconcileLocalAssistantTimeline(nextMessages, currentMessages)
   const merged: ChatMessage[] = mergeStoredAssistantErrors(reconciled, currentMessages)

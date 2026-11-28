@@ -38,13 +38,23 @@ describe('gatewayDevice', () => {
     ).toBe('cloud')
     expect(gatewayDevice({ host: '10.0.0.5', id: 'g', kind: 'ssh', label: 'gpu', user: 'ubuntu' }, null)).toBe('cloud')
     expect(
-      gatewayDevice({ host: '10.0.0.6', id: 'v', kind: 'ssh', label: 'box', remoteHermesPath: '/root/.local/bin/hermes' }, null)
+      gatewayDevice(
+        { host: '10.0.0.6', id: 'v', kind: 'ssh', label: 'box', remoteHermesPath: '/root/.local/bin/hermes' },
+        null
+      )
     ).toBe('cloud')
     expect(gatewayDevice({ id: 'r', kind: 'remote', label: 'aws-worker' }, null)).toBe('cloud')
     // A Mac reached over SSH stays a Mac.
     expect(
       gatewayDevice(
-        { host: 'davids-mac-mini-1', id: 'mac-mini', kind: 'ssh', label: 'mac-mini', user: 'daveey', remoteHermesPath: '/Users/daveey/code/hermes-agent/.venv/bin/hermes' },
+        {
+          host: 'davids-mac-mini-1',
+          id: 'mac-mini',
+          kind: 'ssh',
+          label: 'mac-mini',
+          user: 'daveey',
+          remoteHermesPath: '/Users/daveey/code/hermes-agent/.venv/bin/hermes'
+        },
         null
       )
     ).toBe('mini')

@@ -10,37 +10,57 @@ import { SessionRecoveryAborted } from './utils'
  * with the exact saved submission_id/payload: the owner returns its receipt,
  * including restart-wait's queued/unknown verdict, never a second admission.
  * An identityless legacy send must never enter this function. */
-export async function submitAcrossGatewayRestart<T>(options: {
-  storedSessionId: string | null
-  owner: SessionOwnerScope
-  driftReason: () => string | null
-  onUncertain: () => void
-}, run: () => Promise<T>): Promise<T> {
+export async function submitAcrossGatewayRestart<T>(
+  options: {
+    storedSessionId: string | null
+    owner: SessionOwnerScope
+    driftReason: () => string | null
+    onUncertain: () => void
+  },
+  run: () => Promise<T>
+): Promise<T> {
   let release: (() => void) | undefined
-  const connectionId = typeof options.owner === 'object' && options.owner
-    ? options.owner.connectionId : ambientOwnerConnectionId()
+
+  const connectionId =
+    typeof options.owner === 'object' && options.owner ? options.owner.connectionId : ambientOwnerConnectionId()
+
   const key = JSON.stringify([connectionId || '', options.storedSessionId])
 
   try {
-    return await withSessionWriteReconnect(async () => {
-      const drift = options.driftReason()
-      if (drift) { throw new SessionRecoveryAborted(drift, '') }
+    return await withSessionWriteReconnect(
+      async () => {
+        const drift = options.driftReason()
 
-      try { return await run() } catch (error) {
-        if (retryable(error)) {
-          options.onUncertain()
-          release ??= holdRestartingSessionResume(key)
+        if (drift) {
+          throw new SessionRecoveryAborted(drift, '')
         }
-        throw error
-      }
-    }, { label: `submit-restart ${options.storedSessionId}`, budgetMs: 600_000, retryable })
-  } finally { release?.() }
+
+        try {
+          return await run()
+        } catch (error) {
+          if (retryable(error)) {
+            options.onUncertain()
+            release ??= holdRestartingSessionResume(key)
+          }
+
+          throw error
+        }
+      },
+      { label: `submit-restart ${options.storedSessionId}`, budgetMs: 600_000, retryable }
+    )
+  } finally {
+    release?.()
+  }
 }
 
 function retryable(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
 
-  return isGatewayDrainError(error) || isReconnectableSessionWriteError(error) ||
-
-    /Hermes gateway (?:is not connected|connection closed|unavailable)|Backend .* is reconnecting; retry after it settles|Timed out waiting for the Hermes gateway to reconnect/i.test(message)
+  return (
+    isGatewayDrainError(error) ||
+    isReconnectableSessionWriteError(error) ||
+    /Hermes gateway (?:is not connected|connection closed|unavailable)|Backend .* is reconnecting; retry after it settles|Timed out waiting for the Hermes gateway to reconnect/i.test(
+      message
+    )
+  )
 }

@@ -62,7 +62,11 @@ import {
 } from './prepared-submissions'
 import { rejectSendOnFailedResume, startOptimisticSend } from './rejected-optimistic-sends'
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
-import { captureSubmissionDestination, destinationAfterCreate, sameAuthorityPublishedOwner } from './submission-destination'
+import {
+  captureSubmissionDestination,
+  destinationAfterCreate,
+  sameAuthorityPublishedOwner
+} from './submission-destination'
 import {
   backendRefusesSubmissionId,
   noteSubmissionIdAccepted,
@@ -581,8 +585,14 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // the retry is refused once, visibly, and the entry is retired: sending
         // the words again afterwards is the user's informed new turn.
         if (retained?.legacyAttempted && retainedKey) {
-          await removePreparedSubmission(retainedKey, retained.id).catch(error => console.warn('[prepared-submission-retire]', error))
-          notify({ kind: 'warning', title: copy.promptFailed, message: translateNow('promptNotices.legacySendUnconfirmed') })
+          await removePreparedSubmission(retainedKey, retained.id).catch(error =>
+            console.warn('[prepared-submission-retire]', error)
+          )
+          notify({
+            kind: 'warning',
+            title: copy.promptFailed,
+            message: translateNow('promptNotices.legacySendUnconfirmed')
+          })
 
           return false
         }
@@ -881,7 +891,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         if (failure) {
           // Not sent: say so (a session switch stays silent), then drop the bubble.
-          rejectSendOnFailedResume(failure.error, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: sendUnconfirmed(retained) })
+          rejectSendOnFailedResume(failure.error, {
+            copy,
+            drift: sessionDriftReason(),
+            optimisticId,
+            options,
+            uncertain: sendUnconfirmed(retained)
+          })
 
           return abortForSessionSwitch(null)
         }
@@ -1004,7 +1020,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // drain this abort is a no-op on foreground state (both helpers are
           // targetIsCurrentView-guarded) and simply drops the queued send. A
           // foreground send is not sent either: say so, then drop the bubble.
-          rejectSendOnFailedResume(err, { copy, drift: sessionDriftReason(), optimisticId, options, uncertain: sendUnconfirmed(retained) })
+          rejectSendOnFailedResume(err, {
+            copy,
+            drift: sessionDriftReason(),
+            optimisticId,
+            options,
+            uncertain: sendUnconfirmed(retained)
+          })
 
           return abortForSessionSwitch(null)
         }
@@ -1211,7 +1233,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         const prepared: NonNullable<typeof retained> = retained ?? {
           id: submissionId,
-          owner: destination.owner ?? sameAuthorityPublishedOwner(destination, targetStoredSessionId, ambientRequestGateway),
+          owner:
+            destination.owner ?? sameAuthorityPublishedOwner(destination, targetStoredSessionId, ambientRequestGateway),
           displayText: options?.displayText,
           attachments: syncedAttachments,
           text,
@@ -1247,90 +1270,103 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           const { result, sessionId: receiptSessionId } = await withSessionNotFoundResume<SubmitReceipt>(
             sessionId,
             recoverStoredSessionId,
-            noteUnansweredReplays(liveId =>
-              withSessionBusyRetry(async () => {
-                // Recovery can re-enter this callback within the same submit.
-                // An identityless write cannot be deduplicated after a lost ACK.
-                if (prepared.legacyAttempted) {
-                  throw new Error('Legacy submission acknowledgement is unknown; automatic retry is unsafe')
-                }
+            noteUnansweredReplays(
+              liveId =>
+                withSessionBusyRetry(async () => {
+                  // Recovery can re-enter this callback within the same submit.
+                  // An identityless write cannot be deduplicated after a lost ACK.
+                  if (prepared.legacyAttempted) {
+                    throw new Error('Legacy submission acknowledgement is unknown; automatic retry is unsafe')
+                  }
 
-                const params: Record<string, unknown> = { ...prepared.params, session_id: liveId }
+                  const params: Record<string, unknown> = { ...prepared.params, session_id: liveId }
 
-                const sendIdentityless = async () => {
-                  prepared.legacyAttempted = true
-                  await writePreparedSubmission(retryKey, prepared)
-                  const { submission_id: _id, ...legacyParams } = params
+                  const sendIdentityless = async () => {
+                    prepared.legacyAttempted = true
+                    await writePreparedSubmission(retryKey, prepared)
+                    const { submission_id: _id, ...legacyParams } = params
 
-                  let result: SubmitReceipt
+                    let result: SubmitReceipt
 
-                  try {
-                    result = await requestGateway<SubmitReceipt>(
-                      'prompt.submit',
-                      legacyParams,
-                      PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
-                    )
-                  } catch (error) {
-                    // A definite refusal means this send never ran: an explicit retry (Take over's)
-                    // may send it again. Every other failure keeps the send unconfirmed.
-                    if (isDefiniteSubmitRefusal(error)) {
-                      prepared.legacyAttempted = false
-                      // A failed save must not mask the refusal: the caller acts on the 4090.
-                      await writePreparedSubmission(retryKey, prepared).catch(storageError =>
-                        console.warn('[prepared-submission-reset]', storageError)
+                    try {
+                      result = await requestGateway<SubmitReceipt>(
+                        'prompt.submit',
+                        legacyParams,
+                        PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
                       )
+                    } catch (error) {
+                      // A definite refusal means this send never ran: an explicit retry (Take over's)
+                      // may send it again. Every other failure keeps the send unconfirmed.
+                      if (isDefiniteSubmitRefusal(error)) {
+                        prepared.legacyAttempted = false
+                        // A failed save must not mask the refusal: the caller acts on the 4090.
+                        await writePreparedSubmission(retryKey, prepared).catch(storageError =>
+                          console.warn('[prepared-submission-reset]', storageError)
+                        )
+                      }
+
+                      throw error
                     }
 
-                    throw error
+                    legacyAccepted = true
+
+                    return result
                   }
 
-                  legacyAccepted = true
-
-                  return result
-                }
-
-                // This destination already refused `submission_id` pre-admission: skip the
-                // refused request instead of paying a round trip on every send. Fresh sends only:
-                // a retained entry may already have been admitted WITH identity on a capable
-                // backend, so its retry must offer that identity again (dedupe), never drop it.
-                if (!retained && backendRefusesSubmissionId(destination.scopeKey)) {
-                  return await sendIdentityless()
-                }
-
-                // The activation this request went out under: a refusal answered after a
-                // route/source swap describes the old backend and must not mark the new one.
-                const identityEpoch = submissionIdentityEpoch()
-
-                try {
-                  const receipt = await submitAcrossGatewayRestart({ storedSessionId: targetStoredSessionId,
-                    owner: destination.owner, driftReason: sessionDriftReason,
-                    onUncertain: () => { restartReplayUncertain = true }
-                  }, () => requestGateway<SubmitReceipt>('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS))
-
-                  noteSubmissionIdAccepted(destination.scopeKey)
-
-                  return receipt
-                } catch (error) {
-                  // A retry whose payload no longer matches its admitted original (an attachment send
-                  // offered back as text) is that original: settled as the dedupe it is, no new turn.
-                  if (isAdmittedSubmissionConflict(error)) {
-                    return { status: 'terminal', submission_id: submissionId }
+                  // This destination already refused `submission_id` pre-admission: skip the
+                  // refused request instead of paying a round trip on every send. Fresh sends only:
+                  // a retained entry may already have been admitted WITH identity on a capable
+                  // backend, so its retry must offer that identity again (dedupe), never drop it.
+                  if (!retained && backendRefusesSubmissionId(destination.scopeKey)) {
+                    return await sendIdentityless()
                   }
 
-                  // 4094 is an explicit PRE-admission capability refusal; 4000 is the
-                  // legacy `hermes serve` contract refusing `submission_id` as an unknown
-                  // key (version skew) before any handler ran. Both are pre-admission and
-                  // safe to retry identityless. Never downgrade on a timeout, malformed
-                  // ACK or an ambiguous retry.
-                  if (!isPreAdmissionRefusal(error) || prepared.legacyAttempted || restartReplayUncertain) {
-                    throw error
+                  // The activation this request went out under: a refusal answered after a
+                  // route/source swap describes the old backend and must not mark the new one.
+                  const identityEpoch = submissionIdentityEpoch()
+
+                  try {
+                    const receipt = await submitAcrossGatewayRestart(
+                      {
+                        storedSessionId: targetStoredSessionId,
+                        owner: destination.owner,
+                        driftReason: sessionDriftReason,
+                        onUncertain: () => {
+                          restartReplayUncertain = true
+                        }
+                      },
+                      () => requestGateway<SubmitReceipt>('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                    )
+
+                    noteSubmissionIdAccepted(destination.scopeKey)
+
+                    return receipt
+                  } catch (error) {
+                    // A retry whose payload no longer matches its admitted original (an attachment send
+                    // offered back as text) is that original: settled as the dedupe it is, no new turn.
+                    if (isAdmittedSubmissionConflict(error)) {
+                      return { status: 'terminal', submission_id: submissionId }
+                    }
+
+                    // 4094 is an explicit PRE-admission capability refusal; 4000 is the
+                    // legacy `hermes serve` contract refusing `submission_id` as an unknown
+                    // key (version skew) before any handler ran. Both are pre-admission and
+                    // safe to retry identityless. Never downgrade on a timeout, malformed
+                    // ACK or an ambiguous retry.
+                    if (!isPreAdmissionRefusal(error) || prepared.legacyAttempted || restartReplayUncertain) {
+                      throw error
+                    }
+
+                    noteSubmissionIdRefused(destination.scopeKey, identityEpoch)
+
+                    return await sendIdentityless()
                   }
-
-                  noteSubmissionIdRefused(destination.scopeKey, identityEpoch)
-
-                  return await sendIdentityless()
-                }
-              }), isDefiniteSubmitRefusal, () => { restartReplayUncertain = true }),
+                }),
+              isDefiniteSubmitRefusal,
+              () => {
+                restartReplayUncertain = true
+              }
+            ),
             {
               requestGateway,
               driftReason: sessionDriftReason,
@@ -1379,8 +1415,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
               // An exact retry of an admission the owner lost mid-turn answers `unknown`: it was
               // admitted (never replay it) and no turn will run. Keep the bubble; the pending
               // fanout's lost card offers Discard (prompt.resolve_unknown).
-              if (result.status === 'terminal' || result.status === 'unknown' ||
-                (result.status === 'queued' && result.queued_reason === 'core_update')) {
+              if (
+                result.status === 'terminal' ||
+                result.status === 'unknown' ||
+                (result.status === 'queued' && result.queued_reason === 'core_update')
+              ) {
                 // Deduplication does not start a turn or promise another terminal
                 // event. Remove our duplicate bubble, but preserve any live turn
                 // that an owner event established while the receipt was in flight.
@@ -1388,7 +1427,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                   receiptSessionId,
                   state => ({
                     ...state,
-                    messages: result.status === 'unknown' ? state.messages : state.messages.filter(message => message.id !== optimisticId),
+                    messages:
+                      result.status === 'unknown'
+                        ? state.messages
+                        : state.messages.filter(message => message.id !== optimisticId),
                     ...(!state.turnLive &&
                       !state.streamId &&
                       !state.sawAssistantPayload && {
@@ -1436,22 +1478,40 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             }
 
             if (legacyAccepted && result.status === 'queued' && result.queued_reason === 'core_update') {
-              const next = updateSessionState(receiptSessionId, state => {
-                // A start event that overtook the ACK owns the live state and must not be undone.
-                if (state.turnLive || state.streamId || state.sawAssistantPayload) { return state }
+              const next = updateSessionState(
+                receiptSessionId,
+                state => {
+                  // A start event that overtook the ACK owns the live state and must not be undone.
+                  if (state.turnLive || state.streamId || state.sawAssistantPayload) {
+                    return state
+                  }
 
-                return {
-                  ...state,
-                  messages: state.messages.map(message => message.id === optimisticId
-                    ? { ...message, queued_reason: 'core_update' as const, queued_started_at: result.queued_started_at } : message),
-                  busy: false, awaitingResponse: false, turnStartedAt: null, pendingBranchGroup: null,
-                  // Stop during the in-flight submit had no turn to cancel; the owner holds this
-                  // send for the update, so the held turn's later stream must not be dropped.
-                  interrupted: false
-                }
-              }, targetStoredSessionId)
+                  return {
+                    ...state,
+                    messages: state.messages.map(message =>
+                      message.id === optimisticId
+                        ? {
+                            ...message,
+                            queued_reason: 'core_update' as const,
+                            queued_started_at: result.queued_started_at
+                          }
+                        : message
+                    ),
+                    busy: false,
+                    awaitingResponse: false,
+                    turnStartedAt: null,
+                    pendingBranchGroup: null,
+                    // Stop during the in-flight submit had no turn to cancel; the owner holds this
+                    // send for the update, so the held turn's later stream must not be dropped.
+                    interrupted: false
+                  }
+                },
+                targetStoredSessionId
+              )
 
-              if (!next.busy && !next.awaitingResponse) { releaseBusy() }
+              if (!next.busy && !next.awaitingResponse) {
+                releaseBusy()
+              }
             }
 
             // RT-37: forwarded to the gateway owner's FIFO; its queued-row card stands for the send.
@@ -1496,13 +1556,18 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             return abortForSessionSwitch(sessionId)
           }
 
-          throw await submissionFailed(retryKey, prepared, firstErr, { definite: isDefiniteSubmitRefusal, replayUncertain: restartReplayUncertain })
+          throw await submissionFailed(retryKey, prepared, firstErr, {
+            definite: isDefiniteSubmitRefusal,
+            replayUncertain: restartReplayUncertain
+          })
         }
 
         // The gateway admitted it: a failed journal retirement (ENOSPC/EIO) must not report a
         // delivered prompt as failed and invite a resend. The identity is tombstoned first, so the
         // stale entry is never adopted again — not after a reload either.
-        await removePreparedSubmission(retryKey, prepared.id).catch(error => console.warn('[prepared-submission-retire]', error))
+        await removePreparedSubmission(retryKey, prepared.id).catch(error =>
+          console.warn('[prepared-submission-retire]', error)
+        )
 
         // The prompt is now accepted. Report the EXACT identity it landed on
         // (recovered id included) so a caller that must prove delivery — the

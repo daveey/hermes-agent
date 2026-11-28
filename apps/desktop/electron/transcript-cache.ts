@@ -267,7 +267,12 @@ export class TranscriptCacheStore {
    * still ends at that row (another write since the delta was asked for, an open's latest page, means the delta
    * no longer lines up: false, and the caller refetches the latest page). The meta moves to the delta's.
    */
-  putAfter(key: TranscriptCacheKey, anchorId: number, rows: readonly unknown[], meta: TranscriptCacheMeta = {}): boolean {
+  putAfter(
+    key: TranscriptCacheKey,
+    anchorId: number,
+    rows: readonly unknown[],
+    meta: TranscriptCacheMeta = {}
+  ): boolean {
     const current = this.read(key, { touch: false })
 
     if (!current || tailRowId(current.messages) !== anchorId || !Array.isArray(rows)) {

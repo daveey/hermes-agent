@@ -23,8 +23,7 @@ export interface StreamSpan {
   end: number
 }
 
-export const sameStreamSegment = (a: StreamSpan, b: StreamSpan) =>
-  a.turnId === b.turnId && a.segment === b.segment
+export const sameStreamSegment = (a: StreamSpan, b: StreamSpan) => a.turnId === b.turnId && a.segment === b.segment
 
 /** The part of `text` (claimed as `span`) not already covered by `held`, and the claim after appending it. */
 export function admitStreamText(

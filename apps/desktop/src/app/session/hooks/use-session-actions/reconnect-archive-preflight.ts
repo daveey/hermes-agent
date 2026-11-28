@@ -12,33 +12,52 @@ import { refreshArchiveTasks } from './refresh-archive-tasks'
 
 export { reportDroppedArchiveQueues } from './archive-queue-lifetime'
 
-export async function reconnectArchivePreflight(id: string, row: SessionInfo | undefined, profile: string | undefined,
-  copy: Translations['desktop'], trace?: ArchiveTrace): Promise<SessionInfo | undefined> {
+export async function reconnectArchivePreflight(
+  id: string,
+  row: SessionInfo | undefined,
+  profile: string | undefined,
+  copy: Translations['desktop'],
+  trace?: ArchiveTrace
+): Promise<SessionInfo | undefined> {
   // Pin even an ownerless primary row before waiting: a gateway switch cannot
   // move its safety read to a different same-named profile.
-  const session = { ...row, connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined } as SessionInfo
+  const session = {
+    ...row,
+    connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined
+  } as SessionInfo
   const queue = archiveQueueLifetime(trace?.attemptId ?? randomUuid(), id, copy)
   let queued = false
   const retryable = (error: unknown) => isGatewayDrainError(error) || isReconnectableSessionWriteError(error)
 
   try {
-    return await withSessionWriteReconnect(async () => {
-      try {
-        return await queue.run(() => refreshArchiveTasks(id, session, profile,
-          { retryTransport: true, forceRefresh: queued, signal: queue.signal, trace }))
-      } catch (error) {
-        if (retryable(error)) {
-          trace?.('preflight=waiting-reconnect')
-          queued = true
+    return await withSessionWriteReconnect(
+      async () => {
+        try {
+          return await queue.run(() =>
+            refreshArchiveTasks(id, session, profile, {
+              retryTransport: true,
+              forceRefresh: queued,
+              signal: queue.signal,
+              trace
+            })
+          )
+        } catch (error) {
+          if (retryable(error)) {
+            trace?.('preflight=waiting-reconnect')
+            queued = true
 
-          if (await queue.enqueue()) {trace?.('queued')}
+            if (await queue.enqueue()) {
+              trace?.('queued')
+            }
+          }
+
+          throw error
         }
-
-        throw error
-      }
-    // Intent lifetime and individual safety-read deadlines are different:
-    // back off indefinitely during transport loss, but bound every full read.
-    }, { label: `archive-preflight ${id}`, budgetMs: Infinity, sleep: queue.sleep, retryable })
+        // Intent lifetime and individual safety-read deadlines are different:
+        // back off indefinitely during transport loss, but bound every full read.
+      },
+      { label: `archive-preflight ${id}`, budgetMs: Infinity, sleep: queue.sleep, retryable }
+    )
   } finally {
     queue.dispose()
   }

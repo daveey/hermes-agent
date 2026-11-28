@@ -56,7 +56,9 @@ describe('installOpenTaskHook', () => {
     expect(hook('t_abcdef01', 'ops', 'remote', 'worker')).toBe(true)
     expect(rememberOwner).toHaveBeenCalledWith('t_abcdef01', 'ops', 'remote', 'worker')
     expect($openTaskRequest.get()).toEqual({
-      board: 'ops', taskId: 't_abcdef01', owner: { gateway: 'remote', profile: 'worker', board: 'ops' }
+      board: 'ops',
+      taskId: 't_abcdef01',
+      owner: { gateway: 'remote', profile: 'worker', board: 'ops' }
     })
     expect(Object.isFrozen($openTaskRequest.get()?.owner)).toBe(true)
     expect((hook as unknown as { supportsQualifiedOwners?: boolean }).supportsQualifiedOwners).toBe(true)
@@ -68,7 +70,12 @@ describe('installOpenTaskHook', () => {
     const rememberOwner = vi.fn()
     installOpenTaskHook({ navigate, rememberOwner }, target)
     $openTaskRequest.set(null)
-    const hook = target[OPEN_TASK_HOOK] as (id: string, board: string, gateway: string | null, profile: string | null) => boolean
+    const hook = target[OPEN_TASK_HOOK] as (
+      id: string,
+      board: string,
+      gateway: string | null,
+      profile: string | null
+    ) => boolean
 
     expect(hook('t_abcdef01', 'ops', profile === 'worker' ? null : 'remote', profile)).toBe(false)
     expect(navigate).not.toHaveBeenCalled()

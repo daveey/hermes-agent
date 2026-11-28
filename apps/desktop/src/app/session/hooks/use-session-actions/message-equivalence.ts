@@ -174,8 +174,10 @@ const flagsDiffer = (a: ChatMessage, b: ChatMessage) =>
   FLAG_FIELDS.some(field => (a[field] ?? false) !== (b[field] ?? false))
 
 const timelineMetadataDiffers = (a: ChatMessage, b: ChatMessage) =>
-  a.timestamp !== b.timestamp || a.completedAt !== b.completedAt ||
-  a.queued_reason !== b.queued_reason || a.queued_started_at !== b.queued_started_at
+  a.timestamp !== b.timestamp ||
+  a.completedAt !== b.completedAt ||
+  a.queued_reason !== b.queued_reason ||
+  a.queued_started_at !== b.queued_started_at
 
 // Structured display descriptors — the error card (errorSurface) and the
 // safety-refused notice (contentRefused) each arrive as a fresh object per

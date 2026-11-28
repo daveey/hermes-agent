@@ -201,7 +201,9 @@ async function openWebappTabProfile(desktop: Window['hermesDesktop'], primary: s
   const routes = await desktop.getProfileRoutes?.([profile]).catch(() => null)
 
   if (routes && !routes.some(route => normalizeProfileKey(route.profile) === normalizeProfileKey(profile))) {
-    console.warn(`[gateway] this gateway has no profile "${profile}" or does not serve it; this tab stays on "${primary}"`)
+    console.warn(
+      `[gateway] this gateway has no profile "${profile}" or does not serve it; this tab stays on "${primary}"`
+    )
     await desktop.profile?.remember?.(primary)
 
     return
@@ -1619,7 +1621,9 @@ export function useGatewayBoot({
         getWindowBackend(true),
         recovering ? RECONNECT_ATTEMPT_TIMEOUT_MS : BACKEND_BOOT_WAIT_TIMEOUT_MS,
         'Timed out connecting to Hermes backend',
-        error => { throw backendReadinessTimeout(error.message) }
+        error => {
+          throw backendReadinessTimeout(error.message)
+        }
       )
 
       if (!ownsBoot(revision)) {

@@ -938,7 +938,6 @@ interface MoveTarget {
   remote: boolean
 }
 
-
 function moveTargetGateway(sessionId: string, profile?: null | string, connectionId?: null | string): MoveTarget {
   const row =
     $sessions.get().find(s => sessionMatchesStoredId(s, sessionId)) ??
@@ -1153,7 +1152,6 @@ export async function moveSessionToProject(
     throw error
   }
 }
-
 
 // [daveey] ⌘⇧P "+ Create project": a new project named `name` with an empty
 // `~/code/<slug>` folder, on the session's own gateway, then the move into it.

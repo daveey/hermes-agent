@@ -123,7 +123,9 @@ async function fixture() {
       if (req.url?.startsWith('/api/plugins/slow/') && slow) {
         held.push(res)
 
-        if (held.length === PLUGIN_POOL_MAX_SOCKETS) {notifySaturated()}
+        if (held.length === PLUGIN_POOL_MAX_SOCKETS) {
+          notifySaturated()
+        }
 
         return
       }
@@ -154,10 +156,14 @@ async function fixture() {
     client.on('close', () => upstream.destroy())
     upstream.on('close', () => client.destroy())
     client.on('data', data => {
-      if (!stalled) {upstream.write(data)}
+      if (!stalled) {
+        upstream.write(data)
+      }
     })
     upstream.on('data', data => {
-      if (!stalled) {client.write(data)}
+      if (!stalled) {
+        client.write(data)
+      }
     })
   })
 
@@ -272,11 +278,17 @@ async function fixture() {
     close: async () => {
       destroyKeepaliveAgents()
 
-      for (const ssh of connections) {await ssh.close()}
+      for (const ssh of connections) {
+        await ssh.close()
+      }
 
-      for (const client of ws.clients) {client.terminate()}
+      for (const client of ws.clients) {
+        client.terminate()
+      }
 
-      for (const socket of sockets) {socket.destroy()}
+      for (const socket of sockets) {
+        socket.destroy()
+      }
       await Promise.all([
         new Promise<void>(r => backend.close(() => r())),
         new Promise<void>(r => proxy.close(() => r()))
@@ -285,7 +297,9 @@ async function fixture() {
       for (const child of children) {
         child.kill()
 
-        if (child.exitCode === null) {await once(child, 'exit')}
+        if (child.exitCode === null) {
+          await once(child, 'exit')
+        }
       }
 
       fs.rmSync(dir, { recursive: true, force: true })

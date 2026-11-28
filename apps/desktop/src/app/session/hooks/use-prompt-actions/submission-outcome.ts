@@ -22,7 +22,8 @@ export async function writeInFlightSubmission(key: string, entry: PreparedSubmis
   // A journal that cannot be read falls back to what this window holds: the retained entry it adopted
   // carries the outcome recorded for the earlier attempts (a fresh send carries none).
   const earlier = await readPreparedSubmission(key).catch(() =>
-    entry.earlierUnknown || entry.outcome === 'unknown' ? entry : undefined)
+    entry.earlierUnknown || entry.outcome === 'unknown' ? entry : undefined
+  )
 
   if (earlier?.id === entry.id && (earlier.earlierUnknown || sendUnconfirmed(earlier))) {
     entry.earlierUnknown = true

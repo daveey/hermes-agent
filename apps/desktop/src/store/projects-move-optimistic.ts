@@ -26,7 +26,9 @@ const PENDING_MOVE_TTL_MS = 30_000
 const pendingMoves = new Map<string, PendingMove>()
 
 const sessionIdsOf = (row: SessionInfo | null, sessionId: string): Set<string> =>
-  new Set([sessionId, ...(row ? [row.id, row._lineage_root_id ?? '', ...(row._lineage_ids ?? [])] : [])].filter(Boolean))
+  new Set(
+    [sessionId, ...(row ? [row.id, row._lineage_root_id ?? '', ...(row._lineage_ids ?? [])] : [])].filter(Boolean)
+  )
 
 /**
  * `tree` with session `sessionId` owned by `targetId` only: dropped from every
@@ -153,7 +155,9 @@ const provisionalProjects = new Map<string, { at: number; node: SidebarProjectTr
 export const isProvisionalProjectId = (id: string): boolean => id.startsWith(PROVISIONAL_PREFIX)
 
 const sameNamed = (tree: readonly SidebarProjectTree[], label: string, except = ''): SidebarProjectTree | undefined =>
-  tree.find(node => node.id !== except && !node.isNoProject && !node.archived && labelKey(node.label) === labelKey(label))
+  tree.find(
+    node => node.id !== except && !node.isNoProject && !node.archived && labelKey(node.label) === labelKey(label)
+  )
 
 function withProvisionalProjects(tree: SidebarProjectTree[], now: number): SidebarProjectTree[] {
   let out = tree

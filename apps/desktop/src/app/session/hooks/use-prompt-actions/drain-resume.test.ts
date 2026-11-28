@@ -5,12 +5,19 @@ import { resumeStoredRuntimeSession } from './utils'
 
 // Both production entry paths must wait INSIDE the shared flight, before any
 // prompt can be admitted. No prompt replay is part of restart recovery.
-afterEach(() => { clearSingleFlightSessionResumeState(); vi.useRealTimers() })
+afterEach(() => {
+  clearSingleFlightSessionResumeState()
+  vi.useRealTimers()
+})
 
 it('open resume holds draining then closed transport until the replacement answers', async () => {
   vi.useFakeTimers()
 
-  const run = vi.fn().mockRejectedValueOnce(Object.assign(new Error('runtime_draining'), { code: 4001, data: { reason: 'runtime_draining' } }))
+  const run = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error('runtime_draining'), { code: 4001, data: { reason: 'runtime_draining' } })
+    )
     .mockRejectedValueOnce(new Error('Hermes gateway connection closed'))
     .mockResolvedValueOnce({ session_id: 'new-runtime' })
 
@@ -25,13 +32,17 @@ it('open resume holds draining then closed transport until the replacement answe
 it('pre-send recovery waits through restart and submits exactly once on the new runtime', async () => {
   vi.useFakeTimers()
 
-  const requestGateway = vi.fn().mockRejectedValueOnce(new Error('Gateway is draining existing work; retry shortly.'))
+  const requestGateway = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Gateway is draining existing work; retry shortly.'))
     .mockResolvedValueOnce({ session_id: 'new-runtime' })
 
   const submit = vi.fn()
 
-  const pending = resumeStoredRuntimeSession('drain-send', { requestGateway: requestGateway as never,
-    resolveProfile: async () => 'work' }).then(runtime => submit(runtime))
+  const pending = resumeStoredRuntimeSession('drain-send', {
+    requestGateway: requestGateway as never,
+    resolveProfile: async () => 'work'
+  }).then(runtime => submit(runtime))
 
   await vi.advanceTimersByTimeAsync(0)
   expect(submit).not.toHaveBeenCalled()
@@ -39,7 +50,8 @@ it('pre-send recovery waits through restart and submits exactly once on the new 
   await pending
   expect(submit).toHaveBeenCalledExactlyOnceWith('new-runtime')
   expect(requestGateway.mock.calls.map(([method, params]) => [method, params.profile])).toEqual([
-    ['session.resume', 'work'], ['session.resume', 'work']
+    ['session.resume', 'work'],
+    ['session.resume', 'work']
   ])
 })
 

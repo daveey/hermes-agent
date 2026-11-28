@@ -1173,24 +1173,31 @@ describe('overlayLiveLanes', () => {
 
     expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], explicitProjects, owners)).toBe(true)
     expect(sessionMatchesProjectFilter(session, ['p_named'], explicitProjects, owners)).toBe(false)
-    expect(overlayLiveLanes(home, [session], new Set(), owners, { explicitProjects }).repos[0].groups[0].sessions).toEqual([session])
+    expect(
+      overlayLiveLanes(home, [session], new Set(), owners, { explicitProjects }).repos[0].groups[0].sessions
+    ).toEqual([session])
     expect(overlayLivePreviews([home], [session], explicitProjects, 3, { owners })[NO_PROJECT_ID]).toEqual([session])
   })
 
-  it.each(['preview', 'lane', 'filter'] as const)('keeps an unowned cwd-only fresh chat visible in Home (%s)', surface => {
-    const home = homeNode([])
-    const session = makeCwdSession('/Users/example', { id: 'fresh', message_count: 0, git_repo_root: null })
-    const known = knownProjectsOf([home])
-    const owners = projectOwnerBySessionId([home])
+  it.each(['preview', 'lane', 'filter'] as const)(
+    'keeps an unowned cwd-only fresh chat visible in Home (%s)',
+    surface => {
+      const home = homeNode([])
+      const session = makeCwdSession('/Users/example', { id: 'fresh', message_count: 0, git_repo_root: null })
+      const known = knownProjectsOf([home])
+      const owners = projectOwnerBySessionId([home])
 
-    if (surface === 'preview') {
-      expect(overlayLivePreviews([home], [session], [], 3)[NO_PROJECT_ID]).toEqual([session])
-    } else if (surface === 'lane') {
-      expect(overlayLiveLanes(home, [session], new Set(), owners, { known }).repos[0].groups[0].sessions).toEqual([session])
-    } else {
-      expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], [], owners, known)).toBe(true)
+      if (surface === 'preview') {
+        expect(overlayLivePreviews([home], [session], [], 3)[NO_PROJECT_ID]).toEqual([session])
+      } else if (surface === 'lane') {
+        expect(overlayLiveLanes(home, [session], new Set(), owners, { known }).repos[0].groups[0].sessions).toEqual([
+          session
+        ])
+      } else {
+        expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], [], owners, known)).toBe(true)
+      }
     }
-  })
+  )
 
   it.each([
     ['known cwd project', '/work/app', null, '/work/app'],
@@ -1218,7 +1225,9 @@ describe('overlayLiveLanes', () => {
     expect(sessionBucketId(session, explicitProjects, owners, known)).toBe(expected)
     expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], explicitProjects, owners, known)).toBe(false)
     expect(overlayLiveLanes(home, [session], new Set(), owners, { explicitProjects, known })).toBe(home)
-    expect(overlayLivePreviews([home], [session], explicitProjects, 3, { owners, known })[NO_PROJECT_ID]).toBeUndefined()
+    expect(
+      overlayLivePreviews([home], [session], explicitProjects, 3, { owners, known })[NO_PROJECT_ID]
+    ).toBeUndefined()
   })
 
   // One ownership policy across surfaces: a fresh row (no backend owner, no
@@ -1277,7 +1286,15 @@ describe('overlayLiveLanes', () => {
     const named = projectNode({
       id: 'p_named',
       previewSessions: [session],
-      repos: [{ id: '/named', label: 'named', path: '/named', sessionCount: 1, groups: [lane({ id: '/named', label: 'named', path: '/named', isMain: true, sessions: [session] })] }]
+      repos: [
+        {
+          id: '/named',
+          label: 'named',
+          path: '/named',
+          sessionCount: 1,
+          groups: [lane({ id: '/named', label: 'named', path: '/named', isMain: true, sessions: [session] })]
+        }
+      ]
     })
 
     const owners = new Map([[session.id, owner]])
@@ -1292,7 +1309,9 @@ describe('overlayLiveLanes', () => {
 
     for (const node of [home, named]) {
       const overlaid = overlayLiveLanes(node, [session], new Set(), owners, { explicitProjects, known })
-      expect(overlaid.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))).toEqual(node.id === owner ? [session] : [])
+      expect(overlaid.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))).toEqual(
+        node.id === owner ? [session] : []
+      )
     }
   })
 

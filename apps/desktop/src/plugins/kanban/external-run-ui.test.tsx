@@ -22,13 +22,19 @@ describe('ExternalRunBadge', () => {
     const { container } = render(
       <ExternalRunBadge
         now={1000}
-        task={{ external: gh({ adapter: 'shell', job: 'unknown', service: 'deploy' }), id: 't_deploy', status: 'scheduled' }}
+        task={{
+          external: gh({ adapter: 'shell', job: 'unknown', service: 'deploy' }),
+          id: 't_deploy',
+          status: 'scheduled'
+        }}
       />
     )
 
     expect(container.textContent).not.toMatch(/running/i)
     expect(container.textContent).toContain('Waiting')
-    expect(container.querySelector('[data-slot="kanban-external-badge"]')?.getAttribute('aria-label')).not.toMatch(/running/i)
+    expect(container.querySelector('[data-slot="kanban-external-badge"]')?.getAttribute('aria-label')).not.toMatch(
+      /running/i
+    )
   })
 
   it('scheduled + running is sky “running externally” with Running-on hover', () => {

@@ -38,9 +38,13 @@ describe('autoTakeOverFields', () => {
       autoTakeOver: true,
       refusedAt: 1_000_000
     })
-    expect(ownershipErrorSurface(refused({ reason: 'SESSION_NOT_OWNED', auto_take_over: true })).errorSurface).toEqual(
-      { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false, autoTakeOver: true, refusedAt: 1_000_000 }
-    )
+    expect(ownershipErrorSurface(refused({ reason: 'SESSION_NOT_OWNED', auto_take_over: true })).errorSurface).toEqual({
+      layer: 'gateway',
+      code: 'SESSION_NOT_OWNED',
+      retryable: false,
+      autoTakeOver: true,
+      refusedAt: 1_000_000
+    })
   })
 
   it('stamps the surface submit puts on the card (owner from the Details line, plus the flag)', () => {

@@ -100,7 +100,11 @@ test('connect() reuses the always-on dashboard: no spawn, no lockfile, nothing k
 test('after a core update, connect() waits for the supervisor restart and reuses the restarted dashboard', async () => {
   const logs: string[] = []
   // 1: the old pid still runs the replaced runtime; 2: the code-skew watchdog retired it; 3: launchd/systemd restarted it.
-  const ssh = fakeHost([['ALIVE', record()], ['DEAD', record()], ['ALIVE', record({ pid: 5151 })]])
+  const ssh = fakeHost([
+    ['ALIVE', record()],
+    ['DEAD', record()],
+    ['ALIVE', record({ pid: 5151 })]
+  ])
   let probes = 0
 
   const d = deps(ssh, {
@@ -114,8 +118,14 @@ test('after a core update, connect() waits for the supervisor restart and reuses
   assert.equal(result.pid, 5151)
   assert.ok(!ssh.calls.some(c => SPAWNS.test(c)), 'a restart window must not become a spawn')
   assert.deepEqual(d.cancelled, [9147], 'the stale probe forward is closed')
-  assert.ok(logs.some(l => /stale after an update\); waiting for its supervisor restart/.test(l)), logs.join('\n'))
-  assert.ok(logs.some(l => /reusing always-on remote dashboard pid=5151/.test(l)), logs.join('\n'))
+  assert.ok(
+    logs.some(l => /stale after an update\); waiting for its supervisor restart/.test(l)),
+    logs.join('\n')
+  )
+  assert.ok(
+    logs.some(l => /reusing always-on remote dashboard pid=5151/.test(l)),
+    logs.join('\n')
+  )
 })
 
 test('a dashboard that is still down after the restart wait falls back to the owned-backend path', async () => {
@@ -144,8 +154,14 @@ test('a dashboard that is still down after the restart wait falls back to the ow
     // The owned spawn may fail in this double; only that it was attempted matters.
   }
 
-  assert.ok(logs.some(l => /always-on dashboard unavailable \(pid 4242 not running\)/.test(l)), logs.join('\n'))
-  assert.ok(ssh.calls.some(c => SPAWNS.test(c)), 'falls back to spawning an owned backend')
+  assert.ok(
+    logs.some(l => /always-on dashboard unavailable \(pid 4242 not running\)/.test(l)),
+    logs.join('\n')
+  )
+  assert.ok(
+    ssh.calls.some(c => SPAWNS.test(c)),
+    'falls back to spawning an owned backend'
+  )
 })
 
 test('no always-on dashboard installed: connect() goes straight to the lockfile path', async () => {

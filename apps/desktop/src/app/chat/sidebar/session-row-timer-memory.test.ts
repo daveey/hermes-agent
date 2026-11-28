@@ -27,11 +27,15 @@ it('ignores empty identities rather than retaining an anonymous clock', () => {
 
 it('retains only running and blocked cards in the memo itself', () => {
   vi.useFakeTimers({ now: NOW })
-  rememberRowTimers(known({ kanban_timed_cards: [
-    ...cards,
-    { id: 'blocked', title: 'Blocked', state: 'blocked', since: NOW / 1000 },
-    { id: 'waiting', title: 'Waiting', state: 'waiting', since: NOW / 1000 }
-  ] }))
+  rememberRowTimers(
+    known({
+      kanban_timed_cards: [
+        ...cards,
+        { id: 'blocked', title: 'Blocked', state: 'blocked', since: NOW / 1000 },
+        { id: 'waiting', title: 'Waiting', state: 'waiting', since: NOW / 1000 }
+      ]
+    })
+  )
   expect(rowTimers(unknown()).cards.map(c => c.state)).toEqual(['running', 'blocked'])
 })
 

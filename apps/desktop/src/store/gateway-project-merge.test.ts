@@ -22,7 +22,12 @@ describe('mergeGatewayProjectTrees', () => {
   it("stamps This device's rows `local` when they arrive as another gateway's tree", () => {
     const merged = mergeGatewayProjectTrees(
       [project({ id: 'nous-home', label: 'Home', previewSessions: [row('n1', 10)] })],
-      [{ connectionId: 'local', projects: [project({ id: 'mbp-taxes', label: 'taxes', previewSessions: [row('t1', 5)] })] }],
+      [
+        {
+          connectionId: 'local',
+          projects: [project({ id: 'mbp-taxes', label: 'taxes', previewSessions: [row('t1', 5)] })]
+        }
+      ],
       3
     )
 

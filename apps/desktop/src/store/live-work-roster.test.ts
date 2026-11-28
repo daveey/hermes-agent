@@ -13,12 +13,26 @@ import { $delegatingSessionIds } from './session-dot-state'
 import { $subagentsBySession, type SubagentProgress } from './subagents'
 
 const child = (status: SubagentProgress['status'], updatedAt: number) =>
-  ({ id: 'c1', index: 0, status, updatedAt, executionObservations: status === 'running' ? [evidence('subagent')] : [] }) as unknown as SubagentProgress
+  ({
+    id: 'c1',
+    index: 0,
+    status,
+    updatedAt,
+    executionObservations: status === 'running' ? [evidence('subagent')] : []
+  }) as unknown as SubagentProgress
 
-const evidence = (kind: string) => ({ ...fixture.base, identity: { ...fixture.base.identity, kind, session: 'owner' }, last_activity: Date.now() / 1000, observed_at: Date.now() / 1000, valid_until: Date.now() / 1000 + 180 })
+const evidence = (kind: string) => ({
+  ...fixture.base,
+  identity: { ...fixture.base.identity, kind, session: 'owner' },
+  last_activity: Date.now() / 1000,
+  observed_at: Date.now() / 1000,
+  valid_until: Date.now() / 1000 + 180
+})
 
 const rosterEntry = (session_id: string, subagents: number, background: number) => ({
-  session_id, subagents, background,
+  session_id,
+  subagents,
+  background,
   execution_observations: [...(subagents ? [evidence('subagent')] : []), ...(background ? [evidence('process')] : [])]
 })
 
@@ -61,7 +75,9 @@ describe('backend roster feeds rows no mounted tile speaks for', () => {
   it('a newer read from the source covering a row ends a running entry its hidden pane stopped updating', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000)
-    reconcileBackgroundProcesses('pane', [{ command: 'sleep', session_id: 'p1', status: 'running', execution_observations: [evidence('process')] }])
+    reconcileBackgroundProcesses('pane', [
+      { command: 'sleep', session_id: 'p1', status: 'running', execution_observations: [evidence('process')] }
+    ])
     $subagentsBySession.set({ pane: [child('running', 1_000)] })
     expect($backgroundRunningSessionIds.get()).toContain('pane')
     expect($delegatingSessionIds.get()).toContain('pane')
@@ -75,7 +91,9 @@ describe('backend roster feeds rows no mounted tile speaks for', () => {
   it('a read from a source that does not cover the row never ends its running entry', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000)
-    reconcileBackgroundProcesses('pane', [{ command: 'sleep', session_id: 'p1', status: 'running', execution_observations: [evidence('process')] }])
+    reconcileBackgroundProcesses('pane', [
+      { command: 'sleep', session_id: 'p1', status: 'running', execution_observations: [evidence('process')] }
+    ])
 
     setLiveWorkRosterSource('other-profile', [], 2_000, ['someone-else'])
 

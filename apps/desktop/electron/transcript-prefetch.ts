@@ -331,7 +331,9 @@ export class TranscriptPrefetcher {
 
     const keys = entries.map(entry => keyOf(entry.id, entry.profile))
     // A compression child continues its parent: it is tracked when the parent is.
-    const parents = entries.map(entry => (entry.parent_session_id ? keyOf(entry.parent_session_id, entry.profile) : null))
+    const parents = entries.map(entry =>
+      entry.parent_session_id ? keyOf(entry.parent_session_id, entry.profile) : null
+    )
     const lookups = [...keys, ...parents.filter((key): key is TranscriptCacheKey => key !== null)]
     const { store } = this.deps
 
@@ -340,7 +342,8 @@ export class TranscriptPrefetcher {
       : await Promise.all(lookups.map(key => store.meta(key)))
 
     const cached = new Set(lookups.filter((_key, index) => metas[index]).map(keyString))
-    const tracked = (key: null | TranscriptCacheKey) => Boolean(key) && (cached.has(keyString(key!)) || this.targetKeys.has(keyString(key!)))
+    const tracked = (key: null | TranscriptCacheKey) =>
+      Boolean(key) && (cached.has(keyString(key!)) || this.targetKeys.has(keyString(key!)))
     const work: Promise<void>[] = []
     let unknown = false
 
@@ -480,7 +483,9 @@ export class TranscriptPrefetcher {
     } catch (error) {
       if (isGatewayFailure(error)) {
         this.downUntil.set(connectionId, this.now() + GATEWAY_BACKOFF_MS)
-        this.deps.log?.(`transcript push: ${connectionId} unreachable (${(error as Error)?.message || error}); backing off`)
+        this.deps.log?.(
+          `transcript push: ${connectionId} unreachable (${(error as Error)?.message || error}); backing off`
+        )
       }
 
       this.rememberRevision(keyString(key), undefined)
@@ -497,7 +502,12 @@ export class TranscriptPrefetcher {
   ): Promise<{ outcome?: PushOutcome; reason: string; revision?: null | number }> {
     const { fetchAfter, store } = this.deps
 
-    if (!fetchAfter || !store.tailId || !store.putAfter || (this.deltaUnsupported.get(key.connectionId) ?? 0) > this.now()) {
+    if (
+      !fetchAfter ||
+      !store.tailId ||
+      !store.putAfter ||
+      (this.deltaUnsupported.get(key.connectionId) ?? 0) > this.now()
+    ) {
       return { reason: 'no delta route' }
     }
 
@@ -517,7 +527,12 @@ export class TranscriptPrefetcher {
     }
 
     const id = keyString(key)
-    const reason = deltaMismatch(anchor, page, key.sessionId, this.revisions.has(id) ? this.revisions.get(id) : undefined)
+    const reason = deltaMismatch(
+      anchor,
+      page,
+      key.sessionId,
+      this.revisions.has(id) ? this.revisions.get(id) : undefined
+    )
 
     if (!reason && anchor !== null && (await store.putAfter(key, anchor, page.messages, meta))) {
       this.rememberRevision(id, page.transcriptRevision)

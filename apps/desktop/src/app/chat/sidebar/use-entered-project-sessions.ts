@@ -42,10 +42,12 @@ export function useEnteredProjectSessions(
     }
 
     setLoading(true)
+
     const request =
       supersedable === false
         ? fetchProjectSessions(projectId, { supersedable: false })
         : fetchProjectSessions(projectId)
+
     void request
       .then(next => {
         if (!cancelled) {

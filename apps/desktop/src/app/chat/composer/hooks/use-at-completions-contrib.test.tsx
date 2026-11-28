@@ -213,12 +213,17 @@ describe('contributed @ completion sources', () => {
   })
   it('shows contributed rows on the keystroke, before a slow complete.path answers', async () => {
     vi.useFakeTimers()
-    addSource('sessions', q => ('typeahead'.startsWith(q) ? [{ insert: '@session:abc', display: 'typeahead is slow' }] : []))
+    addSource('sessions', q =>
+      'typeahead'.startsWith(q) ? [{ insert: '@session:abc', display: 'typeahead is slow' }] : []
+    )
 
     // The session owner is a remote gateway: complete.path takes a second.
     const gateway = {
       request: vi.fn(
-        () => new Promise(resolve => setTimeout(() => resolve({ items: [{ text: '@file:src/typeahead.ts', display: 'typeahead.ts' }] }), 1_000))
+        () =>
+          new Promise(resolve =>
+            setTimeout(() => resolve({ items: [{ text: '@file:src/typeahead.ts', display: 'typeahead.ts' }] }), 1_000)
+          )
       )
     }
 

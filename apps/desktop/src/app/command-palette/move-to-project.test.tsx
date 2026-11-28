@@ -72,7 +72,9 @@ describe('⌘P: move the current session to a typed project', () => {
     const row = document.querySelector('[data-value$="move-current-to-project-/repos/fabric"]')
     expect(row?.textContent).toBe('Move to project: fabric')
     // The plain go-to-project row is still there too.
-    expect(document.querySelector('[data-value$="project-/repos/fabric"]:not([data-value*="move-current"])')).not.toBeNull()
+    expect(
+      document.querySelector('[data-value$="project-/repos/fabric"]:not([data-value*="move-current"])')
+    ).not.toBeNull()
     fireEvent.click(row!)
 
     expect(moveSessionToProject).toHaveBeenCalledWith('chat-1', '/repos/fabric', 'default')

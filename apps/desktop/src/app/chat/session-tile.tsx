@@ -526,11 +526,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
         const durableSession = await resolveStoredSession(storedSessionId, ownerRoute).catch(() => undefined)
         const current = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
 
-        const error = sessionTileResumeFailure(
-          message,
-          Boolean(durableSession),
-          Boolean(current && !current.runtimeId)
-        )
+        const error = sessionTileResumeFailure(message, Boolean(durableSession), Boolean(current && !current.runtimeId))
 
         if (error) {
           patchSessionTile(storedSessionId, { error })

@@ -358,11 +358,7 @@ export function frameSizeFromMessage(data: unknown, token: string): FrameSizeRep
  *  "frame + k px", so two consecutive grows by the same step (±2 px) are a
  *  feedback loop, not content. `lastGrow` is the previous grow step (0 when
  *  the last change was not a grow). */
-export function nextFrameHeight(
-  prev: number,
-  reported: number,
-  lastGrow: number
-): { height: number; grow: number } {
+export function nextFrameHeight(prev: number, reported: number, lastGrow: number): { height: number; grow: number } {
   if (Math.abs(reported - prev) <= RESIZE_TOLERANCE) {
     return { height: prev, grow: lastGrow }
   }

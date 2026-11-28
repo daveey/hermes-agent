@@ -103,14 +103,21 @@ export async function openExternalUrl(rawUrl: string, deps: ExternalOpenDeps): P
     const host = match?.[1] || ''
     const labels = host.split('.')
 
-    const validHost = host.length <= 253 && labels.every(label =>
-      /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label))
+    const validHost =
+      host.length <= 253 && labels.every(label => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label))
 
-    const validIp = !/^[0-9.]+$/.test(host) || (labels.length === 4 && labels.every(label =>
-      /^(0|[1-9][0-9]{0,2})$/.test(label) && Number(label) <= 255))
+    const validIp =
+      !/^[0-9.]+$/.test(host) ||
+      (labels.length === 4 && labels.every(label => /^(0|[1-9][0-9]{0,2})$/.test(label) && Number(label) <= 255))
 
     // IPv6 is deliberately unsupported; never pass a partially parsed address.
-    if (!match || match[0] !== rawUrl || !validHost || !validIp || (match[2] && (Number(match[2]) < 1 || Number(match[2]) > 65535))) {
+    if (
+      !match ||
+      match[0] !== rawUrl ||
+      !validHost ||
+      !validIp ||
+      (match[2] && (Number(match[2]) < 1 || Number(match[2]) > 65535))
+    ) {
       return { ok: false, reason: 'invalid' }
     }
 

@@ -360,46 +360,49 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
   )
 
   // A tile's Stop names the tile; its composer's Esc keeps the gesture too (`tile:esc`).
-  const cancelRun = useCallback(async (gesture?: StopOrigin) => {
-    const sessionId = runtimeIdRef.current
-    const origin: StopOrigin = asStopOrigin(gesture) === 'esc' ? 'tile:esc' : 'tile'
+  const cancelRun = useCallback(
+    async (gesture?: StopOrigin) => {
+      const sessionId = runtimeIdRef.current
+      const origin: StopOrigin = asStopOrigin(gesture) === 'esc' ? 'tile:esc' : 'tile'
 
-    // Frontend busy clears immediately; gateway wind-down can lag (#83855).
-    markSessionRecentlyInterrupted(sessionId)
-    flushStreamDeltas(sessionId)
+      // Frontend busy clears immediately; gateway wind-down can lag (#83855).
+      markSessionRecentlyInterrupted(sessionId)
+      flushStreamDeltas(sessionId)
 
-    update(state => ({
-      ...state,
-      messages: finalizeStoppedMessages(state.messages, state.streamId),
-      busy: false,
-      awaitingResponse: false,
-      streamId: null,
-      pendingBranchGroup: null,
-      needsInput: false,
-      interrupted: stopLatchesInterrupt(state, getQueuedPrompts(state.storedSessionId ?? storedIdRef.current))
-    }))
+      update(state => ({
+        ...state,
+        messages: finalizeStoppedMessages(state.messages, state.streamId),
+        busy: false,
+        awaitingResponse: false,
+        streamId: null,
+        pendingBranchGroup: null,
+        needsInput: false,
+        interrupted: stopLatchesInterrupt(state, getQueuedPrompts(state.storedSessionId ?? storedIdRef.current))
+      }))
 
-    clearSessionTodos(sessionId)
-    clearSessionSubagents(sessionId)
-    resetSessionBackground(sessionId)
-    setSessionDraftingTool(sessionId, '')
-    clearAllPrompts(sessionId)
-    clearClarifyRequest(undefined, sessionId)
+      clearSessionTodos(sessionId)
+      clearSessionSubagents(sessionId)
+      resetSessionBackground(sessionId)
+      setSessionDraftingTool(sessionId, '')
+      clearAllPrompts(sessionId)
+      clearClarifyRequest(undefined, sessionId)
 
-    try {
-      await withSessionNotFoundResume(
-        sessionId,
-        storedIdRef.current,
-        liveId => requestSessionGateway('session.interrupt', interruptParams(liveId, origin)),
-        {
-          requestGateway: requestSessionGateway,
-          onRecovered: bindRecoveredRuntime
-        }
-      )
-    } catch (err) {
-      notifyError(err, copy.stopFailed)
-    }
-  }, [bindRecoveredRuntime, copy.stopFailed, requestSessionGateway, update])
+      try {
+        await withSessionNotFoundResume(
+          sessionId,
+          storedIdRef.current,
+          liveId => requestSessionGateway('session.interrupt', interruptParams(liveId, origin)),
+          {
+            requestGateway: requestSessionGateway,
+            onRecovered: bindRecoveredRuntime
+          }
+        )
+      } catch (err) {
+        notifyError(err, copy.stopFailed)
+      }
+    },
+    [bindRecoveredRuntime, copy.stopFailed, requestSessionGateway, update]
+  )
 
   // A hidden note mid-turn rides session.steer into the model's next tool
   // result: no optimistic bubble, no user turn. The main composer has the same

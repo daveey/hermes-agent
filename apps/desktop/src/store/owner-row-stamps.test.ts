@@ -22,7 +22,9 @@ const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
     ...extra
   }) as SessionInfo
 
-function recorder(answer: (ids: string[]) => Partial<SessionInfo>[] = ids => ids.map(id => ({ id, kanban_active: 1 }))) {
+function recorder(
+  answer: (ids: string[]) => Partial<SessionInfo>[] = ids => ids.map(id => ({ id, kanban_active: 1 }))
+) {
   const calls: [string, string, string[]][] = []
 
   const fetcher: StampFetcher = async (connectionId, profile, ids) => {
@@ -46,7 +48,11 @@ describe('owner row stamps', () => {
   it('batches per owner (connection + profile) and keys answers by owner identity', async () => {
     const { calls, fetcher } = recorder()
 
-    await refreshOwnerRowStamps([row('a'), row('b'), row('c', { profile: 'work' }), row('d', { connection_id: 'mini' })], fetcher, 1)
+    await refreshOwnerRowStamps(
+      [row('a'), row('b'), row('c', { profile: 'work' }), row('d', { connection_id: 'mini' })],
+      fetcher,
+      1
+    )
 
     expect(calls).toEqual([
       ['local', 'default', ['a', 'b']],
@@ -54,7 +60,12 @@ describe('owner row stamps', () => {
       ['mini', 'default', ['d']]
     ])
     expect([...$ownerRowStamps.get().keys()].sort()).toEqual(
-      ['local\u0000default\u0000a', 'local\u0000default\u0000b', 'local\u0000work\u0000c', 'mini\u0000default\u0000d'].sort()
+      [
+        'local\u0000default\u0000a',
+        'local\u0000default\u0000b',
+        'local\u0000work\u0000c',
+        'mini\u0000default\u0000d'
+      ].sort()
     )
     expect($ownerRowStamps.get().get('local\u0000default\u0000a')).toEqual({ kanban_active: 1 })
   })

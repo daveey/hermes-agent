@@ -16,7 +16,8 @@ interface ExpectedOwner {
  * System Python remains usable after the managed runtime has been deleted.
  */
 export async function proveRegistryOwnerStopped(
-  ssh: { exec: (command: string) => Promise<string> }, expected: ExpectedOwner
+  ssh: { exec: (command: string) => Promise<string> },
+  expected: ExpectedOwner
 ): Promise<boolean> {
   if (!Number.isSafeInteger(expected.pid) || expected.pid <= 0 || !expected.creationTime?.startsWith('linux:')) {
     return false
@@ -24,7 +25,9 @@ export async function proveRegistryOwnerStopped(
 
   const lock = await readLockfile(ssh, expected.ownershipId)
 
-  if (!lockMatchesManagedUpdateScope(lock, expected)) { return false }
+  if (!lockMatchesManagedUpdateScope(lock, expected)) {
+    return false
+  }
 
   // Unlike shell `kill -0 || DEAD`, EPERM and all other unknown errors must
   // fail closed. Signal zero only probes; no process can be terminated here.
@@ -43,7 +46,9 @@ else:
 
   const verdict = String(await ssh.exec(`python3 -c ${shq(script)}`)).trim()
 
-  if (verdict !== 'STOPPED') { return false }
+  if (verdict !== 'STOPPED') {
+    return false
+  }
 
   // A replacement ownership record during the process probe must not be
   // cleaned up as the old resident, even when its old PID is dead.

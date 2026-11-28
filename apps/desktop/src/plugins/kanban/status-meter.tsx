@@ -13,7 +13,14 @@ export type MeterSegment = 'blocked' | 'external' | 'externalDown' | 'notReady' 
 
 export type MeterCounts = Record<MeterSegment, number>
 
-export const METER_ORDER: readonly MeterSegment[] = ['running', 'external', 'ready', 'notReady', 'blocked', 'externalDown']
+export const METER_ORDER: readonly MeterSegment[] = [
+  'running',
+  'external',
+  'ready',
+  'notReady',
+  'blocked',
+  'externalDown'
+]
 
 export const METER_COLORS: Record<MeterSegment, string> = {
   blocked: '#d64545',
@@ -64,8 +71,7 @@ export function meterCounts(board: Pick<KanbanBoard, 'columns'>, now: number = D
   return counts
 }
 
-export const meterTotal = (c: MeterCounts) =>
-  c.blocked + c.external + c.externalDown + c.notReady + c.ready + c.running
+export const meterTotal = (c: MeterCounts) => c.blocked + c.external + c.externalDown + c.notReady + c.ready + c.running
 
 export function TaskMeter({ counts }: { counts: MeterCounts }) {
   const total = meterTotal(counts)

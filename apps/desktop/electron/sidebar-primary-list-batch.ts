@@ -1,4 +1,8 @@
-import { assembleSidebarSessionSlices, buildSidebarSessionSliceParams, tagSidebarSlicesOwner } from './profile-session-routing'
+import {
+  assembleSidebarSessionSlices,
+  buildSidebarSessionSliceParams,
+  tagSidebarSlicesOwner
+} from './profile-session-routing'
 
 /** Request-owned exact list bases; never retain a response across refreshes. */
 export async function fetchSidebarPrimaryListBatch(
@@ -12,11 +16,14 @@ export async function fetchSidebarPrimaryListBatch(
 ): Promise<unknown> {
   const slices = buildSidebarSessionSliceParams(params)
 
-  if (slices.recents.get('profile') !== 'all' || Object.values(slices).some(sp => {
-    const limit = Number(sp.get('limit'))
+  if (
+    slices.recents.get('profile') !== 'all' ||
+    Object.values(slices).some(sp => {
+      const limit = Number(sp.get('limit'))
 
-    return !Number.isInteger(limit) || limit < 1 || limit > 500
-  })) {
+      return !Number.isInteger(limit) || limit < 1 || limit > 500
+    })
+  ) {
     return deps.fallback()
   }
 
@@ -25,13 +32,16 @@ export async function fetchSidebarPrimaryListBatch(
   let batch: Record<string, any>
 
   try {
-    batch = await deps.fetch(`/api/profiles/sessions/sidebar?${query}`) as Record<string, any>
+    batch = (await deps.fetch(`/api/profiles/sessions/sidebar?${query}`)) as Record<string, any>
 
-    if (batch?.list_slices_version !== 1 || ['recents', 'cron', 'messaging'].some(key => {
-      const slice = batch[key]
+    if (
+      batch?.list_slices_version !== 1 ||
+      ['recents', 'cron', 'messaging'].some(key => {
+        const slice = batch[key]
 
-      return !Array.isArray(slice?.sessions) || !Number.isFinite(slice?.total) || !slice?.profile_totals
-    })) {
+        return !Array.isArray(slice?.sessions) || !Number.isFinite(slice?.total) || !slice?.profile_totals
+      })
+    ) {
       return deps.fallback()
     }
   } catch {

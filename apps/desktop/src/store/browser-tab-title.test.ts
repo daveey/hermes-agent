@@ -10,7 +10,8 @@ import { $selectedStoredSessionId, $sessions, $unreadFinishedSessionIds, setSess
 import { clearAllSessionStates, publishSessionState } from './session-states'
 import { $sessionSeenCounts, $unreadFinishedMarkers } from './session-unread'
 
-const row = (over: Partial<SessionInfo>): SessionInfo => // Fork: a row without a fresh kanban read stays `background`, never unread.
+const row = (over: Partial<SessionInfo>): SessionInfo =>
+  // Fork: a row without a fresh kanban read stays `background`, never unread.
   makeSessionInfo({ kanban_observed_at: Date.now() / 1000, message_count: 3, ...over })
 
 const state = (storedId: string, over: { busy?: boolean; needsInput?: boolean } = {}) => ({

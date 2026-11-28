@@ -169,7 +169,12 @@ describe('default board event notifications', () => {
       cursor: 102,
       events: [
         { id: 99, kind: 'completed' },
-        { id: 102, kind: 'blocked', task_id: 'task', payload: { reason: 'Need approval', human_request: { action: 'Reply in chat with yes or no.' } } }
+        {
+          id: 102,
+          kind: 'blocked',
+          task_id: 'task',
+          payload: { reason: 'Need approval', human_request: { action: 'Reply in chat with yes or no.' } }
+        }
       ]
     })
     await vi.waitFor(() => expect(doors.notify).toHaveBeenCalledTimes(1))

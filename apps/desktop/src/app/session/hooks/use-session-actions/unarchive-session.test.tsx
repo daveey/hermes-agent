@@ -151,7 +151,12 @@ describe('unarchiveSession', () => {
     // Regression: an All-Gateways sidebar row (connection_id=mac-mini) was
     // archived via the active local backend, which 404'd; the row came back.
     setSessions([
-      archivedSession({ archived: false, connection_id: 'mac-mini', id: 'remote-1', profile: 'default' } as Partial<SessionInfo>)
+      archivedSession({
+        archived: false,
+        connection_id: 'mac-mini',
+        id: 'remote-1',
+        profile: 'default'
+      } as Partial<SessionInfo>)
     ])
     vi.mocked(setSessionArchived).mockResolvedValue({ ok: true })
 
@@ -159,10 +164,15 @@ describe('unarchiveSession', () => {
 
     await act(() => handle.archiveSession('remote-1'))
 
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('remote-1', true, {
-      connectionId: 'mac-mini',
-      profile: 'default'
-    }, expect.any(Function))
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith(
+      'remote-1',
+      true,
+      {
+        connectionId: 'mac-mini',
+        profile: 'default'
+      },
+      expect.any(Function)
+    )
   })
 
   it('passes the archived row profile to setSessionArchived', async () => {

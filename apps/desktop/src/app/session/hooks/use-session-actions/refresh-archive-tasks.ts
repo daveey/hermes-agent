@@ -20,8 +20,18 @@ const isTimeout = (error: unknown) => /timed out/i.test(String((error as Error)?
  * Failed/malformed reads remain unknown, including incomplete ancestry.
  * A fresh row that claims work is read too: its `kanban_active` also counts settled cards still waiting for the chat's
  * close-out, which the task list leaves out, so only the read says what is open. If that read fails, the row stands. */
-export async function refreshArchiveTasks(id: string, session: SessionInfo | undefined, profile: string | undefined,
-  options?: { retryTransport?: boolean; budgetMs?: number; trace?: ArchiveTrace; forceRefresh?: boolean; signal?: AbortSignal }): Promise<SessionInfo | undefined> {
+export async function refreshArchiveTasks(
+  id: string,
+  session: SessionInfo | undefined,
+  profile: string | undefined,
+  options?: {
+    retryTransport?: boolean
+    budgetMs?: number
+    trace?: ArchiveTrace
+    forceRefresh?: boolean
+    signal?: AbortSignal
+  }
+): Promise<SessionInfo | undefined> {
   const fresh = hasFreshKanbanObservation(session) && !session?.kanban_unknown && !session?.kanban_remote_stale
 
   if (!options?.forceRefresh && fresh && !session?.kanban_active && !session?.kanban_blocked) {
@@ -53,7 +63,9 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
     return unknown
   }
 
-  if (!owner.connectionId) {return unknownBecause('no owner connection')}
+  if (!owner.connectionId) {
+    return unknownBecause('no owner connection')
+  }
   let timer: ReturnType<typeof setTimeout> | undefined
   let stage = 'start'
 
@@ -64,11 +76,15 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
     options?.signal?.throwIfAborted()
     const remaining = deadline - Date.now()
 
-    if (settled || remaining <= 0) {throw deadlineError()}
+    if (settled || remaining <= 0) {
+      throw deadlineError()
+    }
     const result = await hermesApiAs<T>(owner, { path, timeoutMs: Math.min(READ_TIMEOUT_MS, remaining) })
     options?.signal?.throwIfAborted()
 
-    if (settled || Date.now() >= deadline) {throw deadlineError()}
+    if (settled || Date.now() >= deadline) {
+      throw deadlineError()
+    }
 
     return result
   }
@@ -77,9 +93,13 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
     try {
       return await send<T>(path)
     } catch (error) {
-      if (options?.retryTransport && (isGatewayDrainError(error) || isReconnectableSessionWriteError(error))) {throw error}
+      if (options?.retryTransport && (isGatewayDrainError(error) || isReconnectableSessionWriteError(error))) {
+        throw error
+      }
 
-      if (!isTimeout(error)) {throw error}
+      if (!isTimeout(error)) {
+        throw error
+      }
 
       return send<T>(path)
     }
@@ -90,11 +110,15 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
     let current: string | null = id
 
     for (let hop = 0; current && hop < 12; hop++) {
-      if (ids.has(current)) {return unknownBecause(`ancestry cycle at ${current}`)}
+      if (ids.has(current)) {
+        return unknownBecause(`ancestry cycle at ${current}`)
+      }
       ids.add(current)
       stage = `GET /api/sessions/${current}`
 
-      const row: { id?: string; parent_session_id?: string | null } = await request(`/api/sessions/${encodeURIComponent(current)}`)
+      const row: { id?: string; parent_session_id?: string | null } = await request(
+        `/api/sessions/${encodeURIComponent(current)}`
+      )
 
       if (row?.id !== current || (row.parent_session_id != null && typeof row.parent_session_id !== 'string')) {
         return unknownBecause(`malformed session row from ${stage}`)
@@ -103,48 +127,77 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
       current = row.parent_session_id || null
     }
 
-    if (current) {return unknownBecause('ancestry deeper than 12 hops')}
+    if (current) {
+      return unknownBecause('ancestry deeper than 12 hops')
+    }
     stage = 'GET /api/session-kanban-tasks'
 
-    const result = await request<{ tasks?: Array<{ id?: string; status?: string; stale?: boolean; unfinished?: boolean }> }>(
-      `/api/session-kanban-tasks?ids=${encodeURIComponent([...ids].join(','))}`
-    )
+    const result = await request<{
+      tasks?: Array<{ id?: string; status?: string; stale?: boolean; unfinished?: boolean }>
+    }>(`/api/session-kanban-tasks?ids=${encodeURIComponent([...ids].join(','))}`)
 
-    if (!Array.isArray(result?.tasks)) {return unknownBecause(`malformed response from ${stage}`)}
+    if (!Array.isArray(result?.tasks)) {
+      return unknownBecause(`malformed response from ${stage}`)
+    }
     let active = 0
     let blocked = 0
 
     for (const task of result.tasks) {
-      if (!task?.id || task.stale || !task.status) {return unknownBecause(`stale or incomplete task ${task?.id ?? '?'}`)}
+      if (!task?.id || task.stale || !task.status) {
+        return unknownBecause(`stale or incomplete task ${task?.id ?? '?'}`)
+      }
 
-      if (task.status === 'blocked') {blocked++}
-      else if (['todo', 'ready', 'running', 'scheduled', 'review', 'triage'].includes(task.status)) {active++}
-      else {return unknownBecause(`task ${task.id} has status ${task.status}`)}
+      if (task.status === 'blocked') {
+        blocked++
+      } else if (['todo', 'ready', 'running', 'scheduled', 'review', 'triage'].includes(task.status)) {
+        active++
+      } else {
+        return unknownBecause(`task ${task.id} has status ${task.status}`)
+      }
     }
 
-    if (settled) {return unknown}
+    if (settled) {
+      return unknown
+    }
     settled = true
     options?.trace?.('preflight=ok')
 
-    return { ...session, kanban_active: active, kanban_blocked: blocked, kanban_unknown: false,
-      kanban_remote_stale: 0, kanban_observed_at: Date.now() / 1000 } as SessionInfo
+    return {
+      ...session,
+      kanban_active: active,
+      kanban_blocked: blocked,
+      kanban_unknown: false,
+      kanban_remote_stale: 0,
+      kanban_observed_at: Date.now() / 1000
+    } as SessionInfo
   }
 
   try {
-    return await Promise.race([read(), new Promise<SessionInfo>((resolve, reject) => {
-      // Per-request timeouts share an absolute deadline. The grace lets their transport error win;
-      // if the bridge never settles, the watchdog must reject retry mode, never offer an override.
-      const limit = Math.min(OVERALL_BUDGET_MS, options?.budgetMs === undefined ? OVERALL_BUDGET_MS : options.budgetMs + TIMER_GRACE_MS)
+    return await Promise.race([
+      read(),
+      new Promise<SessionInfo>((resolve, reject) => {
+        // Per-request timeouts share an absolute deadline. The grace lets their transport error win;
+        // if the bridge never settles, the watchdog must reject retry mode, never offer an override.
+        const limit = Math.min(
+          OVERALL_BUDGET_MS,
+          options?.budgetMs === undefined ? OVERALL_BUDGET_MS : options.budgetMs + TIMER_GRACE_MS
+        )
 
-      timer = setTimeout(() => {
-        const result = unknownBecause(`no answer within ${limit}ms (${stage})`)
+        timer = setTimeout(() => {
+          const result = unknownBecause(`no answer within ${limit}ms (${stage})`)
 
-        if (options?.retryTransport) {reject(deadlineError())}
-        else {resolve(result)}
-      }, limit)
-    })])
+          if (options?.retryTransport) {
+            reject(deadlineError())
+          } else {
+            resolve(result)
+          }
+        }, limit)
+      })
+    ])
   } catch (error) {
-    if (options?.retryTransport && (isGatewayDrainError(error) || isReconnectableSessionWriteError(error))) {throw error}
+    if (options?.retryTransport && (isGatewayDrainError(error) || isReconnectableSessionWriteError(error))) {
+      throw error
+    }
 
     return unknownBecause(`${stage} failed`, error)
   } finally {

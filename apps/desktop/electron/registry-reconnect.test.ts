@@ -17,7 +17,13 @@ function fixture() {
     reopen: vi.fn(async () => 'hub-2')
   }
 
-  return { deps, reconnect: createRegistryReconnector(deps), replace: () => { entry = { generation: 'hub-new' } } }
+  return {
+    deps,
+    reconnect: createRegistryReconnector(deps),
+    replace: () => {
+      entry = { generation: 'hub-new' }
+    }
+  }
 }
 
 const target = { connectionId: 'hub', profile: 'default', generation: 'hub-1' }
@@ -37,10 +43,16 @@ test.each([
 test.each(['busy', 'unowned', 'stale'] as const)('fails closed for %s without terminating', async refusal => {
   const { deps, reconnect } = fixture()
 
-  if (refusal === 'busy') {deps.prepare.mockResolvedValue(null)}
+  if (refusal === 'busy') {
+    deps.prepare.mockResolvedValue(null)
+  }
 
-  if (refusal === 'unowned') {deps.proveOwned.mockResolvedValue(false)}
-  expect(await reconnect.run({ ...target, generation: refusal === 'stale' ? 'old' : target.generation })).toEqual({ ok: false })
+  if (refusal === 'unowned') {
+    deps.proveOwned.mockResolvedValue(false)
+  }
+  expect(await reconnect.run({ ...target, generation: refusal === 'stale' ? 'old' : target.generation })).toEqual({
+    ok: false
+  })
   expect(deps.terminate).not.toHaveBeenCalled()
   expect(deps.reopen).not.toHaveBeenCalled()
   expect(() => reconnect.assertCanDial('hub', 'default')).not.toThrow()
@@ -71,9 +83,11 @@ test('termination failure retains the committed fence for an exact-generation re
 
 test('a replacement during prepare cancels only the old permit without committing or terminating', async () => {
   const { deps, reconnect, replace } = fixture()
-  deps.prepare.mockImplementation(async () => { replace();
+  deps.prepare.mockImplementation(async () => {
+    replace()
 
- return 'permit' })
+    return 'permit'
+  })
   expect(await reconnect.run(target)).toEqual({ ok: false })
   expect(deps.cancel).toHaveBeenCalledOnce()
   expect(deps.commit).not.toHaveBeenCalled()
@@ -83,7 +97,12 @@ test('a replacement during prepare cancels only the old permit without committin
 test('freezes same-scope dials and duplicate reconnects before the first async ownership probe', async () => {
   const { deps, reconnect } = fixture()
   let resolve!: (value: boolean) => void
-  deps.proveOwned.mockImplementation(() => new Promise<boolean>(done => { resolve = done }))
+  deps.proveOwned.mockImplementation(
+    () =>
+      new Promise<boolean>(done => {
+        resolve = done
+      })
+  )
   const first = reconnect.run(target)
   expect(() => reconnect.assertCanDial('hub', 'default')).toThrow('reconnect')
   expect(() => reconnect.assertCanDial('hub', 'reviewer')).not.toThrow()
@@ -123,7 +142,9 @@ test.each(['live', 'unknown'] as const)('uncertain %s owner never grants kill au
   await expect(reconnect.run(target)).rejects.toThrow('response lost')
   deps.proveOwned.mockRejectedValue(new Error('HTTP offline'))
 
-  if (status === 'unknown') { deps.recoverStopped.mockRejectedValue(new Error('SSH offline')) }
+  if (status === 'unknown') {
+    deps.recoverStopped.mockRejectedValue(new Error('SSH offline'))
+  }
   await expect(reconnect.run(target)).rejects.toThrow(/offline/)
   expect(deps.terminate).not.toHaveBeenCalled()
   expect(deps.reopen).not.toHaveBeenCalled()
@@ -143,9 +164,11 @@ test('an uncertain committed resident cannot grant retry authority over a replac
 
 test('replacement during commit cannot terminate or reopen a newer resident', async () => {
   const { deps, reconnect, replace } = fixture()
-  deps.commit.mockImplementation(async () => { replace();
+  deps.commit.mockImplementation(async () => {
+    replace()
 
- return true })
+    return true
+  })
   expect(await reconnect.run(target)).toEqual({ ok: false })
   expect(deps.terminate).not.toHaveBeenCalled()
   expect(deps.reopen).not.toHaveBeenCalled()
@@ -154,7 +177,9 @@ test('replacement during commit cannot terminate or reopen a newer resident', as
 
 test('replacement while termination is pending cannot be reopened by the old request', async () => {
   const { deps, reconnect, replace } = fixture()
-  deps.terminate.mockImplementation(async () => { replace() })
+  deps.terminate.mockImplementation(async () => {
+    replace()
+  })
   expect(await reconnect.run(target)).toEqual({ ok: false })
   expect(deps.reopen).not.toHaveBeenCalled()
   expect(() => reconnect.assertCanDial('hub', 'default')).not.toThrow()
@@ -164,7 +189,11 @@ test('reconnects only the generation-qualified registry default, never the prima
   const primary = { generation: 'primary' }
   const target = { generation: 'hub-1' }
   const other = { generation: 'other-1' }
-  const entries = new Map([['default', primary], ['conn:hub::default', target], ['conn:other::default', other]])
+  const entries = new Map([
+    ['default', primary],
+    ['conn:hub::default', target],
+    ['conn:other::default', other]
+  ])
   const prepare = vi.fn(async () => 'permit')
   const cancel = vi.fn(async () => {})
   const commit = vi.fn(async () => true)
@@ -180,12 +209,16 @@ test('reconnects only the generation-qualified registry default, never the prima
     generation: (entry: typeof target) => entry.generation,
     proveOwned: async () => true,
     recoverStopped: async () => false,
-    prepare, commit, cancel, terminate,
+    prepare,
+    commit,
+    cancel,
+    terminate,
     reopen
   })
 
   expect(await reconnect.run({ connectionId: 'hub', profile: 'default', generation: 'hub-1' })).toEqual({
-    ok: true, generation: 'hub-2'
+    ok: true,
+    generation: 'hub-2'
   })
   expect(prepare).toHaveBeenCalledWith(target)
   expect(commit).toHaveBeenCalledWith(target, 'permit')

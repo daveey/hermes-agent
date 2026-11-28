@@ -72,6 +72,7 @@ function restore(tree: LayoutNode, id: string, entry: ParkedTab | undefined): La
   if (!zone || !entry || !registry.getArea('panes').some(c => c.id === id)) {
     return null
   }
+
   const at = Math.min(entry.index, zone.panes.length)
   const panes = [...zone.panes.slice(0, at), id, ...zone.panes.slice(at)]
 
@@ -132,6 +133,7 @@ function release(tree: LayoutNode | null, dismissed: ReadonlySet<string>): Layou
   if (!tree) {
     return null
   }
+
   const registered = new Set(registry.getArea('panes').map(c => c.id))
   let next = tree
 
@@ -172,6 +174,7 @@ function bind(
     if (current === previous) {
       return
     }
+
     previous = current
     const tree = read()
 
@@ -185,6 +188,7 @@ function bind(
       if (released) {
         commit(released)
       }
+
       adopt()
     }
   })
@@ -196,6 +200,7 @@ function reveal(tree: LayoutNode, id: string, commit: (tree: LayoutNode) => void
   if (findGroupOfPane(tree, id)) {
     return
   }
+
   memory.preferred = id
 
   try {

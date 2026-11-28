@@ -83,7 +83,9 @@ describe('local endpoint confirmation requires authoritative empty config', () =
   })
 
   it('dismisses unknown configuration without writing', async () => {
-    backend(async () => { throw new Error('temporary config read failure') })
+    backend(async () => {
+      throw new Error('temporary config read failure')
+    })
     await saveOnboardingLocalEndpoint('http://localhost:1234/v1', '', ctx)
     closeManualOnboarding()
     expect(writes).toHaveLength(0)
@@ -97,28 +99,35 @@ describe('local endpoint confirmation requires authoritative empty config', () =
     expect($desktopOnboarding.get().flow.status).toBe('idle')
   })
 
-  it.each(['empty', 'configured', 'unavailable'] as const)('ignores %s options arriving after dismissal', async mode => {
-    let release!: () => void
-    let entered!: () => void
-    const started = new Promise<void>(resolve => { entered = resolve })
-    const pending = new Promise<void>(resolve => { release = resolve })
-    backend(async () => {
-      entered()
-      await pending
+  it.each(['empty', 'configured', 'unavailable'] as const)(
+    'ignores %s options arriving after dismissal',
+    async mode => {
+      let release!: () => void
+      let entered!: () => void
+      const started = new Promise<void>(resolve => {
+        entered = resolve
+      })
+      const pending = new Promise<void>(resolve => {
+        release = resolve
+      })
+      backend(async () => {
+        entered()
+        await pending
 
-      if (mode === 'unavailable') {
-        throw new Error('temporary config read failure')
-      }
+        if (mode === 'unavailable') {
+          throw new Error('temporary config read failure')
+        }
 
-      return mode === 'empty' ? empty : { ...empty, model: 'existing-model', provider: 'existing-provider' }
-    })
+        return mode === 'empty' ? empty : { ...empty, model: 'existing-model', provider: 'existing-provider' }
+      })
 
-    const save = saveOnboardingLocalEndpoint('http://localhost:1234/v1', '', ctx)
-    await started
-    closeManualOnboarding()
-    release()
-    expect((await save).ok).toBe(false)
-    expect(writes).toHaveLength(0)
-    expect($desktopOnboarding.get().flow.status).toBe('idle')
-  })
+      const save = saveOnboardingLocalEndpoint('http://localhost:1234/v1', '', ctx)
+      await started
+      closeManualOnboarding()
+      release()
+      expect((await save).ok).toBe(false)
+      expect(writes).toHaveLength(0)
+      expect($desktopOnboarding.get().flow.status).toBe('idle')
+    }
+  )
 })

@@ -62,6 +62,7 @@ const TRANSPORT_CODES = new Set([
 
 const TRANSPORT_MESSAGE_RE =
   /\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN)\b|socket hang up/i
+
 const TIMEOUT_MESSAGE_RE = /Timed out connecting to Hermes backend/i
 
 /** The connection itself broke (reset, refused, hung up): the backend behind the tunnel is gone. */

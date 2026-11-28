@@ -6,7 +6,9 @@ describe('status-bar task pill click', () => {
   it('opens the board when nobody takes the click over', () => {
     const target = new EventTarget()
     let seen = 0
-    target.addEventListener(KANBAN_CHIP_EVENT, () => { seen += 1 })
+    target.addEventListener(KANBAN_CHIP_EVENT, () => {
+      seen += 1
+    })
     expect(chipClickOpensBoard(target)).toBe(true)
     expect(seen).toBe(1)
   })

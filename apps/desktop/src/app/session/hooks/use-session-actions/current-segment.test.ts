@@ -10,8 +10,14 @@ describe('appendLiveSessionProjection canonical current segment', () => {
     const messages: ChatMessage[] = [
       { id: 'u', role: 'user', parts: [textPart('prompt')] },
       {
-        id: 'assistant-stream-runtime-1', role: 'assistant', pending: true,
-        parts: [textPart('Narration'), { type: 'tool-call', toolCallId: 'tool-1', toolName: 'terminal', args: {} }, textPart('Answer')]
+        id: 'assistant-stream-runtime-1',
+        role: 'assistant',
+        pending: true,
+        parts: [
+          textPart('Narration'),
+          { type: 'tool-call', toolCallId: 'tool-1', toolName: 'terminal', args: {} },
+          textPart('Answer')
+        ]
       }
     ]
 
@@ -22,39 +28,58 @@ describe('appendLiveSessionProjection canonical current segment', () => {
 
     expect(restored).toHaveLength(2)
     expect(restored[1].parts).toEqual([...messages[1].parts.slice(0, 2), assistantTextPart('Answer across a reload')])
-    expect(appendLiveSessionProjection(restored, {
-      session_id: 'runtime-1', inflight: { user: '', assistant: 'Answer', streaming: true, segment_only: true }
-    })).toEqual(restored)
+    expect(
+      appendLiveSessionProjection(restored, {
+        session_id: 'runtime-1',
+        inflight: { user: '', assistant: 'Answer', streaming: true, segment_only: true }
+      })
+    ).toEqual(restored)
   })
 
   it('creates a current segment stream row after durable tool commentary on cold resume', () => {
     const messages: ChatMessage[] = [
       { id: 'u', role: 'user', parts: [textPart('prompt')] },
-      { id: 'durable', role: 'assistant', parts: [textPart('Narration'), { type: 'tool-call', toolCallId: 'tool-1', toolName: 'terminal', args: {} }] }
+      {
+        id: 'durable',
+        role: 'assistant',
+        parts: [textPart('Narration'), { type: 'tool-call', toolCallId: 'tool-1', toolName: 'terminal', args: {} }]
+      }
     ]
 
     const restored = appendLiveSessionProjection(messages, {
-      session_id: 'runtime-1', inflight: { user: '', assistant: 'Answer across a reload', streaming: true, segment_only: true }
+      session_id: 'runtime-1',
+      inflight: { user: '', assistant: 'Answer across a reload', streaming: true, segment_only: true }
     })
 
     expect(restored.slice(0, 2)).toEqual(messages)
-    expect(restored[2]).toMatchObject({ id: 'assistant-stream-runtime-1', pending: true, parts: [assistantTextPart('Answer across a reload')] })
+    expect(restored[2]).toMatchObject({
+      id: 'assistant-stream-runtime-1',
+      pending: true,
+      parts: [assistantTextPart('Answer across a reload')]
+    })
   })
 
   it('ignores a snapshot cut before the turn settled when the durable reply already closes with that text', () => {
     const messages: ChatMessage[] = [
       { id: 'u', role: 'user', parts: [textPart('prompt')] },
       {
-        id: 'durable', role: 'assistant',
-        parts: [textPart('Narration'), { type: 'tool-call', toolCallId: 'tool-1', toolName: 'terminal', args: {} }, textPart('Answer across the drop')]
+        id: 'durable',
+        role: 'assistant',
+        parts: [
+          textPart('Narration'),
+          { type: 'tool-call', toolCallId: 'tool-1', toolName: 'terminal', args: {} },
+          textPart('Answer across the drop')
+        ]
       }
     ]
 
-    expect(appendLiveSessionProjection(messages, {
-      session_id: 'runtime-1', inflight: { user: '', assistant: 'Answer across', streaming: true, segment_only: true }
-    })).toEqual(messages)
+    expect(
+      appendLiveSessionProjection(messages, {
+        session_id: 'runtime-1',
+        inflight: { user: '', assistant: 'Answer across', streaming: true, segment_only: true }
+      })
+    ).toEqual(messages)
   })
-
 })
 
 describe('a stamped current-segment snapshot merges with live text by offset', () => {
@@ -76,13 +101,19 @@ describe('a stamped current-segment snapshot merges with live text by offset', (
   const liveRow = (text: string, start: number, end: number, segment = 0): ChatMessage[] => [
     { id: 'u', role: 'user', parts: [textPart('prompt')] },
     {
-      id: 'assistant-stream-runtime-1', role: 'assistant', pending: true,
+      id: 'assistant-stream-runtime-1',
+      role: 'assistant',
+      pending: true,
       parts: [textPart('Narration'), tool, { ...textPart(text), streamSpan: { ...turn, segment, start, end } }]
     }
   ]
 
   const closing = (messages: ChatMessage[]) =>
-    messages.at(-1)!.parts.filter(part => part.type === 'text').map(part => (part.type === 'text' ? part.text : '')).join('|')
+    messages
+      .at(-1)!
+      .parts.filter(part => part.type === 'text')
+      .map(part => (part.type === 'text' ? part.text : ''))
+      .join('|')
 
   it('keeps a delta that landed past the snapshot cut instead of replacing it with the snapshot', () => {
     // The journal row held "A2 " (unclaimed); the delta [8, 13) reached the row before the resume answered.
@@ -118,12 +149,19 @@ describe('a stamped current-segment snapshot merges with live text by offset', (
   })
 
   it('grafts early deltas from the runtime state onto a cold-built snapshot row, once', () => {
-    const cold = appendLiveSessionProjection([{ id: 'u', role: 'user', parts: [textPart('prompt')] }], stamped('A2 TAIL ', 0, 8))
+    const cold = appendLiveSessionProjection(
+      [{ id: 'u', role: 'user', parts: [textPart('prompt')] }],
+      stamped('A2 TAIL ', 0, 8)
+    )
 
-    const runtime: ChatMessage[] = [{
-      id: 'assistant-stream-early', role: 'assistant', pending: true,
-      parts: [{ ...textPart('TAIL NEXT '), streamSpan: { ...turn, start: 3, end: 13 } }]
-    }]
+    const runtime: ChatMessage[] = [
+      {
+        id: 'assistant-stream-early',
+        role: 'assistant',
+        pending: true,
+        parts: [{ ...textPart('TAIL NEXT '), streamSpan: { ...turn, start: 3, end: 13 } }]
+      }
+    ]
 
     const grafted = graftEarlySegmentDeltas(cold, runtime, stamped('A2 TAIL ', 0, 8).inflight)
 
@@ -132,14 +170,21 @@ describe('a stamped current-segment snapshot merges with live text by offset', (
   })
 
   it('grafts nothing from unstamped live text or another segment', () => {
-    const cold = appendLiveSessionProjection([{ id: 'u', role: 'user', parts: [textPart('prompt')] }], stamped('A2 TAIL ', 0, 8))
+    const cold = appendLiveSessionProjection(
+      [{ id: 'u', role: 'user', parts: [textPart('prompt')] }],
+      stamped('A2 TAIL ', 0, 8)
+    )
     const inflight = stamped('A2 TAIL ', 0, 8).inflight
     const unstamped: ChatMessage[] = [{ id: 'x', role: 'assistant', pending: true, parts: [textPart('NEXT ')] }]
 
-    const otherSegment: ChatMessage[] = [{
-      id: 'x', role: 'assistant', pending: true,
-      parts: [{ ...textPart('NEXT '), streamSpan: { ...turn, segment: 1, start: 0, end: 5 } }]
-    }]
+    const otherSegment: ChatMessage[] = [
+      {
+        id: 'x',
+        role: 'assistant',
+        pending: true,
+        parts: [{ ...textPart('NEXT '), streamSpan: { ...turn, segment: 1, start: 0, end: 5 } }]
+      }
+    ]
 
     expect(graftEarlySegmentDeltas(cold, unstamped, inflight)).toBe(cold)
     expect(graftEarlySegmentDeltas(cold, otherSegment, inflight)).toBe(cold)
@@ -170,7 +215,12 @@ describe('mergeSegmentSnapshotIntoLiveRow (warm activation adopted the live row)
 
   it('puts the snapshot under a run that starts past its cut, keeping the MEDIA source', () => {
     // The row lost [3, 8) and then took a delta past the cut that carries a MEDIA tag.
-    const live = appendAssistantTextPart(appendAssistantTextPart([], 'A2 '), 'MEDIA:/tmp/AI Brain/r.pdf\n', undefined, span(8, 34))
+    const live = appendAssistantTextPart(
+      appendAssistantTextPart([], 'A2 '),
+      'MEDIA:/tmp/AI Brain/r.pdf\n',
+      undefined,
+      span(8, 34)
+    )
     const merged = mergeSegmentSnapshotIntoLiveRow(row(live), 'runtime-1', inflight)
 
     expect(raw(merged)).toBe('A2 TAIL MEDIA:/tmp/AI Brain/r.pdf\n')
@@ -182,7 +232,9 @@ describe('mergeSegmentSnapshotIntoLiveRow (warm activation adopted the live row)
     const messages = row([{ ...textPart('A2 TAIL '), streamSpan: span(0, 8) }])
     const tail = { ...inflight, assistant: 'NEXT ', segment_stamp: { ...inflight.segment_stamp, offset: 8, end: 13 } }
 
-    expect(raw(appendLiveSessionProjection(messages, { session_id: 'runtime-1', inflight: tail }))).toBe('A2 TAIL NEXT ')
+    expect(raw(appendLiveSessionProjection(messages, { session_id: 'runtime-1', inflight: tail }))).toBe(
+      'A2 TAIL NEXT '
+    )
     expect(raw(mergeSegmentSnapshotIntoLiveRow(messages, 'runtime-1', tail))).toBe('A2 TAIL NEXT ')
   })
 

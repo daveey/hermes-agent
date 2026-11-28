@@ -13,6 +13,8 @@ export function goneSessionSwitchInFlight(sessionProfile: null | string | undefi
   return (
     $gatewaySwitching.get() ||
     Boolean($gatewaySwapTarget.get()) ||
-    Boolean(sessionProfile?.trim() && normalizeProfileKey(sessionProfile) !== normalizeProfileKey($activeGatewayProfile.get()))
+    Boolean(
+      sessionProfile?.trim() && normalizeProfileKey(sessionProfile) !== normalizeProfileKey($activeGatewayProfile.get())
+    )
   )
 }

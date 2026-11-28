@@ -16,13 +16,21 @@ afterEach(() => {
   $sessions.set([])
 })
 
-const mount = (outcome?: SessionOutcome) => render(
-  <SessionStatusDot runningCardCount={2} session={{ id: 'chat', outcome, kanban_active: 3, kanban_blocked: 1 } as SessionInfo} storedSessionId="chat" />
-)
+const mount = (outcome?: SessionOutcome) =>
+  render(
+    <SessionStatusDot
+      runningCardCount={2}
+      session={{ id: 'chat', outcome, kanban_active: 3, kanban_blocked: 1 } as SessionInfo}
+      storedSessionId="chat"
+    />
+  )
 
 describe('SessionStatusDot published status', () => {
   it('red overdue triage is agent attention, not a human decision', () => {
-    const outcome = canonicalOutcome('stuck', { kind: 'waiting', presentation: { stripe: 'stuck', reason_codes: ['triage_overdue'] } })
+    const outcome = canonicalOutcome('stuck', {
+      kind: 'waiting',
+      presentation: { stripe: 'stuck', reason_codes: ['triage_overdue'] }
+    })
     const { container } = mount(outcome)
     const dot = container.querySelector('[data-session-status-dot]')!
     expect(dot.getAttribute('data-session-status-dot')).toBe('stuck')
@@ -30,8 +38,11 @@ describe('SessionStatusDot published status', () => {
     expect(dot.className).toContain('--color-red-500')
   })
   it('red overdue retained stop stays stopped, never a wait or a human decision', () => {
-    const outcome = canonicalOutcome('stuck', { kind: 'unresolved', reason: 'linked_work_retained',
-      presentation: { stripe: 'stuck', reason_codes: ['linked_work_retained', 'triage_overdue'] } })
+    const outcome = canonicalOutcome('stuck', {
+      kind: 'unresolved',
+      reason: 'linked_work_retained',
+      presentation: { stripe: 'stuck', reason_codes: ['linked_work_retained', 'triage_overdue'] }
+    })
 
     const dot = mount(outcome).container.querySelector('[data-session-status-dot]')!
     expect(dot.getAttribute('data-session-status-dot')).toBe('stuck')
@@ -39,18 +50,25 @@ describe('SessionStatusDot published status', () => {
     expect(dot.className).toContain('--color-red-500')
   })
   it.each(['done', 'waiting', 'attention', 'blocked', 'stuck', 'none'] as const)(
-    'paints %s independently of local activity, unread and card counts', stripe => {
+    'paints %s independently of local activity, unread and card counts',
+    stripe => {
       const { container } = mount(canonicalOutcome(stripe, {}, { kind: 'done' }))
       const dot = container.querySelector('[data-session-status-dot]')!
       expect(dot.getAttribute('data-session-status-dot')).toBe(stripe)
       expect(dot.getAttribute('role')).toBe('status')
       expect(dot.getAttribute('aria-label')).toBeTruthy()
 
-      if (stripe === 'done') {expect(dot.className).toContain('bg-(--ui-success)')}
+      if (stripe === 'done') {
+        expect(dot.className).toContain('bg-(--ui-success)')
+      }
 
-      if (stripe === 'none') {expect(dot.className).toContain('border-(--ui-text-quaternary)')}
+      if (stripe === 'none') {
+        expect(dot.className).toContain('border-(--ui-text-quaternary)')
+      }
 
-      if (stripe === 'attention') {expect(dot.className).toContain('--color-amber-500')}
+      if (stripe === 'attention') {
+        expect(dot.className).toContain('--color-amber-500')
+      }
     }
   )
 
@@ -66,7 +84,9 @@ describe('SessionStatusDot published status', () => {
     expect(dot.className).not.toContain('bg-(--ui-success)')
     expect(dot.className).toContain(kind === 'running' ? 'bg-(--ui-accent)' : 'bg-(--session-status-color)')
 
-    if (kind === 'waiting') {expect(dot.className).not.toContain('bg-(--ui-accent)')}
+    if (kind === 'waiting') {
+      expect(dot.className).not.toContain('bg-(--ui-accent)')
+    }
   })
 
   it('announces a canonical never-started session as draft, not Running', () => {
@@ -88,7 +108,8 @@ describe('SessionStatusDot published status', () => {
   })
 
   it.each([undefined, { kind: 'done' }, { kind: 'done', status: { status_version: 2 } }] as const)(
-    'missing and unsupported protocols remain unknown: %j', value => {
+    'missing and unsupported protocols remain unknown: %j',
+    value => {
       const { container } = mount(value as SessionOutcome | undefined)
       const dot = container.querySelector('[data-session-status-dot]')!
       expect(dot.getAttribute('data-session-status-dot')).toBe('attention')
@@ -109,8 +130,15 @@ describe('SessionStatusDot published status', () => {
 
   it('repaints on a new backend status rather than a client clock', () => {
     const view = mount(canonicalOutcome('done', { revision: 3 }))
-    view.rerender(<SessionStatusDot session={{ id: 'chat', outcome: canonicalOutcome('stuck', { revision: 4 }) } as SessionInfo} storedSessionId="chat" />)
-    expect(view.container.querySelector('[data-session-status-dot]')?.getAttribute('data-session-status-dot')).toBe('stuck')
+    view.rerender(
+      <SessionStatusDot
+        session={{ id: 'chat', outcome: canonicalOutcome('stuck', { revision: 4 }) } as SessionInfo}
+        storedSessionId="chat"
+      />
+    )
+    expect(view.container.querySelector('[data-session-status-dot]')?.getAttribute('data-session-status-dot')).toBe(
+      'stuck'
+    )
   })
 
   it('activity variants cannot select a different published color', () => {

@@ -3,7 +3,8 @@
  * schemas/fixtures/execution-observations-v1.json. Never reads clocks implicitly.
  * Every lookup of producer data is own-property-only and type-checked before any set/map access.
  */
-export type ExecutionState = 'running' | 'queued' | 'waiting' | 'needs_user' | 'done' | 'failed' | 'cancelled' | 'unknown'
+export type ExecutionState =
+  'running' | 'queued' | 'waiting' | 'needs_user' | 'done' | 'failed' | 'cancelled' | 'unknown'
 export type ObservationSourceClass = 'sidebar' | 'imported_owner'
 export interface ExecutionObservation extends Record<string, unknown> {
   state: ExecutionState
@@ -16,7 +17,16 @@ export interface ExecutionObservation extends Record<string, unknown> {
   last_progress?: unknown
 }
 
-const STATES: readonly string[] = ['running', 'queued', 'waiting', 'needs_user', 'done', 'failed', 'cancelled', 'unknown']
+const STATES: readonly string[] = [
+  'running',
+  'queued',
+  'waiting',
+  'needs_user',
+  'done',
+  'failed',
+  'cancelled',
+  'unknown'
+]
 const TTL: Readonly<Record<string, number>> = { sidebar: 180, imported_owner: 600 }
 const ID_FIELDS = ['gateway', 'profile', 'board', 'session', 'lineage', 'kind', 'work_id', 'run_id', 'generation']
 const PROGRESS_KINDS = ['artifact', 'test_result', 'work_result']
@@ -46,10 +56,14 @@ const qualified = (v: unknown): boolean => ['gateway', 'profile'].every(k => ide
 
 /** Deep copy of JSON-like data (cycle-safe; own keys defined as data so `__proto__` cannot rebind a prototype). */
 function copy<T>(value: T, seen = new WeakMap<object, unknown>()): T {
-  if (value === null || typeof value !== 'object') {return typeof value === 'function' || typeof value === 'symbol' ? (undefined as T) : value}
+  if (value === null || typeof value !== 'object') {
+    return typeof value === 'function' || typeof value === 'symbol' ? (undefined as T) : value
+  }
   const known = seen.get(value)
 
-  if (known) {return known as T}
+  if (known) {
+    return known as T
+  }
 
   if (Array.isArray(value)) {
     const out: unknown[] = []
@@ -69,21 +83,30 @@ function copy<T>(value: T, seen = new WeakMap<object, unknown>()): T {
   for (const key of Object.keys(value)) {
     const v = copy((value as Record<string, unknown>)[key], seen)
 
-    if (v !== undefined) {Object.defineProperty(out, key, { value: v, enumerable: true, writable: true, configurable: true })}
+    if (v !== undefined) {
+      Object.defineProperty(out, key, { value: v, enumerable: true, writable: true, configurable: true })
+    }
   }
 
   return out as T
 }
 
 function validIdentity(v: unknown): boolean {
-  if (!isObject(v)) {return false}
+  if (!isObject(v)) {
+    return false
+  }
 
   const fields = ['gateway', 'profile', 'kind', 'work_id']
 
-  if (get(v, 'kind') === 'card') {fields.push('board')}
-  else if (!ident(get(v, 'session')) && !ident(get(v, 'lineage'))) {return false}
+  if (get(v, 'kind') === 'card') {
+    fields.push('board')
+  } else if (!ident(get(v, 'session')) && !ident(get(v, 'lineage'))) {
+    return false
+  }
 
-  if (['board', 'session', 'lineage'].some(k => has(v, k) && !ident(v[k]))) {return false}
+  if (['board', 'session', 'lineage'].some(k => has(v, k) && !ident(v[k]))) {
+    return false
+  }
 
   const attempts = ['run_id', 'generation'].filter(k => has(v, k))
 
@@ -91,7 +114,9 @@ function validIdentity(v: unknown): boolean {
 }
 
 export function executionIdentityKey(v: unknown): string | null {
-  if (!validIdentity(v)) {return null}
+  if (!validIdentity(v)) {
+    return null
+  }
 
   // JSON keeps "7" distinct from 7 and 7.0 equal to 7.
   return JSON.stringify(ID_FIELDS.map(k => [k, get(v, k) ?? null]))
@@ -104,7 +129,9 @@ function sameJson(a: unknown, b: unknown): boolean {
   }
 
   if (isObject(a) || isObject(b)) {
-    if (!isObject(a) || !isObject(b)) {return false}
+    if (!isObject(a) || !isObject(b)) {
+      return false
+    }
 
     const keys = Object.keys(a)
 
@@ -114,7 +141,11 @@ function sameJson(a: unknown, b: unknown): boolean {
   return typeof a === typeof b && a === b
 }
 
-function unknown(out: ExecutionObservation, reason: string, freshness: 'unknown' | 'stale' = 'unknown'): ExecutionObservation {
+function unknown(
+  out: ExecutionObservation,
+  reason: string,
+  freshness: 'unknown' | 'stale' = 'unknown'
+): ExecutionObservation {
   return { ...out, state: 'unknown', freshness, unknown_reason: reason }
 }
 
@@ -150,32 +181,56 @@ function progress(out: ExecutionObservation, now: number): void {
 function validWait(value: unknown, now: number): boolean {
   const target = get(value, 'target')
 
-  if (!isObject(value) || !qualified(get(value, 'owner')) || !qualified(target) || !ident(get(target, 'kind')) || !ident(get(target, 'work_id'))) {
+  if (
+    !isObject(value) ||
+    !qualified(get(value, 'owner')) ||
+    !qualified(target) ||
+    !ident(get(target, 'kind')) ||
+    !ident(get(target, 'work_id'))
+  ) {
     return false
   }
 
-  if (get(target, 'kind') === 'card' && !ident(get(target, 'board'))) {return false}
+  if (get(target, 'kind') === 'card' && !ident(get(target, 'board'))) {
+    return false
+  }
 
   const since = get(value, 'since')
   const due = get(value, 'due_at')
 
-  return nonblank(get(value, 'kind')) && nonblank(get(value, 'predicate')) && epoch(since) && since <= now && (due == null || (epoch(due) && due >= since))
+  return (
+    nonblank(get(value, 'kind')) &&
+    nonblank(get(value, 'predicate')) &&
+    epoch(since) &&
+    since <= now &&
+    (due == null || (epoch(due) && due >= since))
+  )
 }
 
 /** Visible request semantics shared with Python. Probes are stripped before this runs. */
 function humanRequest(value: unknown, waitKind?: unknown): boolean {
-  if (!isObject(value)) {return false}
+  if (!isObject(value)) {
+    return false
+  }
 
-  if (!['action', 'why_human', 'interaction', 'scope', 'evidence'].every(k => nonblank(get(value, k)))) {return false}
+  if (!['action', 'why_human', 'interaction', 'scope', 'evidence'].every(k => nonblank(get(value, k)))) {
+    return false
+  }
 
-  if (!INTERACTIONS.includes(value.interaction as string)) {return false}
+  if (!INTERACTIONS.includes(value.interaction as string)) {
+    return false
+  }
 
-  if (typeof waitKind === 'string' && NONHUMAN_WAIT_KINDS.includes(waitKind)) {return false}
+  if (typeof waitKind === 'string' && NONHUMAN_WAIT_KINDS.includes(waitKind)) {
+    return false
+  }
 
   const choices = get(value, 'choices')
 
   if (choices != null) {
-    if (!Array.isArray(choices) || choices.length < 2 || choices.length > 6) {return false}
+    if (!Array.isArray(choices) || choices.length < 2 || choices.length > 6) {
+      return false
+    }
 
     const values = new Set<string>()
 
@@ -183,12 +238,16 @@ function humanRequest(value: unknown, waitKind?: unknown): boolean {
       const label = get(c, 'label')
       const val = get(c, 'value')
 
-      if (!nonblank(label) || codePoints(trim(label)) > 60 || !nonblank(val) || codePoints(trim(val)) > 120) {return false}
+      if (!nonblank(label) || codePoints(trim(label)) > 60 || !nonblank(val) || codePoints(trim(val)) > 120) {
+        return false
+      }
 
       values.add(trim(val))
     }
 
-    if (values.size !== choices.length) {return false}
+    if (values.size !== choices.length) {
+      return false
+    }
   }
 
   return true
@@ -196,11 +255,15 @@ function humanRequest(value: unknown, waitKind?: unknown): boolean {
 
 /** Private probe commands never enter singular or retained visible requests. */
 function stripRequest(request: unknown): unknown {
-  if (!isObject(request)) {return request}
+  if (!isObject(request)) {
+    return request
+  }
   const kept: Record<string, unknown> = {}
 
   for (const k of Object.keys(request)) {
-    if (!PROBE_FIELDS.includes(k)) {Object.defineProperty(kept, k, { value: request[k], enumerable: true, writable: true, configurable: true })}
+    if (!PROBE_FIELDS.includes(k)) {
+      Object.defineProperty(kept, k, { value: request[k], enumerable: true, writable: true, configurable: true })
+    }
   }
 
   return kept
@@ -209,10 +272,14 @@ function stripRequest(request: unknown): unknown {
 function stripProbes(raw: Record<string, unknown>): Record<string, unknown> {
   const out = { ...raw }
 
-  if (has(raw, 'human_request')) {out.human_request = stripRequest(get(raw, 'human_request'))}
+  if (has(raw, 'human_request')) {
+    out.human_request = stripRequest(get(raw, 'human_request'))
+  }
   const retained = get(raw, 'retained_human_requests')
 
-  if (Array.isArray(retained)) {out.retained_human_requests = retained.map(stripRequest)}
+  if (Array.isArray(retained)) {
+    out.retained_human_requests = retained.map(stripRequest)
+  }
 
   return out
 }
@@ -220,48 +287,74 @@ function stripProbes(raw: Record<string, unknown>): Record<string, unknown> {
 function envelopeReject(raw: Record<string, unknown>): string | null {
   const version = get(raw, 'version')
 
-  if (!(typeof version === 'number' && version === 1)) {return 'legacy_or_unsupported_version'}
+  if (!(typeof version === 'number' && version === 1)) {
+    return 'legacy_or_unsupported_version'
+  }
 
-  if (!validIdentity(get(raw, 'identity'))) {return 'missing_qualified_identity'}
+  if (!validIdentity(get(raw, 'identity'))) {
+    return 'missing_qualified_identity'
+  }
 
-  if (!qualified(get(raw, 'owner'))) {return 'missing_qualified_owner'}
+  if (!qualified(get(raw, 'owner'))) {
+    return 'missing_qualified_owner'
+  }
 
   const refs = get(raw, 'evidence_refs')
 
-  if (!Array.isArray(refs) || refs.length === 0 || !refs.every(nonblank)) {return 'missing_evidence_references'}
+  if (!Array.isArray(refs) || refs.length === 0 || !refs.every(nonblank)) {
+    return 'missing_evidence_references'
+  }
 
-  if (!nonblank(get(raw, 'source')) || !nonblank(get(raw, 'source_revision'))) {return 'missing_source_identity'}
+  if (!nonblank(get(raw, 'source')) || !nonblank(get(raw, 'source_revision'))) {
+    return 'missing_source_identity'
+  }
 
   return null
 }
 
 /** Freshness boundary across the envelope and every required source, or the unknown reason. */
-function timingBoundary(raw: Record<string, unknown>, now: number, sourceClass: ObservationSourceClass): { boundary: number } | string {
+function timingBoundary(
+  raw: Record<string, unknown>,
+  now: number,
+  sourceClass: ObservationSourceClass
+): { boundary: number } | string {
   const observed = get(raw, 'observed_at')
   const until = get(raw, 'valid_until')
   const ttl = ttlOf(sourceClass)
 
-  if (ttl === undefined || !epoch(now) || !epoch(observed) || !epoch(until)) {return 'missing_or_invalid_source_timing'}
+  if (ttl === undefined || !epoch(now) || !epoch(observed) || !epoch(until)) {
+    return 'missing_or_invalid_source_timing'
+  }
 
-  if (until < observed || now < observed) {return 'clock_inconsistent'}
+  if (until < observed || now < observed) {
+    return 'clock_inconsistent'
+  }
 
   let boundary = Math.min(until, observed + ttl)
   const sources = has(raw, 'required_sources') ? raw.required_sources : []
 
-  if (!Array.isArray(sources)) {return 'invalid_required_sources'}
+  if (!Array.isArray(sources)) {
+    return 'invalid_required_sources'
+  }
 
   for (const s of sources) {
     const at = get(s, 'observed_at')
     const end = get(s, 'valid_until')
 
-    if (!epoch(at) || !epoch(end)) {return 'missing_required_source_timing'}
+    if (!epoch(at) || !epoch(end)) {
+      return 'missing_required_source_timing'
+    }
 
-    if (end < at || now < at) {return 'clock_inconsistent'}
+    if (end < at || now < at) {
+      return 'clock_inconsistent'
+    }
 
     // Absent inherits the envelope class; explicit null/array/unknown is invalid.
     const sourceTTL = has(s as object, 'source_class') ? ttlOf((s as Record<string, unknown>).source_class) : ttl
 
-    if (sourceTTL === undefined) {return 'invalid_required_source_class'}
+    if (sourceTTL === undefined) {
+      return 'invalid_required_source_class'
+    }
 
     boundary = Math.min(boundary, end, at + sourceTTL)
   }
@@ -280,25 +373,44 @@ export function nonRunningReason(value: unknown, now: number): Record<string, un
     const boundary = Math.min(until, at + 180)
     until = boundary
 
-    if (now >= boundary) {reason = 'dispatcher_evidence_stale'}
-    else if (get(raw, 'freshness') === 'current' && ['blocked', 'waiting'].includes(get(raw, 'disposition') as string)) {
+    if (now >= boundary) {
+      reason = 'dispatcher_evidence_stale'
+    } else if (
+      get(raw, 'freshness') === 'current' &&
+      ['blocked', 'waiting'].includes(get(raw, 'disposition') as string)
+    ) {
       const fields = ['code', 'family', 'actor', 'summary', 'next_action', 'evidence_ref', 'source_revision']
 
-      if (fields.every(k => nonblank(get(raw, k)))) {return { ...copy(raw), valid_until: until }}
+      if (fields.every(k => nonblank(get(raw, k)))) {
+        return { ...copy(raw), valid_until: until }
+      }
     }
   }
 
   return {
-    code: 'unclassified_refusal', family: 'unknown', disposition: 'unknown', actor: 'unknown',
-    summary: 'Execution reason is unknown', next_action: 'Inspect the latest authoritative dispatcher evidence',
-    freshness: 'unknown', unknown_reason: reason, observed_at: at ?? null, valid_until: until ?? null
+    code: 'unclassified_refusal',
+    family: 'unknown',
+    disposition: 'unknown',
+    actor: 'unknown',
+    summary: 'Execution reason is unknown',
+    next_action: 'Inspect the latest authoritative dispatcher evidence',
+    freshness: 'unknown',
+    unknown_reason: reason,
+    observed_at: at ?? null,
+    valid_until: until ?? null
   }
 }
 
-function freshness(source: Record<string, unknown>, now: number, sourceClass: ObservationSourceClass): ExecutionObservation {
+function freshness(
+  source: Record<string, unknown>,
+  now: number,
+  sourceClass: ObservationSourceClass
+): ExecutionObservation {
   const raw = copy(source)
 
-  if (has(raw, 'non_running_reason')) {raw.non_running_reason = nonRunningReason(get(raw, 'non_running_reason'), now)}
+  if (has(raw, 'non_running_reason')) {
+    raw.non_running_reason = nonRunningReason(get(raw, 'non_running_reason'), now)
+  }
   const state = get(raw, 'state')
 
   const out: ExecutionObservation = {
@@ -315,11 +427,15 @@ function freshness(source: Record<string, unknown>, now: number, sourceClass: Ob
 
   const rejected = envelopeReject(raw)
 
-  if (rejected) {return unknown(out, rejected)}
+  if (rejected) {
+    return unknown(out, rejected)
+  }
 
   const timing = timingBoundary(raw, now, sourceClass)
 
-  if (typeof timing === 'string') {return unknown(out, timing)}
+  if (typeof timing === 'string') {
+    return unknown(out, timing)
+  }
 
   const boundary = timing.boundary
   const observed = get(raw, 'observed_at') as number
@@ -327,9 +443,13 @@ function freshness(source: Record<string, unknown>, now: number, sourceClass: Ob
   out.valid_until = boundary
   out.age_seconds = now - observed
 
-  if (now >= boundary) {return unknown(out, 'source_expired', 'stale')}
+  if (now >= boundary) {
+    return unknown(out, 'source_expired', 'stale')
+  }
 
-  if (!stateOf(state)) {return unknown(out, 'unsupported_state')}
+  if (!stateOf(state)) {
+    return unknown(out, 'unsupported_state')
+  }
 
   if (state === 'unknown') {
     const reason = get(raw, 'unknown_reason')
@@ -364,9 +484,13 @@ function delivered(out: ExecutionObservation): boolean {
 /** Typed structural key shared with Python: code-point text, IEEE-754 number bits.
  * Canonical ordering is not evidence authority. Bool differs from number; -0/0 share a key. */
 function jsonOrder(value: unknown): string {
-  if (value === null) {return 'n'}
+  if (value === null) {
+    return 'n'
+  }
 
-  if (typeof value === 'boolean') {return value ? 'b1' : 'b0'}
+  if (typeof value === 'boolean') {
+    return value ? 'b1' : 'b0'
+  }
 
   if (typeof value === 'number') {
     const bytes = new Uint8Array(8)
@@ -375,12 +499,18 @@ function jsonOrder(value: unknown): string {
     return 'd' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
   }
 
-  if (typeof value === 'string') {return 's' + Array.from(value, c => c.codePointAt(0)!.toString(16).padStart(8, '0')).join('') + ';'}
+  if (typeof value === 'string') {
+    return 's' + Array.from(value, c => c.codePointAt(0)!.toString(16).padStart(8, '0')).join('') + ';'
+  }
 
-  if (Array.isArray(value)) {return 'a[' + value.map(jsonOrder).join('') + ']'}
+  if (Array.isArray(value)) {
+    return 'a[' + value.map(jsonOrder).join('') + ']'
+  }
 
   if (isObject(value)) {
-    const keys = Object.keys(value).sort((a, b) => jsonOrder(a) < jsonOrder(b) ? -1 : jsonOrder(a) > jsonOrder(b) ? 1 : 0)
+    const keys = Object.keys(value).sort((a, b) =>
+      jsonOrder(a) < jsonOrder(b) ? -1 : jsonOrder(a) > jsonOrder(b) ? 1 : 0
+    )
 
     return 'o{' + keys.map(k => jsonOrder(k) + jsonOrder(value[k])).join('') + '}'
   }
@@ -403,17 +533,30 @@ function array(out: ExecutionObservation, field: string): unknown[] {
 function requests(out: ExecutionObservation): unknown[] {
   const retained = array(out, 'retained_human_requests').filter(v => humanRequest(v))
 
-  if (humanRequest(get(out, 'human_request'), waitKind(out))) {retained.push(out.human_request)}
+  if (humanRequest(get(out, 'human_request'), waitKind(out))) {
+    retained.push(out.human_request)
+  }
 
   return unique(retained)
 }
 
 function receipts(out: ExecutionObservation): unknown[] {
-  return unique([...array(out, 'historical_delivery_receipts'), get(out, 'delivery_receipt')].filter(v => receiptValid(v, get(out, 'identity'))))
+  return unique(
+    [...array(out, 'historical_delivery_receipts'), get(out, 'delivery_receipt')].filter(v =>
+      receiptValid(v, get(out, 'identity'))
+    )
+  )
 }
 
-function preserve(out: ExecutionObservation, matches: Record<string, unknown>[], now: number, sourceClass: ObservationSourceClass): ExecutionObservation {
-  if (out.state !== 'unknown') {return out}
+function preserve(
+  out: ExecutionObservation,
+  matches: Record<string, unknown>[],
+  now: number,
+  sourceClass: ObservationSourceClass
+): ExecutionObservation {
+  if (out.state !== 'unknown') {
+    return out
+  }
   const projected = matches.map(v => projectExecutionObservation(v, now, sourceClass))
   const asks = unique(projected.flatMap(requests))
   const historical = unique(projected.flatMap(receipts))
@@ -429,11 +572,15 @@ function preserve(out: ExecutionObservation, matches: Record<string, unknown>[],
     if (!valid) {
       delete out[field]
 
-      if (values.length === 1) {out[field] = copy(values[0])}
+      if (values.length === 1) {
+        out[field] = copy(values[0])
+      }
     }
   }
 
-  if (historical.length > 0) {out.last_known_state = 'done'}
+  if (historical.length > 0) {
+    out.last_known_state = 'done'
+  }
 
   return out
 }
@@ -450,7 +597,12 @@ function lastKnown(out: ExecutionObservation): ExecutionObservation {
 
 const waitKind = (out: ExecutionObservation): unknown => get(get(out, 'wait'), 'kind')
 
-function project(value: unknown, now: number, sourceClass: ObservationSourceClass, expectedIdentity?: unknown): ExecutionObservation {
+function project(
+  value: unknown,
+  now: number,
+  sourceClass: ObservationSourceClass,
+  expectedIdentity?: unknown
+): ExecutionObservation {
   // null and undefined both mean "no fence", as Python's `expected_identity is not None` does.
   if (expectedIdentity !== undefined && expectedIdentity !== null) {
     const expected = executionIdentityKey(expectedIdentity)
@@ -467,19 +619,29 @@ function project(value: unknown, now: number, sourceClass: ObservationSourceClas
 
   progress(out, now)
 
-  if (out.state === 'unknown') {return out}
+  if (out.state === 'unknown') {
+    return out
+  }
 
-  if (!WORK_KINDS.includes(String(get(out.identity, 'kind')))) {return unknown(out, 'unsupported_work_kind')}
+  if (!WORK_KINDS.includes(String(get(out.identity, 'kind')))) {
+    return unknown(out, 'unsupported_work_kind')
+  }
 
-  if (out.state === 'needs_user' && !humanRequest(out.human_request)) {return unknown(out, 'missing_human_request')}
+  if (out.state === 'needs_user' && !humanRequest(out.human_request)) {
+    return unknown(out, 'missing_human_request')
+  }
 
   if ((out.state === 'waiting' || out.state === 'needs_user') && !validWait(out.wait, now)) {
     return unknown(out, 'incomplete_wait_condition')
   }
 
-  if (out.state === 'needs_user' && NONHUMAN_WAIT_KINDS.includes(String(waitKind(out)))) {return unknown(out, 'invalid_human_wait')}
+  if (out.state === 'needs_user' && NONHUMAN_WAIT_KINDS.includes(String(waitKind(out)))) {
+    return unknown(out, 'invalid_human_wait')
+  }
 
-  if (out.state === 'done' && !delivered(out)) {return unknown(out, 'unverified_completion')}
+  if (out.state === 'done' && !delivered(out)) {
+    return unknown(out, 'unverified_completion')
+  }
 
   return out
 }
@@ -512,7 +674,10 @@ export function selectExecutionObservation(
   const base = { identity: copy(identity) }
 
   if (matches.length === 0) {
-    return unknown(projectExecutionObservation(base, now, sourceClass), key === null ? 'invalid_requested_identity' : 'no_observation')
+    return unknown(
+      projectExecutionObservation(base, now, sourceClass),
+      key === null ? 'invalid_requested_identity' : 'no_observation'
+    )
   }
 
   let out: ExecutionObservation
@@ -523,7 +688,10 @@ export function selectExecutionObservation(
     const latestAt = matches.reduce((at, v) => Math.max(at, get(v, 'observed_at') as number), 0)
     const latest = matches.filter(v => get(v, 'observed_at') === latestAt)
 
-    if (latest.slice(1).some(v => !sameJson(v, latest[0])) || matches.slice(1).some(v => !sameJson(get(v, 'source'), get(matches[0], 'source')))) {
+    if (
+      latest.slice(1).some(v => !sameJson(v, latest[0])) ||
+      matches.slice(1).some(v => !sameJson(get(v, 'source'), get(matches[0], 'source')))
+    ) {
       out = unknown(projectExecutionObservation(base, now, sourceClass), 'conflicting_source_evidence')
     } else {
       out = projectExecutionObservation(latest[0], now, sourceClass)
@@ -533,7 +701,11 @@ export function selectExecutionObservation(
   return preserve(out, matches, now, sourceClass)
 }
 
-export function summarizeExecutionObservations(values: readonly unknown[], now: number, sourceClass: ObservationSourceClass = 'sidebar') {
+export function summarizeExecutionObservations(
+  values: readonly unknown[],
+  now: number,
+  sourceClass: ObservationSourceClass = 'sidebar'
+) {
   const observations = (Array.isArray(values) ? values : []).map(v => projectExecutionObservation(v, now, sourceClass))
   const counts = Object.fromEntries(STATES.map(state => [state, 0])) as Record<ExecutionState, number>
   let outstanding = 0
@@ -544,5 +716,10 @@ export function summarizeExecutionObservations(values: readonly unknown[], now: 
     outstanding += requests(observation).length
   }
 
-  return { observations, counts, outstanding_human_requests: outstanding, uncertain: observations.length === 0 || counts.unknown > 0 }
+  return {
+    observations,
+    counts,
+    outstanding_human_requests: outstanding,
+    uncertain: observations.length === 0 || counts.unknown > 0
+  }
 }

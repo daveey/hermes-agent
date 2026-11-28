@@ -8,9 +8,9 @@ import { decodeResponseBody, displayTranscriptHeaders, isDisplayTranscriptRead }
 
 describe('display transcript reads', () => {
   it('marks only GETs of a session messages page', () => {
-    expect(isDisplayTranscriptRead('GET', 'http://127.0.0.1:9147/api/sessions/s1/messages?limit=120&order=latest')).toBe(
-      true
-    )
+    expect(
+      isDisplayTranscriptRead('GET', 'http://127.0.0.1:9147/api/sessions/s1/messages?limit=120&order=latest')
+    ).toBe(true)
     expect(isDisplayTranscriptRead(undefined, 'http://127.0.0.1:9147/api/sessions/s1/messages')).toBe(true)
     expect(isDisplayTranscriptRead('POST', 'http://127.0.0.1:9147/api/sessions/s1/messages')).toBe(false)
     expect(isDisplayTranscriptRead('GET', 'http://127.0.0.1:9147/api/sessions/s1/messages/around?row=3')).toBe(false)

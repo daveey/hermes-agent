@@ -923,7 +923,9 @@ describe('active transcript refresh', () => {
     renderSync(vi.fn(async () => undefined))
     vi.mocked(refreshProjectTree).mockClear()
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
     expect(refreshProjectTree).toHaveBeenCalled()
   })
 
@@ -934,15 +936,23 @@ describe('active transcript refresh', () => {
     const { unmount } = renderSync(vi.fn(async () => undefined))
     vi.mocked(refreshProjectTree).mockClear()
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
     expect(refreshProjectTree).not.toHaveBeenCalled()
     focus.mockReturnValue(true)
-    act(() => { window.dispatchEvent(new Event('focus')) })
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
     expect(refreshProjectTree).toHaveBeenCalledTimes(1)
     unmount()
     vi.mocked(refreshProjectTree).mockClear()
-    act(() => { window.dispatchEvent(new Event('focus')) })
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
     expect(refreshProjectTree).not.toHaveBeenCalled()
   })
 

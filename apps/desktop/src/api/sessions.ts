@@ -11,7 +11,11 @@ import type {
   SessionSearchResponse
 } from '@/types/hermes'
 
-import { createSessionMutationClient, type SessionMutationIdentity, type SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
+import {
+  createSessionMutationClient,
+  type SessionMutationIdentity,
+  type SessionMutationSnapshot
+} from '../../../shared/src/session-http-mutations'
 
 import {
   ambientOwnerConnectionId,
@@ -370,7 +374,9 @@ export async function listSidebarSessions(req: SidebarSessionsRequest): Promise<
     recents: {
       ...result.recents,
       // [daveey] An explicit connection's rows are tagged by the caller, never with the window's connection.
-      sessions: req.connectionId ? (result.recents?.sessions ?? []) : stampActiveConnectionOwner(result.recents?.sessions ?? []),
+      sessions: req.connectionId
+        ? (result.recents?.sessions ?? [])
+        : stampActiveConnectionOwner(result.recents?.sessions ?? []),
       ...(result.errors?.length ? { errors: result.errors } : {})
     },
     cron: {
@@ -398,15 +404,27 @@ class MissingMutationSnapshotRoute extends Error {}
  *  verdict on the read, before any write was attempted, selects it; a session/profile 404,
  *  refusal, conflict, timeout or failed write keeps the canonical CAS path and its retained
  *  identity. */
-export function mutateSessionFenced<T>(key: string, read: () => Promise<SessionMutationSnapshot>,
-  send: (identity: Partial<SessionMutationIdentity>) => Promise<T>): Promise<T> {
-  return runSessionMutation(key, () => read().catch(error => {
-    // The prepared read is shared by equal concurrent edits; its verdict must
-    // travel with that rejection, rather than one caller's local closure.
-    if (isUnroutedRestPath(error)) { throw new MissingMutationSnapshotRoute(String(error), { cause: error }) }
-    throw error
-  }), send).catch(error => {
-    if (!(error instanceof MissingMutationSnapshotRoute)) { throw error }
+export function mutateSessionFenced<T>(
+  key: string,
+  read: () => Promise<SessionMutationSnapshot>,
+  send: (identity: Partial<SessionMutationIdentity>) => Promise<T>
+): Promise<T> {
+  return runSessionMutation(
+    key,
+    () =>
+      read().catch(error => {
+        // The prepared read is shared by equal concurrent edits; its verdict must
+        // travel with that rejection, rather than one caller's local closure.
+        if (isUnroutedRestPath(error)) {
+          throw new MissingMutationSnapshotRoute(String(error), { cause: error })
+        }
+        throw error
+      }),
+    send
+  ).catch(error => {
+    if (!(error instanceof MissingMutationSnapshotRoute)) {
+      throw error
+    }
 
     return send({}).catch(cause => {
       throw new NonReplayableSessionWriteError(cause instanceof Error ? cause.message : String(cause), { cause })
@@ -414,7 +432,13 @@ export function mutateSessionFenced<T>(key: string, read: () => Promise<SessionM
   })
 }
 
-function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: Record<string, unknown>, profile?: ProfileScope, onSend?: () => void): Promise<T> {
+function mutateSessionHttp<T>(
+  id: string,
+  method: 'PATCH' | 'DELETE',
+  payload: Record<string, unknown>,
+  profile?: ProfileScope,
+  onSend?: () => void
+): Promise<T> {
   // Null is the window's v1 route (its primary, local or remote); defaulting it to
   // the registry's 'local' source would pin a remote primary's edits to this machine.
   const scope = { connectionId: getApiRequestConnection(), ...sessionScoped(profile) }
@@ -427,34 +451,53 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
     if (method === 'DELETE') {
       const params = new URLSearchParams(query)
 
-      for (const [name, value] of Object.entries(identity)) { params.set(name, String(value)) }
+      for (const [name, value] of Object.entries(identity)) {
+        params.set(name, String(value))
+      }
 
       return hermesApi<T>({ ...scope, path: params.size ? `${path}?${params}` : path, method, timeoutMs })
     }
 
     onSend?.()
 
-    return hermesApi<T>({ ...scope, path, method, timeoutMs,
-      body: { ...payload, ...identity, ...(scope.profile ? { profile: scope.profile } : {}) } })
+    return hermesApi<T>({
+      ...scope,
+      path,
+      method,
+      timeoutMs,
+      body: { ...payload, ...identity, ...(scope.profile ? { profile: scope.profile } : {}) }
+    })
   }
 
   // A reconnect (hub restart, tunnel reset) replays the same intent with its retained identity.
-  return withSessionWriteReconnect(remainingMs => {
-    const deadline = Date.now() + remainingMs
+  return withSessionWriteReconnect(
+    remainingMs => {
+      const deadline = Date.now() + remainingMs
 
-    const timeout = () => {
-      const remaining = deadline - Date.now()
+      const timeout = () => {
+        const remaining = deadline - Date.now()
 
-      // Zero means unlimited to the transport. Never dispatch an expired request.
-      if (remaining <= 0) { throw new Error('Session write reconnect deadline exceeded') }
+        // Zero means unlimited to the transport. Never dispatch an expired request.
+        if (remaining <= 0) {
+          throw new Error('Session write reconnect deadline exceeded')
+        }
 
-      return Math.min(30_000, remaining)
-    }
+        return Math.min(30_000, remaining)
+      }
 
-    return mutateSessionFenced(key,
-      () => hermesApi<SessionMutationSnapshot>({ ...scope, path: `${path}/mutation-snapshot${suffix}`, timeoutMs: timeout() }),
-      identity => send(identity, timeout()))
-  }, { label: `${method} ${id}` })
+      return mutateSessionFenced(
+        key,
+        () =>
+          hermesApi<SessionMutationSnapshot>({
+            ...scope,
+            path: `${path}/mutation-snapshot${suffix}`,
+            timeoutMs: timeout()
+          }),
+        identity => send(identity, timeout())
+      )
+    },
+    { label: `${method} ${id}` }
+  )
 }
 
 // Mutations take the owning `profile` so Electron can route them to the correct
@@ -462,7 +505,12 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
 // An object owner also carries its CONNECTION [daveey]: a row listed from another
 // gateway (All Gateways sidebar) must be archived on that gateway, not on the
 // active one — otherwise the PATCH 404s locally and the row reappears.
-export function setSessionArchived(id: string, archived: boolean, profile?: ProfileScope, onSend?: () => void): Promise<{ ok: boolean }> {
+export function setSessionArchived(
+  id: string,
+  archived: boolean,
+  profile?: ProfileScope,
+  onSend?: () => void
+): Promise<{ ok: boolean }> {
   const owner: ProfileScope =
     profile && typeof profile === 'object'
       ? { ...profile, profile: sessionWriteProfile(profile.profile) ?? null }
@@ -830,7 +878,11 @@ export function deleteSession(id: string, profile?: ProfileScope): Promise<{ ok:
   return mutateSessionHttp(id, 'DELETE', {}, profile)
 }
 
-export function renameSession(id: string, title: string, profile?: ProfileScope): Promise<{ ok: boolean; title: string }> {
+export function renameSession(
+  id: string,
+  title: string,
+  profile?: ProfileScope
+): Promise<{ ok: boolean; title: string }> {
   // An object owner (a selected row's gateway) keeps its connection, normalised like archive's.
   const owner: ProfileScope =
     profile && typeof profile === 'object'

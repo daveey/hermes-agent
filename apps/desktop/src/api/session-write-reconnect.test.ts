@@ -63,9 +63,14 @@ describe('withSessionWriteReconnect', () => {
       throw down
     })
 
-    await expect(withSessionWriteReconnect(run, {
-      label: 'PATCH s', now: c.now, sleep: c.sleep, log: vi.fn()
-    })).rejects.toBe(down)
+    await expect(
+      withSessionWriteReconnect(run, {
+        label: 'PATCH s',
+        now: c.now,
+        sleep: c.sleep,
+        log: vi.fn()
+      })
+    ).rejects.toBe(down)
     expect(run.mock.calls).toEqual([[60_000], [29_000]])
     expect(c.now()).toBe(60_000)
   })
@@ -75,10 +80,17 @@ describe('withSessionWriteReconnect', () => {
     const down = new Error('socket hang up')
     const run = vi.fn().mockRejectedValue(down)
 
-    await expect(withSessionWriteReconnect(run, {
-      label: 'PATCH s', budgetMs: 1_500, now: c.now,
-      sleep: async () => { c.advance(elapsed + 500) }, log: vi.fn()
-    })).rejects.toBe(down)
+    await expect(
+      withSessionWriteReconnect(run, {
+        label: 'PATCH s',
+        budgetMs: 1_500,
+        now: c.now,
+        sleep: async () => {
+          c.advance(elapsed + 500)
+        },
+        log: vi.fn()
+      })
+    ).rejects.toBe(down)
     expect(run).toHaveBeenCalledOnce()
   })
 
@@ -140,19 +152,25 @@ describe('withSessionWriteReconnect', () => {
 })
 
 // Hub, 2026-11-24 05:23:45Z: an archive 10 s into a planned gateway restart (30 s drain, then start).
-const DRAINING = '503: {"detail":"owner_unavailable: draining: the gateway that owns this profile is restarting; nothing was changed, retry"}'
-const DRAINING_OLD = '503: {"detail":"owner_unavailable: draining: Exclusive maintenance refused: Gateway runtime already owns profile /home/ubuntu/.hermes. Drain and stop the gateway, then retry."}'
-const STARTING = '503: {"detail":"owner_unavailable: starting: the gateway that owns this profile is starting; nothing was changed, retry"}'
+const DRAINING =
+  '503: {"detail":"owner_unavailable: draining: the gateway that owns this profile is restarting; nothing was changed, retry"}'
+const DRAINING_OLD =
+  '503: {"detail":"owner_unavailable: draining: Exclusive maintenance refused: Gateway runtime already owns profile /home/ubuntu/.hermes. Drain and stop the gateway, then retry."}'
+const STARTING =
+  '503: {"detail":"owner_unavailable: starting: the gateway that owns this profile is starting; nothing was changed, retry"}'
 
 describe('a gateway restart answered by the owner', () => {
   it.each([DRAINING, DRAINING_OLD, STARTING])('is replayed: %s', message => {
     expect(isOwnerRestartingSessionWriteError(new Error(message))).toBe(true)
   })
 
-  it.each([DEFINITIVE[0], '503: {"detail":"owner_unavailable: update_paused: Exclusive maintenance refused"}', '503: {"detail":"owner_unreachable"}'])(
-    'leaves every other owner answer to the user: %s', message => {
-      expect(isOwnerRestartingSessionWriteError(new Error(message))).toBe(false)
-    })
+  it.each([
+    DEFINITIVE[0],
+    '503: {"detail":"owner_unavailable: update_paused: Exclusive maintenance refused"}',
+    '503: {"detail":"owner_unreachable"}'
+  ])('leaves every other owner answer to the user: %s', message => {
+    expect(isOwnerRestartingSessionWriteError(new Error(message))).toBe(false)
+  })
 
   it('never replays a legacy write without identity', () => {
     expect(isOwnerRestartingSessionWriteError(new NonReplayableSessionWriteError(DRAINING))).toBe(false)
@@ -181,8 +199,9 @@ describe('a gateway restart answered by the owner', () => {
       return { ok: true }
     })
 
-    await expect(withSessionWriteReconnect(run, { label: 'PATCH s', log, now: c.now, sleep: c.sleep }))
-      .resolves.toEqual({ ok: true })
+    await expect(
+      withSessionWriteReconnect(run, { label: 'PATCH s', log, now: c.now, sleep: c.sleep })
+    ).resolves.toEqual({ ok: true })
     expect(run).toHaveBeenCalledTimes(4)
     expect(c.now()).toBeGreaterThan(60_000)
     expect(log.mock.calls.some(([line]) => /hit a gateway restart/.test(line))).toBe(true)
@@ -201,9 +220,15 @@ describe('a gateway restart answered by the owner', () => {
       throw drain
     })
 
-    await expect(withSessionWriteReconnect(run, {
-      label: 'PATCH s', ownerRestartBudgetMs: 100_000, log: vi.fn(), now: c.now, sleep: c.sleep
-    })).rejects.toBe(drain)
+    await expect(
+      withSessionWriteReconnect(run, {
+        label: 'PATCH s',
+        ownerRestartBudgetMs: 100_000,
+        log: vi.fn(),
+        now: c.now,
+        sleep: c.sleep
+      })
+    ).rejects.toBe(drain)
     // No replay starts once the window is spent; the last answer may land just after it.
     expect(sends.length).toBeGreaterThan(2)
     expect(Math.max(...sends)).toBeLessThanOrEqual(100_000)

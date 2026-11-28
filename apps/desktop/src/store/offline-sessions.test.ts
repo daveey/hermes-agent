@@ -20,7 +20,12 @@ import {
   staleSessionOwners,
   syncedAgoLabel
 } from './offline-sessions'
-import { $ownerRowStamps, _resetOwnerRowStampsForTests, refreshOwnerRowStamps, type StampFetcher } from './owner-row-stamps'
+import {
+  $ownerRowStamps,
+  _resetOwnerRowStampsForTests,
+  refreshOwnerRowStamps,
+  type StampFetcher
+} from './owner-row-stamps'
 import { kanbanStripeCounts } from './session-dot-state'
 
 // [daveey] Cached (hermes-hub replica) sessions of an unreachable gateway feed
@@ -114,7 +119,11 @@ describe('offlineSessionsFromReplica', () => {
     const now = 20_000
     const old = offlineSessionsFromReplica([rec('a', { running: true, synced_at: now - 181 })], connFor, now)[0]
     const edge = offlineSessionsFromReplica([rec('b', { running: true, synced_at: now - 180 })], connFor, now)[0]
-    const stale = offlineSessionsFromReplica([rec('c', { running: true, stale: true, synced_at: now })], connFor, now)[0]
+    const stale = offlineSessionsFromReplica(
+      [rec('c', { running: true, stale: true, synced_at: now })],
+      connFor,
+      now
+    )[0]
     const never = offlineSessionsFromReplica([rec('d', { running: true, synced_at: null })], connFor, now)[0]
 
     expect([old.offline_cached, old.is_active]).toEqual([true, false])
@@ -162,10 +171,7 @@ describe('offlineSessionsFromReplica', () => {
   })
 
   it('keeps delegate children out of the boot snapshot of this gateway too', () => {
-    const records = [
-      rec('child', { is_internal_child: true, local: true }),
-      rec('mine', { local: true })
-    ]
+    const records = [rec('child', { is_internal_child: true, local: true }), rec('mine', { local: true })]
 
     expect(ids(offlineSessionsFromReplica(records, connFor, undefined, { includeLocal: true }))).toEqual(['mine'])
   })
@@ -328,7 +334,7 @@ describe('mergeOfflineFallback', () => {
     expect(merged[0]).toMatchObject({ offline_stale_list: true })
   })
 
-  it("on a cold start (no live row of this Mac yet) the boot copies of its chats still paint", () => {
+  it('on a cold start (no live row of this Mac yet) the boot copies of its chats still paint', () => {
     recordSessionListResult([], [], undefined, 'default', [], true)
 
     expect(ids(mergeOfflineFallback([], ownBoot())).sort()).toEqual(['older', 'recent'])
@@ -468,7 +474,14 @@ describe('mergeOfflineFallback', () => {
         title: 'Chat f07c32'
       })
       expect(row.offline_cached).toBe(false)
-      expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 5 })
+      expect(kanbanStripeCounts(row)).toEqual({
+        blocked: 0,
+        external: 0,
+        externalDown: 0,
+        externalUnknown: 0,
+        stalled: 0,
+        waiting: 5
+      })
 
       // Control: the asleep owner's cached row is the very same row as before (no stamps, still cached).
       const asleepRow = merged.find(r => r.id === 'asleep')!
@@ -520,9 +533,10 @@ it('uses ordinary gateway visibility, owner grouping, and pin resolution for cac
 })
 
 it('freshness and retained-row archive hiding stay scoped to the full owner', () => {
-  const cached = offlineSessionsFromReplica([
-    rec('same'), rec('same', { profile: 'work' }), rec('same', { gateway: 'cloud' })
-  ], connFor)
+  const cached = offlineSessionsFromReplica(
+    [rec('same'), rec('same', { profile: 'work' }), rec('same', { gateway: 'cloud' })],
+    connFor
+  )
 
   const previous = cached.map(row => ({ ...row, offline_cached: false, is_active: true }))
   const incoming = previous.filter(row => row.connection_id === 'conn-cloud')
@@ -543,7 +557,12 @@ describe('gateway-unavailable probe', () => {
     expect(sessionOwnerIsFresh('hermes-hub', 'default')).toBe(false)
     expect(staleSessionOwners()).toEqual(['hermes-hub/*'])
 
-    recordSessionListResult([], [{ id: 's1', profile: 'default', connection_id: 'hermes-hub' } as SessionInfo], 'hermes-hub', 'all')
+    recordSessionListResult(
+      [],
+      [{ id: 's1', profile: 'default', connection_id: 'hermes-hub' } as SessionInfo],
+      'hermes-hub',
+      'all'
+    )
     expect(sessionOwnerIsFresh('hermes-hub', 'default')).toBe(true)
     expect(staleSessionOwners()).toEqual([])
   })

@@ -31,9 +31,9 @@ import { introFr } from './intro-fr'
 
 export const frOverrides = {
   gatewayGroupOpen: {
-    opening: "Ouverture de la discussion de groupe…",
-    lookupFailed: "Impossible de retrouver ce groupe sur la passerelle. Réessayez.",
-    missing: "Cette discussion de groupe n’existe plus."
+    opening: 'Ouverture de la discussion de groupe…',
+    lookupFailed: 'Impossible de retrouver ce groupe sur la passerelle. Réessayez.',
+    missing: 'Cette discussion de groupe n’existe plus.'
   },
   sharedMetrics: frSharedMetrics,
   firstRun: frFirstRun,
@@ -2412,21 +2412,23 @@ export const frOverrides = {
       browserRealProfile: {
         label: 'Utiliser mon profil de navigateur réel',
         description:
-          'Copie les identifiants de connexion et les cookies de votre navigateur par défaut dans un instantané géré que l\'agent utilise pour naviguer, et connecte aussi le navigateur intégré avec eux. Votre profil actif n\'est jamais ouvert directement. S\'applique aux nouvelles sessions.',
+          "Copie les identifiants de connexion et les cookies de votre navigateur par défaut dans un instantané géré que l'agent utilise pour naviguer, et connecte aussi le navigateur intégré avec eux. Votre profil actif n'est jamais ouvert directement. S'applique aux nouvelles sessions.",
         enabledTitle: 'Navigation avec le profil réel activée',
         enabledMessage: 'Les nouvelles sessions utiliseront un instantané de votre profil de navigateur par défaut.',
         disabledTitle: 'Navigation avec le profil réel désactivée',
         disabledMessage:
-          'L\'instantané du profil sera supprimé et le navigateur intégré en sera déconnecté ; les nouvelles sessions utiliseront un navigateur vierge.',
+          "L'instantané du profil sera supprimé et le navigateur intégré en sera déconnecté ; les nouvelles sessions utiliseront un navigateur vierge.",
         failedSave: "Impossible d'enregistrer le paramètre du profil réel",
         reimportSignins: 'Réimporter les connexions',
         signinsImportedTitle: 'Connexions du navigateur intégré',
-        signinsImported: count => `Navigateur intégré connecté avec ${count} cookie${count === 1 ? '' : 's'} de votre profil de navigateur.`,
-        signinsRemote: 'Ce backend s\'exécute sur une autre machine, son profil de navigateur n\'est donc pas importé dans le navigateur intégré.',
-        signinsFailed: 'Impossible d\'importer les connexions dans le navigateur intégré',
+        signinsImported: count =>
+          `Navigateur intégré connecté avec ${count} cookie${count === 1 ? '' : 's'} de votre profil de navigateur.`,
+        signinsRemote:
+          "Ce backend s'exécute sur une autre machine, son profil de navigateur n'est donc pas importé dans le navigateur intégré.",
+        signinsFailed: "Impossible d'importer les connexions dans le navigateur intégré",
         prompt: {
           title: 'Restez connecté à vos sites',
-          body: 'Autorisez Hermes à naviguer avec un instantané de votre profil de navigateur par défaut afin que les sites s\'ouvrent avec vos sessions déjà connectées, pour l\'agent et dans le navigateur intégré.',
+          body: "Autorisez Hermes à naviguer avec un instantané de votre profil de navigateur par défaut afin que les sites s'ouvrent avec vos sessions déjà connectées, pour l'agent et dans le navigateur intégré.",
           bulletSnapshot: 'Les cookies et identifiants de connexion sont copiés dans un instantané géré.',
           bulletLiveProfile: "Votre profil de navigateur actif n'est jamais ouvert directement.",
           bulletLocal: 'Rien ne quitte cet ordinateur.',
@@ -3025,7 +3027,8 @@ export const frOverrides = {
     relayLink: {
       title: 'Team Gateway',
       badge: 'Aucun jeton de bot requis',
-      intro: (platform: string) => `${platform} atteint cet agent via le bot Hermes partagé. Associez votre compte ${platform} et écrivez au bot pour parler à votre agent.`,
+      intro: (platform: string) =>
+        `${platform} atteint cet agent via le bot Hermes partagé. Associez votre compte ${platform} et écrivez au bot pour parler à votre agent.`,
       link: (platform: string) => `Associer ${platform}`,
       linkAnother: (platform: string) => `Associer un autre compte ${platform}`,
       linkedAccounts: 'Comptes associés',
@@ -3043,10 +3046,12 @@ export const frOverrides = {
       refused: (platform: string) => `${platform} a refusé l’association. Demandez un nouveau code et réessayez.`,
       qrAlt: (platform: string) => `Code QR du bot ${platform} partagé`,
       managed: 'Géré par Team Gateway',
-      managedNote: (platform: string) => `Team Gateway assure la messagerie sur cette instance : le gateway désactive donc la connexion directe ${platform} à chaque démarrage. Pour l’utiliser en plus du relais, définissez GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true dans l’environnement du gateway (une connexion directe empêche l’instance de descendre à zéro et peut livrer les messages deux fois).`,
+      managedNote: (platform: string) =>
+        `Team Gateway assure la messagerie sur cette instance : le gateway désactive donc la connexion directe ${platform} à chaque démarrage. Pour l’utiliser en plus du relais, définissez GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true dans l’environnement du gateway (une connexion directe empêche l’instance de descendre à zéro et peut livrer les messages deux fois).`,
       managedIntro: 'Les comptes de cet agent se lient depuis Nous Portal.',
       openPortal: 'Lier des comptes dans Nous Portal',
-      noNewAccount: (platform: string) => `Le code n’est plus actif et aucun nouveau compte n’est apparu. Si votre compte ${platform} n’est pas listé, obtenez un nouveau code et réessayez.`
+      noNewAccount: (platform: string) =>
+        `Le code n’est plus actif et aucun nouveau compte n’est apparu. Si votre compte ${platform} n’est pas listé, obtenez un nouveau code et réessayez.`
     },
     telegramQr: {
       title: 'Choisissez comment connecter votre bot Telegram',
@@ -3254,7 +3259,8 @@ export const frOverrides = {
     fieldDeliver: 'Livrer vers',
     fieldDeliverOnly: 'Livrer le payload uniquement',
     fieldSignature: 'Signature',
-    fieldSignatureHint: 'Le seul schéma de signature accepté par cette route. Les livraisons GitHub, GitLab et Linear exigent leur propre schéma.',
+    fieldSignatureHint:
+      'Le seul schéma de signature accepté par cette route. Les livraisons GitHub, GitLab et Linear exigent leur propre schéma.',
     signatureOptions: {
       generic: 'Générique (horodatée)',
       github: 'GitHub',
@@ -3746,8 +3752,10 @@ export const frOverrides = {
       backgroundExternalDown: 'Un service externe est hors service',
       kanbanExternalRunning: 's’exécute à l’extérieur',
       kanbanExternalDown: 'panne externe',
-      kanbanUnknown: count => `${count} éléments de travail au statut actuel inconnu : preuves manquantes, expirées ou non vérifiées. Cela ne signifie pas terminé ; aucune nouvelle vérification demandée.`,
-      pausedQueue: 'Un message mis en file avant un redémarrage n’a peut-être pas été exécuté : renvoyez-le ou supprimez-le',
+      kanbanUnknown: count =>
+        `${count} éléments de travail au statut actuel inconnu : preuves manquantes, expirées ou non vérifiées. Cela ne signifie pas terminé ; aucune nouvelle vérification demandée.`,
+      pausedQueue:
+        'Un message mis en file avant un redémarrage n’a peut-être pas été exécuté : renvoyez-le ou supprimez-le',
       pin: 'Épingler',
       unpin: 'Désépingler',
       markUnread: 'Marquer comme non lue',
@@ -3949,7 +3957,8 @@ export const frOverrides = {
       '/topup': 'Afficher votre solde Nous et gérer la facturation sur le portail',
       '/platform': 'Suspendre, reprendre ou lister une plateforme de gateway en échec',
       '/version': 'Afficher la version de Hermes Agent',
-      '/debug': 'Rapport de débogage (versions, clés de configuration, compteurs d’erreurs ; aucun texte de journal) : affiche d\'abord l\'avis de confidentialité ; /debug upload partage les liens',
+      '/debug':
+        "Rapport de débogage (versions, clés de configuration, compteurs d’erreurs ; aucun texte de journal) : affiche d'abord l'avis de confidentialité ; /debug upload partage les liens",
       '/model': 'Changer le modèle de cette session'
     },
     hotkeyDescs: {
@@ -3987,7 +3996,8 @@ export const frOverrides = {
     queueResume: 'Reprendre',
     queueResumeTip: "Mis en pause par Arrêter — reprendre l'envoi des tours en file d'attente",
     queueLostNote: 'Tour perdu pendant le redémarrage',
-    queueUpdateNote: (started: string | undefined) => `En attente d’une mise à jour de Hermes${started ? ` (démarrée à ${started})` : ''}, envoi automatique`,
+    queueUpdateNote: (started: string | undefined) =>
+      `En attente d’une mise à jour de Hermes${started ? ` (démarrée à ${started})` : ''}, envoi automatique`,
     restoreImageDraft: "Restaurer le brouillon d'image",
     queueCancelFailed: "Impossible de retirer le tour en file d'attente",
     queueLostDiscard: 'Ignorer',
@@ -5079,7 +5089,7 @@ export const frOverrides = {
         },
         session_turn_lease_lost: {
           title: 'Hermes a arrêté cette réponse',
-          body: 'Un autre processus Hermes a repris cette conversation pendant la réponse, donc Hermes l\'a arrêtée pour protéger la transcription. Le travail fait avant l\'arrêt est conservé. Réessayez pour la relancer.'
+          body: "Un autre processus Hermes a repris cette conversation pendant la réponse, donc Hermes l'a arrêtée pour protéger la transcription. Le travail fait avant l'arrêt est conservé. Réessayez pour la relancer."
         },
         SESSION_NOT_OWNED: {
           title: 'Cette conversation est ouverte ailleurs',
@@ -5557,7 +5567,8 @@ export const frOverrides = {
     archived: 'Archivé',
     archiveFailed: "Échec de l'archivage",
     archiveLinkedTitle: (title: string) => (title ? `Archiver « ${title} » ?` : 'Archiver ce chat ?'),
-    archiveLinkedBody: 'Consultez ci-dessous le statut du travail lié. L’archivage masque seulement le chat ; il n’arrête aucune tâche ni machine.',
+    archiveLinkedBody:
+      'Consultez ci-dessous le statut du travail lié. L’archivage masque seulement le chat ; il n’arrête aucune tâche ni machine.',
     archiveLinkedConfirm: 'Archiver quand même',
     archiveLinkedCancel: 'Garder le chat',
     ...frArchiveTasks,

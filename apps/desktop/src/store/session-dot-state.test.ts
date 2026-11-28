@@ -75,11 +75,13 @@ describe('showsRunningArc', () => {
 
 describe('sessionStatusStripe canonical authority', () => {
   it.each(['done', 'waiting', 'attention', 'blocked', 'stuck', 'none'] as const)(
-    'uses published %s across every activity and mute combination', stripe => {
+    'uses published %s across every activity and mute combination',
+    stripe => {
       for (const state of ['background', 'draft', 'idle', 'needs-input', 'stalled', 'unread', 'working'] as const) {
         for (const muted of [false, true]) {
-          expect(sessionStatusStripe(state, true, muted, 2, true, 'stuck', 3, 4, 1, canonicalOutcome(stripe), true, 2, 1))
-            .toBe(stripe === 'none' ? null : stripe)
+          expect(
+            sessionStatusStripe(state, true, muted, 2, true, 'stuck', 3, 4, 1, canonicalOutcome(stripe), true, 2, 1)
+          ).toBe(stripe === 'none' ? null : stripe)
         }
       }
     }
@@ -109,11 +111,29 @@ describe('hasLiveTurn', () => {
 
 describe('$delegatingSessionIds', () => {
   const subagent = (status: SubagentProgress['status']): SubagentProgress => ({
-    executionObservations: status === 'running' ? [{
-      version: 1, identity: { gateway: 'edge', profile: 'default', session: 'owner', kind: 'subagent', work_id: 'sub-1', generation: 'session=sub-1' },
-      owner: { gateway: 'edge', profile: 'default', session: 'owner' }, state: 'running', source: 'subagent.activity',
-      source_revision: 'sub-1@1000', observed_at: Date.now() / 1000, valid_until: Date.now() / 1000 + 180, evidence_refs: ['sub-1']
-    }] : [],
+    executionObservations:
+      status === 'running'
+        ? [
+            {
+              version: 1,
+              identity: {
+                gateway: 'edge',
+                profile: 'default',
+                session: 'owner',
+                kind: 'subagent',
+                work_id: 'sub-1',
+                generation: 'session=sub-1'
+              },
+              owner: { gateway: 'edge', profile: 'default', session: 'owner' },
+              state: 'running',
+              source: 'subagent.activity',
+              source_revision: 'sub-1@1000',
+              observed_at: Date.now() / 1000,
+              valid_until: Date.now() / 1000 + 180,
+              evidence_refs: ['sub-1']
+            }
+          ]
+        : [],
     id: 'sub-1',
     parentId: null,
     goal: 'do a thing',
@@ -156,7 +176,15 @@ describe('$delegatingSessionIds', () => {
 })
 
 const storedRow = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
-  ({ id, kanban_observed_at: Date.now() / 1000, message_count: 1, source: 'cli', started_at: 0, title: id, ...extra }) as SessionInfo
+  ({
+    id,
+    kanban_observed_at: Date.now() / 1000,
+    message_count: 1,
+    source: 'cli',
+    started_at: 0,
+    title: id,
+    ...extra
+  }) as SessionInfo
 
 describe('persisted unread (backend watermark)', () => {
   beforeEach(() => {
@@ -334,13 +362,16 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
     expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('attention')
   })
 
-  it.each([undefined, 1, Infinity, Date.now() / 1000 + 60])('keeps absent or stale observations off done: %s', observed => {
-    setSessions([storedRow('s1', { kanban_observed_at: observed })])
+  it.each([undefined, 1, Infinity, Date.now() / 1000 + 60])(
+    'keeps absent or stale observations off done: %s',
+    observed => {
+      setSessions([storedRow('s1', { kanban_observed_at: observed })])
 
-    expect($kanbanBusySessionIds.get()).toContain('s1')
-    expect(withRowActivity('idle', { kanban_observed_at: observed } as never)).toBe('background')
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
-  })
+      expect($kanbanBusySessionIds.get()).toContain('s1')
+      expect(withRowActivity('idle', { kanban_observed_at: observed } as never)).toBe('background')
+      expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
+    }
+  )
 
   it('expires a zero-work observation even when no list refresh arrives', () => {
     // Earlier get() calls mount real timers until nanostores' delayed unmount.
@@ -376,7 +407,13 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
   })
 
   it('folds blocked-only project rows over finished/unseen results after goal completion', () => {
-    const row = { goal_active: false, kanban_active: 0, kanban_blocked: 1, kanban_observed_at: Date.now() / 1000, kanban_unseen: 1 }
+    const row = {
+      goal_active: false,
+      kanban_active: 0,
+      kanban_blocked: 1,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_unseen: 1
+    }
 
     for (const state of ['idle', 'unread', 'draft'] as const) {
       expect(withRowActivity(state, row)).toBe('background')
@@ -567,7 +604,9 @@ describe('withRowActivity', () => {
       expect(withRowActivity(state, { goal_active: true })).toBe(state)
     }
 
-    expect(withRowActivity('idle', { goal_active: false, kanban_active: 0, kanban_observed_at: Date.now() / 1000 })).toBe('idle')
+    expect(
+      withRowActivity('idle', { goal_active: false, kanban_active: 0, kanban_observed_at: Date.now() / 1000 })
+    ).toBe('idle')
   })
 
   // [daveey] A backend-woken Kanban close-out turn in a chat this window never opened (or one on a gateway other
@@ -661,7 +700,12 @@ describe('backgroundDotLabel', () => {
       backgroundDotLabel({ ...fresh(), execution_observations: [live(), unknownObs], kanban_active: 2 } as never)
     ).toBe('running')
     expect(
-      backgroundDotLabel({ ...fresh(), execution_observations: [live(), waitingObs()], kanban_active: 2, kanban_parked: 1 } as never)
+      backgroundDotLabel({
+        ...fresh(),
+        execution_observations: [live(), waitingObs()],
+        kanban_active: 2,
+        kanban_parked: 1
+      } as never)
     ).toBe('running')
   })
 
@@ -679,10 +723,21 @@ describe('backgroundDotLabel', () => {
   it('keeps the running label for blocked or unparked work (not a known wait)', () => {
     expect(backgroundDotLabel({ ...fresh(), kanban_active: 0, kanban_blocked: 1 })).toBe('running')
     expect(
-      backgroundDotLabel({ ...fresh(), execution_observations: [], kanban_active: 2, kanban_blocked: 1, kanban_parked: 2 } as never)
+      backgroundDotLabel({
+        ...fresh(),
+        execution_observations: [],
+        kanban_active: 2,
+        kanban_blocked: 1,
+        kanban_parked: 2
+      } as never)
     ).toBe('running')
     expect(
-      backgroundDotLabel({ ...fresh(), execution_observations: [waitingObs()], kanban_active: 2, kanban_parked: 1 } as never)
+      backgroundDotLabel({
+        ...fresh(),
+        execution_observations: [waitingObs()],
+        kanban_active: 2,
+        kanban_parked: 1
+      } as never)
     ).toBe('running')
   })
 
@@ -742,7 +797,9 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
   })
 
   it('withRowActivity turns an idle project-tree row with a waiting result green', () => {
-    expect(withRowActivity('idle', { kanban_active: 0, kanban_unseen: 1, kanban_observed_at: Date.now() / 1000 })).toBe('unread')
+    expect(withRowActivity('idle', { kanban_active: 0, kanban_unseen: 1, kanban_observed_at: Date.now() / 1000 })).toBe(
+      'unread'
+    )
     expect(withRowActivity('idle', { kanban_active: 1, kanban_unseen: 1 })).toBe('background')
     expect(withRowActivity('idle', { kanban_active: 0, kanban_observed_at: Date.now() / 1000 })).toBe('idle')
   })
@@ -754,10 +811,19 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
 describe('kanbanStripeCounts', () => {
   it('live cards are working: no waiting count, background dot, no stripe', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 3, kanban_parked: 1 }
-    expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
+    expect(kanbanStripeCounts(row)).toEqual({
+      blocked: 0,
+      external: 0,
+      externalDown: 0,
+      externalUnknown: 0,
+      stalled: 0,
+      waiting: 0
+    })
     const state = withRowActivity('idle', row)
     expect(state).toBe('background')
-    expect(sessionStatusStripe(state, true, false, 0, false, null, 0, kanbanStripeCounts(row).waiting)).toBe('attention')
+    expect(sessionStatusStripe(state, true, false, 0, false, null, 0, kanbanStripeCounts(row).waiting)).toBe(
+      'attention'
+    )
   })
 
   it('parked-only work waits (grey) and does not paint the dot as running', () => {
@@ -773,24 +839,44 @@ describe('kanbanStripeCounts', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 1, kanban_parked: 0, kanban_held: 1 }
     const counts = kanbanStripeCounts(row)
     expect(counts).toEqual({ blocked: 1, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
-    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('attention')
+    expect(
+      sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)
+    ).toBe('attention')
   })
 
   it('held plus live: a held ask is red for a working turn too (the invariant)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 0, kanban_held: 1 }
     const counts = kanbanStripeCounts(row)
-    expect(sessionStatusStripe('working', true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('attention')
-    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('attention')
+    expect(sessionStatusStripe('working', true, false, counts.blocked, false, null, 0, counts.waiting)).toBe(
+      'attention'
+    )
+    expect(
+      sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)
+    ).toBe('attention')
   })
 
   it('a backend without kanban_parked keeps the old behaviour (all open cards wait)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_blocked: 1 }
-    expect(kanbanStripeCounts(row)).toEqual({ blocked: 1, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 2 })
+    expect(kanbanStripeCounts(row)).toEqual({
+      blocked: 1,
+      external: 0,
+      externalDown: 0,
+      externalUnknown: 0,
+      stalled: 0,
+      waiting: 2
+    })
     expect(withRowActivity('idle', row)).toBe('background')
   })
 
   it('no kanban work: zero counts', () => {
-    expect(kanbanStripeCounts({})).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
+    expect(kanbanStripeCounts({})).toEqual({
+      blocked: 0,
+      external: 0,
+      externalDown: 0,
+      externalUnknown: 0,
+      stalled: 0,
+      waiting: 0
+    })
   })
 
   // [daveey] Agent-owned parks that nothing has produced for over 2 h: amber `stalled`, distinct from grey waiting
@@ -800,15 +886,32 @@ describe('kanbanStripeCounts', () => {
     const counts = kanbanStripeCounts(row)
     expect(counts).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 1, waiting: 3 })
     const state = withRowActivity('idle', row)
-    expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled)).toBe('attention')
+    expect(
+      sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled)
+    ).toBe('attention')
   })
 
   it('a human ask (red) beats stalled, and live work hides it', () => {
-    const held = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 1, kanban_held: 1, kanban_stalled: 1 }
+    const held = {
+      kanban_observed_at: Date.now() / 1000,
+      kanban_active: 2,
+      kanban_parked: 1,
+      kanban_held: 1,
+      kanban_stalled: 1
+    }
     const h = kanbanStripeCounts(held)
-    expect(sessionStatusStripe(withRowActivity('idle', held), true, false, h.blocked, false, null, 0, h.waiting, h.stalled)).toBe('attention')
+    expect(
+      sessionStatusStripe(withRowActivity('idle', held), true, false, h.blocked, false, null, 0, h.waiting, h.stalled)
+    ).toBe('attention')
     const live = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 1, kanban_stalled: 1 }
-    expect(kanbanStripeCounts(live)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
+    expect(kanbanStripeCounts(live)).toEqual({
+      blocked: 0,
+      external: 0,
+      externalDown: 0,
+      externalUnknown: 0,
+      stalled: 0,
+      waiting: 0
+    })
   })
 
   it('reads kanban_external / kanban_external_down stamps when cards are absent', () => {
@@ -981,7 +1084,9 @@ describe('stuckReasons and the red report', () => {
     publishSessionState('rt-other', { ...createClientSessionState('other-chat'), needsInput: true })
     expect(stuckReasons(row, 'needs-input')).toEqual(['needs-input:prompt runtime=rt-dead'])
 
-    $queuedPromptsBySession.set({ 'red-chat': [{ attachments: [], id: 'q1', serverStatus: 'unknown', text: 'hi' }] } as never)
+    $queuedPromptsBySession.set({
+      'red-chat': [{ attachments: [], id: 'q1', serverStatus: 'unknown', text: 'hi' }]
+    } as never)
     expect(stuckReasons(row, 'needs-input')).toEqual(['needs-input:prompt runtime=rt-dead', 'needs-input:paused-queue'])
 
     clearAllSessionStates()
@@ -996,10 +1101,15 @@ describe('stuckReasons and the red report', () => {
     ).toEqual(['kanban-blocked:3 on=default/t_a held=2'])
     expect(stuckReasons({ ...row, review_wait: 'stuck', review_wait_pr: 'o/r#9' }, 'idle')).toEqual(['review:o/r#9'])
     expect(stuckReasons({ ...row, review_wait: 'stuck' }, 'idle')).toEqual(['review:?'])
-    expect(stuckReasons({ ...row, outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }) } as never, 'idle')).toEqual(['outcome:decision'])
+    expect(
+      stuckReasons({ ...row, outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }) } as never, 'idle')
+    ).toEqual(['outcome:decision'])
     // An open ask (a blocked card here) is red whatever the dot says; the outcome only covers the non-red stripes.
     expect(
-      stuckReasons({ ...row, kanban_blocked: 1, outcome: { kind: 'decision' }, review_wait: 'stuck' } as never, 'working')
+      stuckReasons(
+        { ...row, kanban_blocked: 1, outcome: { kind: 'decision' }, review_wait: 'stuck' } as never,
+        'working'
+      )
     ).toEqual(['kanban-blocked:1', 'review:?'])
     expect(stuckReasons({ ...row, review_wait: 'parked', outcome: { kind: 'done' } } as never, 'idle')).toEqual([])
   })
@@ -1026,7 +1136,11 @@ describe('stuckReasons and the red report', () => {
 
     const open = {
       ...row,
-      outcome: canonicalOutcome('stuck', {}, { kind: 'decision', items: [{ id: 'question', question: 'Choose?', state: 'open' }] })
+      outcome: canonicalOutcome(
+        'stuck',
+        {},
+        { kind: 'decision', items: [{ id: 'question', question: 'Choose?', state: 'open' }] }
+      )
     }
 
     expect(stuckReasons(open, 'idle')).toEqual(['outcome:decision'])

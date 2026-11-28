@@ -338,10 +338,17 @@ describe('main.ts wiring helpers', () => {
     const tracker = new SlowLinkTracker()
     const lines: string[] = []
     const mini = 'http://127.0.0.1:50111'
-    const option = dispatchSlowLink('conn:mac-mini::default', async () => true, line => lines.push(line), tracker)
+    const option = dispatchSlowLink(
+      'conn:mac-mini::default',
+      async () => true,
+      line => lines.push(line),
+      tracker
+    )
 
     expect(option.noteTimeout({ baseUrl: mini })).toEqual({ giveUp: false, strikes: 1 })
-    expect(lines).toEqual([expect.stringMatching(/^\[slow-link\] http:\/\/127\.0\.0\.1:50111 is slow \(probe timed out/)])
+    expect(lines).toEqual([
+      expect.stringMatching(/^\[slow-link\] http:\/\/127\.0\.0\.1:50111 is slow \(probe timed out/)
+    ])
   })
 
   it('thinnedPoll: holds a repeated timer poll, frees an unsent one, and never holds a foreground or non-GET request', async () => {
@@ -437,7 +444,9 @@ describe('main.ts wiring', () => {
 
     expect(body).toContain('slowLinkTracker.scaleTimeout(')
     expect(body).not.toMatch(/timeoutMs: opts\.timeoutMs,\s+headers/)
-    expect(body.match(/noteRemoteAnswer\(descriptor\.baseUrl, path, Date\.now\(\) - startedAt, rememberLog\)/g)).toHaveLength(2)
+    expect(
+      body.match(/noteRemoteAnswer\(descriptor\.baseUrl, path, Date\.now\(\) - startedAt, rememberLog\)/g)
+    ).toHaveLength(2)
   })
 
   it('wraps the registry dispatch, down gate included, in the poll thinner and reports the send', () => {
@@ -445,7 +454,9 @@ describe('main.ts wiring', () => {
     const run = dispatch.indexOf('await poll.run(')
 
     expect(dispatch.indexOf('poll.sent(descriptor.baseUrl)')).toBeGreaterThan(0)
-    expect(dispatch.indexOf('poll.sent(descriptor.baseUrl)')).toBeLessThan(dispatch.indexOf('return fetchJsonForBackend('))
+    expect(dispatch.indexOf('poll.sent(descriptor.baseUrl)')).toBeLessThan(
+      dispatch.indexOf('return fetchJsonForBackend(')
+    )
     expect(run).toBeGreaterThan(0)
     expect(run).toBeLessThan(dispatch.indexOf('dispatchThroughRemoteDownGate({'))
   })

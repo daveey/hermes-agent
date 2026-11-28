@@ -19,6 +19,7 @@ function Harness({ onKeyDown = () => {} }: { onKeyDown?: () => void }) {
 }
 
 const search = () => screen.queryByRole('textbox', { name: 'Search sessions' })
+
 const reveal = async () => {
   act(() => requestSessionSearchFocus())
   await waitFor(() => expect(search()).not.toBeNull())

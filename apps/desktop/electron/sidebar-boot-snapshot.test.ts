@@ -44,13 +44,31 @@ function buildDb(opts: { lastOk?: number; shared?: string } = {}) {
   }
 
   const pub = db.prepare("INSERT INTO published (coll, key, data, version) VALUES ('sessions', ?, ?, ?)")
-  pub.run('default/s_own', JSON.stringify({ activity: NOW - 10, id: 's_own', profile: 'default', title: 'Own chat' }), 3)
+  pub.run(
+    'default/s_own',
+    JSON.stringify({ activity: NOW - 10, id: 's_own', profile: 'default', title: 'Own chat' }),
+    3
+  )
   pub.run('default/s_arch', JSON.stringify({ activity: NOW, archived: true, id: 's_arch', title: 'Archived' }), 1)
   pub.run('default/s_bad', 'not json', 1)
 
-  const rep = db.prepare("INSERT INTO replica (gw, coll, key, version, data, updated_at) VALUES (?, 'sessions', ?, ?, ?, ?)")
-  rep.run('mini', 'default/s_mini', 7, JSON.stringify({ activity: NOW - 1, id: 's_mini', title: 'Mini chat' }), (NOW - 60) * 1000)
-  rep.run('hub', 'default/s_hub', 2, JSON.stringify({ activity: NOW - 100, id: 's_hub', title: 'Hub chat' }), (NOW - 600) * 1000)
+  const rep = db.prepare(
+    "INSERT INTO replica (gw, coll, key, version, data, updated_at) VALUES (?, 'sessions', ?, ?, ?, ?)"
+  )
+  rep.run(
+    'mini',
+    'default/s_mini',
+    7,
+    JSON.stringify({ activity: NOW - 1, id: 's_mini', title: 'Mini chat' }),
+    (NOW - 60) * 1000
+  )
+  rep.run(
+    'hub',
+    'default/s_hub',
+    2,
+    JSON.stringify({ activity: NOW - 100, id: 's_hub', title: 'Hub chat' }),
+    (NOW - 600) * 1000
+  )
   // A replica copy of this gateway's own row is never shown twice.
   rep.run('macbook', 'default/s_own', 3, JSON.stringify({ id: 's_own', title: 'Own chat (echo)' }), NOW * 1000)
 
@@ -157,7 +175,12 @@ describe('tree snapshot file', () => {
     const file = path.join(dir, 'tree.json')
     writeTreeSnapshot(file, { activeProjectId: 'p_1', connectionId: 'local', tree: [{ id: 'p_1' }] }, 123)
 
-    expect(readTreeSnapshot(file)).toEqual({ activeProjectId: 'p_1', connectionId: 'local', savedAt: 123, tree: [{ id: 'p_1' }] })
+    expect(readTreeSnapshot(file)).toEqual({
+      activeProjectId: 'p_1',
+      connectionId: 'local',
+      savedAt: 123,
+      tree: [{ id: 'p_1' }]
+    })
 
     fs.writeFileSync(file, '{"v":1,"tree":')
     expect(readTreeSnapshot(file)).toBeNull()
@@ -171,7 +194,13 @@ describe('installSidebarBootSnapshot IPC', () => {
   function install() {
     const handlers = new Map<string, (event: any, payload?: any) => void>()
     const ipcMain = { on: vi.fn((channel: string, fn: any) => void handlers.set(channel, fn)) }
-    installSidebarBootSnapshot({ appStartMs: 42, hubDb: dbFile, ipcMain: ipcMain as any, log: () => {}, userDataDir: dir })
+    installSidebarBootSnapshot({
+      appStartMs: 42,
+      hubDb: dbFile,
+      ipcMain: ipcMain as any,
+      log: () => {},
+      userDataDir: dir
+    })
 
     return handlers
   }
@@ -179,7 +208,10 @@ describe('installSidebarBootSnapshot IPC', () => {
   it('read (sendSync) returns the process start, hub rows and the saved tree', () => {
     buildDb()
     const handlers = install()
-    handlers.get('hermes:boot-snapshot:save-tree')!({}, { activeProjectId: null, connectionId: 'local', tree: [{ id: 'p' }] })
+    handlers.get('hermes:boot-snapshot:save-tree')!(
+      {},
+      { activeProjectId: null, connectionId: 'local', tree: [{ id: 'p' }] }
+    )
     const event: { returnValue?: any } = {}
     handlers.get('hermes:boot-snapshot:read')!(event)
 

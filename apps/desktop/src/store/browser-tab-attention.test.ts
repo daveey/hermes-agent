@@ -11,6 +11,7 @@ vi.mock('@/lib/host-capabilities', () => ({ hostHas: (name: string) => name === 
 // This suite owns tab-attention timers, not the fork's unrelated Kanban freshness clock.
 vi.mock('./session-dot-state', async () => {
   const { atom } = await import('nanostores')
+
   return { $unreadSessionCount: atom(0) }
 })
 

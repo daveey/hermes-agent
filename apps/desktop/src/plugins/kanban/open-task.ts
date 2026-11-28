@@ -53,9 +53,10 @@ export function installOpenTaskHook(
 
     const slug = typeof board === 'string' ? board : ''
 
-    const owner = typeof gateway === 'string' && gateway && typeof profile === 'string' && profile
-      ? Object.freeze({ gateway, profile, board: slug })
-      : undefined
+    const owner =
+      typeof gateway === 'string' && gateway && typeof profile === 'string' && profile
+        ? Object.freeze({ gateway, profile, board: slug })
+        : undefined
 
     if (profile !== undefined && (!owner || !slug)) {
       return false

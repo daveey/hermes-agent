@@ -87,7 +87,7 @@ const isStr = (v: unknown): v is string => typeof v === 'string'
 const str = (v: unknown) => (isStr(v) ? v : '')
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
 const strList = (v: unknown) => (Array.isArray(v) ? v.filter(isStr) : [])
-const observationList = (v: unknown): unknown[] | undefined => Array.isArray(v) ? v : undefined
+const observationList = (v: unknown): unknown[] | undefined => (Array.isArray(v) ? v : undefined)
 
 const asStatus = (v: unknown, terminalEvent = false): SubagentStatus => {
   if (v === 'completed' || v === 'failed' || v === 'interrupted') {

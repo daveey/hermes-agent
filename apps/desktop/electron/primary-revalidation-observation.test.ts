@@ -1,6 +1,10 @@
 import { expect, test } from 'vitest'
 
-import { capturePrimarySshTeardown, createPrimaryRemoteRevalidator, ensureProbedPrimaryBackend } from './primary-remote-revalidation'
+import {
+  capturePrimarySshTeardown,
+  createPrimaryRemoteRevalidator,
+  ensureProbedPrimaryBackend
+} from './primary-remote-revalidation'
 import { RemoteLivenessTracker, RemoteRevalidationCoordinator } from './remote-liveness'
 import { requestStages, StageBuffer } from './request-stages'
 
@@ -13,7 +17,14 @@ function observer() {
 
 test('the real health probe path is admitted without query credentials', async () => {
   const rows: any[] = []
-  const buffer = new StageBuffer(async lines => { rows.push(...lines.trim().split('\n').map(line => JSON.parse(line))) })
+  const buffer = new StageBuffer(async lines => {
+    rows.push(
+      ...lines
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+    )
+  })
   const trace = requestStages('http://127.0.0.1:32123/api/status?secret=PRIVATE', 'GET', buffer)
   expect(trace).toBeDefined()
   await buffer.flush()
@@ -25,13 +36,23 @@ test('coalesced callers have one round and terminal probe verdict, not caller-co
   const { events, observe } = observer()
   const cp = Promise.resolve({ mode: 'remote', remoteKind: 'ssh', baseUrl: 'http://127.0.0.1:32123?PRIVATE' })
   let release!: () => void
-  const blocked = new Promise<void>(resolve => { release = resolve })
+  const blocked = new Promise<void>(resolve => {
+    release = resolve
+  })
   let probes = 0
 
   const revalidate = createPrimaryRemoteRevalidator({
-    currentConnectionPromise: () => cp, coordinator: new RemoteRevalidationCoordinator(),
-    tracker: new RemoteLivenessTracker(), log() {}, observe,
-    probe: async () => { probes++; await blocked }, resetConnection() {}, captureSshTeardown: () => async () => {}
+    currentConnectionPromise: () => cp,
+    coordinator: new RemoteRevalidationCoordinator(),
+    tracker: new RemoteLivenessTracker(),
+    log() {},
+    observe,
+    probe: async () => {
+      probes++
+      await blocked
+    },
+    resetConnection() {},
+    captureSshTeardown: () => async () => {}
   })
 
   const pending = Array.from({ length: 8 }, () => revalidate('prewarm'))
@@ -55,14 +76,28 @@ test('retirement records captured identity, drain before reset, and awaited tear
   let current: typeof cp | null = cp
 
   const revalidate = createPrimaryRemoteRevalidator({
-    currentConnectionPromise: () => current, coordinator: new RemoteRevalidationCoordinator(),
-    tracker: new RemoteLivenessTracker(1), log() {}, observe,
-    probe: async () => { throw Error('PRIVATE_ERROR') },
-    resetConnection: () => { current = null },
-    captureSshTeardown: connection => capturePrimarySshTeardown(connection, {
-      states, observe, cancelAndWait: async (_key, stop) => { await stop() },
-      teardown: async () => { states.delete('PRIVATE_SCOPE') }
-    })
+    currentConnectionPromise: () => current,
+    coordinator: new RemoteRevalidationCoordinator(),
+    tracker: new RemoteLivenessTracker(1),
+    log() {},
+    observe,
+    probe: async () => {
+      throw Error('PRIVATE_ERROR')
+    },
+    resetConnection: () => {
+      current = null
+    },
+    captureSshTeardown: connection =>
+      capturePrimarySshTeardown(connection, {
+        states,
+        observe,
+        cancelAndWait: async (_key, stop) => {
+          await stop()
+        },
+        teardown: async () => {
+          states.delete('PRIVATE_SCOPE')
+        }
+      })
   })
 
   await expect(revalidate('renderer')).resolves.toEqual({ ok: true, rebuilt: true })
@@ -70,7 +105,9 @@ test('retirement records captured identity, drain before reset, and awaited tear
   expect(names).toContain('probe_failure')
   expect(events.find(e => e.event === 'probe_failure')).toMatchObject({ failures: 1, should_reset: true })
 
-  for (const e of ['retirement_requested', 'drain_start', 'reset', 'teardown_end', 'round_end']) { expect(names).toContain(e) }
+  for (const e of ['retirement_requested', 'drain_start', 'reset', 'teardown_end', 'round_end']) {
+    expect(names).toContain(e)
+  }
   expect(names.indexOf('drain_start')).toBeLessThan(names.indexOf('reset'))
   expect(names.indexOf('teardown_end')).toBeLessThan(names.indexOf('round_end'))
   expect(events.find(e => e.event === 'ssh_capture')).toMatchObject({ port: 32123, matched: true })
@@ -82,9 +119,15 @@ test('ordinary/passive matches record skip and never probe', async () => {
   let probes = 0
 
   for (const opts of [{}, { forceProbe: true, passive: true }]) {
-    expect(await ensureProbedPrimaryBackend(42, opts, {
-      observe, revalidate: async () => { probes++ }, ensure: async () => 43
-    })).toBe(42)
+    expect(
+      await ensureProbedPrimaryBackend(42, opts, {
+        observe,
+        revalidate: async () => {
+          probes++
+        },
+        ensure: async () => 43
+      })
+    ).toBe(42)
   }
 
   expect(probes).toBe(0)

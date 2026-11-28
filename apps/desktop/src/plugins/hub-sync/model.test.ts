@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  type HubSessionRow,
-  isRowPending,
-  markRowPending,
-  replicaSessionsToShow,
-  sessionRequestBody
-} from './model'
+import { type HubSessionRow, isRowPending, markRowPending, replicaSessionsToShow, sessionRequestBody } from './model'
 
 // [daveey] Sidebar rows for sessions on gateways that aren't live right now,
 // read from the window gateway's hermes-hub replica (hub-sync plugin REST).
@@ -82,5 +76,7 @@ describe('owner requests', () => {
 it('keeps same-id sessions in different profiles independent', () => {
   const rows = [row('mini', 'same'), row('mini', 'same', { profile: 'work', key: 'work/same' })]
   expect(replicaSessionsToShow(rows, [], () => false)).toHaveLength(2)
-  expect(replicaSessionsToShow(rows, [{ gateway: 'mini', profile: 'work', id: 'same' }], () => false)).toEqual([rows[0]])
+  expect(replicaSessionsToShow(rows, [{ gateway: 'mini', profile: 'work', id: 'same' }], () => false)).toEqual([
+    rows[0]
+  ])
 })

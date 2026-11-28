@@ -128,7 +128,14 @@ describe('createPluginContext.openPreview', () => {
   it('opens a resolvable file in the preview pane via the shared normalizer', async () => {
     const preview = await import('@/store/preview')
     const spy = vi.spyOn(preview, 'openPreview').mockImplementation(() => undefined as never)
-    const target = { kind: 'file', label: 'plan.md', path: '/tmp/plan.md', previewKind: 'text', source: '/tmp/plan.md', url: 'file:///tmp/plan.md' }
+    const target = {
+      kind: 'file',
+      label: 'plan.md',
+      path: '/tmp/plan.md',
+      previewKind: 'text',
+      source: '/tmp/plan.md',
+      url: 'file:///tmp/plan.md'
+    }
     const normalizePreviewTarget = vi.fn().mockResolvedValue(target)
     const prev = window.hermesDesktop
     window.hermesDesktop = { ...(prev ?? {}), normalizePreviewTarget } as never
@@ -152,7 +159,14 @@ describe('createPluginContext.openPreview', () => {
     const normalizePreviewTarget = vi
       .fn()
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ kind: 'file', previewKind: 'directory', path: '/tmp', source: '/tmp', url: 'file:///tmp', label: 'tmp' })
+      .mockResolvedValueOnce({
+        kind: 'file',
+        previewKind: 'directory',
+        path: '/tmp',
+        source: '/tmp',
+        url: 'file:///tmp',
+        label: 'tmp'
+      })
 
     const prev = window.hermesDesktop
     window.hermesDesktop = { ...(prev ?? {}), normalizePreviewTarget } as never

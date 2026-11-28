@@ -30,17 +30,24 @@ test('env primary has an owner and registry requests reuse it without a local sp
 })
 
 test('env selection and credentials never persist, but saved source edits survive', () => {
-  const stored = normalizeRegistry({ primary: 'saved', lastUsed: 'saved', connections: [
-    { id: 'saved', kind: 'remote', label: 'Saved', url: 'https://saved.test' },
-    { id: 'environment-gateway', kind: 'remote', label: 'Existing', url: 'https://existing.test' }
-  ] })
+  const stored = normalizeRegistry({
+    primary: 'saved',
+    lastUsed: 'saved',
+    connections: [
+      { id: 'saved', kind: 'remote', label: 'Saved', url: 'https://saved.test' },
+      { id: 'environment-gateway', kind: 'remote', label: 'Existing', url: 'https://existing.test' }
+    ]
+  })
 
   const overlay = new EnvironmentRegistry(env)
   const registry = overlay.read(stored)
   assert.notEqual(registry.primary, 'environment-gateway')
 
-  const next = { ...registry, lastUsed: registry.primary, connections: registry.connections.map(c =>
-    c.id === 'saved' ? { ...c, label: 'Renamed' } : c) }
+  const next = {
+    ...registry,
+    lastUsed: registry.primary,
+    connections: registry.connections.map(c => (c.id === 'saved' ? { ...c, label: 'Renamed' } : c))
+  }
 
   const persisted = overlay.stored(next, stored)
   assert.equal(persisted.primary, 'saved')

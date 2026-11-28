@@ -140,9 +140,10 @@ export async function uploadComposerAttachment(
   // Edit-message drops bypass the main composer store, so also resolve their
   // source descriptor here. Absence means an older browser backend/native file
   // and retains the existing byte-upload rules.
-  const stagedUpload = attachment.kind === 'file'
-    ? attachment.stagedUpload ?? window.hermesDesktop?.getStagedFileForAttach?.(path)
-    : undefined
+  const stagedUpload =
+    attachment.kind === 'file'
+      ? (attachment.stagedUpload ?? window.hermesDesktop?.getStagedFileForAttach?.(path))
+      : undefined
 
   if (stagedUpload && stagedUpload.path !== path) {
     throw new Error(`Could not attach ${label}: staged source changed; select the file again`)
@@ -214,9 +215,7 @@ export async function uploadComposerAttachment(
       session_id: liveSessionId,
       // Omit path as well as bytes for the provenance-aware branch: an older
       // RPC implementation must reject it rather than ignore source ownership.
-      ...(stagedUpload
-        ? { staged_upload: stagedUpload }
-        : { path, ...(fileDataUrl ? { data_url: fileDataUrl } : {}) })
+      ...(stagedUpload ? { staged_upload: stagedUpload } : { path, ...(fileDataUrl ? { data_url: fileDataUrl } : {}) })
     })
 
     if (!result.attached || !result.ref_text) {
@@ -753,99 +752,105 @@ export function usePromptActions({
     [copy.sttDisabled, sttEnabled]
   )
 
-  const cancelRun = useCallback(async (origin?: StopOrigin) => {
-    // Read from the ref, not the closure-captured `activeSessionId`. The
-    // actions bag is a stable ref mutated in place (Object.assign on each
-    // ContribWiring render), and ChatRoutesSurface is memoized on that stable
-    // ref — so it does NOT re-render when activeSessionId changes, which means
-    // the ChatView element's onCancel prop holds a stale cancelRun closure.
-    // The closure's `activeSessionId` can be a previous session's id (or null
-    // from a new-chat draft), sending session.interrupt to the wrong session.
-    // The ref is updated via useEffect on every activeSessionId change, so it
-    // always reflects the current session — same pattern submitText uses.
-    const sessionId = activeSessionIdRef.current
+  const cancelRun = useCallback(
+    async (origin?: StopOrigin) => {
+      // Read from the ref, not the closure-captured `activeSessionId`. The
+      // actions bag is a stable ref mutated in place (Object.assign on each
+      // ContribWiring render), and ChatRoutesSurface is memoized on that stable
+      // ref — so it does NOT re-render when activeSessionId changes, which means
+      // the ChatView element's onCancel prop holds a stale cancelRun closure.
+      // The closure's `activeSessionId` can be a previous session's id (or null
+      // from a new-chat draft), sending session.interrupt to the wrong session.
+      // The ref is updated via useEffect on every activeSessionId change, so it
+      // always reflects the current session — same pattern submitText uses.
+      const sessionId = activeSessionIdRef.current
 
-    const releaseBusy = () => {
-      setMutableRef(busyRef, false)
-      setBusy(false)
-    }
-
-    setAwaitingResponse(false)
-    setTurnStartedAt(null)
-
-    if (!sessionId) {
-      releaseBusy()
-      setMessages(finalizeStoppedMessages($messages.get()))
-
-      return
-    }
-
-    // Frontend busy clears immediately; gateway wind-down can lag. Mark so a
-    // fast edit/resend still interrupt-first instead of racing 4009 (#83855).
-    markSessionRecentlyInterrupted(sessionId)
-
-    // Preserve delivered bytes before the interrupted gate rejects later deltas.
-    flushStreamDeltas(sessionId)
-
-    updateSessionState(sessionId, state => {
-      const streamId = state.streamId
-      const messages = finalizeStoppedMessages(state.messages, streamId)
-
-      return {
-        ...state,
-        messages,
-        busy: false,
-        awaitingResponse: false,
-        streamId: null,
-        pendingBranchGroup: null,
-        needsInput: false,
-        interrupted: stopLatchesInterrupt(state, getQueuedPrompts(state.storedSessionId ?? selectedStoredSessionIdRef.current)),
-        turnStartedAt: null,
-        turnLive: false
+      const releaseBusy = () => {
+        setMutableRef(busyRef, false)
+        setBusy(false)
       }
-    })
 
-    clearSessionTodos(sessionId)
-    // Stop ends this turn only: background subagents keep running and keep their rows; the
-    // stopped turn's own children drop out of the next roster snapshot.
-    pruneFinishedSessionSubagents(sessionId)
-    // No resetSessionBackground() here. A plain interrupt (Stop, or "send now"
-    // on a queued message while busy) keeps the timeline, and the gateway's
-    // session.interrupt deliberately leaves terminal(background=true) processes
-    // running. Killing them belongs only to the rewind paths (reload / restore /
-    // edit), where the spawning turns are discarded.
-    setSessionDraftingTool(sessionId, '')
-    // Auto-compaction sets a per-session flag that only clears on message.start
-    // / message.complete / error. A hung compaction emits none of those, so the
-    // "Summarizing thread" overlay sticks and Stop is the user's only recourse —
-    // clear it here too so cancelling actually dismisses the panel.
-    setSessionCompacting(sessionId, false)
-    // Stop ends the turn, so the gateway is no longer blocked on any prompt it
-    // raised. Drop this session's pending clarify / approval / sudo / secret so
-    // a dead panel (and the sidebar "needs input" dot) can't linger and accept
-    // an answer the backend will reject.
-    clearAllPrompts(sessionId)
-    clearClarifyRequest(undefined, sessionId)
+      setAwaitingResponse(false)
+      setTurnStartedAt(null)
 
-    try {
-      await withSessionNotFoundResume(
-        sessionId,
-        selectedStoredSessionIdRef.current,
-        liveId => requestGateway('session.interrupt', interruptParams(liveId, origin)),
-        {
-          requestGateway,
-          onRecovered: recoveredId => {
-            activeSessionIdRef.current = recoveredId
-            setActiveSessionId(recoveredId)
-          }
+      if (!sessionId) {
+        releaseBusy()
+        setMessages(finalizeStoppedMessages($messages.get()))
+
+        return
+      }
+
+      // Frontend busy clears immediately; gateway wind-down can lag. Mark so a
+      // fast edit/resend still interrupt-first instead of racing 4009 (#83855).
+      markSessionRecentlyInterrupted(sessionId)
+
+      // Preserve delivered bytes before the interrupted gate rejects later deltas.
+      flushStreamDeltas(sessionId)
+
+      updateSessionState(sessionId, state => {
+        const streamId = state.streamId
+        const messages = finalizeStoppedMessages(state.messages, streamId)
+
+        return {
+          ...state,
+          messages,
+          busy: false,
+          awaitingResponse: false,
+          streamId: null,
+          pendingBranchGroup: null,
+          needsInput: false,
+          interrupted: stopLatchesInterrupt(
+            state,
+            getQueuedPrompts(state.storedSessionId ?? selectedStoredSessionIdRef.current)
+          ),
+          turnStartedAt: null,
+          turnLive: false
         }
-      )
-      releaseBusy()
-    } catch (err) {
-      releaseBusy()
-      notifyError(err, copy.stopFailed)
-    }
-  }, [activeSessionIdRef, busyRef, copy.stopFailed, requestGateway, selectedStoredSessionIdRef, updateSessionState])
+      })
+
+      clearSessionTodos(sessionId)
+      // Stop ends this turn only: background subagents keep running and keep their rows; the
+      // stopped turn's own children drop out of the next roster snapshot.
+      pruneFinishedSessionSubagents(sessionId)
+      // No resetSessionBackground() here. A plain interrupt (Stop, or "send now"
+      // on a queued message while busy) keeps the timeline, and the gateway's
+      // session.interrupt deliberately leaves terminal(background=true) processes
+      // running. Killing them belongs only to the rewind paths (reload / restore /
+      // edit), where the spawning turns are discarded.
+      setSessionDraftingTool(sessionId, '')
+      // Auto-compaction sets a per-session flag that only clears on message.start
+      // / message.complete / error. A hung compaction emits none of those, so the
+      // "Summarizing thread" overlay sticks and Stop is the user's only recourse —
+      // clear it here too so cancelling actually dismisses the panel.
+      setSessionCompacting(sessionId, false)
+      // Stop ends the turn, so the gateway is no longer blocked on any prompt it
+      // raised. Drop this session's pending clarify / approval / sudo / secret so
+      // a dead panel (and the sidebar "needs input" dot) can't linger and accept
+      // an answer the backend will reject.
+      clearAllPrompts(sessionId)
+      clearClarifyRequest(undefined, sessionId)
+
+      try {
+        await withSessionNotFoundResume(
+          sessionId,
+          selectedStoredSessionIdRef.current,
+          liveId => requestGateway('session.interrupt', interruptParams(liveId, origin)),
+          {
+            requestGateway,
+            onRecovered: recoveredId => {
+              activeSessionIdRef.current = recoveredId
+              setActiveSessionId(recoveredId)
+            }
+          }
+        )
+        releaseBusy()
+      } catch (err) {
+        releaseBusy()
+        notifyError(err, copy.stopFailed)
+      }
+    },
+    [activeSessionIdRef, busyRef, copy.stopFailed, requestGateway, selectedStoredSessionIdRef, updateSessionState]
+  )
 
   // The desktop steering action is an immediate correction: the core cancels
   // model generation and rebuilds the live turn with displayed reasoning and

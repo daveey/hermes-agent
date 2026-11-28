@@ -50,7 +50,12 @@ describe('readInlineDoc', () => {
   })
 
   it('never frames a truncated document (older shell ignored `full`)', async () => {
-    readText.mockResolvedValue({ byteSize: 700 * 1024, path: '/b.html', text: '<img src="data:image/png;base64,iVBOR', truncated: true })
+    readText.mockResolvedValue({
+      byteSize: 700 * 1024,
+      path: '/b.html',
+      text: '<img src="data:image/png;base64,iVBOR',
+      truncated: true
+    })
 
     await expect(readInlineDoc('/b.html')).resolves.toBeNull()
   })

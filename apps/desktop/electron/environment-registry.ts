@@ -24,7 +24,10 @@ export class EnvironmentRegistry {
       return cached
     }
 
-    const id = connectionIdForLabel('Environment gateway', stored.connections.map(c => c.id))
+    const id = connectionIdForLabel(
+      'Environment gateway',
+      stored.connections.map(c => c.id)
+    )
 
     const view: ConnectionRegistry = {
       ...stored,

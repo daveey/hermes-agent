@@ -289,7 +289,11 @@ const recordKey = (record: OfflineReplicaRecord, id: string) =>
 const isCompressionAncestor = (record: OfflineReplicaRecord) => record.end_reason === 'compression'
 
 /** The normal recents rule: no excluded source or delegate child, not empty/archived/hidden, has a title. */
-function isRecentsEligible(record: OfflineReplicaRecord, excluded: ReadonlySet<string>, includeLocal: boolean): boolean {
+function isRecentsEligible(
+  record: OfflineReplicaRecord,
+  excluded: ReadonlySet<string>,
+  includeLocal: boolean
+): boolean {
   const source = normalizeSessionSource(record.source)
 
   return !(
@@ -330,7 +334,12 @@ export function ownerAsleep(record: Pick<OfflineReplicaRecord, 'stale' | 'synced
   return record.stale || record.synced_at == null || nowS - record.synced_at > OWNER_ASLEEP_AFTER_S
 }
 
-function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, lineage: string[], nowS: number): SessionInfo {
+function rowFromRecord(
+  record: OfflineReplicaRecord,
+  connectionId: string,
+  lineage: string[],
+  nowS: number
+): SessionInfo {
   const startedAt = record.started_at ?? record.activity ?? 0
   const asleep = ownerAsleep(record, nowS)
 
@@ -422,9 +431,7 @@ export function mergeOfflineFallback(
   // stamps (cron_active, kanban_*, goal_active, ...). Once the own backend has put any live row in the list it has
   // answered this launch, and its older chats paint from the live (stamped) projects tree instead; re-adding the boot
   // copies after a failed list blanked their stripes.
-  const ownBackendAnswered = live.some(
-    row => !row.offline_cached && (row.connection_id?.trim() || primary) === primary
-  )
+  const ownBackendAnswered = live.some(row => !row.offline_cached && (row.connection_id?.trim() || primary) === primary)
 
   // [daveey] Backend tree rows by owner identity; replica-derived tree rows (offline_synced_at) are no better.
   const reported = new Map<string, SessionInfo>()

@@ -33,7 +33,10 @@ export async function commentOnOwner<T>(
       return await send({ ...owner, gateway: connection })
     } catch (cause) {
       // The owner's response can be uncertain. Do not queue or retry again.
-      throw new Error(`Could not confirm that ${gateway} saved your comment. Open the card on that gateway and check its comments before trying again.`, { cause })
+      throw new Error(
+        `Could not confirm that ${gateway} saved your comment. Open the card on that gateway and check its comments before trying again.`,
+        { cause }
+      )
     }
   }
 }

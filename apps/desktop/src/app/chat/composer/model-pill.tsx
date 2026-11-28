@@ -132,8 +132,7 @@ export function ModelPill({
   // pin whenever a draft (no live session) is running on a manual override. A
   // live session's footer reflects that session's model, so no badge there.
   // Tiles always have a runtime — pin badge is primary-draft only.
-  const pinnedOverride =
-    view.kind === 'primary' && !runtimeId && modelSource === 'manual' && Boolean(liveModel.trim())
+  const pinnedOverride = view.kind === 'primary' && !runtimeId && modelSource === 'manual' && Boolean(liveModel.trim())
 
   // Unknown does not imply a request is pending: keep the picker named.
   //

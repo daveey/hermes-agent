@@ -160,7 +160,10 @@ describe('owner-qualified pins', () => {
   const owned = (gateway: string, extra: Partial<SessionInfo> = {}) =>
     row('kanban_owner_terminal', {
       connection_id: gateway,
-      outcome: { kind: 'done', status: { identity: { gateway, owner_epoch: 'e', profile: 'default', session_id: 'kanban_owner_terminal' } } },
+      outcome: {
+        kind: 'done',
+        status: { identity: { gateway, owner_epoch: 'e', profile: 'default', session_id: 'kanban_owner_terminal' } }
+      },
       ...extra
     } as Partial<SessionInfo>)
 

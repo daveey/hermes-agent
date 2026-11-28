@@ -7,11 +7,21 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { resolveDesktopHermesHome } from './data-paths'
-import { currentRevalidationRound, type PrimaryRevalidationObserver, type PrimaryRevalidationTrigger, revalidationIdentity, withRevalidationInvocation } from './primary-revalidation-observation'
+import {
+  currentRevalidationRound,
+  type PrimaryRevalidationObserver,
+  type PrimaryRevalidationTrigger,
+  revalidationIdentity,
+  withRevalidationInvocation
+} from './primary-revalidation-observation'
 
 const POLL_PATHS = new Set([
-  '/api/plugins/user-steps/requests', '/api/plugins/hub-sync/status',
-  '/api/plugins/kanban/board', '/api/sessions', '/api/health', '/api/status',
+  '/api/plugins/user-steps/requests',
+  '/api/plugins/hub-sync/status',
+  '/api/plugins/kanban/board',
+  '/api/sessions',
+  '/api/health',
+  '/api/status',
   '/api/plugins/session-mentions/result'
 ])
 
@@ -27,7 +37,10 @@ export class StageBuffer {
   ioLost = 0
   readonly boot = randomUUID().replaceAll('-', '')
 
-  constructor(private write: (lines: string) => Promise<void>, private capacity = 4096) {}
+  constructor(
+    private write: (lines: string) => Promise<void>,
+    private capacity = 4096
+  ) {}
 
   emit(stage: string, fields: Row = {}) {
     const seq = ++this.seq
@@ -38,12 +51,24 @@ export class StageBuffer {
       return
     }
 
-    this.rows.push({ ...fields, stage, seq, boot: this.boot, pid: process.pid,
-      utc_ms: Date.now(), mono_ms: performance.now(), dropped: this.dropped, io_lost: this.ioLost })
+    this.rows.push({
+      ...fields,
+      stage,
+      seq,
+      boot: this.boot,
+      pid: process.pid,
+      utc_ms: Date.now(),
+      mono_ms: performance.now(),
+      dropped: this.dropped,
+      io_lost: this.ioLost
+    })
 
     if (!this.scheduled && !this.writing) {
       this.scheduled = true
-      setImmediate(() => { this.scheduled = false; void this.flush() })
+      setImmediate(() => {
+        this.scheduled = false
+        void this.flush()
+      })
     }
   }
 
@@ -74,16 +99,36 @@ export class StageBuffer {
 let sink: StageBuffer | undefined
 const calls = new AsyncLocalStorage<string>()
 
-export function observePrimaryRevalidation(event: Parameters<PrimaryRevalidationObserver>[0], fields: Parameters<PrimaryRevalidationObserver>[1] = {}, output?: StageBuffer) {
-  (output || journal()).emit('primary_revalidation', { ...currentRevalidationRound(), ...fields, event, call_id: calls.getStore() || '' })
+export function observePrimaryRevalidation(
+  event: Parameters<PrimaryRevalidationObserver>[0],
+  fields: Parameters<PrimaryRevalidationObserver>[1] = {},
+  output?: StageBuffer
+) {
+  ;(output || journal()).emit('primary_revalidation', {
+    ...currentRevalidationRound(),
+    ...fields,
+    event,
+    call_id: calls.getStore() || ''
+  })
 }
 
 /** Start before registry/fingerprint/bootstrap awaits, including background warm calls. */
-export function withRegistryRevalidationStages<T>(opts: { forceProbe?: boolean; passive?: boolean; revalidationTrigger?: PrimaryRevalidationTrigger }, operation: () => Promise<T>, output?: StageBuffer): Promise<T> {
-  const context = { invocation: revalidationIdentity({}), trigger: opts.revalidationTrigger || 'registry' as PrimaryRevalidationTrigger }
+export function withRegistryRevalidationStages<T>(
+  opts: { forceProbe?: boolean; passive?: boolean; revalidationTrigger?: PrimaryRevalidationTrigger },
+  operation: () => Promise<T>,
+  output?: StageBuffer
+): Promise<T> {
+  const context = {
+    invocation: revalidationIdentity({}),
+    trigger: opts.revalidationTrigger || ('registry' as PrimaryRevalidationTrigger)
+  }
 
   return withRevalidationInvocation(context, async () => {
-    observePrimaryRevalidation('registry_start', { force_probe: Boolean(opts.forceProbe), passive: Boolean(opts.passive) }, output)
+    observePrimaryRevalidation(
+      'registry_start',
+      { force_probe: Boolean(opts.forceProbe), passive: Boolean(opts.passive) },
+      output
+    )
 
     try {
       const result = await operation()
@@ -109,10 +154,16 @@ function pollUrl(raw: string, base?: string): URL | undefined {
 }
 
 /** Covers registry/gate/dial/coalescing waits before a request has an HTTP Agent. */
-export async function withApiRequestStages<T>(request: { path?: string; method?: string }, operation: () => Promise<T>, output?: StageBuffer): Promise<T> {
+export async function withApiRequestStages<T>(
+  request: { path?: string; method?: string },
+  operation: () => Promise<T>,
+  output?: StageBuffer
+): Promise<T> {
   const parsed = pollUrl(request.path || '/', 'http://localhost')
 
-  if (!parsed) { return operation() }
+  if (!parsed) {
+    return operation()
+  }
   const pathname = parsed.pathname
   const callId = randomUUID().replaceAll('-', '')
   const target = output || journal()
@@ -133,38 +184,50 @@ export async function withApiRequestStages<T>(request: { path?: string; method?:
 }
 
 export function stageFileWriter(file: string, maxBytes = 16 * 1024 * 1024) {
-    let size = 0
-    let ready = false
+  let size = 0
+  let ready = false
 
-    return async (lines: string) => {
-      if (!ready) {
-        await fs.mkdir(path.dirname(file), { recursive: true })
+  return async (lines: string) => {
+    if (!ready) {
+      await fs.mkdir(path.dirname(file), { recursive: true })
 
-        try { size = (await fs.stat(file)).size } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error }
+      try {
+        size = (await fs.stat(file)).size
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error
         }
-
-        ready = true
       }
 
-      if (size + Buffer.byteLength(lines) > maxBytes) {
-        for (let i = 2; i >= 0; i--) {
-          try { await fs.rename(i ? `${file}.${i}` : file, `${file}.${i + 1}`) } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error }
+      ready = true
+    }
+
+    if (size + Buffer.byteLength(lines) > maxBytes) {
+      for (let i = 2; i >= 0; i--) {
+        try {
+          await fs.rename(i ? `${file}.${i}` : file, `${file}.${i + 1}`)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw error
           }
         }
-
-        size = 0
       }
 
-      await fs.appendFile(file, lines, { mode: 0o600 })
-      size += Buffer.byteLength(lines)
+      size = 0
     }
+
+    await fs.appendFile(file, lines, { mode: 0o600 })
+    size += Buffer.byteLength(lines)
+  }
 }
 
 function journal(): StageBuffer {
   if (!sink) {
-    const file = path.join(resolveDesktopHermesHome({ home: os.homedir() }), 'logs', `request-stages-desktop-${process.pid}.jsonl`)
+    const file = path.join(
+      resolveDesktopHermesHome({ home: os.homedir() }),
+      'logs',
+      `request-stages-desktop-${process.pid}.jsonl`
+    )
     sink = new StageBuffer(stageFileWriter(file))
     const timer = setInterval(() => sink?.emit('coverage'), 1000)
     timer.unref()
@@ -182,9 +245,14 @@ export function requestStages(url: string, method: string, output?: StageBuffer)
 
   const id = randomUUID().replaceAll('-', '')
 
-  const fields = { ...currentRevalidationRound(), id, call_id: calls.getStore() || '', path: parsed.pathname,
+  const fields = {
+    ...currentRevalidationRound(),
+    id,
+    call_id: calls.getStore() || '',
+    path: parsed.pathname,
     method: /^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(method) ? method : 'OTHER',
-    port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)) }
+    port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
+  }
 
   const target = output || journal()
   const emit = (stage: string, extras: Row = {}) => target.emit(stage, { ...fields, ...extras })
@@ -197,16 +265,23 @@ export function requestStages(url: string, method: string, output?: StageBuffer)
       emit('agent_queue')
       req.once('socket', socket => {
         emit('socket_assigned', { reused: req.reusedSocket })
-        const connected = () => emit('connected', { local_port: socket.localPort || 0, remote_port: socket.remotePort || 0 })
+        const connected = () =>
+          emit('connected', { local_port: socket.localPort || 0, remote_port: socket.remotePort || 0 })
 
-        if (socket.connecting) { socket.once('connect', connected) } else { connected() }
+        if (socket.connecting) {
+          socket.once('connect', connected)
+        } else {
+          connected()
+        }
       })
       // Node finish = flushed to the local socket, not acknowledgement by the hub.
       req.once('finish', () => emit('write_finished'))
       req.once('response', res => {
         emit('response_start', { status: res.statusCode || 0 })
         let bytes = 0
-        res.on('data', chunk => { bytes += chunk.length })
+        res.on('data', chunk => {
+          bytes += chunk.length
+        })
         // The JSON consumer registers first; receipt must precede its synchronous
         // decompression/delta decoding/JSON parsing, not include that local work.
         res.prependOnceListener('end', () => emit('response_end', { bytes }))

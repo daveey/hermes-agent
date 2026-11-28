@@ -35,7 +35,13 @@ import type { SessionOutcome } from '@/types/session-outcome'
 import { $backgroundRunningSessionIds, $backgroundStatusBySession } from './composer-status'
 import { executionHoldsRow, executionKey, rowExecution } from './execution-observation-row'
 import { $kanbanObservationTick, hasFreshKanbanObservation } from './kanban-observation'
-import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle, selectWorkObservations } from './live-work-roster'
+import {
+  $liveWorkRoster,
+  noteEventFed,
+  rosterLiveIds,
+  rosterSaysIdle,
+  selectWorkObservations
+} from './live-work-roster'
 import { $pausedQueueSessionIds } from './owner-queue-reconcile'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
 import {
@@ -74,7 +80,14 @@ export const $delegatingSessionIds = computed(
 
       const evidence = items.filter(i => i.status === 'running').flatMap(i => i.executionObservations ?? [])
 
-      if (summarizeExecutionObservations(selectWorkObservations(evidence, Date.now() / 1000), Date.now() / 1000, 'sidebar').counts.running > 0 && !rosterSaysIdle(roster, 'subagents', aliases, heardAt)) {
+      if (
+        summarizeExecutionObservations(
+          selectWorkObservations(evidence, Date.now() / 1000),
+          Date.now() / 1000,
+          'sidebar'
+        ).counts.running > 0 &&
+        !rosterSaysIdle(roster, 'subagents', aliases, heardAt)
+      ) {
         for (const alias of aliases) {
           ids.add(alias)
         }
@@ -96,48 +109,61 @@ export const $delegatingSessionIds = computed(
 // the session as done (green stripe) while its workers were still going. The
 // backend stamps `kanban_active` on every list row (summed over the lineage).
 let kanbanBusyIds: readonly string[] = []
-export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $kanbanObservationTick, $liveWorkRoster, $subagentsBySession], (sessions, messaging) => {
-  const ids: string[] = []
+export const $kanbanBusySessionIds = computed(
+  [$sessions, $messagingSessions, $kanbanObservationTick, $liveWorkRoster, $subagentsBySession],
+  (sessions, messaging) => {
+    const ids: string[] = []
 
-  for (const rows of [sessions, messaging]) {
-    for (const row of rows) {
-      // [daveey] `kanban_unknown`: the backend could not read the session's cards (local boards or another
-      // gateway's replica). Unknown is not "no work", so the row stays off done until a read succeeds.
-      if (
-        (row.kanban_active ?? 0) > 0 ||
-        (row.kanban_blocked ?? 0) > 0 ||
-        row.kanban_unknown === true ||
-        (row.kanban_remote_stale ?? 0) > 0 ||
-        !hasFreshKanbanObservation(row) ||
-        executionHoldsRow(rowExecution(row))
-      ) {
-        ids.push(row.id)
+    for (const rows of [sessions, messaging]) {
+      for (const row of rows) {
+        // [daveey] `kanban_unknown`: the backend could not read the session's cards (local boards or another
+        // gateway's replica). Unknown is not "no work", so the row stays off done until a read succeeds.
+        if (
+          (row.kanban_active ?? 0) > 0 ||
+          (row.kanban_blocked ?? 0) > 0 ||
+          row.kanban_unknown === true ||
+          (row.kanban_remote_stale ?? 0) > 0 ||
+          !hasFreshKanbanObservation(row) ||
+          executionHoldsRow(rowExecution(row))
+        ) {
+          ids.push(row.id)
+        }
       }
     }
-  }
 
-  return (kanbanBusyIds = stableArray(kanbanBusyIds, ids))
-})
+    return (kanbanBusyIds = stableArray(kanbanBusyIds, ids))
+  }
+)
 
 /** Per-row execution evidence signature at the render clock. Re-evaluated by the existing 15 s tick (time-only
  *  expiry, no fetch); the reference changes only when some row's verdict does, so subscribers re-render on
  *  transitions, not on every tick. Rows without observations are absent. */
 let executionKeys: Readonly<Record<string, string>> = {}
-export const $executionRowKeys = computed([$sessions, $messagingSessions, $kanbanObservationTick, $liveWorkRoster, $backgroundStatusBySession, $subagentsBySession], (sessions, messaging) => {
-  const next: Record<string, string> = {}
+export const $executionRowKeys = computed(
+  [
+    $sessions,
+    $messagingSessions,
+    $kanbanObservationTick,
+    $liveWorkRoster,
+    $backgroundStatusBySession,
+    $subagentsBySession
+  ],
+  (sessions, messaging) => {
+    const next: Record<string, string> = {}
 
-  for (const rows of [sessions, messaging]) {
-    for (const row of rows) {
-      const key = executionKey(rowExecution(row))
+    for (const rows of [sessions, messaging]) {
+      for (const row of rows) {
+        const key = executionKey(rowExecution(row))
 
-      if (key) {
-        next[row.id] = key
+        if (key) {
+          next[row.id] = key
+        }
       }
     }
-  }
 
-  return (executionKeys = stableRecord(executionKeys, next))
-})
+    return (executionKeys = stableRecord(executionKeys, next))
+  }
+)
 
 // [daveey] Sessions whose kanban cards finished while no backend held the chat:
 // the result is waiting in the kanban store (`kanban_unseen`, until the
@@ -290,15 +316,7 @@ export const showsRunningArc = (state: SessionDotState): boolean =>
 //  agent can end and has for over 2 h (backend `kanban_stalled`): nothing is producing what it waits for. Still not
 //  the user's move (red stays for that), and parked like `waiting` for ⌘] / ⌘[.
 export type SessionStatusStripe =
-  | 'attention'
-  | 'blocked'
-  | 'done'
-  | 'external'
-  | 'external_down'
-  | 'periodic'
-  | 'stalled'
-  | 'stuck'
-  | 'waiting'
+  'attention' | 'blocked' | 'done' | 'external' | 'external_down' | 'periodic' | 'stalled' | 'stuck' | 'waiting'
 
 /** [daveey] Backend `review_wait` stamp: the session's latest reply links an
  *  open PR still needing a code review. `stuck` = the review is on the user

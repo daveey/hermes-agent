@@ -1,4 +1,11 @@
-import { type PrimaryRevalidationObserver, type PrimaryRevalidationTrigger, revalidationIdentity, revalidationPort, revalidationScopeIdentity, withRevalidationRound } from './primary-revalidation-observation'
+import {
+  type PrimaryRevalidationObserver,
+  type PrimaryRevalidationTrigger,
+  revalidationIdentity,
+  revalidationPort,
+  revalidationScopeIdentity,
+  withRevalidationRound
+} from './primary-revalidation-observation'
 import {
   type RemoteLivenessTracker,
   type RemoteRevalidationCoordinator,
@@ -22,7 +29,11 @@ export function capturePrimarySshTeardown<T extends { localPort?: number }>(
 ) {
   const port = Number(new URL(connection.baseUrl!).port)
   const entry = [...deps.states].find(([, state]) => state.localPort === port)
-  const fields = { port, state: entry ? revalidationIdentity(entry[1]) : 0, scope: entry ? revalidationScopeIdentity(entry[0]) : '' }
+  const fields = {
+    port,
+    state: entry ? revalidationIdentity(entry[1]) : 0,
+    scope: entry ? revalidationScopeIdentity(entry[0]) : ''
+  }
   deps.observe?.('ssh_capture', { ...fields, matched: Boolean(entry) })
 
   return async () => {
@@ -51,7 +62,9 @@ export function capturePrimarySshTeardown<T extends { localPort?: number }>(
           deps.observe?.('teardown_error', fields)
           throw error
         }
-      } else {deps.observe?.('stale_scope_after_drain', fields)}
+      } else {
+        deps.observe?.('stale_scope_after_drain', fields)
+      }
     })
     deps.observe?.('drain_end', fields)
   }
@@ -86,37 +99,46 @@ export function createPrimaryRemoteRevalidator(deps: {
     // One failure observation per round, even with several tabs/prewarm aliases.
     const generation = revalidationIdentity(connectionPromise)
 
-    const pending: Promise<RemoteRevalidationResult> = deps.coordinator.run(connectionPromise, async () => withRevalidationRound({ round: revalidationIdentity(pending), generation }, async () => {
-      deps.observe?.('round_start', { trigger })
+    const pending: Promise<RemoteRevalidationResult> = deps.coordinator.run(connectionPromise, async () =>
+      withRevalidationRound({ round: revalidationIdentity(pending), generation }, async () => {
+        deps.observe?.('round_start', { trigger })
 
-      try {
-        const connection = await connectionPromise.catch(() => null)
-        const teardown = connection?.remoteKind === 'ssh' ? deps.captureSshTeardown(connection) : null
-        let retirement: Promise<void> | undefined
+        try {
+          const connection = await connectionPromise.catch(() => null)
+          const teardown = connection?.remoteKind === 'ssh' ? deps.captureSshTeardown(connection) : null
+          let retirement: Promise<void> | undefined
 
-        const result = await revalidateRemoteConnection({
-          ...deps,
-          connectionPromise,
-          resetConnection: () => {
-            // Arm the drain before clearing the promise permits a replacement.
-            deps.observe?.('retirement_requested')
-            retirement = teardown?.()
-            deps.resetConnection()
-            deps.observe?.('reset')
+          const result = await revalidateRemoteConnection({
+            ...deps,
+            connectionPromise,
+            resetConnection: () => {
+              // Arm the drain before clearing the promise permits a replacement.
+              deps.observe?.('retirement_requested')
+              retirement = teardown?.()
+              deps.resetConnection()
+              deps.observe?.('reset')
+            }
+          })
+
+          if (result.rebuilt) {
+            await retirement
           }
-        })
+          deps.observe?.('round_end', { rebuilt: result.rebuilt, port: revalidationPort(connection?.baseUrl) })
 
-        if (result.rebuilt) { await retirement }
-        deps.observe?.('round_end', { rebuilt: result.rebuilt, port: revalidationPort(connection?.baseUrl) })
+          return result
+        } catch (error) {
+          deps.observe?.('round_error')
+          throw error
+        }
+      })
+    )
 
-        return result
-      } catch (error) {
-        deps.observe?.('round_error')
-        throw error
-      }
-    }))
-
-    deps.observe?.('invocation', { trigger, generation, round: revalidationIdentity(pending), joined: seen.has(pending) })
+    deps.observe?.('invocation', {
+      trigger,
+      generation,
+      round: revalidationIdentity(pending),
+      joined: seen.has(pending)
+    })
     seen.add(pending)
 
     return pending
@@ -132,7 +154,12 @@ export async function ensureProbedPrimaryBackend<T>(
     observe?: PrimaryRevalidationObserver
   }
 ): Promise<T> {
-  deps.observe?.('matched_primary', { matched: true, force_probe: Boolean(opts.forceProbe), passive: Boolean(opts.passive), skipped: !opts.forceProbe || Boolean(opts.passive) })
+  deps.observe?.('matched_primary', {
+    matched: true,
+    force_probe: Boolean(opts.forceProbe),
+    passive: Boolean(opts.passive),
+    skipped: !opts.forceProbe || Boolean(opts.passive)
+  })
 
   if (!opts.forceProbe || opts.passive) {
     return cached

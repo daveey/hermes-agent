@@ -104,6 +104,7 @@ export const frOnboarding: TranslationOverrides['onboarding'] = {
   price: (input, output) => `${input} entrant / ${output} sortant par Mtok`,
   change: 'Modifier',
   startChatting: 'Commencer',
-  defaultChangeNote: model => `« Commencer » définit ${model} comme modèle par défaut pour les nouvelles conversations.`,
+  defaultChangeNote: model =>
+    `« Commencer » définit ${model} comme modèle par défaut pour les nouvelles conversations.`,
   docs: provider => `Documentation ${provider}`
 }

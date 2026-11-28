@@ -14,7 +14,9 @@ it('keeps a stable clock sample until the existing tick or source row changes', 
   vi.useFakeTimers()
   vi.setSystemTime(1001_000)
   const initialRow = {}
-  const { result, rerender } = renderHook(({ row }) => useExecutionObservationClock(row), { initialProps: { row: initialRow } })
+  const { result, rerender } = renderHook(({ row }) => useExecutionObservationClock(row), {
+    initialProps: { row: initialRow }
+  })
 
   expect(result.current).toBe(1001)
   vi.setSystemTime(1002_000)

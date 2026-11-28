@@ -28,14 +28,29 @@ describe('late completion after a no-reply notice', () => {
 
   it('does not erase an unrelated failure when completing a bubble', async () => {
     const stream = renderMessageStream(SID, {
-      states: new Map([[SID, {
-        ...createClientSessionState(), heartbeatSettledStreamId: 'stream',
-        messages: [{ id: 'stream', role: 'assistant', parts: [], error: 'Provider failed',
-          errorSurface: { code: 'timeout', layer: 'provider', retryable: true } }]
-      }]])
+      states: new Map([
+        [
+          SID,
+          {
+            ...createClientSessionState(),
+            heartbeatSettledStreamId: 'stream',
+            messages: [
+              {
+                id: 'stream',
+                role: 'assistant',
+                parts: [],
+                error: 'Provider failed',
+                errorSurface: { code: 'timeout', layer: 'provider', retryable: true }
+              }
+            ]
+          }
+        ]
+      ])
     })
 
-    await act(() => stream.handleEvent({ type: 'message.complete', session_id: SID, payload: { text: 'Partial reply' } }))
+    await act(() =>
+      stream.handleEvent({ type: 'message.complete', session_id: SID, payload: { text: 'Partial reply' } })
+    )
     expect(stream.state().messages.at(-1)?.error).toBe('Provider failed')
   })
 
@@ -46,16 +61,25 @@ describe('late completion after a no-reply notice', () => {
     ])
 
     const stream = renderMessageStream(SID, {
-      states: new Map([[SID, {
-        ...createClientSessionState(),
-        messages,
-        heartbeatSettledStreamId: retained ? 'stream' : null
-      }]])
+      states: new Map([
+        [
+          SID,
+          {
+            ...createClientSessionState(),
+            messages,
+            heartbeatSettledStreamId: retained ? 'stream' : null
+          }
+        ]
+      ])
     })
 
-    await act(() => stream.handleEvent({
-      type: 'message.complete', session_id: SID, payload: { text: 'Queued the next stage.' }
-    }))
+    await act(() =>
+      stream.handleEvent({
+        type: 'message.complete',
+        session_id: SID,
+        payload: { text: 'Queued the next stage.' }
+      })
+    )
 
     const replies = stream.state().messages.filter(message => message.role === 'assistant')
     expect(replies).toHaveLength(1)

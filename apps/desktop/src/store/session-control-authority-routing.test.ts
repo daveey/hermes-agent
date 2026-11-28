@@ -7,7 +7,13 @@ import { sessionsHost } from '@/sdk/sessions'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $gateway, setPrimaryGateway, setPrimaryGatewayConnection } from '@/store/gateway'
 import { $profiles } from '@/store/profile'
-import { $activeSessionId, $cronSessions, $messagingSessions, _resetSessionOwnerHintsForTests, setSessions } from '@/store/session'
+import {
+  $activeSessionId,
+  $cronSessions,
+  $messagingSessions,
+  _resetSessionOwnerHintsForTests,
+  setSessions
+} from '@/store/session'
 import { $sessionControlBySession, clearAllSessionControl, refreshSessionControl } from '@/store/session-control'
 import { $sessionTiles, clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import { $unavailableWorkSources, beginWorkSourceRead } from '@/store/session-work-source'
@@ -16,7 +22,6 @@ import { makeSessionInfo } from '@/test/session-info'
 
 const CONTROL = { goal: null, heartbeat: null, loop: null, revision: 'r1', updated_at: 1 }
 const DONE = { kind: 'done', source: 'derived', at: 1000 } as const
-
 
 describe('control source evidence at the real idle row hook (not status authority)', () => {
   const request = vi.fn(async () => ({ control: CONTROL }))
@@ -230,17 +235,29 @@ describe('control source evidence at the real idle row hook (not status authorit
     const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
     setSessions([row])
     publishSessionState('rt-next', createClientSessionState(row.id))
-    $sessionTiles.set([{ storedSessionId: row.id, runtimeId: 'rt-main', ownerRoute: { connectionId: 'local', profile: 'default' } }])
-    const reads = (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source => sessionsHost.beginWorkSourceRead({connectionId: 'local', profile: 'default', storedSessionId: row.id, source}))
+    $sessionTiles.set([
+      { storedSessionId: row.id, runtimeId: 'rt-main', ownerRoute: { connectionId: 'local', profile: 'default' } }
+    ])
+    const reads = (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source =>
+      sessionsHost.beginWorkSourceRead({ connectionId: 'local', profile: 'default', storedSessionId: row.id, source })
+    )
 
-    for (const read of reads) {sessionsHost.reportWorkSourceRead({...read, available: true})}
+    for (const read of reads) {
+      sessionsHost.reportWorkSourceRead({ ...read, available: true })
+    }
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
       expect(result.current).toBe(false)
-      act(() => { $sessionTiles.set([{ storedSessionId: row.id, runtimeId: 'rt-next', ownerRoute: { connectionId: 'local', profile: 'default' } }]) })
+      act(() => {
+        $sessionTiles.set([
+          { storedSessionId: row.id, runtimeId: 'rt-next', ownerRoute: { connectionId: 'local', profile: 'default' } }
+        ])
+      })
       expect(result.current).toBe(true)
-    } finally { unmount() }
+    } finally {
+      unmount()
+    }
   })
 
   it('a rebind between mirrored runtimes revokes cached and in-flight proof, ABA included, but not an unrelated row', () => {
@@ -441,7 +458,12 @@ describe('control source evidence at the real idle row hook (not status authorit
     try {
       expect(result.current).toBe(false)
       act(() => {
-        sessionsHost.beginWorkSourceRead({ connectionId: 'local', profile: 'default', storedSessionId: row.id, source: 'tasks' })
+        sessionsHost.beginWorkSourceRead({
+          connectionId: 'local',
+          profile: 'default',
+          storedSessionId: row.id,
+          source: 'tasks'
+        })
       })
       expect(result.current).toBe(true) // a pending current read still holds it
     } finally {

@@ -551,7 +551,9 @@ it('a new identical message never adopts an unconfirmed send; the restored draft
   const admitted = new Set<string>()
   let loseAck = true
   vi.mocked(requestGatewayForProfile).mockImplementation(async (_profile, method, params) => {
-    if (method !== 'prompt.submit') { throw new Error(`unexpected ${method}`) }
+    if (method !== 'prompt.submit') {
+      throw new Error(`unexpected ${method}`)
+    }
     const id = String((params as Record<string, unknown>).submission_id)
     const replay = admitted.has(id)
     admitted.add(id)
@@ -563,7 +565,10 @@ it('a new identical message never adopts an unconfirmed send; the restored draft
 
     return { admission_id: id, status: replay ? 'terminal' : 'started' }
   })
-  const ids = () => vi.mocked(requestGatewayForProfile).mock.calls.map(([, , params]) => String((params as Record<string, unknown>).submission_id))
+  const ids = () =>
+    vi
+      .mocked(requestGatewayForProfile)
+      .mock.calls.map(([, , params]) => String((params as Record<string, unknown>).submission_id))
   stashSessionDraft('stored-B', 'continue', [])
   seed()
 
@@ -674,7 +679,10 @@ const LOADING = '400: Chat model is still loading; retry when it is ready'
 
 // A hub whose session.create answers `onCreate(callNumber)` (throw to refuse) and whose prompt.submit
 // answers `onSubmit`.
-const mockHub = (onCreate: (call: number) => void, onSubmit: (call: number, params: Record<string, unknown>) => unknown) => {
+const mockHub = (
+  onCreate: (call: number) => void,
+  onSubmit: (call: number, params: Record<string, unknown>) => unknown
+) => {
   const calls = { create: 0, submit: 0, params: [] as Record<string, unknown>[] }
 
   vi.mocked(requestGatewayForAgent).mockImplementation(async (_connection, _profile, method, params) => {

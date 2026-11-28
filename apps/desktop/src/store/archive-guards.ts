@@ -103,7 +103,10 @@ export async function collectArchiveLinks(
 /** Core guard: the row's own Kanban counts (summed over its lineage by the
  *  backend, same numbers as the sidebar badge). `copy.value` renders the value
  *  so the caller owns the copy. */
-export function sessionKanbanArchiveLinks(session: SessionInfo | undefined, copy: ArchiveTaskCopy): ArchiveLinkedItem[] {
+export function sessionKanbanArchiveLinks(
+  session: SessionInfo | undefined,
+  copy: ArchiveTaskCopy
+): ArchiveLinkedItem[] {
   return kanbanArchiveLinks(session, {
     label: copy.archiveLinkedTasksLabel,
     unknown: copy.archiveLinkedTasksUnknown,
@@ -124,7 +127,8 @@ export function kanbanArchiveLinks(
 
   if (open + blocked === 0) {
     return hasFreshKanbanObservation(session) && !(session?.kanban_remote_stale ?? 0)
-      ? [] : [{ label: copy.label, value: copy.unknown }]
+      ? []
+      : [{ label: copy.label, value: copy.unknown }]
   }
 
   return [{ label: copy.label, value: copy.value(open, blocked) }]

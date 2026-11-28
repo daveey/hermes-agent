@@ -8,9 +8,11 @@ import { descriptorCustody, diagnosticJson } from './diagnostic-primitives'
 const ownDescriptor = Object.getOwnPropertyDescriptor
 const ownedDocument = () => document
 const ownedLocation = typeof window === 'undefined' ? null : window.location
-const locationHref = typeof window === 'undefined' ? undefined : Object.getOwnPropertyDescriptor(window.location, 'href')?.get
+const locationHref =
+  typeof window === 'undefined' ? undefined : Object.getOwnPropertyDescriptor(window.location, 'href')?.get
 const invoke = Reflect.apply
-const navigationHref = () => locationHref && ownedLocation ? invoke(locationHref, ownedLocation, []) as string : location.href
+const navigationHref = () =>
+  locationHref && ownedLocation ? (invoke(locationHref, ownedLocation, []) as string) : location.href
 
 import type { ByteIdentity, ServedAsset } from '@/sdk/loaded-assets'
 
@@ -62,102 +64,180 @@ interface Activation {
 }
 
 export function createSessionTasksIdentity() {
-const realm = randomUuid()
-let generation = 0
-let current: Activation | undefined
-let registering: Activation | undefined
+  const realm = randomUuid()
+  let generation = 0
+  let current: Activation | undefined
+  let registering: Activation | undefined
 
-function invalidate(activation: Activation, reason: string) { activation.reason = reason }
+  function invalidate(activation: Activation, reason: string) {
+    activation.reason = reason
+  }
 
-const navigate = () => { if (current) {invalidate(current, 'NAVIGATION_CHANGED')} }
+  const navigate = () => {
+    if (current) {
+      invalidate(current, 'NAVIGATION_CHANGED')
+    }
+  }
 
-if (typeof window !== 'undefined') {
-  for (const event of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) {window.addEventListener(event, navigate)}
-}
+  if (typeof window !== 'undefined') {
+    for (const event of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) {
+      window.addEventListener(event, navigate)
+    }
+  }
 
-function sameSurface(activation: Activation): boolean {
-  if (!activation.surface || !activation.surfaceCurrent) {return false}
-  const descriptor = ownDescriptor(window, '__sessionTasks')
+  function sameSurface(activation: Activation): boolean {
+    if (!activation.surface || !activation.surfaceCurrent) {
+      return false
+    }
+    const descriptor = ownDescriptor(window, '__sessionTasks')
 
-  return descriptor?.value === activation.surface && activation.surfaceCurrent()
-}
+    return descriptor?.value === activation.surface && activation.surfaceCurrent()
+  }
 
-function sessionTasksActivation(input: Input) {
-  const activation: Activation = { input, generation: ++generation, document, navigation: location.href, reason: 'REGISTRATION_PENDING' }
-
-  if (input.pluginId === 'session-tasks') {current = activation}
-  let called = false
-
-  const bind = (surface: object) => {
-    if (activation.reason === 'REENTRANT_REGISTRATION') {throw new Error('Reentrant diagnostic binding')}
-
-    if (registering !== activation) { invalidate(activation, 'OUTSIDE_REGISTRATION'); throw new Error('Session Tasks binding outside synchronous registration') }
-
-    if (called) { invalidate(activation, 'DUPLICATE_BINDING'); throw new Error('Session Tasks binding already supplied') }
-    called = true
-
-    if (input.pluginId !== 'session-tasks' || typeof surface !== 'object' || surface === null) {
-      invalidate(activation, 'INVALID_SURFACE'); throw new Error('Invalid Session Tasks binding')
+  function sessionTasksActivation(input: Input) {
+    const activation: Activation = {
+      input,
+      generation: ++generation,
+      document,
+      navigation: location.href,
+      reason: 'REGISTRATION_PENDING'
     }
 
-    activation.surface = surface
-    activation.surfaceCurrent = descriptorCustody(surface)
-  }
+    if (input.pluginId === 'session-tasks') {
+      current = activation
+    }
+    let called = false
 
-  return {
-    bind,
-    run<T>(run: () => T): T {
-      if (registering) {
-        invalidate(registering, 'REENTRANT_REGISTRATION'); invalidate(activation, 'REENTRANT_REGISTRATION')
+    const bind = (surface: object) => {
+      if (activation.reason === 'REENTRANT_REGISTRATION') {
+        throw new Error('Reentrant diagnostic binding')
       }
 
-      const previous = registering
-      registering = activation
+      if (registering !== activation) {
+        invalidate(activation, 'OUTSIDE_REGISTRATION')
+        throw new Error('Session Tasks binding outside synchronous registration')
+      }
 
-      try { return run() } finally { registering = previous }
-    },
-    settle() {
-      if (activation.reason !== 'REGISTRATION_PENDING') {return}
-      activation.reason = input.dependencyReason ?? (activation.surface ? 'MATCH' : 'MISSING_BINDING')
-    },
-    invalidate(reason = 'UNLOADED') { invalidate(activation, reason) }
+      if (called) {
+        invalidate(activation, 'DUPLICATE_BINDING')
+        throw new Error('Session Tasks binding already supplied')
+      }
+      called = true
+
+      if (input.pluginId !== 'session-tasks' || typeof surface !== 'object' || surface === null) {
+        invalidate(activation, 'INVALID_SURFACE')
+        throw new Error('Invalid Session Tasks binding')
+      }
+
+      activation.surface = surface
+      activation.surfaceCurrent = descriptorCustody(surface)
+    }
+
+    return {
+      bind,
+      run<T>(run: () => T): T {
+        if (registering) {
+          invalidate(registering, 'REENTRANT_REGISTRATION')
+          invalidate(activation, 'REENTRANT_REGISTRATION')
+        }
+
+        const previous = registering
+        registering = activation
+
+        try {
+          return run()
+        } finally {
+          registering = previous
+        }
+      },
+      settle() {
+        if (activation.reason !== 'REGISTRATION_PENDING') {
+          return
+        }
+        activation.reason = input.dependencyReason ?? (activation.surface ? 'MATCH' : 'MISSING_BINDING')
+      },
+      invalidate(reason = 'UNLOADED') {
+        invalidate(activation, reason)
+      }
+    }
   }
-}
 
-/** Synchronous and by-value: getters on the companion are never invoked. */
-function readSessionTasksLoadedIdentity(): SessionTasksLoadedIdentity {
-  const active = current
-  const zero = { sha256: '', byteLength: 0 }
+  /** Synchronous and by-value: getters on the companion are never invoked. */
+  function readSessionTasksLoadedIdentity(): SessionTasksLoadedIdentity {
+    const active = current
+    const zero = { sha256: '', byteLength: 0 }
 
-  if (!active) {return { schemaVersion:1, status:'NOT_READY', reason:'NOT_LOADED', pluginId:'session-tasks', source:{origin:'',path:null}, original:zero, rewritten:zero, activationGeneration:0, realm, navigation:location.href, dependencies:[], currentSurfaceMatches:false }}
+    if (!active) {
+      return {
+        schemaVersion: 1,
+        status: 'NOT_READY',
+        reason: 'NOT_LOADED',
+        pluginId: 'session-tasks',
+        source: { origin: '', path: null },
+        original: zero,
+        rewritten: zero,
+        activationGeneration: 0,
+        realm,
+        navigation: location.href,
+        dependencies: [],
+        currentSurfaceMatches: false
+      }
+    }
 
-  if (active.document !== ownedDocument() || active.navigation !== navigationHref()) {invalidate(active, 'NAVIGATION_CHANGED')}
-  const matches = sameSurface(active)
-  const reason = active.reason !== 'MATCH' ? active.reason : !active.input.sdkCurrent() ? 'SDK_CHANGED' : !matches ? 'SURFACE_CHANGED' : 'MATCH'
-  const dependencies: DependencyIdentity[] = []
+    if (active.document !== ownedDocument() || active.navigation !== navigationHref()) {
+      invalidate(active, 'NAVIGATION_CHANGED')
+    }
+    const matches = sameSurface(active)
+    const reason =
+      active.reason !== 'MATCH'
+        ? active.reason
+        : !active.input.sdkCurrent()
+          ? 'SDK_CHANGED'
+          : !matches
+            ? 'SURFACE_CHANGED'
+            : 'MATCH'
+    const dependencies: DependencyIdentity[] = []
 
-  for (let i = 0; i < active.input.dependencies.length; i++) {
-    const input = active.input.dependencies[i]
-    const servedAssets: ServedAsset[] = []
+    for (let i = 0; i < active.input.dependencies.length; i++) {
+      const input = active.input.dependencies[i]
+      const servedAssets: ServedAsset[] = []
 
-    for (let j = 0; j < input.servedAssets.length; j++) { servedAssets[j] = {...input.servedAssets[j]} }
-    dependencies[i] = {specifier:input.specifier, handle:input.handle, shimUrl:input.shimUrl, shim:{...input.shim}, servedAssets}
+      for (let j = 0; j < input.servedAssets.length; j++) {
+        servedAssets[j] = { ...input.servedAssets[j] }
+      }
+      dependencies[i] = {
+        specifier: input.specifier,
+        handle: input.handle,
+        shimUrl: input.shimUrl,
+        shim: { ...input.shim },
+        servedAssets
+      }
+    }
+
+    return {
+      schemaVersion: 1,
+      status: reason === 'MATCH' ? 'MATCH' : 'NOT_READY',
+      reason,
+      pluginId: active.input.pluginId,
+      source: { origin: active.input.origin, path: active.input.path ?? null },
+      original: { ...active.input.original },
+      rewritten: { ...active.input.rewritten },
+      activationGeneration: active.generation,
+      realm,
+      navigation: active.navigation,
+      dependencies,
+      currentSurfaceMatches: matches
+    }
+  }
+
+  /** Supported immutable ESM binding. Primitive return avoids then/toJSON host hooks. */
+  function readSessionTasksLoadedIdentityJson(): string {
+    return diagnosticJson(readSessionTasksLoadedIdentity())
   }
 
   return {
-    schemaVersion:1, status: reason === 'MATCH' ? 'MATCH' : 'NOT_READY', reason,
-    pluginId:active.input.pluginId, source:{origin:active.input.origin,path:active.input.path ?? null},
-    original:{...active.input.original}, rewritten:{...active.input.rewritten}, activationGeneration:active.generation,
-    realm, navigation:active.navigation,
-    dependencies,
-    currentSurfaceMatches:matches
+    activate: sessionTasksActivation,
+    read: readSessionTasksLoadedIdentity,
+    readJson: readSessionTasksLoadedIdentityJson
   }
-}
-
-/** Supported immutable ESM binding. Primitive return avoids then/toJSON host hooks. */
-function readSessionTasksLoadedIdentityJson(): string {
-  return diagnosticJson(readSessionTasksLoadedIdentity())
-}
-
-return { activate: sessionTasksActivation, read: readSessionTasksLoadedIdentity, readJson: readSessionTasksLoadedIdentityJson }
 }

@@ -1344,6 +1344,7 @@ describe('moveSessionToProject keeps the sidebar scope', () => {
     $projectTree.set(tree)
     $projectScope.set('p_src')
     moveHook = null
+
     const request = vi.fn(async (method: string) => {
       if (method === 'projects.tree') {
         return { active_id: null, projects: tree, scoped_session_ids: [] }
@@ -1361,6 +1362,7 @@ describe('moveSessionToProject keeps the sidebar scope', () => {
 
       return {}
     })
+
     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
   })
 

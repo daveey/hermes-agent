@@ -170,7 +170,11 @@ describe('(b) session-scoped RPCs go only to the owning gateway', () => {
   it('the store poller path (requestForOwnedSession) ignores a stale local tile route too', async () => {
     setSessions([makeSessionInfo({ connection_id: MACBOOK, id: MACBOOK_SESSION, profile: 'default' })])
     $sessionTiles.set([
-      { ownerRoute: { connectionId: 'local', profile: 'default' }, runtimeId: 'rt-mb', storedSessionId: MACBOOK_SESSION }
+      {
+        ownerRoute: { connectionId: 'local', profile: 'default' },
+        runtimeId: 'rt-mb',
+        storedSessionId: MACBOOK_SESSION
+      }
     ] as never)
 
     const gateways = mockGateways(handlers())
@@ -215,7 +219,11 @@ describe('(c) a not-found from the wrong gateway follows the owner once', () => 
     // The tile was saved with `local`; the MacBook hint is the only other
     // record. A runtime-id RPC answers 4001 ("not in memory") on local.
     $sessionTiles.set([
-      { ownerRoute: { connectionId: 'local', profile: 'default' }, runtimeId: 'rt-mb', storedSessionId: MACBOOK_SESSION }
+      {
+        ownerRoute: { connectionId: 'local', profile: 'default' },
+        runtimeId: 'rt-mb',
+        storedSessionId: MACBOOK_SESSION
+      }
     ] as never)
     setSessionOwnerHint(MACBOOK_SESSION, { connectionId: MACBOOK, profile: 'default' })
 

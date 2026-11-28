@@ -7,11 +7,7 @@ import { $activeGatewayProfile, $profiles } from '@/store/profile'
 import { $connection, $gatewayState, $sessions, setSessions } from '@/store/session'
 import { $sessionTiles, openSessionTile, reopenLastClosedTile } from '@/store/session-states'
 
-import {
-  sessionTileResumeFailure,
-  shouldResumeSessionTile,
-  startUnrestoredTileTitleBackfill,
-} from './session-tile'
+import { sessionTileResumeFailure, shouldResumeSessionTile, startUnrestoredTileTitleBackfill } from './session-tile'
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -60,8 +56,6 @@ describe('sessionTileResumeFailure', () => {
   it('does not overwrite a tile that rebound while the lookup was pending', () => {
     expect(sessionTileResumeFailure('session not found', true, false)).toBeUndefined()
   })
-
-
 })
 
 describe('startUnrestoredTileTitleBackfill (#94167)', () => {

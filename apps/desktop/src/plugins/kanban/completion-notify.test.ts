@@ -431,7 +431,10 @@ describe('terminal kinds beyond completed', () => {
     m.bindCompletionNotify(makeRest(() => 100) as never)
 
     const fired = await m.onKanbanEventsFrame('smoke', [
-      ev(101, 'blocked', { reason: 'Architecture choice settled; retain only existing primary portal authentication gate.', human_request: ASK })
+      ev(101, 'blocked', {
+        reason: 'Architecture choice settled; retain only existing primary portal authentication gate.',
+        human_request: ASK
+      })
     ])
 
     expect(fired).toBe(true)
@@ -458,7 +461,9 @@ describe('terminal kinds beyond completed', () => {
     m.bindCompletionNotify(makeRest(() => 100) as never)
 
     for (const [i, hr] of [undefined, null, {}, { action: '  ' }, { action: 7 }, '[1]', 'not json'].entries()) {
-      await m.onKanbanEventsFrame('smoke', [ev(101 + i, 'blocked', { reason: 'needs API key; gate settled', human_request: hr })])
+      await m.onKanbanEventsFrame('smoke', [
+        ev(101 + i, 'blocked', { reason: 'needs API key; gate settled', human_request: hr })
+      ])
       expect(lastNotify()).toMatchObject({
         kind: 'warning',
         title: 'Task paused',
@@ -564,10 +569,17 @@ describe('native OS door', () => {
     const m = await loadModule()
     m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os)
 
-    await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'gate settled', human_request: { action: 'Reply in chat with the budget.', why_human: 'Spend needs you.' } })])
+    await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', {
+        reason: 'gate settled',
+        human_request: { action: 'Reply in chat with the budget.', why_human: 'Spend needs you.' }
+      })
+    ])
 
     expect(os.notify).toHaveBeenCalledTimes(1)
-    expect(os.notify.mock.calls[0][0]).toMatchObject({ body: 'Reply in chat with the budget.\nWhy you: Spend needs you. · t101' })
+    expect(os.notify.mock.calls[0][0]).toMatchObject({
+      body: 'Reply in chat with the budget.\nWhy you: Spend needs you. · t101'
+    })
   })
 
   it('an os door that throws never breaks the toast or the frame result', async () => {
@@ -622,7 +634,9 @@ describe('quiet kinds', () => {
     const m = await loadModule()
     m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os, { toastless: ['blocked'] })
 
-    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'gate settled', human_request: { action: 'Reply in chat with the budget.' } })])
+    const fired = await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', { reason: 'gate settled', human_request: { action: 'Reply in chat with the budget.' } })
+    ])
     expect(fired).toBe(true)
     expect(hostMock.notify).not.toHaveBeenCalled()
     expect(os.notify).toHaveBeenCalledTimes(1)

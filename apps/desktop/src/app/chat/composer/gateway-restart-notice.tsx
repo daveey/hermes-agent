@@ -13,11 +13,24 @@ export function GatewayRestartNotice({ sessionId }: { sessionId?: string | null 
   const { t } = useI18n()
   const connectionId = (sessionId && getSessionOwnerHint(sessionId)?.connectionId) || ambientOwnerConnectionId()
 
-  return sessionResumeIsRestarting(sessionId, connectionId, pending)
-    ? <div className="text-xs text-muted-foreground" role="status">{t.composer.placeholderHubRestarting}</div>
-    : null
+  return sessionResumeIsRestarting(sessionId, connectionId, pending) ? (
+    <div className="text-xs text-muted-foreground" role="status">
+      {t.composer.placeholderHubRestarting}
+    </div>
+  ) : null
 }
 
-export function ComposerConnectionBadges({ sessionId, storedSessionId }: { sessionId: string | null; storedSessionId?: string | null }) {
-  return <><GatewayRestartNotice sessionId={storedSessionId ?? sessionId} /><ActionBadges sessionId={sessionId} /></>
+export function ComposerConnectionBadges({
+  sessionId,
+  storedSessionId
+}: {
+  sessionId: string | null
+  storedSessionId?: string | null
+}) {
+  return (
+    <>
+      <GatewayRestartNotice sessionId={storedSessionId ?? sessionId} />
+      <ActionBadges sessionId={sessionId} />
+    </>
+  )
 }

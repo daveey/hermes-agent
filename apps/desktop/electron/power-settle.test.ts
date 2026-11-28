@@ -171,7 +171,9 @@ describe('clock-gap wake (sleep without a powerMonitor event)', () => {
 describe('absorbFailure', () => {
   it('classifies connect-level failures only', () => {
     expect(isConnectFailure(timeout)).toBe(true)
-    expect(isConnectFailure(new Error('Remote backend "conn:hermes-hub::default" is down (dispatch probe failed)'))).toBe(true)
+    expect(
+      isConnectFailure(new Error('Remote backend "conn:hermes-hub::default" is down (dispatch probe failed)'))
+    ).toBe(true)
     expect(isConnectFailure(new Error('connect ECONNREFUSED 127.0.0.1:58232'))).toBe(true)
     expect(isConnectFailure(new Error('500: internal error'))).toBe(false)
   })
@@ -196,7 +198,9 @@ describe('absorbFailure', () => {
     gate.setLog(line => lines.push(line))
     gate.wake()
     tickFor(h, 20_000)
-    const down = new Error('Remote backend "conn:hermes-hub::default" is down (dispatch probe failed: Timed out connecting)')
+    const down = new Error(
+      'Remote backend "conn:hermes-hub::default" is down (dispatch probe failed: Timed out connecting)'
+    )
     expect(gate.absorbFailure(poll, down)).toBe(true)
     expect(lines).toEqual([])
     tickFor(h, POWER_RECONNECT_GRACE_MS)
@@ -217,7 +221,7 @@ describe('absorbFailure', () => {
 })
 
 describe('attachPowerSettle', () => {
-  it('starts an unref\'d clock ticker that drives observeClock', () => {
+  it("starts an unref'd clock ticker that drives observeClock", () => {
     const monitor = { on: () => undefined }
     const { gate, advance } = harness()
     const ticks: Array<{ fn: () => void; ms: number }> = []

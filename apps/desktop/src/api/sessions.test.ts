@@ -51,7 +51,9 @@ describe('session write reconnect safety', () => {
     const lostReply = new Error('socket hang up')
     vi.mocked(gatewayRpc.isUnroutedRestPath).mockImplementation(error => error === missing)
     hermesApi.mockImplementation(async request => {
-      if (!request.method) { throw missing }
+      if (!request.method) {
+        throw missing
+      }
       throw lostReply
     })
 
@@ -84,9 +86,10 @@ describe('session write reconnect safety', () => {
     })
 
     try {
-      const write = method === 'PATCH'
-        ? setSessionArchived(`budget-snapshot-${method}`, true)
-        : deleteSession(`budget-snapshot-${method}`)
+      const write =
+        method === 'PATCH'
+          ? setSessionArchived(`budget-snapshot-${method}`, true)
+          : deleteSession(`budget-snapshot-${method}`)
 
       const result = write.catch(error => error)
       await vi.runAllTimersAsync()
@@ -176,7 +179,9 @@ describe('deleteSession profile scoping', () => {
       method: 'DELETE',
       path: expect.stringContaining('/api/sessions/sess-3')
     })
-    expect((hermesApi.mock.calls.filter(([request]) => request.method)[0][0] as { path: string }).path).not.toContain('profile=')
+    expect((hermesApi.mock.calls.filter(([request]) => request.method)[0][0] as { path: string }).path).not.toContain(
+      'profile='
+    )
   })
 
   it('keeps an explicit local pin routed to the local pool', async () => {
@@ -265,7 +270,7 @@ describe('setSessionArchived profile scoping', () => {
     })
   })
 
-  it('sends a remote row\'s archive with the fence identity, read from ITS connection', async () => {
+  it("sends a remote row's archive with the fence identity, read from ITS connection", async () => {
     // Regression (hub row 20261028_224631_5ff53d): a pre-fence client PATCHed with no
     // request_id/expected_revision and the hub answered 409 client_upgrade_required, so
     // the archive never landed. The snapshot read and the PATCH must share the row's
@@ -279,7 +284,10 @@ describe('setSessionArchived profile scoping', () => {
     const read = calls.find(request => String(request.path).includes('/mutation-snapshot'))
     const patch = calls.find(request => request.method === 'PATCH')!
 
-    expect(read).toMatchObject({ connectionId: 'hermes-hub', path: expect.stringContaining('/api/sessions/sess-hub/mutation-snapshot') })
+    expect(read).toMatchObject({
+      connectionId: 'hermes-hub',
+      path: expect.stringContaining('/api/sessions/sess-hub/mutation-snapshot')
+    })
     expect(patch).toMatchObject({ connectionId: 'hermes-hub', method: 'PATCH', path: '/api/sessions/sess-hub' })
     expect(patch.body).toMatchObject({ archived: true, pinned: false, expected_revision: 7 })
     expect(typeof patch.body.request_id).toBe('string')
@@ -308,7 +316,9 @@ describe('setSessionArchived profile scoping', () => {
         }
 
         if (patches === 2) {
-          throw new Error('Remote backend "conn:hermes-hub::default" is down (socket hang up, 3s ago); reconnect in progress. Failing fast instead of waiting for a timeout.')
+          throw new Error(
+            'Remote backend "conn:hermes-hub::default" is down (socket hang up, 3s ago); reconnect in progress. Failing fast instead of waiting for a timeout.'
+          )
         }
 
         return { ok: true }
@@ -318,10 +328,14 @@ describe('setSessionArchived profile scoping', () => {
       await vi.advanceTimersByTimeAsync(5_000)
 
       await expect(archived).resolves.toEqual({ ok: true })
-      const sent = hermesApi.mock.calls.map(([request]) => request as Record<string, any>).filter(request => request.method === 'PATCH')
+      const sent = hermesApi.mock.calls
+        .map(([request]) => request as Record<string, any>)
+        .filter(request => request.method === 'PATCH')
       expect(sent).toHaveLength(3)
       expect(new Set(sent.map(request => request.body.request_id)).size).toBe(1)
-      expect(sent.every(request => request.connectionId === 'hermes-hub' && request.body.expected_revision === 7)).toBe(true)
+      expect(sent.every(request => request.connectionId === 'hermes-hub' && request.body.expected_revision === 7)).toBe(
+        true
+      )
     } finally {
       vi.useRealTimers()
     }
@@ -333,7 +347,9 @@ describe('setSessionArchived profile scoping', () => {
         return { exists: true, runtime_revision: 7, runtime_generation: 3 }
       }
 
-      throw new Error('409: {"detail":"client_upgrade_required: this app is out of sync (different versions) with the Hermes backend; update the app to edit sessions"}')
+      throw new Error(
+        '409: {"detail":"client_upgrade_required: this app is out of sync (different versions) with the Hermes backend; update the app to edit sessions"}'
+      )
     }) as never)
 
     await expect(setSessionArchived('sess-refused', true, 'default')).rejects.toThrow(/client_upgrade_required/)
@@ -405,7 +421,13 @@ describe('setSessionPinnedRemote / setSessionUnreadRemote profile scoping', () =
 
 describe('renameSession profile scoping', () => {
   it('carries the owning profile in the PATCH body and request', async () => {
-    hermesApi.mockResolvedValue({ ok: true, title: 'Prep Butler', exists: true, runtime_revision: 5, runtime_generation: 2 } as never)
+    hermesApi.mockResolvedValue({
+      ok: true,
+      title: 'Prep Butler',
+      exists: true,
+      runtime_revision: 5,
+      runtime_generation: 2
+    } as never)
 
     await renameSession('sess-r', 'Prep Butler', 'personal')
 
@@ -418,7 +440,13 @@ describe('renameSession profile scoping', () => {
   })
 
   it('falls back to the active request profile when the argument is omitted', async () => {
-    hermesApi.mockResolvedValue({ ok: true, title: 'Prep Butler', exists: true, runtime_revision: 5, runtime_generation: 2 } as never)
+    hermesApi.mockResolvedValue({
+      ok: true,
+      title: 'Prep Butler',
+      exists: true,
+      runtime_revision: 5,
+      runtime_generation: 2
+    } as never)
     vi.mocked(client.getApiRequestProfile).mockReturnValue('personal')
 
     await renameSession('sess-r2', 'Prep Butler')

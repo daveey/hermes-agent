@@ -6,16 +6,30 @@ import type { createRegistryRetirementClient } from './registry-retirement-http'
 
 function fixture() {
   const descriptor = { baseUrl: 'http://hub', token: 'synthetic' }
-  const primary = { process: null, connectionPromise: Promise.resolve({ baseUrl: 'http://local', token: 'synthetic-local' }) }
+  const primary = {
+    process: null,
+    connectionPromise: Promise.resolve({ baseUrl: 'http://local', token: 'synthetic-local' })
+  }
   const entry = { process: null, connectionPromise: Promise.resolve(descriptor) }
-  const state = { registryConnectionId: 'hub', primaryRegistryScope: false, spawnNonce: 'owned', remotePlatform: 'Linux' }
-  const pool = new Map([['default', primary], ['conn:hub::default', entry]])
+  const state = {
+    registryConnectionId: 'hub',
+    primaryRegistryScope: false,
+    spawnNonce: 'owned',
+    remotePlatform: 'Linux'
+  }
+  const pool = new Map([
+    ['default', primary],
+    ['conn:hub::default', entry]
+  ])
   const states = new Map([['conn:hub::default', state]])
   const gate = new ManagedConnectionUpdateGate()
 
-  const request = vi.fn<Parameters<typeof createRegistryRetirementClient<typeof descriptor>>[0]>(async (_descriptor, path, options) => path === '/api/ssh/ownership'
-    ? { ok: true, protocolVersion: 1, sshOwnerNonce: 'owned', runtimeIntact: false }
-    : { ok: true, idle: true, token: 'permit', action: options.body?.action })
+  const request = vi.fn<Parameters<typeof createRegistryRetirementClient<typeof descriptor>>[0]>(
+    async (_descriptor, path, options) =>
+      path === '/api/ssh/ownership'
+        ? { ok: true, protocolVersion: 1, sshOwnerNonce: 'owned', runtimeIntact: false }
+        : { ok: true, idle: true, token: 'permit', action: options.body?.action }
+  )
 
   const terminate = vi.fn(async () => {})
   const proveStopped = vi.fn(async () => false)
@@ -28,7 +42,14 @@ function fixture() {
   })
 
   const service = createRegistryReconnectService({
-    pool, states, gate, request, terminate, close, reopen, proveStopped,
+    pool,
+    states,
+    gate,
+    request,
+    terminate,
+    close,
+    reopen,
+    proveStopped,
     onCleanupError: vi.fn(),
     key: (id, profile) => `conn:${id}::${profile}`,
     isSsh: id => id === 'hub',
@@ -56,16 +77,22 @@ test.each(['stopped', 'replacement', 'live', 'unknown'] as const)('ambiguous com
   const target = f.service.target('hub', 'default')!
   const request = f.request.getMockImplementation()!
   f.request.mockImplementation(async (descriptor, path, options) => {
-    if (options.body?.action === 'commit') { throw new Error('response lost') }
+    if (options.body?.action === 'commit') {
+      throw new Error('response lost')
+    }
 
     return request(descriptor, path, options)
   })
   await expect(f.service.run(target)).rejects.toThrow('response lost')
   f.request.mockRejectedValue(new Error('HTTP offline'))
   f.proveStopped.mockImplementation(async () => {
-    if (verdict === 'unknown') { throw new Error('SSH offline') }
+    if (verdict === 'unknown') {
+      throw new Error('SSH offline')
+    }
 
-    if (verdict === 'replacement') { f.entry.connectionPromise = Promise.resolve({ baseUrl: 'http://replacement', token: 'new' }) }
+    if (verdict === 'replacement') {
+      f.entry.connectionPromise = Promise.resolve({ baseUrl: 'http://replacement', token: 'new' })
+    }
 
     return verdict !== 'live'
   })
@@ -93,7 +120,12 @@ test('a second profile cannot borrow a pending reconnect claim', async () => {
   const first = f.service.target('hub', 'default')!
   const second = f.service.target('hub', 'other')!
   let finish!: () => void
-  f.terminate.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+  f.terminate.mockImplementationOnce(
+    () =>
+      new Promise<void>(resolve => {
+        finish = resolve
+      })
+  )
   const running = f.service.run(first)
   await vi.waitFor(() => expect(f.terminate).toHaveBeenCalledOnce())
   expect(await f.service.run(second)).toEqual({ ok: false })
@@ -113,7 +145,9 @@ test('direct profile deletion cannot evict a resident during reconnect commit', 
   const request = f.request.getMockImplementation()!
   f.request.mockImplementation(async (descriptor, path, options) => {
     if (options.body?.action === 'commit') {
-      await new Promise<void>(resolve => { commit = resolve })
+      await new Promise<void>(resolve => {
+        commit = resolve
+      })
     }
 
     return request(descriptor, path, options)
@@ -134,7 +168,9 @@ test('a primary alias cannot acquire retirement authority', async () => {
   const f = fixture()
   f.state.primaryRegistryScope = true
   expect(f.service.target('hub', 'default')).toBeNull()
-  expect(await f.service.run({ connectionId: 'hub', profile: 'default', generation: 'invented' })).toEqual({ ok: false })
+  expect(await f.service.run({ connectionId: 'hub', profile: 'default', generation: 'invented' })).toEqual({
+    ok: false
+  })
   expect(f.request).not.toHaveBeenCalled()
   expect(f.terminate).not.toHaveBeenCalled()
 })
@@ -142,8 +178,11 @@ test('a primary alias cannot acquire retirement authority', async () => {
 test('busy backend releases the connection gate without tearing down its transport', async () => {
   const f = fixture()
   const target = f.service.target('hub', 'default')!
-  f.request.mockImplementation(async (_d, path) => path === '/api/ssh/ownership'
-    ? { ok: true, protocolVersion: 1, sshOwnerNonce: 'owned' } : { ok: false, idle: false })
+  f.request.mockImplementation(async (_d, path) =>
+    path === '/api/ssh/ownership'
+      ? { ok: true, protocolVersion: 1, sshOwnerNonce: 'owned' }
+      : { ok: false, idle: false }
+  )
   expect(await f.service.run(target)).toEqual({ ok: false })
   expect(f.terminate).not.toHaveBeenCalled()
   expect(f.close).not.toHaveBeenCalled()

@@ -6,7 +6,9 @@ import { makeSessionInfo } from '@/test/session-info'
 
 const state = vi.hoisted(() => ({ focus: vi.fn(), reveal: vi.fn(), note: vi.fn() }))
 vi.mock('@/components/pane-shell/tree/store', () => ({ revealTreePane: state.reveal, noteActiveTreeGroup: state.note }))
-vi.mock('@/i18n', () => ({ useI18n: () => ({ t: { sidebar: { nav: { 'new-session': 'New session', 'unsent-retry': 'Not sent – retry:' } } } }) }))
+vi.mock('@/i18n', () => ({
+  useI18n: () => ({ t: { sidebar: { nav: { 'new-session': 'New session', 'unsent-retry': 'Not sent – retry:' } } } })
+}))
 vi.mock('@/store/session-states', () => ({ $sessionTiles: atom([]), focusOpenSession: state.focus }))
 vi.mock('@/store/session-focus', () => ({ $focusedStoredSessionId: atom(null), $focusedSessionIsTile: atom(false) }))
 vi.mock('@/store/session', () => ({

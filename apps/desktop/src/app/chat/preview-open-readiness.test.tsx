@@ -49,7 +49,9 @@ beforeEach(() => {
     beginPreviewGuestActivity: async id => {
       const guest = attachedGuests.get(id)
 
-      if (!guest) {throw new Error(`Unknown preview guest ${id}`)}
+      if (!guest) {
+        throw new Error(`Unknown preview guest ${id}`)
+      }
       const token = ++nextActivityToken
       activityLeases.set(token, guest)
 
@@ -58,11 +60,15 @@ beforeEach(() => {
     executePreviewGuestScript: async (token, code) => {
       const guest = activityLeases.get(token)
 
-      if (!guest?.executeJavaScript) {throw new Error(`Unknown preview activity ${token}`)}
+      if (!guest?.executeJavaScript) {
+        throw new Error(`Unknown preview activity ${token}`)
+      }
 
       return guest.executeJavaScript(code)
     },
-    endPreviewGuestActivity: async token => { activityLeases.delete(token) }
+    endPreviewGuestActivity: async token => {
+      activityLeases.delete(token)
+    }
   } as Window['hermesDesktop']
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   vi.stubGlobal('CSS', { ...globalThis.CSS, escape: (value: string) => value })

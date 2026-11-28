@@ -85,7 +85,9 @@ describe('the turn timer covers the gaps, not just the streaming', () => {
   it('names a text-free model wait instead of painting only the blue square', () => {
     const { container } = render(<Harness messages={[userMessage('Inspect this'), assistant('waiting', [], true)]} />)
     expect(container.querySelector('[data-slot="aui_response-loading"]')?.textContent).toContain('Model thinking')
-    expect(container.querySelector('[data-slot="aui_response-loading"]')?.textContent).toContain('no reasoning streamed yet')
+    expect(container.querySelector('[data-slot="aui_response-loading"]')?.textContent).toContain(
+      'no reasoning streamed yet'
+    )
   })
 
   it('times a settled tail bubble while the session is still working', () => {

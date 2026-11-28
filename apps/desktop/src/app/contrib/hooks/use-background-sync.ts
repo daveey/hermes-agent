@@ -6,10 +6,7 @@ import {
   graftRefreshedTailOntoBackfill,
   olderPageReader
 } from '@/app/chat/transcript-backfill'
-import {
-  isSessionRecentlyInterrupted,
-  recentInterruptRemainingMs
-} from '@/app/session/hooks/use-prompt-actions/utils'
+import { isSessionRecentlyInterrupted, recentInterruptRemainingMs } from '@/app/session/hooks/use-prompt-actions/utils'
 import { sessionCreatedThisRun } from '@/app/session/hooks/use-session-actions/created-this-run'
 import { preserveLocalPendingTurnMessages } from '@/app/session/hooks/use-session-actions/utils'
 import { getLatestSessionMessages, type ProfileScope } from '@/hermes'
@@ -173,7 +170,11 @@ function tileRuntimeOwnsLiveState(runtimeId: string): boolean {
 
   return Boolean(
     state &&
-      (state.busy || state.awaitingResponse || state.needsInput || state.turnLive || stopAwaitsItsReceipt(state, runtimeId))
+    (state.busy ||
+      state.awaitingResponse ||
+      state.needsInput ||
+      state.turnLive ||
+      stopAwaitsItsReceipt(state, runtimeId))
   )
 }
 
@@ -880,8 +881,6 @@ export function rehydrateLiveSessionStatuses(
       // feeds the clock without claiming a spinner, since a lazy resume
       // builds with no turn at all.
       noteSessionEvent(runtimeSessionId)
-
-
     }
 
     if (!working) {
@@ -1150,10 +1149,13 @@ export function useBackgroundSync({
       const state = $sessionStates.get()[activeSessionId]
 
       if (stopHoldTimer === null && state && stopAwaitsItsReceipt(state, activeSessionId)) {
-        stopHoldTimer = setTimeout(() => {
-          stopHoldTimer = null
-          observe()
-        }, recentInterruptRemainingMs(activeSessionId) + 1)
+        stopHoldTimer = setTimeout(
+          () => {
+            stopHoldTimer = null
+            observe()
+          },
+          recentInterruptRemainingMs(activeSessionId) + 1
+        )
       }
     }
 
@@ -1548,13 +1550,7 @@ export function useBackgroundSync({
         window.clearTimeout(typingDeferTimer)
       }
     }
-  }, [
-    changeEventsAvailable,
-    gatewayState,
-    refreshSessions,
-    requestActiveTranscriptRefresh,
-    updateSessionState
-  ])
+  }, [changeEventsAvailable, gatewayState, refreshSessions, requestActiveTranscriptRefresh, updateSessionState])
 
   // Keyboard warmth for the deferral above: capture phase on window. Any
   // keydown in this renderer (composer, modal, settings) counts — conservative

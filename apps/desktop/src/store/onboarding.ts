@@ -1557,8 +1557,11 @@ async function localEndpointNeedsConfirm(profile?: ProfileScope) {
 
     // Only an explicitly empty authoritative response proves first run. Missing
     // fields, partial configuration and failed reads must never authorize a write.
-    const empty = typeof options?.model === 'string' && options.model.trim() === '' &&
-      typeof options?.provider === 'string' && options.provider.trim() === ''
+    const empty =
+      typeof options?.model === 'string' &&
+      options.model.trim() === '' &&
+      typeof options?.provider === 'string' &&
+      options.provider.trim() === ''
 
     return shouldDeferGlobalDefault(!empty)
   } catch {

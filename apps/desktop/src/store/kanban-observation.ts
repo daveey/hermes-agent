@@ -12,10 +12,17 @@ onMount($kanbanObservationTick, () => {
 })
 
 /** A successful empty read is evidence; an absent/expired stamp is not. */
-export function hasFreshKanbanObservation(session: Pick<SessionInfo, 'kanban_observed_at'> | undefined, after?: number): boolean {
+export function hasFreshKanbanObservation(
+  session: Pick<SessionInfo, 'kanban_observed_at'> | undefined,
+  after?: number
+): boolean {
   const observed = session?.kanban_observed_at
   const age = typeof observed === 'number' ? Date.now() / 1000 - observed : NaN
 
-  return Number.isFinite(age) && age >= 0 && age <= 180 &&
+  return (
+    Number.isFinite(age) &&
+    age >= 0 &&
+    age <= 180 &&
     (after === undefined || (typeof observed === 'number' && observed >= after))
+  )
 }

@@ -82,8 +82,13 @@ describe('sessionStatusStripe without a protocol', () => {
 
 describe('outcomeTooltip', () => {
   it('keeps stopped incomplete work and its evidence visible without an execution wait', () => {
-    const item = { kind: 'card', id: 'card:retained', state: 'retained', label: 'Stopped, retained and incomplete',
-      retained_stop: { reason: 'scope_stopped', episode_uid: 'stop-episode', evidence: ['acceptance remains unmet'] } }
+    const item = {
+      kind: 'card',
+      id: 'card:retained',
+      state: 'retained',
+      label: 'Stopped, retained and incomplete',
+      retained_stop: { reason: 'scope_stopped', episode_uid: 'stop-episode', evidence: ['acceptance remains unmet'] }
+    }
 
     const outcome = { kind: 'unresolved', reason: 'linked_work_retained', on: [item] }
 

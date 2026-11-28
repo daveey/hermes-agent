@@ -17,10 +17,14 @@ it('serializes blocking requests while nonblocking peers see a held lock', async
 
   const first = request.request('composer', async () => {
     order.push('first')
-    await new Promise<void>(resolve => { release = resolve })
+    await new Promise<void>(resolve => {
+      release = resolve
+    })
   })
 
-  const second = request.request('composer', () => { order.push('second') })
+  const second = request.request('composer', () => {
+    order.push('second')
+  })
   expect(await request.request('composer', { ifAvailable: true }, lock => lock)).toBeNull()
   expect(order).toEqual(['first'])
   release()

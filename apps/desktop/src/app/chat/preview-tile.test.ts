@@ -1,7 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-
-
 vi.mock('./right-rail/preview', () => ({
   PreviewTilePane: () => null
 }))

@@ -7,9 +7,7 @@ export const NO_REPLY_ERROR = 'Hermes ended this turn without a reply.'
  *  reply (store/session-no-reply.ts). The text also names it: a bubble can
  *  lose its descriptor on the way through a cache and keep only the string. */
 export function isNoReplyNotice(message: ChatMessage): boolean {
-  return (
-    message.role === 'assistant' && (message.errorSurface?.code === 'no_reply' || message.error === NO_REPLY_ERROR)
-  )
+  return message.role === 'assistant' && (message.errorSurface?.code === 'no_reply' || message.error === NO_REPLY_ERROR)
 }
 
 /** Only the synthetic notice is cleared; genuine provider/tool failures survive. */
@@ -27,7 +25,12 @@ export function completionNoticeBase(message: ChatMessage, text: string, error: 
   return text || error ? withoutNoReplyNotice(message) : message
 }
 
-export function completionSettlesErrorCard(message: ChatMessage, existingText: string, text: string, error: string | null): boolean {
+export function completionSettlesErrorCard(
+  message: ChatMessage,
+  existingText: string,
+  text: string,
+  error: string | null
+): boolean {
   return Boolean((isNoReplyNotice(message) && (text || error)) || (error && message.error && !existingText))
 }
 

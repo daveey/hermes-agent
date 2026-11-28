@@ -81,6 +81,7 @@ test('reports a missing captured tunnel without fencing or retiring a bystander'
   const logs: string[] = []
   let fences = 0
   let retired = 0
+
   const teardown = capturePrimarySshTeardown(
     { baseUrl: 'http://127.0.0.1:12345' },
     {
@@ -90,7 +91,9 @@ test('reports a missing captured tunnel without fencing or retiring a bystander'
         fences++
         await stop()
       },
-      teardown: async () => { retired++ }
+      teardown: async () => {
+        retired++
+      }
     }
   )
 

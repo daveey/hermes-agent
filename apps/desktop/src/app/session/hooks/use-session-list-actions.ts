@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 
 import { $apiRequestScope } from '@/api/client'
-import { getApiRequestConnection, getSession, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
+import {
+  getApiRequestConnection,
+  getSession,
+  listAllProfileSessions,
+  listSidebarSessions,
+  type SessionInfo
+} from '@/hermes'
 import { sameCronSignature } from '@/lib/session-signatures'
 import {
   isMessagingSource,
@@ -21,7 +27,12 @@ import {
   SIDEBAR_FILTERED_PAGE_SIZE,
   SIDEBAR_SESSIONS_PAGE_SIZE
 } from '@/store/layout'
-import { $sessionListFreshness, recordSessionListResult, sessionOwnerIsFresh, staleSessionOwners } from '@/store/offline-sessions'
+import {
+  $sessionListFreshness,
+  recordSessionListResult,
+  sessionOwnerIsFresh,
+  staleSessionOwners
+} from '@/store/offline-sessions'
 import { messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
 import {
   $messagingSessions,
@@ -75,25 +86,31 @@ function sidebarRequestConnection(): string | undefined {
 }
 
 function recordSidebarFailure(owns: () => boolean, connection: string | undefined, profile: string): void {
-  if (owns()) {recordSessionListResult($sessions.get(), [], connection, profile, [], true)}
+  if (owns()) {
+    recordSessionListResult($sessions.get(), [], connection, profile, [], true)
+  }
 }
 
-function recordSidebarFreshness(result: Awaited<ReturnType<typeof listSidebarSessions>>, connection: string | undefined, profile: string): void {
+function recordSidebarFreshness(
+  result: Awaited<ReturnType<typeof listSidebarSessions>>,
+  connection: string | undefined,
+  profile: string
+): void {
   const recents = result.recents
   const recentsErrors = recents.errors ?? result.errors
-          recordSessionListResult(
-            $sessions.get(),
-            recents.sessions ?? [],
-            connection,
-            profile,
-            [
-              ...(recentsErrors ?? []),
-              ...Object.entries(recents.profiles_failed ?? result.profiles_failed ?? {})
-                .filter(([, failure]) => failure.failed || failure.retry)
-                .map(([profile]) => ({ profile }))
-            ],
-            recents.failed === true || recents.retry === true
-          )
+  recordSessionListResult(
+    $sessions.get(),
+    recents.sessions ?? [],
+    connection,
+    profile,
+    [
+      ...(recentsErrors ?? []),
+      ...Object.entries(recents.profiles_failed ?? result.profiles_failed ?? {})
+        .filter(([, failure]) => failure.failed || failure.retry)
+        .map(([profile]) => ({ profile }))
+    ],
+    recents.failed === true || recents.retry === true
+  )
 
   // [daveey] Cold-start timing: the first live list this launch.
   if (recents.failed !== true && recents.retry !== true) {
@@ -431,23 +448,34 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
           const primaryPin = pinnedPrimaryGatewayConnectionId()
           result = await fetchPage()
 
-          if (!owns()) { return }
+          if (!owns()) {
+            return
+          }
 
-          if (gatewayActivationEpoch() !== activationEpoch) { continue }
+          if (gatewayActivationEpoch() !== activationEpoch) {
+            continue
+          }
 
           // Open/restored older rows survive paging, but otherwise their task
           // counts never refresh. Pin reads to the owner captured before await.
           const page = result.recents.sessions ?? []
 
-          const retained = mergeSessionPage($sessions.get(), page, sessionsToKeep())
-            .filter(row => !page.some(item => item.id === row.id &&
-              (item.profile ?? 'default') === (row.profile ?? 'default') &&
-              (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)))
+          const retained = mergeSessionPage($sessions.get(), page, sessionsToKeep()).filter(
+            row =>
+              !page.some(
+                item =>
+                  item.id === row.id &&
+                  (item.profile ?? 'default') === (row.profile ?? 'default') &&
+                  (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)
+              )
+          )
 
-          refreshed = await refreshRetainedKanban(retained, row => getSession(row.id, {
-            connectionId: row.connection_id ?? primaryPin,
-            profile: row.profile ?? 'default'
-          }))
+          refreshed = await refreshRetainedKanban(retained, row =>
+            getSession(row.id, {
+              connectionId: row.connection_id ?? primaryPin,
+              profile: row.profile ?? 'default'
+            })
+          )
         } while (owns() && gatewayActivationEpoch() !== activationEpoch)
 
         if (owns() && gatewayActivationEpoch() === activationEpoch) {
@@ -486,9 +514,12 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             // (a stale previous slice can still hold the doomed row through
             // the keep set once the tombstone prune has cleared membership).
             const observed = prev.map(row => {
-              const fresh = refreshed.find(item => item.id === row.id &&
-                (item.profile ?? 'default') === (row.profile ?? 'default') &&
-                (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection))
+              const fresh = refreshed.find(
+                item =>
+                  item.id === row.id &&
+                  (item.profile ?? 'default') === (row.profile ?? 'default') &&
+                  (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)
+              )
 
               return fresh ? withKanbanEvidence(row, fresh) : row
             })
@@ -662,9 +693,11 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       const sessionProfile = sidebarProfileForScope(profileScope)
       const wildcard = `${connection?.trim() || 'local'}/*`
 
-      const eligible = staleSessionOwners(state).some(owner =>
-        !owner.endsWith('/*') || (owner === wildcard &&
-          (sessionProfile === 'all' || !sessionOwnerIsFresh(connection, sessionProfile, state))))
+      const eligible = staleSessionOwners(state).some(
+        owner =>
+          !owner.endsWith('/*') ||
+          (owner === wildcard && (sessionProfile === 'all' || !sessionOwnerIsFresh(connection, sessionProfile, state)))
+      )
 
       if (!eligible) {
         attempt = 0

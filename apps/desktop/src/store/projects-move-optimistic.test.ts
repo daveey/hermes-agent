@@ -111,7 +111,12 @@ describe('moveSessionToProject shows the row in the destination at once', () => 
     const done = moveSessionToProject('s1', 'p_dest')
 
     expect($projectOwnerBySessionId.get().get('s1')).toBe('p_dest')
-    expect($projectTree.get().find(n => n.id === 'p_dest')?.previewSessions?.map(s => s.id)).toEqual(['s1'])
+    expect(
+      $projectTree
+        .get()
+        .find(n => n.id === 'p_dest')
+        ?.previewSessions?.map(s => s.id)
+    ).toEqual(['s1'])
     expect($projectTree.get().find(n => n.id === 'p_src')?.previewSessions).toEqual([])
     expect($sessions.get()[0].cwd).toBe('/repos/dest')
 

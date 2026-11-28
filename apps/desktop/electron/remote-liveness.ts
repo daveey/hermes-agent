@@ -565,7 +565,11 @@ export async function revalidateRemoteConnection<TConnection extends RemoteConne
     }
 
     const failure = tracker.recordFailure(baseUrl)
-    observe?.('probe_failure', { failures: failure.failures, should_reset: failure.shouldReset, duration_ms: performance.now() - started })
+    observe?.('probe_failure', {
+      failures: failure.failures,
+      should_reset: failure.shouldReset,
+      duration_ms: performance.now() - started
+    })
 
     if (!failure.shouldReset) {
       log(

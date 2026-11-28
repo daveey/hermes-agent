@@ -189,7 +189,11 @@ describe('prewarm at startup', () => {
 describe('recently used named profiles stay warm', () => {
   function store(now: () => number, initial: unknown = null) {
     const saved: any[] = []
-    const recent = new RecentRemoteProfiles({ load: () => initial, save: data => saved.push(structuredClone(data)), now })
+    const recent = new RecentRemoteProfiles({
+      load: () => initial,
+      save: data => saved.push(structuredClone(data)),
+      now
+    })
 
     return { recent, saved }
   }
@@ -259,16 +263,22 @@ describe('main.ts wiring', () => {
   it('starts the prewarmer when the app is ready and stops it on quit', () => {
     const ready = main.slice(main.indexOf('app.whenReady().then(() => {'))
     expect(ready.indexOf('void remotePrewarmer.start()')).toBeGreaterThan(0)
-    expect(main).toMatch(/minimizeToTray\.beginQuit\(\)\n\s+mainProcessLagWatchdog\.stop\(\)\n\s+remotePrewarmer\.stop\(\)/)
+    expect(main).toMatch(
+      /minimizeToTray\.beginQuit\(\)\n\s+mainProcessLagWatchdog\.stop\(\)\n\s+remotePrewarmer\.stop\(\)/
+    )
   })
 
   it('prewarms registry SSH connections through ensureRegistryBackend with a forced keepalive probe', () => {
     // Upstream retired spawn priorities with the local-backend pool (c63d465dbc2).
-    expect(main).toMatch(/ensureRegistryBackend\(connectionId, profile, '', \{ forceProbe, revalidationTrigger: 'prewarm' \}\)/)
+    expect(main).toMatch(
+      /ensureRegistryBackend\(connectionId, profile, '', \{ forceProbe, revalidationTrigger: 'prewarm' \}\)/
+    )
     expect(main).toMatch(/createRemoteWarmSet\(\{[^}]*readRegistry: readDesktopConnectionsRegistry,/)
     expect(main).toMatch(/new RemotePrewarmer\(\{\n\s+listTargets: remoteWarmSet\.listTargets,/)
     expect(warmSet).toMatch(/connection\.kind === 'ssh'/)
-    expect(warmSet).toMatch(/HERMES_DESKTOP_REMOTE_PREWARM === '0' \? \[\] : prewarmTargets\(sshConnectionIds\(\), recent\)/)
+    expect(warmSet).toMatch(
+      /HERMES_DESKTOP_REMOTE_PREWARM === '0' \? \[\] : prewarmTargets\(sshConnectionIds\(\), recent\)/
+    )
   })
 
   it('records a named profile only for a dial flagged as use (never a sweep, prewarm or passive call)', () => {
@@ -279,10 +289,14 @@ describe('main.ts wiring', () => {
   })
 
   it('pooled dispatch skips the probe from the shared answer ledger unless forced', () => {
-    expect(main).toMatch(/answers: remoteAnswerLedger,\n\s+skipWindowMs: opts\.forceProbe \? 0 : DISPATCH_PROBE_SKIP_WINDOW_MS/)
+    expect(main).toMatch(
+      /answers: remoteAnswerLedger,\n\s+skipWindowMs: opts\.forceProbe \? 0 : DISPATCH_PROBE_SKIP_WINDOW_MS/
+    )
     // noteRemoteAnswer moved to slow-link.ts (main.ts is over its line cap); fetchJsonForBackend still calls it on
     // every answer, and it still feeds the shared ledger first.
-    expect(main.match(/noteRemoteAnswer\(descriptor\.baseUrl, path, Date\.now\(\) - startedAt, rememberLog\)/g)).toHaveLength(2)
+    expect(
+      main.match(/noteRemoteAnswer\(descriptor\.baseUrl, path, Date\.now\(\) - startedAt, rememberLog\)/g)
+    ).toHaveLength(2)
     expect(readFileSync(join(__dirname, 'slow-link.ts'), 'utf8')).toMatch(
       /export function noteRemoteAnswer\(.*\): void \{\n\s+remoteAnswerLedger\.recordAnswer\(baseUrl\)/
     )

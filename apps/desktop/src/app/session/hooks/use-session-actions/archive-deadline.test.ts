@@ -26,18 +26,23 @@ afterEach(() => {
 })
 
 it('deducts successful ancestry time before the task request timeout', async () => {
-  const api = vi.fn(({ path, timeoutMs }: HermesApiRequest) => new Promise((resolve, reject) => {
-    if (path === '/api/sessions/deadline') {
-      setTimeout(() => resolve({ id: row.id }), 1_000)
-    } else {
-      setTimeout(() => reject(new Error('Timed out connecting to Hermes backend')), (timeoutMs ?? 0) + 1)
-    }
-  }))
+  const api = vi.fn(
+    ({ path, timeoutMs }: HermesApiRequest) =>
+      new Promise((resolve, reject) => {
+        if (path === '/api/sessions/deadline') {
+          setTimeout(() => resolve({ id: row.id }), 1_000)
+        } else {
+          setTimeout(() => reject(new Error('Timed out connecting to Hermes backend')), (timeoutMs ?? 0) + 1)
+        }
+      })
+  )
 
   vi.stubGlobal('hermesDesktop', { api })
 
-  const outcome = refreshArchiveTasks(row.id, row, 'work', { retryTransport: true, budgetMs: 5_000 })
-    .then(() => 'resolved', () => 'rejected')
+  const outcome = refreshArchiveTasks(row.id, row, 'work', { retryTransport: true, budgetMs: 5_000 }).then(
+    () => 'resolved',
+    () => 'rejected'
+  )
 
   await vi.advanceTimersByTimeAsync(6_000)
   expect(await outcome).toBe('rejected')
@@ -48,8 +53,10 @@ it('rejects the reconnect deadline even if a transport read never settles', asyn
   const api = vi.fn(() => new Promise(() => {}))
   vi.stubGlobal('hermesDesktop', { api })
 
-  const outcome = refreshArchiveTasks(row.id, row, 'work', { retryTransport: true, budgetMs: 125 })
-    .then(() => 'resolved', () => 'rejected')
+  const outcome = refreshArchiveTasks(row.id, row, 'work', { retryTransport: true, budgetMs: 125 }).then(
+    () => 'resolved',
+    () => 'rejected'
+  )
 
   await vi.advanceTimersByTimeAsync(375)
   expect(await outcome).toBe('rejected')
@@ -57,15 +64,19 @@ it('rejects the reconnect deadline even if a transport read never settles', asyn
 
 it('does not accept a task result arriving after the shared deadline', async () => {
   const api = vi.fn(({ path }: HermesApiRequest) => {
-    if (path === '/api/sessions/deadline') {return Promise.resolve({ id: row.id })}
+    if (path === '/api/sessions/deadline') {
+      return Promise.resolve({ id: row.id })
+    }
 
     return new Promise(resolve => setTimeout(() => resolve({ tasks: [] }), 5_001))
   })
 
   vi.stubGlobal('hermesDesktop', { api })
 
-  const outcome = refreshArchiveTasks(row.id, row, 'work', { retryTransport: true, budgetMs: 5_000 })
-    .then(() => 'resolved', () => 'rejected')
+  const outcome = refreshArchiveTasks(row.id, row, 'work', { retryTransport: true, budgetMs: 5_000 }).then(
+    () => 'resolved',
+    () => 'rejected'
+  )
 
   await vi.advanceTimersByTimeAsync(5_250)
   expect(await outcome).toBe('rejected')
@@ -76,12 +87,16 @@ it('keeps sequential transport read deadlines queued rather than offering Archiv
 
   const api = vi.fn(({ path, timeoutMs }: HermesApiRequest) => {
     if (path === '/api/sessions/deadline') {
-      if (++attempts < 9) {return Promise.reject(new Error('socket hang up'))}
+      if (++attempts < 9) {
+        return Promise.reject(new Error('socket hang up'))
+      }
 
       return new Promise(resolve => setTimeout(() => resolve({ id: row.id }), 1_000))
     }
 
-    return new Promise((_resolve, reject) => setTimeout(() => reject(new Error('Timed out connecting to Hermes backend')), (timeoutMs ?? 0) + 1))
+    return new Promise((_resolve, reject) =>
+      setTimeout(() => reject(new Error('Timed out connecting to Hermes backend')), (timeoutMs ?? 0) + 1)
+    )
   })
 
   vi.stubGlobal('hermesDesktop', { api })
@@ -90,7 +105,10 @@ it('keeps sequential transport read deadlines queued rather than offering Archiv
   await vi.advanceTimersByTimeAsync(61_000)
   const confirmation = $confirmRequest.get()
   expect(hidden.restore).not.toHaveBeenCalled()
-  $notifications.get().find(n => n.message === en.desktop.archiveQueued)?.action?.onClick()
+  $notifications
+    .get()
+    .find(n => n.message === en.desktop.archiveQueued)
+    ?.action?.onClick()
   expect(await outcome).toBe(false)
   expect(confirmation).toBeNull()
   expect(hidden.restore).toHaveBeenCalledOnce()

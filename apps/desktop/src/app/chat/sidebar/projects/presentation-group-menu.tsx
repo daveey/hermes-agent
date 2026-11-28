@@ -32,7 +32,9 @@ export function ProjectGroupMenu({
           onSelect={() => {
             ids.forEach(dismissAutoProject)
 
-            if (ids.length === group.members.length) {onExitScope?.()}
+            if (ids.length === group.members.length) {
+              onExitScope?.()
+            }
             notify({
               kind: 'success',
               message: p.hiddenFromSidebar,

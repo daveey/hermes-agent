@@ -12,13 +12,26 @@ import { routeBlobImportsToDataUrls } from './runtime-loader.test-helpers'
 vi.mock('@/sdk/loaded-assets', async original => {
   const actual = await original<typeof Assets>()
 
-  return { ...actual, readServedAssets: async () => [{ url: 'https://fixture.invalid/assets/sdk.js', ...await actual.identifyBytes('pinned SDK fixture transport') }] }
+  return {
+    ...actual,
+    readServedAssets: async () => [
+      { url: 'https://fixture.invalid/assets/sdk.js', ...(await actual.identifyBytes('pinned SDK fixture transport')) }
+    ]
+  }
 })
 const companion = readK01Companion()
 const load = () => loadRuntimePlugin(companion, 'session-tasks', { file: '/plugins/session-tasks/plugin.js' })
 let restore: () => void
-beforeEach(() => { restore = routeBlobImportsToDataUrls(); dropPlugin('session-tasks'); void setPluginEnabled('session-tasks', true) })
-afterEach(() => { unloadRuntimePlugin('session-tasks'); restore(); vi.restoreAllMocks() })
+beforeEach(() => {
+  restore = routeBlobImportsToDataUrls()
+  dropPlugin('session-tasks')
+  void setPluginEnabled('session-tasks', true)
+})
+afterEach(() => {
+  unloadRuntimePlugin('session-tasks')
+  restore()
+  vi.restoreAllMocks()
+})
 
 it.each(['before load', 'after admission'])('genuine nested SDK mutation %s refuses live identity', async when => {
   if (when === 'after admission') {
@@ -30,11 +43,17 @@ it.each(['before load', 'after admission'])('genuine nested SDK mutation %s refu
   let result: ReturnType<typeof readSessionTasksLoadedIdentity>
 
   try {
-    host.sessions.beginWorkSourceRead = (() => { throw new Error('foreign session method') }) as typeof original
+    host.sessions.beginWorkSourceRead = (() => {
+      throw new Error('foreign session method')
+    }) as typeof original
 
-    if (when === 'before load') { await load() }
+    if (when === 'before load') {
+      await load()
+    }
     result = readSessionTasksLoadedIdentity()
-  } finally { host.sessions.beginWorkSourceRead = original }
+  } finally {
+    host.sessions.beginWorkSourceRead = original
+  }
 
   expect(result!).toMatchObject({ status: 'NOT_READY', reason: 'SDK_CHANGED' })
 })
@@ -49,7 +68,9 @@ it('prototype every replacement cannot bless refresh=warm', async () => {
   try {
     Array.prototype.every = (() => true) as unknown as typeof original
     result = readSessionTasksLoadedIdentity()
-  } finally { Array.prototype.every = original }
+  } finally {
+    Array.prototype.every = original
+  }
 
   expect(result!).toMatchObject({ status: 'NOT_READY', reason: 'SURFACE_CHANGED' })
 })
@@ -58,24 +79,43 @@ it('primitive JSON diagnostic ignores inherited serialization and await hooks', 
   await load()
   const surface = Object.getOwnPropertyDescriptor(window, '__sessionTasks')!.value
   surface.refresh = surface.warm
-  const every = Array.prototype.every, map = Array.prototype.map, json = JSON.stringify
-  let hooks = 0, text = ''
+  const every = Array.prototype.every,
+    map = Array.prototype.map,
+    json = JSON.stringify
+  let hooks = 0,
+    text = ''
 
   try {
     Array.prototype.every = (() => true) as unknown as typeof every
-    Array.prototype.map = (() => { hooks++;
+    Array.prototype.map = (() => {
+      hooks++
 
- return [] }) as typeof map
-    Object.defineProperty(Object.prototype, 'toJSON', { configurable: true, value: () => { hooks++;
+      return []
+    }) as typeof map
+    Object.defineProperty(Object.prototype, 'toJSON', {
+      configurable: true,
+      value: () => {
+        hooks++
 
- return { status: 'MATCH' } } })
-    Object.defineProperty(Object.prototype, 'then', { configurable: true, value: () => { hooks++ } })
-    JSON.stringify = (() => { hooks++;
+        return { status: 'MATCH' }
+      }
+    })
+    Object.defineProperty(Object.prototype, 'then', {
+      configurable: true,
+      value: () => {
+        hooks++
+      }
+    })
+    JSON.stringify = (() => {
+      hooks++
 
- return 'forged' }) as typeof json
+      return 'forged'
+    }) as typeof json
     text = readSessionTasksLoadedIdentityJson()
   } finally {
-    Array.prototype.every = every; Array.prototype.map = map; JSON.stringify = json
+    Array.prototype.every = every
+    Array.prototype.map = map
+    JSON.stringify = json
     delete (Object.prototype as { toJSON?: unknown }).toJSON
     delete (Object.prototype as { then?: unknown }).then
   }
@@ -94,7 +134,9 @@ it('published SDK replacement is detected without invoking a foreign accessor', 
   try {
     Object.defineProperty(globalThis, '__HERMES_PLUGIN_SDK__', { get, configurable: true })
     text = readSessionTasksLoadedIdentityJson()
-  } finally { Object.defineProperty(globalThis, '__HERMES_PLUGIN_SDK__', original) }
+  } finally {
+    Object.defineProperty(globalThis, '__HERMES_PLUGIN_SDK__', original)
+  }
 
   expect(JSON.parse(text)).toMatchObject({ status: 'NOT_READY', reason: 'SDK_CHANGED' })
   expect(get).not.toHaveBeenCalled()
@@ -112,7 +154,9 @@ it('replacing the genuine exported host diagnostic does not replace the direct r
     host.diagnostics.readSessionTasksLoadedIdentity = () => old
     expect(host.diagnostics.readSessionTasksLoadedIdentity().status).toBe('MATCH')
     result = readSessionTasksLoadedIdentity()
-  } finally { host.diagnostics.readSessionTasksLoadedIdentity = original }
+  } finally {
+    host.diagnostics.readSessionTasksLoadedIdentity = original
+  }
 
   expect(result!.status).toBe('NOT_READY')
 })

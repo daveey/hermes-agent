@@ -17,7 +17,9 @@ export function recordDialFailure(
   error?: unknown
 ): void {
   // Auth rejection has its own ledger that already fails background callers fast.
-  if (error !== undefined && isGatewayReauthRequired(error)) {return}
+  if (error !== undefined && isGatewayReauthRequired(error)) {
+    return
+  }
   const previous = failures.get(entry.scope)
   failures.set(entry.scope, {
     at: Date.now(),

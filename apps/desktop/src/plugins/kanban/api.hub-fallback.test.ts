@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // the primary source, and a comment on a replica card becomes a hub request.
 
 const routed = vi.hoisted(() => ({ id: null as null | string }))
-const hub = vi.hoisted(() => ({ calls: [] as Array<{ path: string; opts: Record<string, unknown> }>, tasks: [] as unknown[] }))
+const hub = vi.hoisted(() => ({
+  calls: [] as Array<{ path: string; opts: Record<string, unknown> }>,
+  tasks: [] as unknown[]
+}))
 
 vi.mock('@/hermes', () => ({ setApiRequestProfile: vi.fn() }))
 vi.mock('@/store/gateway', async importOriginal => ({
@@ -171,7 +174,9 @@ describe('Kanban hub replica fallback', () => {
 
     await addComment('t_run', 'ping')
     expect(hub.calls.at(-1)).toMatchObject({
-      opts: { body: { action: 'comment', args: { text: 'ping' }, coll: 'tasks', gateway: 'mini', key: 'default/t_run' } },
+      opts: {
+        body: { action: 'comment', args: { text: 'ping' }, coll: 'tasks', gateway: 'mini', key: 'default/t_run' }
+      },
       path: '/request'
     })
 

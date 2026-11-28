@@ -1,4 +1,3 @@
-
 import { resolveSessionRpcOwner } from '@/app/contrib/wiring-routing'
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
 import { getSession } from '@/hermes'
@@ -737,7 +736,10 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
-    if (isOptimisticUser && optimisticUserAlreadyRepresented(message, liveOptimisticUsers, contentRefusedCounterparts)) {
+    if (
+      isOptimisticUser &&
+      optimisticUserAlreadyRepresented(message, liveOptimisticUsers, contentRefusedCounterparts)
+    ) {
       continue
     }
 
@@ -931,8 +933,11 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   // streamed when they were typed, before the output they redirected.
   // `correction_offsets` (assistant-text length at each accepted correction)
   // carries that boundary; older gateways omit it.
-  const { entries: inflightCorrectionEntries, texts: inflightCorrections, offsetsUsable: correctionOffsetsUsable } =
-    projectionCorrections(projection)
+  const {
+    entries: inflightCorrectionEntries,
+    texts: inflightCorrections,
+    offsetsUsable: correctionOffsetsUsable
+  } = projectionCorrections(projection)
 
   // A retained failed turn (the gateway keeps error snapshots replayable when
   // the terminal frame may have been lost to a disconnect) — surface the

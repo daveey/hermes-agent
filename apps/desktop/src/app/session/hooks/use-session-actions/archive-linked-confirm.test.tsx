@@ -130,7 +130,12 @@ describe('archiveSession linked-work confirmation', () => {
     await act(() => handle.archiveSession('s-1'))
 
     expect($confirmRequest.get()).toBeNull()
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' }, expect.any(Function))
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith(
+      's-1',
+      true,
+      { profile: 'default' },
+      expect.any(Function)
+    )
   })
 
   it('asks before archiving a chat with open Kanban tasks; Cancel keeps it', async () => {
@@ -156,22 +161,26 @@ describe('archiveSession linked-work confirmation', () => {
     expect($sessions.get().map(session => session.id)).toEqual(['s-1'])
   })
 
-  it.each([
-    { kanban_unknown: true },
-    { kanban_observed_at: undefined },
-    { kanban_observed_at: 1 }
-  ])('asks when remote task status is unknown despite zero known counts: %j', async evidence => {
-    setSessions([row({ ...evidence, kanban_active: 0, kanban_blocked: 0 })])
-    const handle = await mountHarness()
-    let done: Promise<void> | undefined
-    act(() => { done = handle.archiveSession('s-1') })
-    await waitFor(() => expect($confirmRequest.get()).not.toBeNull())
-    expect($confirmRequest.get()!.details).toEqual([
-      { label: 'Kanban tasks', value: 'Task status unavailable; work may still be unfinished.' }
-    ])
-    await act(async () => { settleConfirm(false); await done })
-    expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
-  })
+  it.each([{ kanban_unknown: true }, { kanban_observed_at: undefined }, { kanban_observed_at: 1 }])(
+    'asks when remote task status is unknown despite zero known counts: %j',
+    async evidence => {
+      setSessions([row({ ...evidence, kanban_active: 0, kanban_blocked: 0 })])
+      const handle = await mountHarness()
+      let done: Promise<void> | undefined
+      act(() => {
+        done = handle.archiveSession('s-1')
+      })
+      await waitFor(() => expect($confirmRequest.get()).not.toBeNull())
+      expect($confirmRequest.get()!.details).toEqual([
+        { label: 'Kanban tasks', value: 'Task status unavailable; work may still be unfinished.' }
+      ])
+      await act(async () => {
+        settleConfirm(false)
+        await done
+      })
+      expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
+    }
+  )
 
   it('archives after the user confirms', async () => {
     setSessions([row({ kanban_blocked: 1 })])
@@ -189,7 +198,12 @@ describe('archiveSession linked-work confirmation', () => {
       await done
     })
 
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' }, expect.any(Function))
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith(
+      's-1',
+      true,
+      { profile: 'default' },
+      expect.any(Function)
+    )
     expect($sessions.get()).toEqual([])
   })
 
@@ -360,10 +374,15 @@ describe('offline archive owner isolation', () => {
     const handle = await mountHarness()
     await act(() => handle.archiveSession('s-1', { selectedRow }))
     expect(hubRequest).not.toHaveBeenCalled()
-    expect(setSessionArchived).toHaveBeenCalledWith('s-1', true, { connectionId: 'mini', profile: 'work' }, expect.any(Function))
+    expect(setSessionArchived).toHaveBeenCalledWith(
+      's-1',
+      true,
+      { connectionId: 'mini', profile: 'work' },
+      expect.any(Function)
+    )
   })
   // Offline rows keep main's owner-scoped flow: no bare-id tombstone, no live-slice copy.
-  it('does not tombstone another owner\'s cached chat with the same id', async () => {
+  it("does not tombstone another owner's cached chat with the same id", async () => {
     const selectedRow = cached('cloud', 'work')
     const otherOwnerRow = cached('mini', 'personal')
     $offlineSessions.set([selectedRow, otherOwnerRow])
@@ -414,25 +433,27 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
   const api = vi.fn()
 
   // Mirrors main's hermes:api: the hub knows hub-1; the primary 404s.
-  const desktopApi = (hub: 'up' | 'down') => async ({ connectionId, path }: { connectionId?: string; path: string }) => {
-    if (connectionId !== 'hermes-hub') {
-      throw new Error('404: {"detail":"Session not found"}')
-    }
+  const desktopApi =
+    (hub: 'up' | 'down') =>
+    async ({ connectionId, path }: { connectionId?: string; path: string }) => {
+      if (connectionId !== 'hermes-hub') {
+        throw new Error('404: {"detail":"Session not found"}')
+      }
 
-    if (hub === 'down') {
-      throw new Error('Timed out connecting to Hermes backend after 2000ms')
-    }
+      if (hub === 'down') {
+        throw new Error('Timed out connecting to Hermes backend after 2000ms')
+      }
 
-    if (path === '/api/sessions/hub-1') {
-      return { id: 'hub-1', parent_session_id: null }
-    }
+      if (path === '/api/sessions/hub-1') {
+        return { id: 'hub-1', parent_session_id: null }
+      }
 
-    if (path.startsWith('/api/session-kanban-tasks?ids=hub-1')) {
-      return { tasks: [] }
-    }
+      if (path.startsWith('/api/session-kanban-tasks?ids=hub-1')) {
+        return { tasks: [] }
+      }
 
-    throw new Error(`unexpected ${path}`)
-  }
+      throw new Error(`unexpected ${path}`)
+    }
 
   // The session-tasks plugin's guard contract: read ancestry on the owner it
   // is handed (omitted = registry primary).
@@ -442,7 +463,12 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
 
       return []
     } catch {
-      return [{ label: 'Unverified work', value: 'Session ancestry unavailable; linked work or rented machines may still be active.' }]
+      return [
+        {
+          label: 'Unverified work',
+          value: 'Session ancestry unavailable; linked work or rented machines may still be active.'
+        }
+      ]
     }
   })
 
@@ -478,17 +504,25 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
   const hub = { connectionId: 'hermes-hub', profile: 'default' }
 
   it.each([
-    ['only the project tree lists it', () => $projectTree.set([{ previewSessions: [remoteRow()], repos: [] } as never])],
-    ['Recents holds an ownerless copy', () => {
-      setSessions([remoteRow({ connection_id: undefined })])
-      $projectTree.set([{ previewSessions: [remoteRow()], repos: [] } as never])
-    }],
+    [
+      'only the project tree lists it',
+      () => $projectTree.set([{ previewSessions: [remoteRow()], repos: [] } as never])
+    ],
+    [
+      'Recents holds an ownerless copy',
+      () => {
+        setSessions([remoteRow({ connection_id: undefined })])
+        $projectTree.set([{ previewSessions: [remoteRow()], repos: [] } as never])
+      }
+    ],
     ['no list has a row but its owner is remembered', () => setSessionOwnerHint('hub-1', hub)],
     // The sidebar paints the chat from the hub-sync replica (outside the first
     // Recents page, or while the hub's pooled backend reconnects) and no owner
     // hint was ever recorded on this Desktop.
-    ['only the sidebar hub-replica row lists it', () =>
-      $offlineSessions.set([remoteRow({ offline_cached: false, offline_gateway: 'hub', offline_version: 7 })])]
+    [
+      'only the sidebar hub-replica row lists it',
+      () => $offlineSessions.set([remoteRow({ offline_cached: false, offline_gateway: 'hub', offline_version: 7 })])
+    ]
   ])('archives an idle hub chat without a warning when %s', async (_case, seed) => {
     seed()
     api.mockImplementation(desktopApi('up'))
@@ -497,8 +531,15 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     await act(() => handle.archiveSession('hub-1'))
 
     expect($confirmRequest.get()).toBeNull()
-    expect(api.mock.calls.map(([request]) => request.connectionId)).toEqual(['hermes-hub', 'hermes-hub', 'hermes-hub', 'hermes-hub'])
-    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'hermes-hub', sessionId: 'hub-1' }))
+    expect(api.mock.calls.map(([request]) => request.connectionId)).toEqual([
+      'hermes-hub',
+      'hermes-hub',
+      'hermes-hub',
+      'hermes-hub'
+    ])
+    expect(ancestryGuard).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionId: 'hermes-hub', sessionId: 'hub-1' })
+    )
     expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, hub, expect.any(Function))
   })
 
@@ -562,7 +603,12 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     await act(() => handle.archiveSession('hub-1', { selectedRow }))
 
     expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local' }))
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, { connectionId: 'local', profile: 'default' }, expect.any(Function))
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith(
+      'hub-1',
+      true,
+      { connectionId: 'local', profile: 'default' },
+      expect.any(Function)
+    )
   })
 
   it('pins the invocation active profile for an unlisted unresolved ownerless chat in safety reads and PATCH', async () => {
@@ -570,19 +616,40 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     vi.mocked(getSession).mockRejectedValue(new Error('socket hang up'))
 
     let release: (value: unknown) => void = () => {}
-    api.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
-      .mockImplementation(async ({ path }) => path.includes('session-kanban-tasks') ? { tasks: [] } : { id: 'unlisted', archived: true })
+    api
+      .mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            release = resolve
+          })
+      )
+      .mockImplementation(async ({ path }) =>
+        path.includes('session-kanban-tasks') ? { tasks: [] } : { id: 'unlisted', archived: true }
+      )
     const handle = await mountHarness()
     let done: Promise<void> | undefined
-    act(() => { done = handle.archiveSession('unlisted') })
+    act(() => {
+      done = handle.archiveSession('unlisted')
+    })
     await waitFor(() => expect(api).toHaveBeenCalled())
     setRequestProfile('other')
-    await act(async () => { release({ id: 'unlisted' }); await done })
+    await act(async () => {
+      release({ id: 'unlisted' })
+      await done
+    })
     expect(api.mock.calls.map(([request]) => [request.connectionId, request.profile])).toEqual([
-      ['local', 'work'], ['local', 'work'], ['local', undefined], ['local', 'work']
+      ['local', 'work'],
+      ['local', 'work'],
+      ['local', undefined],
+      ['local', 'work']
     ])
     expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local', profile: 'work' }))
-    expect(setSessionArchived).toHaveBeenCalledWith('unlisted', true, { connectionId: 'local', profile: 'work' }, expect.any(Function))
+    expect(setSessionArchived).toHaveBeenCalledWith(
+      'unlisted',
+      true,
+      { connectionId: 'local', profile: 'work' },
+      expect.any(Function)
+    )
     setRequestProfile(null)
     vi.mocked(getSession).mockReset()
   })
@@ -591,16 +658,33 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     setRequestProfile('work')
 
     let rejectSession: (error: Error) => void = () => {}
-    vi.mocked(getSession).mockImplementation(() => new Promise((_resolve, reject) => { rejectSession = reject }))
-    api.mockImplementation(async ({ path }: { path: string }) => path.includes('session-kanban-tasks') ? { tasks: [] } : { id: 'unlisted', archived: true })
+    vi.mocked(getSession).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSession = reject
+        })
+    )
+    api.mockImplementation(async ({ path }: { path: string }) =>
+      path.includes('session-kanban-tasks') ? { tasks: [] } : { id: 'unlisted', archived: true }
+    )
     const handle = await mountHarness()
     let done: Promise<void> | undefined
-    act(() => { done = handle.archiveSession('unlisted') })
+    act(() => {
+      done = handle.archiveSession('unlisted')
+    })
     await waitFor(() => expect(getSession).toHaveBeenCalled())
     setRequestProfile('other')
-    await act(async () => { rejectSession(new Error('socket hang up')); await done })
+    await act(async () => {
+      rejectSession(new Error('socket hang up'))
+      await done
+    })
     expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local', profile: 'work' }))
-    expect(setSessionArchived).toHaveBeenCalledWith('unlisted', true, { connectionId: 'local', profile: 'work' }, expect.any(Function))
+    expect(setSessionArchived).toHaveBeenCalledWith(
+      'unlisted',
+      true,
+      { connectionId: 'local', profile: 'work' },
+      expect.any(Function)
+    )
     setRequestProfile(null)
     vi.mocked(getSession).mockReset()
   })
@@ -613,21 +697,31 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     const handle = await mountHarness()
     await act(() => handle.archiveSession('hub-1'))
     expect(api.mock.calls.map(([request]) => request.profile)).not.toContain('work')
-    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'hermes-hub', profile: 'default' }))
+    expect(ancestryGuard).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionId: 'hermes-hub', profile: 'default' })
+    )
     expect(setSessionArchived).toHaveBeenCalledWith('hub-1', true, hub, expect.any(Function))
     setRequestProfile(null)
     vi.mocked(getSession).mockReset()
   })
 
   it('writes to the resolved nondefault profile, not default, for an ownerless/profileless row', async () => {
-    const selectedRow = remoteRow({ connection_id: undefined, profile: undefined, kanban_observed_at: Date.now() / 1000 })
+    const selectedRow = remoteRow({
+      connection_id: undefined,
+      profile: undefined,
+      kanban_observed_at: Date.now() / 1000
+    })
     setSessions([selectedRow])
     vi.mocked(getSession).mockResolvedValueOnce({ ...selectedRow, profile: 'work' })
     api.mockImplementation(async () => ({ id: 'hub-1', archived: true }))
     const handle = await mountHarness()
     await act(() => handle.archiveSession('hub-1', { selectedRow }))
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true,
-      { connectionId: 'local', profile: 'work' }, expect.any(Function))
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith(
+      'hub-1',
+      true,
+      { connectionId: 'local', profile: 'work' },
+      expect.any(Function)
+    )
     expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local', profile: 'work' }))
   })
 })

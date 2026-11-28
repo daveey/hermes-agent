@@ -7,7 +7,13 @@ describe('bot wake timeout classification', () => {
     expect(isBotWakeTimeout(new Error("Timed out loading medicina's session history."))).toBe(true)
   })
 
-  it.each([null, 'Timed out loading history', { message: 'Timed out loading history' }, new Error('Disconnected'), new Error('Other: Timed out loading history')])('rejects unrelated failures: %s', error => {
+  it.each([
+    null,
+    'Timed out loading history',
+    { message: 'Timed out loading history' },
+    new Error('Disconnected'),
+    new Error('Other: Timed out loading history')
+  ])('rejects unrelated failures: %s', error => {
     expect(isBotWakeTimeout(error)).toBe(false)
   })
 })

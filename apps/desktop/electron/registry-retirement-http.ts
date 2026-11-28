@@ -18,14 +18,16 @@ type RequestJson<D> = (
  */
 export function createRegistryRetirementClient<D>(requestJson: RequestJson<D>) {
   async function request(descriptor: D, action: string, token?: string) {
-    return await requestJson(descriptor, '/api/health/retirement', {
-      method: 'POST', body: { action, ...(token ? { token } : {}) }, timeoutMs: 3000
-    }) as RetirementReply | null
+    return (await requestJson(descriptor, '/api/health/retirement', {
+      method: 'POST',
+      body: { action, ...(token ? { token } : {}) },
+      timeoutMs: 3000
+    })) as RetirementReply | null
   }
 
   return {
     proveOwned: async (descriptor: D, nonce: string): Promise<boolean> => {
-      const proof = await requestJson(descriptor, '/api/ssh/ownership', { timeoutMs: 3000 }) as RetirementReply | null
+      const proof = (await requestJson(descriptor, '/api/ssh/ownership', { timeoutMs: 3000 })) as RetirementReply | null
 
       // runtimeIntact is deliberately NOT a prerequisite for retirement. A
       // deleted managed Python runtime is precisely what reconnect repairs.
@@ -35,7 +37,8 @@ export function createRegistryRetirementClient<D>(requestJson: RequestJson<D>) {
       const reply = await request(descriptor, 'prepare')
 
       return reply?.ok === true && reply.idle === true && typeof reply.token === 'string' && reply.token
-        ? reply.token : null
+        ? reply.token
+        : null
     },
     commit: async (descriptor: D, token: string): Promise<boolean> => {
       const reply = await request(descriptor, 'commit', token)

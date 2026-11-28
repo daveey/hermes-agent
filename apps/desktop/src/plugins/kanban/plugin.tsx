@@ -114,11 +114,23 @@ const plugin: HermesPlugin = {
     // [daveey] window.__hermesKanbanOpenTask(id, board?, gateway?) for disk plugins.
     ctx.onDispose(installOpenTaskHook({ navigate: path => host.navigate(path), rememberOwner: rememberTaskOwner }))
     // All existing intent producers (Blocked, notification Open, and New task) win over a card set.
-    ctx.onDispose($openTaskRequest.listen(request => { if (request) { $cardSet.set(null) } }))
-    ctx.onDispose($newTaskLane.listen(lane => { if (lane) { $cardSet.set(null) } }))
+    ctx.onDispose(
+      $openTaskRequest.listen(request => {
+        if (request) {
+          $cardSet.set(null)
+        }
+      })
+    )
+    ctx.onDispose(
+      $newTaskLane.listen(lane => {
+        if (lane) {
+          $cardSet.set(null)
+        }
+      })
+    )
     ctx.onDispose(installCardSetHook({ navigate: path => host.navigate(path) }))
     ctx.onDispose(() => $cardSet.set(null))
-    const BoardPage = () => useValue($cardSet) ? <CardSetBoard rest={ctx.rest} /> : <KanbanBoardPage />
+    const BoardPage = () => (useValue($cardSet) ? <CardSetBoard rest={ctx.rest} /> : <KanbanBoardPage />)
 
     $blockedSectionOpen.set(ctx.storage.get('blockedSectionOpen', true))
     ctx.onDispose($blockedSectionOpen.listen(value => ctx.storage.set('blockedSectionOpen', value)))

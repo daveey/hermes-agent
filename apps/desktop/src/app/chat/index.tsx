@@ -485,9 +485,11 @@ export const ChatView = memo(function ChatView(props: ChatViewProps) {
 
 function useTranscriptIds(view: ReturnType<typeof useSessionView>) {
   const activeSessionId = useStore(view.$runtimeId)
+
   const transcriptStoredSessionId = useStoreSelector($sessionStates, states =>
     activeSessionId ? (states[activeSessionId]?.storedSessionId ?? null) : null
   )
+
   const storedId = useStore(view.$storedId)
 
   return [activeSessionId, transcriptStoredSessionId, storedId] as const

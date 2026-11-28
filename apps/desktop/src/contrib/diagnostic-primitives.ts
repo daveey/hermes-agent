@@ -9,11 +9,18 @@ const array = Array.isArray
 const stringify = JSON.stringify
 const flags = ['configurable', 'enumerable', 'writable', 'value', 'get', 'set'] as const
 
-export function descriptorMatches(before: PropertyDescriptor | undefined, after: PropertyDescriptor | undefined): boolean {
-  if (!before || !after) { return before === after }
+export function descriptorMatches(
+  before: PropertyDescriptor | undefined,
+  after: PropertyDescriptor | undefined
+): boolean {
+  if (!before || !after) {
+    return before === after
+  }
 
   for (let i = 0; i < flags.length; i++) {
-    if (!same(descriptor(before, flags[i])?.value, descriptor(after, flags[i])?.value)) { return false }
+    if (!same(descriptor(before, flags[i])?.value, descriptor(after, flags[i])?.value)) {
+      return false
+    }
   }
 
   return true
@@ -25,12 +32,16 @@ export function descriptorCustody(target: object, selected?: readonly PropertyKe
   const before = descriptors(target)
 
   return () => {
-    if (!selected && keys(target).length !== names.length) { return false }
+    if (!selected && keys(target).length !== names.length) {
+      return false
+    }
 
     for (let i = 0; i < names.length; i++) {
       const name = names[i]
 
-      if (!descriptorMatches(descriptor(before, name)?.value, descriptor(target, name))) { return false }
+      if (!descriptorMatches(descriptor(before, name)?.value, descriptor(target, name))) {
+        return false
+      }
     }
 
     return true
@@ -39,17 +50,23 @@ export function descriptorCustody(target: object, selected?: readonly PropertyKe
 
 /** No inherited then/toJSON or array prototype hooks participate in transport. */
 function safeValue(value: unknown): unknown {
-  if (value === null || typeof value !== 'object') { return value }
+  if (value === null || typeof value !== 'object') {
+    return value
+  }
   const out = (array(value) ? setPrototype([], null) : create(null)) as Record<PropertyKey, unknown>
   const names = keys(value)
 
   for (let i = 0; i < names.length; i++) {
     const name = names[i]
 
-    if (name === 'length' && array(value)) { continue }
+    if (name === 'length' && array(value)) {
+      continue
+    }
     const own = descriptor(value, name)
 
-    if (own && 'value' in own) { out[name] = safeValue(own.value) }
+    if (own && 'value' in own) {
+      out[name] = safeValue(own.value)
+    }
   }
 
   return out

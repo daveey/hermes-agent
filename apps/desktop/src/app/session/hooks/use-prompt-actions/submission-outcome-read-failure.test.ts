@@ -11,7 +11,13 @@ vi.mock('./prepared-submissions', async importOriginal => {
   return { ...actual, readPreparedSubmission: vi.fn(actual.readPreparedSubmission) }
 })
 
-const entry = (): PreparedSubmission => ({ id: 'sub-1', owner: null as never, attachments: [], text: 'hello', params: {} })
+const entry = (): PreparedSubmission => ({
+  id: 'sub-1',
+  owner: null as never,
+  attachments: [],
+  text: 'hello',
+  params: {}
+})
 const definite = () => true
 
 beforeEach(() => clearStoredJournal())
@@ -20,7 +26,10 @@ describe('the in-flight write when the journal cannot be read', () => {
   it('keeps an earlier unknown attempt from the retained entry it holds, so a later abort stays unknown', async () => {
     const first = entry()
     await writeInFlightSubmission('k', first)
-    await submissionFailed('k', first, new Error('request timed out'), { definite: () => false, replayUncertain: false })
+    await submissionFailed('k', first, new Error('request timed out'), {
+      definite: () => false,
+      replayUncertain: false
+    })
 
     // The retry holds the retained entry as adopted; reading the journal again now fails.
     const retry = { ...storedJournal().k }

@@ -209,9 +209,8 @@ function ownerForEntry(entry: Tracked): QualifiedWorkSourceOwner | undefined {
   const owners = candidateOwners(entry.storedSessionId)
 
   return (
-    owners.find(
-      owner => owner?.connectionId === entry.owner.connectionId && owner?.profile === entry.owner.profile
-    ) ?? owners[0]
+    owners.find(owner => owner?.connectionId === entry.owner.connectionId && owner?.profile === entry.owner.profile) ??
+    owners[0]
   )
 }
 
@@ -286,7 +285,9 @@ function rebuildRuntimeIndex(): void {
     }
   }
 
-  runtimeIndex = new Map([...index].map(([key, values]) => [key, JSON.stringify(values.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))]))
+  runtimeIndex = new Map(
+    [...index].map(([key, values]) => [key, JSON.stringify(values.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))])
+  )
 }
 
 function syncTracked(): void {

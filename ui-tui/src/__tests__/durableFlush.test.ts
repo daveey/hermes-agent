@@ -19,7 +19,12 @@ const fsyncs = vi.hoisted(() => [] as number[])
 vi.mock('node:fs', async importOriginal => {
   const actual = await importOriginal<typeof Fs>()
 
-  return { ...actual, fsyncSync: vi.fn((fd: number) => { fsyncs.push(fd) }) }
+  return {
+    ...actual,
+    fsyncSync: vi.fn((fd: number) => {
+      fsyncs.push(fd)
+    })
+  }
 })
 
 const homes: string[] = []
@@ -29,7 +34,9 @@ afterEach(() => {
   vi.mocked(flushFileHandle).mockReset()
   fsyncs.length = 0
 
-  for (const home of homes.splice(0)) { rmSync(home, { recursive: true, force: true }) }
+  for (const home of homes.splice(0)) {
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 const freshHome = () => {
@@ -39,10 +46,14 @@ const freshHome = () => {
   return home
 }
 
-const item = (home: string) => ({
-  submissionId: '00000000-0000-4000-8000-000000000001', text: 'hello', display: 'hello', createdAt: 1,
-  destination: { sid: 'S1', storedSid: 'stored', profile: 'default', profileHome: home }
-}) as any
+const item = (home: string) =>
+  ({
+    submissionId: '00000000-0000-4000-8000-000000000001',
+    text: 'hello',
+    display: 'hello',
+    createdAt: 1,
+    destination: { sid: 'S1', storedSid: 'stored', profile: 'default', profileHome: home }
+  }) as any
 
 it('flushes the complete temporary record before the rename and the directory after it', () => {
   const home = freshHome()
@@ -86,7 +97,10 @@ it('flushes staged image bytes before handing out their path', async () => {
   const home = freshHome()
   vi.stubEnv('HERMES_TUI_GATEWAY_URL', '')
   const source = join(home, 'shot.png')
-  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nL8AAAAASUVORK5CYII=', 'base64')
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nL8AAAAASUVORK5CYII=',
+    'base64'
+  )
   const { writeFileSync } = await vi.importActual<typeof Fs>('node:fs')
   writeFileSync(source, png)
 
@@ -98,7 +112,9 @@ it('flushes staged image bytes before handing out their path', async () => {
     const staged = await stageImagePath(source, {} as any, { sid: 'S1', profile: 'default', profileHome: home } as any)
     expect(flushFileHandle).toHaveBeenCalledTimes(1)
     expect(readFileSync(staged.path)).toEqual(png)
-  } finally { vi.unstubAllEnvs() }
+  } finally {
+    vi.unstubAllEnvs()
+  }
 })
 
 it('the real module fsyncs the file descriptor and the directory', async () => {
@@ -107,7 +123,11 @@ it('the real module fsyncs the file descriptor and the directory', async () => {
   const { openSync, closeSync } = await vi.importActual<typeof Fs>('node:fs')
   const fd = openSync(join(home, 'record'), 'w')
 
-  try { real.flushFileSync(fd) } finally { closeSync(fd) }
+  try {
+    real.flushFileSync(fd)
+  } finally {
+    closeSync(fd)
+  }
   expect(fsyncs).toEqual([fd])
 
   real.flushDirectorySync(home)

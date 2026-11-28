@@ -36,9 +36,15 @@ export async function commitArchive(commit: ArchiveCommit): Promise<boolean> {
   try {
     let sends = 0
 
-    await archiveDrainWrite(storedSessionId, copy, () => commit.trace
-      ? setSessionArchived(storedSessionId, true, owner, () => commit.trace?.(`patch-sent n=${++sends}`))
-      : setSessionArchived(storedSessionId, true, owner), commit.trace)
+    await archiveDrainWrite(
+      storedSessionId,
+      copy,
+      () =>
+        commit.trace
+          ? setSessionArchived(storedSessionId, true, owner, () => commit.trace?.(`patch-sent n=${++sends}`))
+          : setSessionArchived(storedSessionId, true, owner),
+      commit.trace
+    )
 
     // A write ACK alone is not archived=true evidence. Use the same pinned
     // owner and the real IPC read path. Failed verification never replays a
@@ -46,10 +52,20 @@ export async function commitArchive(commit: ArchiveCommit): Promise<boolean> {
     // Diagnostic-only: don't hold success/optimistic-hide release behind a slow GET.
     if (commit.trace) {
       const scope = owner && typeof owner === 'object' ? owner : { profile: owner }
-      void Promise.resolve().then(() => hermesApiAs<{ id: string; archived?: boolean | number }>({ connectionId: scope.connectionId ?? null, profile: scope.profile ?? null },
-        { path: `/api/sessions/${encodeURIComponent(storedSessionId)}`, timeoutMs: 6_000 }))
-        .then(row => commit.trace?.(row.id === storedSessionId && (row.archived === true || row.archived === 1)
-          ? 'committed' : 'verification-pending:not-archived'))
+      void Promise.resolve()
+        .then(() =>
+          hermesApiAs<{ id: string; archived?: boolean | number }>(
+            { connectionId: scope.connectionId ?? null, profile: scope.profile ?? null },
+            { path: `/api/sessions/${encodeURIComponent(storedSessionId)}`, timeoutMs: 6_000 }
+          )
+        )
+        .then(row =>
+          commit.trace?.(
+            row.id === storedSessionId && (row.archived === true || row.archived === 1)
+              ? 'committed'
+              : 'verification-pending:not-archived'
+          )
+        )
         .catch(() => commit.trace?.('verification-pending:read-failed'))
     }
 
@@ -58,8 +74,16 @@ export async function commitArchive(commit: ArchiveCommit): Promise<boolean> {
     commit.trace?.(`failed:${String(err)}`)
     hidden.restore()
     notifyError(err, copy.archiveFailed, {
-      action: sessionWriteRetryAction(err, commit.retryLabel, () => void commitArchive({ ...commit,
-        trace: commit.trace ? startArchiveTrace(storedSessionId) : undefined, hidden: commit.rehide() })),
+      action: sessionWriteRetryAction(
+        err,
+        commit.retryLabel,
+        () =>
+          void commitArchive({
+            ...commit,
+            trace: commit.trace ? startArchiveTrace(storedSessionId) : undefined,
+            hidden: commit.rehide()
+          })
+      ),
       id: `archive-failed:${storedSessionId}`
     })
 

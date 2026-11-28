@@ -267,7 +267,9 @@ export const ResponseLoadingIndicator: FC = () => {
         <WaitHint hint={hint} />
       ) : localLoad ? (
         <ProgressHint label={t.assistant.thread.loadingLocalModel(localLoad.model)} percent={localLoad.percent} />
-      ) : <HintText>{t.assistant.thread.modelThinking}</HintText>}
+      ) : (
+        <HintText>{t.assistant.thread.modelThinking}</HintText>
+      )}
       <ActivityTimerText aria-hidden={true} seconds={elapsed} />
     </StatusRow>
   )
@@ -343,7 +345,9 @@ const TurnActivityRow: FC<TurnActivityRowProps> = ({ active, elapsed, hint, loca
             <WaitHint hint={hint} />
           ) : localLoad ? (
             <ProgressHint label={t.assistant.thread.loadingLocalModel(localLoad.model)} percent={localLoad.percent} />
-          ) : <HintText>{t.assistant.thread.loadingResponse}</HintText>}
+          ) : (
+            <HintText>{t.assistant.thread.loadingResponse}</HintText>
+          )}
           <ActivityTimerText aria-hidden={true} seconds={elapsed} />
         </>
       )}

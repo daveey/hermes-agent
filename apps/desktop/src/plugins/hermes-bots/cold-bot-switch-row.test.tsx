@@ -51,7 +51,9 @@ it('spins the pending target row without stealing the highlight', () => {
   const [alphaRow, bravoRow] = screen.getAllByRole('button')
 
   expect(bravoRow.getAttribute('aria-busy')).toBe('true')
-  expect(bravoRow.querySelector('[role="status"][aria-label="Opening chat…"]')?.getAttribute('aria-label')).toBe('Opening chat…')
+  expect(bravoRow.querySelector('[role="status"][aria-label="Opening chat…"]')?.getAttribute('aria-label')).toBe(
+    'Opening chat…'
+  )
   expect(alphaRow.getAttribute('aria-busy')).not.toBe('true')
   expect(alphaRow.querySelector('[role="status"][aria-label="Opening chat…"]')).toBeNull()
   expect(alphaRow.querySelector('[data-session-status-dot]')?.getAttribute('data-session-status-dot')).toBe('attention')

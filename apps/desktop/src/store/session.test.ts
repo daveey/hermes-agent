@@ -1796,7 +1796,10 @@ describe('owner-qualified session identity (same id on two gateways)', () => {
   const owned = (gateway: string, over: Partial<SessionInfo> = {}) =>
     session({
       id: 'kanban_owner_terminal',
-      outcome: { kind: 'done', status: { identity: { gateway, owner_epoch: 'e', profile: 'default', session_id: 'kanban_owner_terminal' } } },
+      outcome: {
+        kind: 'done',
+        status: { identity: { gateway, owner_epoch: 'e', profile: 'default', session_id: 'kanban_owner_terminal' } }
+      },
       profile: 'default',
       ...over
     })
@@ -1819,14 +1822,16 @@ describe('owner-qualified session identity (same id on two gateways)', () => {
     const a = owned('gw-a', { connection_id: 'conn-a' })
     const b = owned('gw-b', { connection_id: 'conn-b' })
 
-    expect(mergeSessionPage([a, b], [b], ['kanban_owner_terminal']).map(s => s.connection_id).sort()).toEqual([
-      'conn-a',
-      'conn-b'
-    ])
-    expect(carryForwardFailedProfileSessions([a, b], [b], [{ profile: 'default' }]).map(s => s.connection_id).sort()).toEqual([
-      'conn-a',
-      'conn-b'
-    ])
+    expect(
+      mergeSessionPage([a, b], [b], ['kanban_owner_terminal'])
+        .map(s => s.connection_id)
+        .sort()
+    ).toEqual(['conn-a', 'conn-b'])
+    expect(
+      carryForwardFailedProfileSessions([a, b], [b], [{ profile: 'default' }])
+        .map(s => s.connection_id)
+        .sort()
+    ).toEqual(['conn-a', 'conn-b'])
   })
 
   it('same owner still replaces (carry title/activity) and a legacy row without a gateway still collapses', () => {
@@ -1863,15 +1868,33 @@ describe('owner-qualified session identity (same id on two gateways)', () => {
 
   it('absorbs renamed owners through their lineage root and all lineage members without absorbing twins', () => {
     for (const carried of [false, true]) {
-      const old = owned('local', { id: 'old', _lineage_root_id: 'root', connection_id: carried ? 'local-src' : 'source', title: 'Kept', last_active: 100 })
-      const [prev] = carried ? mergeSessionPage([old], [owned('local', { id: 'old', _lineage_root_id: 'root', last_active: 90 })], []) : [old]
+      const old = owned('local', {
+        id: 'old',
+        _lineage_root_id: 'root',
+        connection_id: carried ? 'local-src' : 'source',
+        title: 'Kept',
+        last_active: 100
+      })
+      const [prev] = carried
+        ? mergeSessionPage([old], [owned('local', { id: 'old', _lineage_root_id: 'root', last_active: 90 })], [])
+        : [old]
       const connection_id = carried ? undefined : 'source'
       const next = owned('hub', { id: 'new', _lineage_root_id: 'root', connection_id, last_active: 90 })
       const merged = mergeSessionPage([prev], [next], ['root'])
       expect(merged).toHaveLength(1)
-      expect(merged[0]).toMatchObject({ id: 'new', title: 'Kept', last_active: 100, connection_id: carried ? 'local-src' : 'source' })
+      expect(merged[0]).toMatchObject({
+        id: 'new',
+        title: 'Kept',
+        last_active: 100,
+        connection_id: carried ? 'local-src' : 'source'
+      })
 
-      const freshRoot = owned('hub', { id: 'new', _lineage_root_id: 'fresh', _lineage_ids: ['old', 'new'], connection_id })
+      const freshRoot = owned('hub', {
+        id: 'new',
+        _lineage_root_id: 'fresh',
+        _lineage_ids: ['old', 'new'],
+        connection_id
+      })
       expect(mergeSessionPage([prev], [freshRoot], ['old']).map(s => s.id)).toEqual(['new'])
       const twin = owned('remote', { id: 'old', _lineage_root_id: 'root', connection_id: 'registry' })
       expect(mergeSessionPage([twin], [next], ['root'])).toHaveLength(2)
@@ -1880,7 +1903,13 @@ describe('owner-qualified session identity (same id on two gateways)', () => {
   })
 
   it('keeps a carried route distinct from list provenance across gateway renames', () => {
-    const draft = session({ connection_id: 'local-src', id: 'kanban_owner_terminal', profile: 'default', title: 'Draft', last_active: 100 })
+    const draft = session({
+      connection_id: 'local-src',
+      id: 'kanban_owner_terminal',
+      profile: 'default',
+      title: 'Draft',
+      last_active: 100
+    })
     const [first] = mergeSessionPage([draft], [owned('local', { last_active: 90 })], [])
     expect(first).toMatchObject({ connection_id: 'local-src', title: 'Draft', last_active: 100 })
 

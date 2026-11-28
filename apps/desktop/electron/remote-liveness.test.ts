@@ -295,7 +295,8 @@ describe('ensureHealthyPooledRemoteBackendForDispatch', () => {
   })
 
   describe('[daveey] slow link: a probe timeout with the transport alive keeps the descriptor', () => {
-    const timeout = () => new Error(`Timed out connecting to Hermes backend after ${POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS}ms`)
+    const timeout = () =>
+      new Error(`Timed out connecting to Hermes backend after ${POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS}ms`)
     const isTimeout = (error: unknown) => /Timed out connecting/.test(String((error as Error)?.message))
 
     function harness(over: { alive?: boolean; giveUp?: boolean; probeError?: Error } = {}) {

@@ -121,14 +121,25 @@ function resolveRuntimeIdForStored(storedSessionId: string): null | string {
   return null
 }
 
-function runtimeMatchesSelectedOwner(candidateRuntimeId: null | string, owner: ReturnType<typeof sessionOwnerRouteFromRow>): boolean {
+function runtimeMatchesSelectedOwner(
+  candidateRuntimeId: null | string,
+  owner: ReturnType<typeof sessionOwnerRouteFromRow>
+): boolean {
   const runtimeOwner =
     owner && candidateRuntimeId
       ? ($sessionTiles.get().find(tile => tile.runtimeId === candidateRuntimeId)?.ownerRoute ??
         runtimeSessionOwner(candidateRuntimeId))
       : undefined
 
-  return !owner || Boolean(runtimeOwner && typeof runtimeOwner === 'object' && runtimeOwner.connectionId === owner.connectionId && runtimeOwner.profile === owner.profile)
+  return (
+    !owner ||
+    Boolean(
+      runtimeOwner &&
+      typeof runtimeOwner === 'object' &&
+      runtimeOwner.connectionId === owner.connectionId &&
+      runtimeOwner.profile === owner.profile
+    )
+  )
 }
 
 export async function renameSessionPreferringRpc(
@@ -186,7 +197,10 @@ export async function renameSessionPreferringRpc(
   if (owner) {
     // The fenced edit (snapshot + request_id/expected_revision) on the row's own gateway: a bare
     // PATCH carries no mutation identity, which every current backend refuses as an old client.
-    const result = await renameSession(storedSessionId, title, { connectionId: owner.connectionId, profile: owner.profile })
+    const result = await renameSession(storedSessionId, title, {
+      connectionId: owner.connectionId,
+      profile: owner.profile
+    })
 
     return { title: result?.title ?? title }
   }

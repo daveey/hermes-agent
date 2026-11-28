@@ -15,7 +15,10 @@ type SegmentInflight = NonNullable<SessionResumeResult['inflight']>
 function closingText(message: ChatMessage): string {
   const boundary = message.parts.findLastIndex(part => part.type !== 'text') + 1
 
-  return message.parts.slice(boundary).map(part => (part.type === 'text' ? part.text : '')).join('')
+  return message.parts
+    .slice(boundary)
+    .map(part => (part.type === 'text' ? part.text : ''))
+    .join('')
 }
 
 /** The snapshot's span in the stamped stream, or null for a snapshot that carries no identity. */
@@ -48,7 +51,11 @@ function withLiveRun(parts: ChatMessagePart[], live: ReturnType<typeof closingSt
 }
 
 /** Canonical snapshots describe just the current segment, not the legacy flat turn dump. */
-export function appendCurrentSegment(messages: ChatMessage[], sessionId: string, inflight: SegmentInflight): ChatMessage[] {
+export function appendCurrentSegment(
+  messages: ChatMessage[],
+  sessionId: string,
+  inflight: SegmentInflight
+): ChatMessage[] {
   const text = inflight.assistant ?? ''
   const span = snapshotSpan(inflight)
   const last = messages.at(-1)
@@ -63,12 +70,15 @@ export function appendCurrentSegment(messages: ChatMessage[], sessionId: string,
       return messages
     }
 
-    return [...messages, {
-      id: `assistant-stream-${sessionId}`,
-      role: 'assistant',
-      parts: snapshotParts(text, span),
-      pending: true
-    }]
+    return [
+      ...messages,
+      {
+        id: `assistant-stream-${sessionId}`,
+        role: 'assistant',
+        parts: snapshotParts(text, span),
+        pending: true
+      }
+    ]
   }
 
   // A tool/reasoning boundary seals the prose before it. Replace only the
@@ -109,10 +119,13 @@ export function appendCurrentSegment(messages: ChatMessage[], sessionId: string,
     return messages
   }
 
-  return [...messages.slice(0, -1), {
-    ...current,
-    parts: [...current.parts.slice(0, boundary), ...snapshotParts(text, null)]
-  }]
+  return [
+    ...messages.slice(0, -1),
+    {
+      ...current,
+      parts: [...current.parts.slice(0, boundary), ...snapshotParts(text, null)]
+    }
+  ]
 }
 
 /**
@@ -149,7 +162,9 @@ export function graftEarlySegmentDeltas(
   const closing = target.parts.slice(boundary)
   const parts = withLiveRun(closing, live)
 
-  return parts === closing ? messages : [...messages.slice(0, -1), { ...target, parts: [...target.parts.slice(0, boundary), ...parts] }]
+  return parts === closing
+    ? messages
+    : [...messages.slice(0, -1), { ...target, parts: [...target.parts.slice(0, boundary), ...parts] }]
 }
 
 /**

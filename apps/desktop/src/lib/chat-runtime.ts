@@ -467,8 +467,14 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
       content: message.parts.filter((part): part is Extract<ChatMessagePart, { type: 'text' }> => part.type === 'text'),
       attachments: [],
       createdAt,
-      metadata: { custom: { attachmentRefs: message.attachmentRefs ?? [], ...reactionMeta, ...timelineMeta,
-        ...queuedMessageMeta(message) } }
+      metadata: {
+        custom: {
+          attachmentRefs: message.attachmentRefs ?? [],
+          ...reactionMeta,
+          ...timelineMeta,
+          ...queuedMessageMeta(message)
+        }
+      }
     } as ThreadMessage
   }
 

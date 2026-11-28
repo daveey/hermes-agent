@@ -4,7 +4,9 @@ const { openUpdatesWindow, cloud } = vi.hoisted(() => ({ openUpdatesWindow: vi.f
 vi.mock('@/store/updates', () => ({ openUpdatesWindow }))
 vi.mock('@/lib/hermes-cloud-host', () => ({ servedByHermesCloud: () => cloud.served }))
 
-const refusal = new Error('409: {"detail":"client_upgrade_required: this app is out of sync (different versions) with the Hermes backend; update the app to edit sessions"}')
+const refusal = new Error(
+  '409: {"detail":"client_upgrade_required: this app is out of sync (different versions) with the Hermes backend; update the app to edit sessions"}'
+)
 
 beforeEach(() => {
   localStorage.clear()
@@ -73,8 +75,12 @@ test('Cloud offers reload instead of a native update', async () => {
 })
 
 test('unavailable localStorage does not hide the in-window recovery', async () => {
-  vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied') })
-  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+  vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+    throw new Error('denied')
+  })
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    throw new Error('quota')
+  })
   const n = await import('./notifications')
   n.notifyError(refusal, 'Edit failed')
   n.clearNotifications()

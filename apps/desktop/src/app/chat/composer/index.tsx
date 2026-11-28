@@ -125,20 +125,26 @@ function controlRowGridClass(singleColumn: boolean, stacked: boolean): string {
 }
 
 function useQueueAwareCancel(activeQueueSessionKeyRef: { current: null | string }, onCancel: ChatBarProps['onCancel']) {
-  return useCallback((origin?: StopOrigin) => {
-    parkQueuedPrompts(activeQueueSessionKeyRef.current)
+  return useCallback(
+    (origin?: StopOrigin) => {
+      parkQueuedPrompts(activeQueueSessionKeyRef.current)
 
-    return onCancel(origin)
-  }, [activeQueueSessionKeyRef, onCancel])
+      return onCancel(origin)
+    },
+    [activeQueueSessionKeyRef, onCancel]
+  )
 }
 
 function useBlurCloseTimer() {
   const timer = useRef<number | null>(null)
-  useEffect(() => () => {
-    if (timer.current !== null) {
-      window.clearTimeout(timer.current)
-    }
-  }, [])
+  useEffect(
+    () => () => {
+      if (timer.current !== null) {
+        window.clearTimeout(timer.current)
+      }
+    },
+    []
+  )
 
   return timer
 }

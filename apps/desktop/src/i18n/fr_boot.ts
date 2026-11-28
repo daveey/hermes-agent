@@ -20,7 +20,7 @@ export const frBoot = {
       backendStopped: 'Backend arrêté',
       backendUpdating: 'Mise à jour de Hermes…',
       backendUpdatingMessage:
-        'Hermes redémarre pour terminer une mise à jour. Vos discussions se reconnecteront d\'elles-mêmes.',
+        "Hermes redémarre pour terminer une mise à jour. Vos discussions se reconnecteront d'elles-mêmes.",
       restartHermes: 'Redémarrer Hermes',
       openLogs: 'Ouvrir les journaux',
       desktopBootFailed: 'Échec du démarrage',

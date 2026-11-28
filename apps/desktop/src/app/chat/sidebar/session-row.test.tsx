@@ -297,21 +297,34 @@ describe('production CI projection', () => {
     const root = resolve(process.cwd(), '../..')
 
     // A cold checkout may provision Python; do that once, outside row assertion deadlines.
-    rows = JSON.parse(execFileSync('scripts/hermes-python', ['tests/fixtures/ci_wait_dot_projection.py'], {
-      cwd: root, encoding: 'utf8', env: { ...process.env, PYTHONPATH: root }, timeout: 90_000
-    })) as Record<string, SessionInfo>
+    rows = JSON.parse(
+      execFileSync('scripts/hermes-python', ['tests/fixtures/ci_wait_dot_projection.py'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, PYTHONPATH: root },
+        timeout: 90_000
+      })
+    ) as Record<string, SessionInfo>
   }, 120_000)
 
   it.each(['ordinary-ci-chat', 'kanban_owner_ci'])('projects real queued CI and unknown evidence into row %s', id => {
-    for (const [kind, expected] of [['queued_ci', 'external'], ['unknown', 'attention'], ['empty', 'none']] as const) {
+    for (const [kind, expected] of [
+      ['queued_ci', 'external'],
+      ['unknown', 'attention'],
+      ['empty', 'none']
+    ] as const) {
       const row = makeSession({ ...rows[kind], id, title: 'CI owner' })
       const { container, unmount } = renderRow(row)
       const dot = container.querySelector(`[data-session-status-dot="${expected}"]`) as HTMLElement
       expect(dot).not.toBeNull()
 
-      if (expected === 'external') { expect(dot.style.backgroundColor).toBe('rgb(56, 189, 248)') }
+      if (expected === 'external') {
+        expect(dot.style.backgroundColor).toBe('rgb(56, 189, 248)')
+      }
 
-      if (expected === 'attention') { expect(dot.getAttribute('aria-label')).toBe('Open work, current status unknown') }
+      if (expected === 'attention') {
+        expect(dot.getAttribute('aria-label')).toBe('Open work, current status unknown')
+      }
       unmount()
     }
   })

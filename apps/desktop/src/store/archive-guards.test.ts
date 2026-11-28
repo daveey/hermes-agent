@@ -73,15 +73,24 @@ describe('archive guards', () => {
     ])
   })
 
-  it.each([undefined, {}, { kanban_observed_at: 1 }, { kanban_observed_at: Infinity },
-    { kanban_observed_at: Date.now() / 1000 + 60 }])('warns when zero-work evidence is absent or stale: %j', session => {
+  it.each([
+    undefined,
+    {},
+    { kanban_observed_at: 1 },
+    { kanban_observed_at: Infinity },
+    { kanban_observed_at: Date.now() / 1000 + 60 }
+  ])('warns when zero-work evidence is absent or stale: %j', session => {
     const copy = { label: 'Kanban tasks', unknown: 'Status unavailable', value: () => 'counts' }
 
     expect(kanbanArchiveLinks(session as never, copy)).toEqual([{ label: copy.label, value: copy.unknown }])
   })
 
   it('kanbanArchiveLinks reads the row counts', () => {
-    const copy = { label: 'Kanban tasks', unknown: 'Status unavailable', value: (open: number, blocked: number) => `${open}/${blocked}` }
+    const copy = {
+      label: 'Kanban tasks',
+      unknown: 'Status unavailable',
+      value: (open: number, blocked: number) => `${open}/${blocked}`
+    }
 
     expect(kanbanArchiveLinks({ kanban_active: 0, kanban_observed_at: Date.now() / 1000 } as never, copy)).toEqual([])
     expect(kanbanArchiveLinks({ kanban_active: 2, kanban_blocked: 1 } as never, copy)).toEqual([

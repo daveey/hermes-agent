@@ -170,7 +170,9 @@ describe('route resume composed with session actions and the gateway registry', 
     gateways.setPrimaryGateway(local as never, 'default')
     gateways.setPrimaryGatewayConnection(descriptor('local'))
     setConnection(descriptor('local'))
-    setSessions([makeSessionInfo({ id: 'remote-session', profile: 'default', connection_id: 'remote', message_count: 1 })])
+    setSessions([
+      makeSessionInfo({ id: 'remote-session', profile: 'default', connection_id: 'remote', message_count: 1 })
+    ])
   })
 
   afterEach(() => {
@@ -207,7 +209,9 @@ describe('route resume composed with session actions and the gateway registry', 
     expect($selectedStoredSessionId.get()).toBe('remote-session')
     expect($sessionStates.get()['remote-runtime']).toMatchObject({
       storedSessionId: 'remote-session',
-      messages: [expect.objectContaining({ parts: [expect.objectContaining({ text: 'History from the remote owner' })] })]
+      messages: [
+        expect.objectContaining({ parts: [expect.objectContaining({ text: 'History from the remote owner' })] })
+      ]
     })
     expect(screen.getByTestId('transcript').textContent).toContain('History from the remote owner')
     expect(local.request).not.toHaveBeenCalled()

@@ -15,7 +15,10 @@ export function useExecutionObservationClock(row: unknown): number {
   const roster = useStore($liveWorkRoster)
   const background = useStore($backgroundStatusBySession)
   const subagents = useStore($subagentsBySession)
-  const sample = useMemo(() => ({ nowSeconds: Date.now() / 1000, row, tick, roster, background, subagents }), [row, tick, roster, background, subagents])
+  const sample = useMemo(
+    () => ({ nowSeconds: Date.now() / 1000, row, tick, roster, background, subagents }),
+    [row, tick, roster, background, subagents]
+  )
 
   return sample.nowSeconds
 }

@@ -38,13 +38,16 @@ export function wireRegistryReconnect<D, E extends { connectionPromise: Promise<
     gate: deps.gate,
     key: deps.key,
     isSsh: id => deps.readRegistry().connections.some(source => source.id === id && source.kind === 'ssh'),
-    inFlight: key => Boolean(deps.dialClaims.inFlight(key) || deps.poolStopper.inFlight(key) || deps.bootstrap.pending.has(key)),
+    inFlight: key =>
+      Boolean(deps.dialClaims.inFlight(key) || deps.poolStopper.inFlight(key) || deps.bootstrap.pending.has(key)),
     request: deps.request,
     proveStopped: state => proveRegistryOwnerStopped(state.ssh, { ...state, profile: state.remoteProfile || '' }),
     terminate: async state => {
       const expected = { ...state, profile: state.remoteProfile || '' }
 
-      if (state.remotePlatform !== 'Linux') { throw new Error('Unsupported registry SSH platform') }
+      if (state.remotePlatform !== 'Linux') {
+        throw new Error('Unsupported registry SSH platform')
+      }
       await terminateOwnedDashboardForUpdate(state.ssh, expected)
     },
     close: async (key, state) => {
@@ -64,7 +67,9 @@ export function wireRegistryReconnect<D, E extends { connectionPromise: Promise<
   return {
     ...service,
     assertCanDial: (kind: string, id: string, correlation: string) => {
-      if (kind === 'ssh') { deps.gate.assertCanDial(id, correlation) }
+      if (kind === 'ssh') {
+        deps.gate.assertCanDial(id, correlation)
+      }
     }
   }
 }

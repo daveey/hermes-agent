@@ -87,7 +87,9 @@ describe('a no-reply notice on a turn with no stored reply', () => {
     expect(errors(merged)).toEqual(['Hermes ended this turn without a reply.'])
     const notice = merged.find(message => message.error)!
     expect(toRuntimeMessage(notice).metadata.custom?.errorSurface).toEqual({
-      code: 'no_reply', layer: 'runtime', retryable: true
+      code: 'no_reply',
+      layer: 'runtime',
+      retryable: true
     })
   })
 })

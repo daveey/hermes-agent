@@ -243,7 +243,12 @@ function sendWithRequestDeadline(
     onError,
     requestState,
     observeRequest
-  }: { body?: Buffer; onError: (error: Error) => void; requestState?: { bodySent?: boolean }; observeRequest?: (req: http.ClientRequest) => void }
+  }: {
+    body?: Buffer
+    onError: (error: Error) => void
+    requestState?: { bodySent?: boolean }
+    observeRequest?: (req: http.ClientRequest) => void
+  }
 ): http.ClientRequest {
   const req = open()
   observeRequest?.(req)

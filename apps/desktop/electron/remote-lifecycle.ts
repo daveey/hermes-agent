@@ -1536,7 +1536,9 @@ async function readAlwaysOnState(ssh) {
       `printf '%s\\n' "$rec"; cat "$d/token"`
   )
 
-  const [state = '', recordLine = '', tokenLine = ''] = String(raw || '').trim().split('\n')
+  const [state = '', recordLine = '', tokenLine = ''] = String(raw || '')
+    .trim()
+    .split('\n')
 
   if (state.trim() === 'NONE' || !state.trim()) {
     return null

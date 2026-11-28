@@ -132,8 +132,11 @@ for (const entered of [false, true]) {
         )
       )
 
-      if (context) {fireEvent.contextMenu(screen.getByTestId('control'))}
-      else {openMenu(screen.getByRole('button', { name: 'Actions' }))}
+      if (context) {
+        fireEvent.contextMenu(screen.getByTestId('control'))
+      } else {
+        openMenu(screen.getByRole('button', { name: 'Actions' }))
+      }
 
       await screen.findByRole('menuitem', { name: /^Rename/ })
       const expected = menuItems()
@@ -141,10 +144,11 @@ for (const entered of [false, true]) {
       control.unmount()
       mount()
 
-      if (entered)
-        {await act(async () => {
+      if (entered) {
+        await act(async () => {
           $projectScope.set('local-app')
-        })}
+        })
+      }
 
       await act(async () => {})
 
@@ -152,8 +156,11 @@ for (const entered of [false, true]) {
         entered ? '[data-entered-project-member="local-app"]' : '[data-sessions-project="local-app"]'
       ) as HTMLElement
 
-      if (context) {fireEvent.contextMenu(member.querySelector('[data-slot="context-menu-trigger"]')!)}
-      else {openMenu(within(member).getByRole('button', { name: 'Actions' }))}
+      if (context) {
+        fireEvent.contextMenu(member.querySelector('[data-slot="context-menu-trigger"]')!)
+      } else {
+        openMenu(within(member).getByRole('button', { name: 'Actions' }))
+      }
 
       await screen.findByRole('menuitem', { name: /^Rename/ })
       expect(menuItems()).toEqual(expected)

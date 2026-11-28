@@ -236,56 +236,59 @@ it('review: same-id rows on two live routes both retain usable authority', () =>
 it.each([
   ['local, remote-default, worker', 0],
   ['worker, remote-default, local', 1]
-])('identical stored ids on three live routes each reach green and recover independently (%s)', async (_label, flip) => {
-  const opening = ensureGatewayForAgent('remote', 'default')
-  await vi.advanceTimersByTimeAsync(10)
-  expect(await opening).toBe(true)
-  const remoteDefaultSocket = AuthoritySocket.instances.at(-1)!
-  const local = makeSessionInfo({ id: row.id, profile: 'default', connection_id: 'local' })
-  const remoteDefault = makeSessionInfo({ id: row.id, profile: 'default', connection_id: 'remote' })
-  const routes = [local, remoteDefault, row]
-  setSessions(flip ? [...routes].reverse() : routes)
+])(
+  'identical stored ids on three live routes each reach green and recover independently (%s)',
+  async (_label, flip) => {
+    const opening = ensureGatewayForAgent('remote', 'default')
+    await vi.advanceTimersByTimeAsync(10)
+    expect(await opening).toBe(true)
+    const remoteDefaultSocket = AuthoritySocket.instances.at(-1)!
+    const local = makeSessionInfo({ id: row.id, profile: 'default', connection_id: 'local' })
+    const remoteDefault = makeSessionInfo({ id: row.id, profile: 'default', connection_id: 'remote' })
+    const routes = [local, remoteDefault, row]
+    setSessions(flip ? [...routes].reverse() : routes)
 
-  const readFor = (session: typeof row) =>
-    (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source =>
-      sessionsHost.beginWorkSourceRead({
-        connectionId: session.connection_id!,
-        profile: session.profile!,
-        storedSessionId: session.id,
-        source
+    const readFor = (session: typeof row) =>
+      (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source =>
+        sessionsHost.beginWorkSourceRead({
+          connectionId: session.connection_id!,
+          profile: session.profile!,
+          storedSessionId: session.id,
+          source
+        })
+      )
+
+    const reads = routes.map(readFor)
+    expect(reads.flat().every(read => read.authorityEpoch !== undefined)).toBe(true)
+    succeed(reads[0])
+    succeed(reads[2])
+
+    const mounted = renderHook(() => routes.map(route => useWorkSourceUnavailable(route)))
+
+    try {
+      // Only routes with their own five proofs are green; a sibling's proof never certifies the third.
+      expect(mounted.result.current).toEqual([false, true, false])
+      act(() => succeed(reads[1]))
+      expect(mounted.result.current).toEqual([false, false, false])
+      // Closing one live socket vetoes that route only.
+      act(() => remoteDefaultSocket.close())
+      expect(mounted.result.current).toEqual([false, true, false])
+      // After the real reconnect the pre-close reads are another epoch: no evidence, so the undisplayed row falls back
+      // to its stored outcome, and an old FAILED reply cannot veto it...
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
       })
-    )
-
-  const reads = routes.map(readFor)
-  expect(reads.flat().every(read => read.authorityEpoch !== undefined)).toBe(true)
-  succeed(reads[0])
-  succeed(reads[2])
-
-  const mounted = renderHook(() => routes.map(route => useWorkSourceUnavailable(route)))
-
-  try {
-    // Only routes with their own five proofs are green; a sibling's proof never certifies the third.
-    expect(mounted.result.current).toEqual([false, true, false])
-    act(() => succeed(reads[1]))
-    expect(mounted.result.current).toEqual([false, false, false])
-    // Closing one live socket vetoes that route only.
-    act(() => remoteDefaultSocket.close())
-    expect(mounted.result.current).toEqual([false, true, false])
-    // After the real reconnect the pre-close reads are another epoch: no evidence, so the undisplayed row falls back
-    // to its stored outcome, and an old FAILED reply cannot veto it...
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000)
-    })
-    expect(mounted.result.current).toEqual([false, false, false])
-    act(() => fail(reads[1]))
-    expect(mounted.result.current).toEqual([false, false, false])
-    // ...while a fresh failed read on that route vetoes it alone.
-    act(() => fail(readFor(remoteDefault)))
-    expect(mounted.result.current).toEqual([false, true, false])
-  } finally {
-    mounted.unmount()
+      expect(mounted.result.current).toEqual([false, false, false])
+      act(() => fail(reads[1]))
+      expect(mounted.result.current).toEqual([false, false, false])
+      // ...while a fresh failed read on that route vetoes it alone.
+      act(() => fail(readFor(remoteDefault)))
+      expect(mounted.result.current).toEqual([false, true, false])
+    } finally {
+      mounted.unmount()
+    }
   }
-})
+)
 
 it('revokes a mounted secondary owner on close and rejects old replies after real reconnect', async () => {
   const reads = capture()

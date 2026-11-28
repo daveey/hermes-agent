@@ -138,7 +138,10 @@ it('pairs only the queue projection, preserving equal corrections and different 
       chatMessageText(oldQueue)
     ])
     expect(current.filter(row => row.id === 'user-queued-runtime')).toHaveLength(1)
-    expect(current.find(row => row.id === 'user-queued-runtime')).toMatchObject({ queued_reason: 'core_update', queued_started_at: 1234 })
+    expect(current.find(row => row.id === 'user-queued-runtime')).toMatchObject({
+      queued_reason: 'core_update',
+      queued_started_at: 1234
+    })
     expect(current).toContainEqual(unrelatedUser)
     expect(current).toContainEqual(oldQueue)
     expect(current).toContainEqual(response)

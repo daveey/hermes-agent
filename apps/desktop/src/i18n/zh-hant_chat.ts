@@ -468,7 +468,8 @@ export const zhHantChat = {
     archiveLinkedConfirm: '仍要封存',
     archiveLinkedCancel: '保留對話',
     archiveLinkedTasksLabel: '看板任務',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} 個未完成` : '', blocked ? `${blocked} 個受阻` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksValue: (open: number, blocked: number) =>
+      [open ? `${open} 個未完成` : '', blocked ? `${blocked} 個受阻` : ''].filter(Boolean).join(' · '),
     archiveLinkedTasksUnknown: '無法取得任務狀態；工作可能尚未完成。',
     restored: '已還原',
     unarchiveFailed: '取消封存失敗',

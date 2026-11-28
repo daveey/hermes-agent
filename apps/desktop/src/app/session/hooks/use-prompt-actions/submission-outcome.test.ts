@@ -57,8 +57,10 @@ describe('the outcome a journaled send records', () => {
 
   it.each([
     ['an abort', (prepared: PreparedSubmission) => submissionAborted('k', prepared, () => false)],
-    ['a definite refusal', (prepared: PreparedSubmission) =>
-      submissionFailed('k', prepared, refused, { definite, replayUncertain: false })]
+    [
+      'a definite refusal',
+      (prepared: PreparedSubmission) => submissionFailed('k', prepared, refused, { definite, replayUncertain: false })
+    ]
   ] as const)('%s on a retry never downgrades an earlier unknown attempt', async (_label, end) => {
     const first = entry()
     await writeInFlightSubmission('k', first)
@@ -92,11 +94,19 @@ describe('a recovery wrapper that calls the submit again', () => {
   const calls = async (errors: unknown[]) => {
     let replays = 0
 
-    const run = noteUnansweredReplays(async (n: number) => {
-      if (errors[n] !== undefined) { throw errors[n] }
+    const run = noteUnansweredReplays(
+      async (n: number) => {
+        if (errors[n] !== undefined) {
+          throw errors[n]
+        }
 
-      return 'ok'
-    }, definite, () => { replays += 1 })
+        return 'ok'
+      },
+      definite,
+      () => {
+        replays += 1
+      }
+    )
 
     for (let n = 0; n <= errors.length; n += 1) {
       await run(n).catch(() => undefined)

@@ -175,6 +175,7 @@ function beginControlAuthority(sessionId: string): WorkSourceRead | undefined {
   if (!owner || !storedSessionId) {
     return undefined
   }
+
   const authority = workSourceAuthorityForSession(owner.connectionId, owner.profile, storedSessionId)
 
   const read = beginWorkSourceRead({
@@ -205,6 +206,7 @@ function clearControlAuthority(sessionId: string): void {
   if (read) {
     beginWorkSourceRead(read)
   }
+
   controlAuthority.delete(sessionId)
 }
 
@@ -978,6 +980,7 @@ export async function refreshSessionControl(
       if (!controlAuthorityIsCurrent(sessionId, authority)) {
         return $sessionControlBySession.get()[sessionId]
       }
+
       reportWorkSourceRead({ ...authority, available: true })
     }
 

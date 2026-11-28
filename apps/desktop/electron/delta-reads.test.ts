@@ -33,7 +33,15 @@ const SCOPE = 'conn:hermes-hub::default'
 const BOARD = `${HUB}/api/plugins/kanban/board?board=default`
 
 const cards = (count: number, done = -1) =>
-  Buffer.from(JSON.stringify({ cards: Array.from({ length: count }, (_, id) => ({ id, status: id === done ? 'done' : 'todo', title: `card ${id}` })) }))
+  Buffer.from(
+    JSON.stringify({
+      cards: Array.from({ length: count }, (_, id) => ({
+        id,
+        status: id === done ? 'done' : 'todo',
+        title: `card ${id}`
+      }))
+    })
+  )
 
 const whole = (body: Buffer, extra: Record<string, string> = {}) => ({
   headers: { 'content-type': 'application/json', 'x-hermes-body-hash': bodyHash(body), ...extra },
@@ -76,9 +84,14 @@ describe('asking for a delta', () => {
     const first = cards(40)
 
     decodeDeltaBody(BOARD, whole(first), first, store)
-    expect(deltaRequestHeaders('GET', BOARD, store)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd', [DELTA_BASE_HEADER]: bodyHash(first) })
+    expect(deltaRequestHeaders('GET', BOARD, store)).toEqual({
+      [DELTA_ACCEPT_HEADER]: 'zstd',
+      [DELTA_BASE_HEADER]: bodyHash(first)
+    })
     // Another query is another read.
-    expect(deltaRequestHeaders('GET', `${HUB}/api/plugins/kanban/board?board=runners`, store)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
+    expect(deltaRequestHeaders('GET', `${HUB}/api/plugins/kanban/board?board=runners`, store)).toEqual({
+      [DELTA_ACCEPT_HEADER]: 'zstd'
+    })
   })
 
   it('a remote transcript page retains slim+gzip and negotiates compressed-entity deltas', () => {
@@ -100,7 +113,11 @@ describe('asking for a delta', () => {
     expect(deltaRequestHeaders('GET', BOARD, store)).toEqual({})
     // The copies wait for the rebuilt tunnel.
     store.bindRemote('http://127.0.0.1:61511', SCOPE)
-    expect(deltaRequestHeaders('GET', 'http://127.0.0.1:61511/api/plugins/kanban/board?board=default', store)[DELTA_BASE_HEADER]).toBe(bodyHash(body))
+    expect(
+      deltaRequestHeaders('GET', 'http://127.0.0.1:61511/api/plugins/kanban/board?board=default', store)[
+        DELTA_BASE_HEADER
+      ]
+    ).toBe(bodyHash(body))
   })
 
   it('keeps one origin per scope: a rebind without a teardown stops the old port being asked or filed under it', () => {
@@ -232,9 +249,21 @@ describe('decoding', () => {
   it.each([
     ['the base is not held', (b: Buffer, n: Buffer) => delta(b, n), false],
     ['it names another base', (b: Buffer, n: Buffer) => delta(b, n, { 'x-hermes-delta-base': 'f'.repeat(32) }), true],
-    ['the decoded body does not match its hash', (b: Buffer, n: Buffer) => delta(b, n, { 'x-hermes-body-hash': '0'.repeat(32) }), true],
-    ['the frame is corrupt', (b: Buffer, n: Buffer) => ({ ...delta(b, n), body: Buffer.from('not a zstd frame') }), true],
-    ['it was encoded against other bytes', (b: Buffer, n: Buffer) => ({ ...delta(b, n), body: zstdCompressSync(n, { dictionary: cards(9) }) }), true]
+    [
+      'the decoded body does not match its hash',
+      (b: Buffer, n: Buffer) => delta(b, n, { 'x-hermes-body-hash': '0'.repeat(32) }),
+      true
+    ],
+    [
+      'the frame is corrupt',
+      (b: Buffer, n: Buffer) => ({ ...delta(b, n), body: Buffer.from('not a zstd frame') }),
+      true
+    ],
+    [
+      'it was encoded against other bytes',
+      (b: Buffer, n: Buffer) => ({ ...delta(b, n), body: zstdCompressSync(n, { dictionary: cards(9) }) }),
+      true
+    ]
   ])('fails for a retry and drops the copy when %s', (_name, make, seed) => {
     const store = bound()
     const base = cards(300)
@@ -307,8 +336,13 @@ describe('decoding', () => {
       return decodeDeltaBody(BOARD, whole(current), current, store)
     }
 
-    await expect(withRetry(attempt, { delayFn: async () => undefined, method: 'GET' })).resolves.toBe(current.toString('utf8'))
-    expect(asked).toEqual([{ [DELTA_ACCEPT_HEADER]: 'zstd', [DELTA_BASE_HEADER]: bodyHash(base) }, { [DELTA_ACCEPT_HEADER]: 'zstd' }])
+    await expect(withRetry(attempt, { delayFn: async () => undefined, method: 'GET' })).resolves.toBe(
+      current.toString('utf8')
+    )
+    expect(asked).toEqual([
+      { [DELTA_ACCEPT_HEADER]: 'zstd', [DELTA_BASE_HEADER]: bodyHash(base) },
+      { [DELTA_ACCEPT_HEADER]: 'zstd' }
+    ])
   })
 
   it.each([
@@ -344,7 +378,9 @@ describe('decoding', () => {
     // gzip on the wire: the hash is of the plain body, which we do not hold here.
     const zipped = gzipSync(body)
 
-    expect(decodeDeltaBody(BOARD, whole(body, { 'content-encoding': 'gzip' }), zipped, store)).toBe(body.toString('utf8'))
+    expect(decodeDeltaBody(BOARD, whole(body, { 'content-encoding': 'gzip' }), zipped, store)).toBe(
+      body.toString('utf8')
+    )
     // A wrong hash header.
     decodeDeltaBody(BOARD, { headers: { 'x-hermes-body-hash': '0'.repeat(32) }, statusCode: 200 }, body, store)
     // An error answer.
@@ -360,7 +396,9 @@ describe('decoding', () => {
     const body = Buffer.from('{"ok":true}')
 
     expect(decodeDeltaBody(BOARD, { headers: {}, statusCode: 200 }, body, store)).toBe('{"ok":true}')
-    expect(decodeDeltaBody(BOARD, { headers: { 'content-encoding': 'gzip' }, statusCode: 200 }, gzipSync(body), store)).toBe('{"ok":true}')
+    expect(
+      decodeDeltaBody(BOARD, { headers: { 'content-encoding': 'gzip' }, statusCode: 200 }, gzipSync(body), store)
+    ).toBe('{"ok":true}')
     expect(store.size).toBe(0)
   })
 })
@@ -450,7 +488,10 @@ describe('persisted copies (persistTo): a relaunch still holds the bases', () =>
 
     const relaunched = reopened(dir)
 
-    expect(deltaRequestHeaders('GET', BOARD, relaunched)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd', [DELTA_BASE_HEADER]: bodyHash(v1) })
+    expect(deltaRequestHeaders('GET', BOARD, relaunched)).toEqual({
+      [DELTA_ACCEPT_HEADER]: 'zstd',
+      [DELTA_BASE_HEADER]: bodyHash(v1)
+    })
 
     const v2 = cards(3000, 7)
     const { body, response } = delta(v1, v2)
@@ -473,35 +514,38 @@ describe('persisted copies (persistTo): a relaunch still holds the bases', () =>
     expect(files(dir)).toHaveLength(2)
   })
 
-  it.each(['truncate', 'flip', 'empty', 'header only'])('a %s file is dropped and the read goes whole', async damage => {
-    const dir = tmpDir()
-    const first = reopened(dir)
-    const v1 = cards(3000)
+  it.each(['truncate', 'flip', 'empty', 'header only'])(
+    'a %s file is dropped and the read goes whole',
+    async damage => {
+      const dir = tmpDir()
+      const first = reopened(dir)
+      const v1 = cards(3000)
 
-    decodeDeltaBody(BOARD, whole(v1), v1, first)
-    await first.flush()
+      decodeDeltaBody(BOARD, whole(v1), v1, first)
+      await first.flush()
 
-    const [file] = files(dir)
-    const data = fs.readFileSync(file)
-    const flipped = Buffer.from(data)
+      const [file] = files(dir)
+      const data = fs.readFileSync(file)
+      const flipped = Buffer.from(data)
 
-    flipped[data.length - 10] ^= 1
-    fs.writeFileSync(
-      file,
-      {
-        empty: Buffer.alloc(0),
-        flip: flipped,
-        'header only': data.subarray(0, data.indexOf(0x0a) + 1),
-        truncate: data.subarray(0, data.length / 2)
-      }[damage]!
-    )
+      flipped[data.length - 10] ^= 1
+      fs.writeFileSync(
+        file,
+        {
+          empty: Buffer.alloc(0),
+          flip: flipped,
+          'header only': data.subarray(0, data.indexOf(0x0a) + 1),
+          truncate: data.subarray(0, data.length / 2)
+        }[damage]!
+      )
 
-    const relaunched = reopened(dir)
+      const relaunched = reopened(dir)
 
-    expect(deltaRequestHeaders('GET', BOARD, relaunched)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
-    await new Promise(resolve => setTimeout(resolve, 50))
-    expect(files(dir)).toEqual([])
-  })
+      expect(deltaRequestHeaders('GET', BOARD, relaunched)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
+      await new Promise(resolve => setTimeout(resolve, 50))
+      expect(files(dir)).toEqual([])
+    }
+  )
 
   it('another scope cannot read a persisted copy, even renamed to its own file', async () => {
     const dir = tmpDir()
@@ -692,7 +736,11 @@ describe('fetchJson itself (json-fetch.ts), against a live server that speaks th
   const server = http.createServer((req, res) => {
     const base = String(req.headers['x-hermes-delta-base'] ?? '')
 
-    seen.push({ accept: String(req.headers['x-hermes-delta-accept'] ?? ''), base, token: String(req.headers['x-hermes-session-token'] ?? '') })
+    seen.push({
+      accept: String(req.headers['x-hermes-delta-accept'] ?? ''),
+      base,
+      token: String(req.headers['x-hermes-session-token'] ?? '')
+    })
 
     const body = board()
 

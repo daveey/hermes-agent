@@ -37,6 +37,7 @@ function textReadLimits(options) {
     ? { full, maxBytes: TEXT_FULL_READ_MAX_BYTES, readLimit: TEXT_FULL_READ_MAX_BYTES }
     : { full, maxBytes: TEXT_PREVIEW_SOURCE_MAX_BYTES, readLimit: TEXT_PREVIEW_MAX_BYTES }
 }
+
 // Renderer-supplied composer writes (pasted/dropped images, large text pastes)
 // land on disk under userData/HERMES_HOME; cap them like the attach reader so
 // one IPC call can't allocate or write unbounded bytes in the main process.

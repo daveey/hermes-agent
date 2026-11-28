@@ -69,9 +69,12 @@ describe('sessionHasOpenCards', () => {
     expect(sessionHasOpenCards({ ...session, kanban_active: 0, needs_you: [] })).toBe(false)
   })
 
-  it.each([['kanban_active'], ['kanban_blocked'], ['kanban_held'], ['kanban_parked']] as const)('is true for %s', key => {
-    expect(sessionHasOpenCards({ ...session, [key]: 1 })).toBe(true)
-  })
+  it.each([['kanban_active'], ['kanban_blocked'], ['kanban_held'], ['kanban_parked']] as const)(
+    'is true for %s',
+    key => {
+      expect(sessionHasOpenCards({ ...session, [key]: 1 })).toBe(true)
+    }
+  )
 
   it('is true when needs_you is non-empty', () => {
     expect(sessionHasOpenCards({ ...session, needs_you: [{ id: 'x' }] as never })).toBe(true)

@@ -18,8 +18,10 @@ export const isInherited = (value: TaskModelOverride): boolean =>
 function classModel(value: TaskModelOverride): string {
   const model = value.model.trim()
 
-  if ((model && !(CLASSES as readonly string[]).includes(model)) ||
-    (value.provider.trim() && value.provider.trim() !== 'auto')) {
+  if (
+    (model && !(CLASSES as readonly string[]).includes(model)) ||
+    (value.provider.trim() && value.provider.trim() !== 'auto')
+  ) {
     throw new Error('Kanban requires dynamic class routing')
   }
 
@@ -35,7 +37,10 @@ export function overrideLabel(value: TaskModelOverride, inheritCopy: string): st
 }
 
 /** Legacy concrete values are displayed as dynamic routing and never resubmitted. */
-export function ModelOverrideField({ onChange, value }: {
+export function ModelOverrideField({
+  onChange,
+  value
+}: {
   onChange: (next: TaskModelOverride) => void
   value: TaskModelOverride
 }) {
@@ -47,11 +52,17 @@ export function ModelOverrideField({ onChange, value }: {
       <select
         aria-label={k.modelInherit}
         className="h-8 min-w-0 flex-1 rounded border bg-background px-2 text-xs"
-        onChange={event => onChange({ ...value, model: event.target.value, provider: event.target.value ? 'auto' : '' })}
+        onChange={event =>
+          onChange({ ...value, model: event.target.value, provider: event.target.value ? 'auto' : '' })
+        }
         value={model}
       >
         <option value="">{k.modelInherit}</option>
-        {CLASSES.map(level => <option key={level} value={level}>{level}</option>)}
+        {CLASSES.map(level => (
+          <option key={level} value={level}>
+            {level}
+          </option>
+        ))}
       </select>
       <select
         aria-label={reasoningEffortLabel('high')}
@@ -60,8 +71,11 @@ export function ModelOverrideField({ onChange, value }: {
         value={value.effort}
       >
         <option value="">{k.modelInherit}</option>
-        {['none', 'low', 'medium', 'high', 'ultra'].map(effort =>
-          <option key={effort} value={effort}>{reasoningEffortLabel(effort)}</option>)}
+        {['none', 'low', 'medium', 'high', 'ultra'].map(effort => (
+          <option key={effort} value={effort}>
+            {reasoningEffortLabel(effort)}
+          </option>
+        ))}
       </select>
     </div>
   )

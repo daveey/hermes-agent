@@ -167,7 +167,12 @@ describe('ChatSidebar offline fallback rows', () => {
     fireEvent.click(screen.getByText('Chat a'))
 
     expect(resume).not.toHaveBeenCalled()
-    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/mini is offline/)
+    expect(
+      $notifications
+        .get()
+        .map(n => n.message)
+        .join(' ')
+    ).toMatch(/mini is offline/)
   })
 
   it('a replica row stays refused while its owner list is failing too', () => {
@@ -179,7 +184,12 @@ describe('ChatSidebar offline fallback rows', () => {
     fireEvent.click(screen.getByText('Chat a'))
 
     expect(resume).not.toHaveBeenCalled()
-    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/mini is offline/)
+    expect(
+      $notifications
+        .get()
+        .map(n => n.message)
+        .join(' ')
+    ).toMatch(/mini is offline/)
   })
 
   it('a stale-list row of a busy local backend still opens, naming the connection as not responding', () => {
@@ -194,7 +204,10 @@ describe('ChatSidebar offline fallback rows', () => {
     fireEvent.click(screen.getByText('Live one'))
 
     expect(resume).toHaveBeenCalledWith('live-1', expect.objectContaining({ id: 'live-1', offline_stale_list: true }))
-    const notices = $notifications.get().map(n => n.message).join(' ')
+    const notices = $notifications
+      .get()
+      .map(n => n.message)
+      .join(' ')
     expect(notices).toMatch(/This computer is not responding/)
     expect(notices).not.toMatch(/its gateway|never synced/)
   })
@@ -213,7 +226,12 @@ describe('ChatSidebar offline fallback rows', () => {
 
     expect(resume).toHaveBeenCalledWith('busy', expect.objectContaining({ offline_stale_list: true }))
     expect(asleepOpenFor('busy')).toBeNull()
-    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/^mini is not responding/)
+    expect(
+      $notifications
+        .get()
+        .map(n => n.message)
+        .join(' ')
+    ).toMatch(/^mini is not responding/)
     clearTranscriptTails()
   })
 
@@ -257,7 +275,10 @@ describe('ChatSidebar offline fallback rows', () => {
 
       expect(resume).toHaveBeenCalledWith('live-1', expect.objectContaining({ id: 'live-1', offline_stale_list: true }))
       expect(asleepOpenFor('live-1')).toBeNull()
-      const notices = $notifications.get().map(n => n.message).join(' ')
+      const notices = $notifications
+        .get()
+        .map(n => n.message)
+        .join(' ')
       expect(notices).toMatch(/This computer is not responding/)
       expect(notices).not.toMatch(/is offline/)
     }
@@ -273,7 +294,12 @@ describe('ChatSidebar offline fallback rows', () => {
     fireEvent.click(screen.getByText('Chat a'))
 
     expect(resume).not.toHaveBeenCalled()
-    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/mini is offline/)
+    expect(
+      $notifications
+        .get()
+        .map(n => n.message)
+        .join(' ')
+    ).toMatch(/mini is offline/)
   })
 
   it('opens a live row normally', () => {
@@ -303,7 +329,7 @@ describe('ChatSidebar offline fallback rows', () => {
     expect(screen.queryAllByTestId('session-row-offline')).toHaveLength(0)
   })
 
-  it('[daveey] paints an awake row\'s cached transcript in the click, before resume runs', () => {
+  it("[daveey] paints an awake row's cached transcript in the click, before resume runs", () => {
     // Awake owner (published within the asleep window): an ordinary row that resumes live.
     setCached([rec('w', { synced_at: Math.floor(Date.now() / 1000) - 5 })])
     saveTranscriptTail('w', [{ content: 'cached on click', id: 1, role: 'user', timestamp: 1 } as never], {

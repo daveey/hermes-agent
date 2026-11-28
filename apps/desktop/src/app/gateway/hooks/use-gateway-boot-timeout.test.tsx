@@ -202,28 +202,45 @@ it.each([false, true])('keeps recovery alive across real IPC wiring (registry ro
   const bridge = startupConnectionBridge(connect)
   Object.assign(desktop, {
     getStartupConnection: bridge.getStartupConnection,
-    profile: { ...desktop.profile, getDefault: async () => registry ? { connectionId: 'local', profile: 'worker' } : null },
-    getRecentLogs: async () => ({ lines: [] }), getBootstrapState: async () => null,
+    profile: {
+      ...desktop.profile,
+      getDefault: async () => (registry ? { connectionId: 'local', profile: 'worker' } : null)
+    },
+    getRecentLogs: async () => ({ lines: [] }),
+    getBootstrapState: async () => null,
     getConnectionConfig: async () => ({ mode: 'local' })
   })
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
   const refreshSessions = vi.fn(async () => undefined)
-  render(<><Harness refreshSessions={refreshSessions} /><BootFailureOverlay /></>)
+  render(
+    <>
+      <Harness refreshSessions={refreshSessions} />
+      <BootFailureOverlay />
+    </>
+  )
   setSelectedStoredSessionId('retained-through-ipc')
-  await act(async () => { await vi.advanceTimersByTimeAsync(BACKEND_BOOT_WAIT_TIMEOUT_MS) })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(BACKEND_BOOT_WAIT_TIMEOUT_MS)
+  })
   expect($desktopBoot.get().error).toMatch(/Timed out connecting/)
   expect(screen.getByText(en.boot.failure.title)).toBeTruthy()
-  await act(async () => { await vi.advanceTimersByTimeAsync(2_001) })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_001)
+  })
   expect($desktopBoot.get().error).toMatch(/Gateway starting \(deadline\)/)
   expect(screen.getByText(en.boot.failure.title)).toBeTruthy()
-  await act(async () => { await vi.advanceTimersByTimeAsync(4_001) })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4_001)
+  })
   expect(connect).toHaveBeenCalledTimes(3)
   expect(refreshSessions).toHaveBeenCalledOnce()
   expect($desktopBoot.get().error).toBeNull()
   expect($desktopBoot.get().progress).toBe(100)
   expect(screen.queryByText(en.boot.failure.title)).toBeNull()
   expect($selectedStoredSessionId.get()).toBe('retained-through-ipc')
-  expect(connect.mock.calls[1]?.[0]).toMatchObject(registry ? { connectionId: 'local', profile: 'worker' } : { profile: 'default' })
+  expect(connect.mock.calls[1]?.[0]).toMatchObject(
+    registry ? { connectionId: 'local', profile: 'worker' } : { profile: 'default' }
+  )
 })
 
 it('stops queued recovery on unmount and ignores a late original readiness reply', async () => {

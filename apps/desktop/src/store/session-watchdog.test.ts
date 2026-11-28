@@ -479,7 +479,10 @@ describe('live turn event silence', () => {
 
   it('does not stamp stale local state when the pane leaves during a failed store read', async () => {
     $activeSessionId.set('rt-away')
-    publishSessionState('rt-away', state({ awaitingResponse: true, busy: true, storedSessionId: 's-away', turnLive: true }))
+    publishSessionState(
+      'rt-away',
+      state({ awaitingResponse: true, busy: true, storedSessionId: 's-away', turnLive: true })
+    )
     const refreshTranscript = vi.fn(async () => false)
     backend(async () => ({ sessions: [] }), refreshTranscript)
     noteSessionEvent('rt-away')

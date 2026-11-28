@@ -16,13 +16,19 @@ let owner: Owner | null = null
 function disposeOwner(entry: Owner) {
   entry.disposed = true
 
-  if (owner === entry) {owner = null}
+  if (owner === entry) {
+    owner = null
+  }
 
-  for (const fail of [...entry.waiters]) {fail(new Error('Hermes gateway unavailable'))}
+  for (const fail of [...entry.waiters]) {
+    fail(new Error('Hermes gateway unavailable'))
+  }
 }
 
 export function registerPrimaryGatewayRecovery(gateway: HermesGateway, recover: PrimaryGatewayRecoverer): () => void {
-  if (owner) {disposeOwner(owner)}
+  if (owner) {
+    disposeOwner(owner)
+  }
   const entry: Owner = { gateway, disposed: false, recover, waiters: new Set() }
   owner = entry
 
@@ -42,12 +48,18 @@ export function waitForPrimaryGateway(
   timeoutMs: number | undefined,
   signal: AbortSignal | undefined
 ): Promise<null | PrimaryGatewayReady> {
-  if (signal?.aborted) {return Promise.reject(abortError())}
+  if (signal?.aborted) {
+    return Promise.reject(abortError())
+  }
 
-  if (gateway.connectionState === 'open') {return Promise.resolve({ remainingMs: timeoutMs })}
+  if (gateway.connectionState === 'open') {
+    return Promise.resolve({ remainingMs: timeoutMs })
+  }
   const entry = owner
 
-  if (!entry || entry.disposed || entry.gateway !== gateway) {return Promise.resolve(null)}
+  if (!entry || entry.disposed || entry.gateway !== gateway) {
+    return Promise.resolve(null)
+  }
 
   const startedAt = Date.now()
   const hasDeadline = timeoutMs !== undefined && timeoutMs > 0
@@ -58,7 +70,9 @@ export function waitForPrimaryGateway(
     let offState: (() => void) | undefined
 
     const finish = (outcome: () => void) => {
-      if (settled) {return}
+      if (settled) {
+        return
+      }
       settled = true
       clearTimeout(timer)
       offState?.()
@@ -69,7 +83,8 @@ export function waitForPrimaryGateway(
 
     const fail = (error: Error) => finish(() => reject(error))
     const onAbort = () => fail(abortError())
-    const timedOut = () => fail(new Error(`Timed out waiting for the Hermes gateway to reconnect (${Math.round(budget / 1000)}s)`))
+    const timedOut = () =>
+      fail(new Error(`Timed out waiting for the Hermes gateway to reconnect (${Math.round(budget / 1000)}s)`))
 
     const opened = () => {
       const elapsed = Date.now() - startedAt
@@ -87,7 +102,9 @@ export function waitForPrimaryGateway(
     entry.waiters.add(fail)
     signal?.addEventListener('abort', onAbort, { once: true })
     offState = gateway.onState(state => {
-      if (state === 'open') {opened()}
+      if (state === 'open') {
+        opened()
+      }
     })
 
     // onState immediately reports the current state. Its disposer is not yet
@@ -105,8 +122,11 @@ export function waitForPrimaryGateway(
     }
 
     try {
-      if (!entry.recover()) {finish(() => resolve(null))}
-      else if (gateway.connectionState === 'open') {opened()}
+      if (!entry.recover()) {
+        finish(() => resolve(null))
+      } else if (gateway.connectionState === 'open') {
+        opened()
+      }
     } catch (error) {
       finish(() => reject(error))
     }

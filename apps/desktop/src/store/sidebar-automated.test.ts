@@ -19,7 +19,10 @@ afterEach(() => {
 describe('sessionHiddenAsAutomated [daveey]', () => {
   it('uses the caller render clock when expiring live evidence reveals a stalled parked card', () => {
     const row = {
-      ...bot, kanban_active: 1, kanban_parked: 1, kanban_stalled: 1,
+      ...bot,
+      kanban_active: 1,
+      kanban_parked: 1,
+      kanban_stalled: 1,
       execution_observations: [{ ...fixture.base, valid_until: 1010 }]
     }
 

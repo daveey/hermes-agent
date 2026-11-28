@@ -101,7 +101,10 @@ test('release() keeps an owned backend alive and its lockfile in place', async (
 
   assert.ok(!ssh.calls.some(command => KILLS.test(command)), 'release must not terminate the backend')
   assert.ok(ssh.hasLock(), 'release must keep the lockfile so the next connect can reuse the backend')
-  assert.ok(logs.some(line => /released remote dashboard pid=333/.test(line)), logs.join('\n'))
+  assert.ok(
+    logs.some(line => /released remote dashboard pid=333/.test(line)),
+    logs.join('\n')
+  )
 })
 
 test('release() fails closed on a foreign or corrupt lockfile: no kill, no removal', async () => {
@@ -130,7 +133,12 @@ test('connect() logs the exact reason a present backend was not reused', async (
     ['no stored token', ownedLock(), {}, /reuse miss: .*no stored token/],
     ['token mismatch', ownedLock(), { reuseToken: 'other-token' }, /reuse miss: .*token fingerprint mismatch/],
     ['profile', ownedLock({ profile: 'work' }), { reuseToken: 'stored-token' }, /reuse miss: .*profile work != ''/],
-    ['hermes path', ownedLock({ hermesPath: '/old/bin/hermes' }), { reuseToken: 'stored-token' }, /reuse miss: .*hermes path/]
+    [
+      'hermes path',
+      ownedLock({ hermesPath: '/old/bin/hermes' }),
+      { reuseToken: 'stored-token' },
+      /reuse miss: .*hermes path/
+    ]
   ]
 
   for (const [label, lock, over, expected] of cases) {
@@ -148,7 +156,10 @@ test('connect() logs the exact reason a present backend was not reused', async (
       // Spawning a replacement may fail in this double; only the logged reason matters here.
     }
 
-    assert.ok(logs.some(line => expected.test(line)), `${label}: ${logs.join('\n')}`)
+    assert.ok(
+      logs.some(line => expected.test(line)),
+      `${label}: ${logs.join('\n')}`
+    )
   }
 })
 
@@ -158,7 +169,13 @@ test('teardown policy: normal disconnects release, deliberate ones terminate, un
     assert.equal(remoteTeardownAction(reason, 'Darwin'), 'release', reason)
   }
 
-  for (const reason of ['fingerprint-change', 'connection-removed', 'recycle', 'config-apply', 'profile-teardown'] as const) {
+  for (const reason of [
+    'fingerprint-change',
+    'connection-removed',
+    'recycle',
+    'config-apply',
+    'profile-teardown'
+  ] as const) {
     assert.equal(remoteTeardownAction(reason, 'Linux'), 'terminate', reason)
   }
 
@@ -187,5 +204,8 @@ test('connect() logs a reason when the backend is alive and ours but its runtime
     // Replacing the stale backend may fail in this double; only the logged reason matters here.
   }
 
-  assert.ok(logs.some(line => /reuse miss: pid 333 runs a replaced runtime/.test(line)), logs.join('\n'))
+  assert.ok(
+    logs.some(line => /reuse miss: pid 333 runs a replaced runtime/.test(line)),
+    logs.join('\n')
+  )
 })

@@ -113,22 +113,33 @@ beforeEach(ctx => {
 describe('remote project groups from the hub replica', () => {
   it('does not wake a local backend for background trees, but reads one already running', async () => {
     vi.mocked(activeGatewayConnectionId).mockReturnValue(conn)
-    $connectionsRegistry.set({connections:[{id:'local',kind:'local',label:'This device'},{id:conn,kind:'remote',label:'remote'}],primary:conn} as never)
+    $connectionsRegistry.set({
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device' },
+        { id: conn, kind: 'remote', label: 'remote' }
+      ],
+      primary: conn
+    } as never)
     vi.mocked(hubGatewayProjects).mockResolvedValue(null)
     vi.mocked(hermesApi).mockRejectedValue(new Error('passive backend unavailable'))
     await refreshProjectTree()
     await flush()
-    expect(hermesApi).toHaveBeenCalledWith(expect.objectContaining({connectionId:'local',passive:true}))
+    expect(hermesApi).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local', passive: true }))
     expect(requestGatewayForAgent).not.toHaveBeenCalled()
-    const clock = vi.spyOn(Date,'now').mockReturnValue(Date.now() + 120_000)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000)
 
     try {
-      vi.mocked(hermesApi).mockResolvedValue({projects:[{...localTree[0],id:'p_warm',label:'warm-only'}],scoped_session_ids:[]})
+      vi.mocked(hermesApi).mockResolvedValue({
+        projects: [{ ...localTree[0], id: 'p_warm', label: 'warm-only' }],
+        scoped_session_ids: []
+      })
       await refreshProjectTree()
       await flush()
       expect($projectTree.get().some(node => node.id === 'gw:local:p_warm')).toBe(true)
       expect(requestGatewayForAgent).not.toHaveBeenCalled()
-    } finally { clock.mockRestore() }
+    } finally {
+      clock.mockRestore()
+    }
   })
 
   it("draws an unreachable gateway's groups from the replica, renameable, rows owned by that connection", async () => {
@@ -172,8 +183,17 @@ describe('remote project groups from the hub replica', () => {
   // kanban badge it last reported (audit: 17 rows of This device showed no open/blocked counts for 16 min after a
   // restart while the hub was the active gateway).
   const liveRow = (over: Record<string, unknown> = {}) => ({
-    id: 's_1', profile: 'default', title: 'mini chat', message_count: 3, started_at: 1, last_active: 5,
-    kanban_active: 2, kanban_blocked: 1, kanban_parked: 2, kanban_observed_at: 1000, ...over
+    id: 's_1',
+    profile: 'default',
+    title: 'mini chat',
+    message_count: 3,
+    started_at: 1,
+    last_active: 5,
+    kanban_active: 2,
+    kanban_blocked: 1,
+    kanban_parked: 2,
+    kanban_observed_at: 1000,
+    ...over
   })
 
   const remoteRow = () => remoteNode()?.previewSessions?.find(row => row.id === 's_1')

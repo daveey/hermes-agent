@@ -176,8 +176,12 @@ const KeepAlivePaneHost = memo(function KeepAlivePaneHost({ pane, placement, epo
           positionAnchor: placement.anchor,
           left: 'anchor(left)',
           top: 'anchor(top)',
-          width: placement.visible ? 'anchor-size(width)' : `var(--pane-kept-width, ${placement.bornParked ? BORN_PARKED_WIDTH : '0px'})`,
-          height: placement.visible ? 'anchor-size(height)' : `var(--pane-kept-height, ${placement.bornParked ? BORN_PARKED_HEIGHT : '0px'})`
+          width: placement.visible
+            ? 'anchor-size(width)'
+            : `var(--pane-kept-width, ${placement.bornParked ? BORN_PARKED_WIDTH : '0px'})`,
+          height: placement.visible
+            ? 'anchor-size(height)'
+            : `var(--pane-kept-height, ${placement.bornParked ? BORN_PARKED_HEIGHT : '0px'})`
         } as CSSProperties
       }
     >

@@ -28,8 +28,14 @@ import { requestStages } from './request-stages'
 export const TRANSCRIPT_IDENTITY_MAX_BYTES = 64 * 1024 * 1024
 
 function identityHeaders(headers: Record<string, string>): Record<string, string> {
-  return { ...Object.fromEntries(Object.entries(headers).filter(([name]) =>
-    !['accept-encoding', 'x-hermes-delta-accept', 'x-hermes-delta-base'].includes(name.toLowerCase()))), 'Accept-Encoding': 'identity' }
+  return {
+    ...Object.fromEntries(
+      Object.entries(headers).filter(
+        ([name]) => !['accept-encoding', 'x-hermes-delta-accept', 'x-hermes-delta-base'].includes(name.toLowerCase())
+      )
+    ),
+    'Accept-Encoding': 'identity'
+  }
 }
 
 /** What main.ts supplies: headers configured for remote gateways, and one-use native gateway grants. */
@@ -86,7 +92,9 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
         // and non-idempotent verbs are not retried.
         const encodingHeaders = {
           ...deps.remoteHeaders(url),
-          ...(identityTranscript ? displayTranscriptHeaders(options.method, url) : readEncodingHeaders(options.method, url)),
+          ...(identityTranscript
+            ? displayTranscriptHeaders(options.method, url)
+            : readEncodingHeaders(options.method, url)),
           ...(options.headers || {})
         }
 

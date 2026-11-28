@@ -4,11 +4,17 @@ import type * as ClientApi from './client'
 
 vi.mock('@/lib/legacy-session-owner-backfill', () => ({ maybeBackfillLegacySessionOwners: vi.fn() }))
 vi.mock('@/store/transcript-tail', () => ({ recordTranscriptTail: vi.fn() }))
-vi.mock('@/app/session/hooks/use-session-actions/archive-queue-lifetime', () => ({ archiveQueueLifetime: () => ({
-  run: (run: () => Promise<unknown>) => run(), enqueue: vi.fn(), sleep: async () => {}, dispose: vi.fn()
-}) }))
+vi.mock('@/app/session/hooks/use-session-actions/archive-queue-lifetime', () => ({
+  archiveQueueLifetime: () => ({
+    run: (run: () => Promise<unknown>) => run(),
+    enqueue: vi.fn(),
+    sleep: async () => {},
+    dispose: vi.fn()
+  })
+}))
 vi.mock('./client', async importOriginal => ({
-  ...await importOriginal<typeof ClientApi>(), hermesApi: vi.fn()
+  ...(await importOriginal<typeof ClientApi>()),
+  hermesApi: vi.fn()
 }))
 import { archiveDrainWrite } from '@/app/session/hooks/use-session-actions/archive-drain-write'
 import { sessionWriteRetryAction } from '@/lib/session-write-retry'
@@ -17,9 +23,15 @@ import { hermesApi, setApiRequestConnection, setApiRequestProfile } from './clie
 import { pinSessionWriteOwner, renameSession, setSessionArchived } from './sessions'
 
 // The Nov 11 hub refusal, verbatim in shape: a live owner that missed its identify deadlines.
-const STALLED = new Error('503: {"detail":"owner_unavailable: control_timeout: the gateway that owns this profile did not answer in time; nothing was changed, retry"}')
+const STALLED = new Error(
+  '503: {"detail":"owner_unavailable: control_timeout: the gateway that owns this profile did not answer in time; nothing was changed, retry"}'
+)
 
-beforeEach(() => { vi.mocked(hermesApi).mockReset(); setApiRequestConnection('owner'); setApiRequestProfile('work') })
+beforeEach(() => {
+  vi.mocked(hermesApi).mockReset()
+  setApiRequestConnection('owner')
+  setApiRequestProfile('work')
+})
 
 function owner(revision: number, failures: Error[]) {
   const writes: Array<{ body: Record<string, unknown>; connectionId?: string; path: string }> = []
@@ -34,7 +46,9 @@ function owner(revision: number, failures: Error[]) {
     writes.push(request as never)
     const failure = failures.shift()
 
-    if (failure) { throw failure }
+    if (failure) {
+      throw failure
+    }
 
     return { ok: true, revision: revision + 1 } as never
   })
@@ -62,8 +76,14 @@ it('a Retry after an owner stall replays the same fenced archive on the same own
   expect(seen.reads()).toBe(1) // no fresh precondition for a write the owner may already hold
   expect(seen.writes[1]).toEqual(seen.writes[0])
   expect(seen.writes[0].connectionId).toBe('owner')
-  expect(seen.writes[0].body).toMatchObject({ archived: true, pinned: false, profile: 'work', expected_revision: 4,
-    expected_generation: 3, request_id: expect.any(String) })
+  expect(seen.writes[0].body).toMatchObject({
+    archived: true,
+    pinned: false,
+    profile: 'work',
+    expected_revision: 4,
+    expected_generation: 3,
+    request_id: expect.any(String)
+  })
 })
 
 it('a drain retries the real fenced PATCH with unchanged identity and no new snapshot', async () => {
@@ -83,8 +103,12 @@ it('a selected row rename is fenced on its own gateway', async () => {
   await renameSession('chat', 'New', row)
   expect(seen.writes.map(write => write.connectionId)).toEqual(['mini', 'mini'])
   expect(seen.writes[1]).toEqual(seen.writes[0])
-  expect(seen.writes[0].body).toMatchObject({ title: 'New', profile: 'work', expected_revision: 9,
-    request_id: expect.any(String) })
+  expect(seen.writes[0].body).toMatchObject({
+    title: 'New',
+    profile: 'work',
+    expected_revision: 9,
+    request_id: expect.any(String)
+  })
 })
 
 it('offers Retry exactly while the intent is still retained', async () => {

@@ -9,13 +9,25 @@ import { joinPrimaryBoot, primaryBootRequest, primaryDialClaimKey } from './prim
 
 // Execute the production IPC and backend-selection declarations, isolating
 // Electron startup/process spawning, not the route decision being tested.
-const main = ts.createSourceFile('main.ts', fs.readFileSync(new URL('./main.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
-const preload = ts.createSourceFile('preload.ts', fs.readFileSync(new URL('./preload.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
+const main = ts.createSourceFile(
+  'main.ts',
+  fs.readFileSync(new URL('./main.ts', import.meta.url), 'utf8'),
+  ts.ScriptTarget.Latest,
+  true
+)
+const preload = ts.createSourceFile(
+  'preload.ts',
+  fs.readFileSync(new URL('./preload.ts', import.meta.url), 'utf8'),
+  ts.ScriptTarget.Latest,
+  true
+)
 
 function declaration(name: string) {
   const node = main.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name)
 
-  if (!node) { throw new Error(`Missing production function ${name}`) }
+  if (!node) {
+    throw new Error(`Missing production function ${name}`)
+  }
 
   return node.getText(main)
 }
@@ -24,26 +36,43 @@ function bridge(name: string) {
   let found = ''
 
   const visit = (node: ts.Node) => {
-    if (ts.isPropertyAssignment(node) && node.name.getText(preload) === name) { found = node.initializer.getText(preload) }
+    if (ts.isPropertyAssignment(node) && node.name.getText(preload) === name) {
+      found = node.initializer.getText(preload)
+    }
     ts.forEachChild(node, visit)
   }
 
   visit(preload)
 
-  if (!found) { throw new Error(`Missing preload bridge ${name}`) }
+  if (!found) {
+    throw new Error(`Missing preload bridge ${name}`)
+  }
 
   return found
 }
 
 function harness(localGateway = false) {
-  const primary = { baseUrl: 'https://hub.invalid', wsUrl: 'wss://hub.invalid/api/ws', authMode: 'oauth', headers: { Authorization: 'fixture' }, mode: 'remote' }
-  const local = { baseUrl: 'http://local.invalid', wsUrl: 'ws://local.invalid/api/ws', headers: {}, mode: 'local', ...(localGateway ? { gatewayEndpoint: {} } : {}) }
+  const primary = {
+    baseUrl: 'https://hub.invalid',
+    wsUrl: 'wss://hub.invalid/api/ws',
+    authMode: 'oauth',
+    headers: { Authorization: 'fixture' },
+    mode: 'remote'
+  }
+  const local = {
+    baseUrl: 'http://local.invalid',
+    wsUrl: 'ws://local.invalid/api/ws',
+    headers: {},
+    mode: 'local',
+    ...(localGateway ? { gatewayEndpoint: {} } : {})
+  }
   const handlers = new Map<string, (...args: any[]) => any>()
   const start = vi.fn(async () => ({ ...primary, ...(localGateway ? { gatewayEndpoint: {} } : {}) }))
   const pool = vi.fn(async () => local)
   const mint = vi.fn(async () => 'one-use-fixture')
   const registry = vi.fn(async () => ({ ...local, profile: 'coding' }))
   const forget = vi.fn()
+
   const dial = vi.fn(async (opts: { profile: string; forget: () => unknown; ensure: () => Promise<unknown> }) => {
     await opts.forget()
     await opts.ensure()
@@ -52,27 +81,48 @@ function harness(localGateway = false) {
   })
 
   const deps = {
-    primaryBootRequest, joinPrimaryBoot, primaryDialClaimKey,
-    resolveProfileBackendRoute, resolveDesktopConnectionRequest, desktopConnectionRequestInheritsPrimary,
+    primaryBootRequest,
+    joinPrimaryBoot,
+    primaryDialClaimKey,
+    resolveProfileBackendRoute,
+    resolveDesktopConnectionRequest,
+    desktopConnectionRequestInheritsPrimary,
     primaryProfileKey: () => 'remote-primary',
     // The old descriptor's default label now names a stored local pool. The
     // primary has been re-pinned (e.g. a remote roster repair during boot).
-    profileRouteOptions: (key: string) => ({ primaryProfile: 'remote-primary', primaryRemoteActive: true, ownEntry: key === 'default', profileRemoteOverride: key === 'other-remote' }),
+    profileRouteOptions: (key: string) => ({
+      primaryProfile: 'remote-primary',
+      primaryRemoteActive: true,
+      ownEntry: key === 'default',
+      profileRemoteOverride: key === 'other-remote'
+    }),
     profileDeletionGate: { assertCanStart: vi.fn() },
-    startHermes: start, dialPoolBackend: pool, backendPool: new Map(),
-    setWslBridgeProfileState: vi.fn(), assertNotPassiveSpawn: vi.fn(), newPoolEntry: () => ({}),
-    logPoolSpawnFailure: vi.fn(), forgetFailedPoolEntry: vi.fn(),
+    startHermes: start,
+    dialPoolBackend: pool,
+    backendPool: new Map(),
+    setWslBridgeProfileState: vi.fn(),
+    assertNotPassiveSpawn: vi.fn(),
+    newPoolEntry: () => ({}),
+    logPoolSpawnFailure: vi.fn(),
+    forgetFailedPoolEntry: vi.fn(),
     mintGatewayWsTicket: mint,
-    localGatewayDial: dial, forgetLocalGatewayDescriptor: forget, HERMES_HOME: '/fixture/home',
+    localGatewayDial: dial,
+    forgetLocalGatewayDescriptor: forget,
+    HERMES_HOME: '/fixture/home',
     localGatewayDials: { prepare: vi.fn() },
-    buildGatewayWsUrlWithTicket: (base: string, ticket: string) => `${base.replace('https:', 'wss:')}/api/ws?ticket=${ticket}`,
+    buildGatewayWsUrlWithTicket: (base: string, ticket: string) =>
+      `${base.replace('https:', 'wss:')}/api/ws?ticket=${ticket}`,
     rememberRemoteWsHeaders: vi.fn(),
     windowConnectionRoutes: new Map([[7, { connectionId: 'foreground', profile: 'coding', registryScoped: true }]]),
     backendDialClaimKey: (id: string, profile: string) => `${id}:${profile}`,
     backendDialClaims: { run: (_key: string, run: () => unknown) => run() },
     ensureRegistryBackend: registry,
-    liveWindowState: () => ({}), BrowserWindow: { fromWebContents: vi.fn() }, getWindowState: vi.fn(), mainWindow: null,
-    resolvedConnectionId: () => null, readDesktopConnectionsRegistry: () => ({}),
+    liveWindowState: () => ({}),
+    BrowserWindow: { fromWebContents: vi.fn() },
+    getWindowState: vi.fn(),
+    mainWindow: null,
+    resolvedConnectionId: () => null,
+    readDesktopConnectionsRegistry: () => ({}),
     overlayWindowState: (connection: unknown) => connection,
     captureStartupDeadline: (promise: unknown) => promise,
     gatewayWsUrlIpcResult: (run: () => unknown) => run(),
@@ -81,13 +131,30 @@ function harness(localGateway = false) {
     unwrapConnectionDeadline: (value: unknown) => value
   }
 
-  const ipc = main.statements.filter(statement => ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression) && statement.expression.expression.getText(main) === 'ipcMain.handle' && ['hermes:connection', 'hermes:gateway:ws-url'].includes((statement.expression.arguments[0] as ts.StringLiteral).text)).map(statement => statement.getText(main))
+  const ipc = main.statements
+    .filter(
+      statement =>
+        ts.isExpressionStatement(statement) &&
+        ts.isCallExpression(statement.expression) &&
+        statement.expression.expression.getText(main) === 'ipcMain.handle' &&
+        ['hermes:connection', 'hermes:gateway:ws-url'].includes(
+          (statement.expression.arguments[0] as ts.StringLiteral).text
+        )
+    )
+    .map(statement => statement.getText(main))
   expect(ipc).toHaveLength(2)
 
-  const source = [declaration('ensureBackend'), declaration('freshGatewayWsUrl'), declaration('connectDesktopProfileRoute'), ...ipc,
-    `return { getConnection: ${bridge('getConnection')}, getGatewayWsUrl: ${bridge('getGatewayWsUrl')} }`].join('\n')
+  const source = [
+    declaration('ensureBackend'),
+    declaration('freshGatewayWsUrl'),
+    declaration('connectDesktopProfileRoute'),
+    ...ipc,
+    `return { getConnection: ${bridge('getConnection')}, getGatewayWsUrl: ${bridge('getGatewayWsUrl')} }`
+  ].join('\n')
 
-  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText
   const api = new Function(...Object.keys(deps), compiled)(...Object.values(deps))
 
   return { api, start, pool, mint, registry, primary, local, forget, dial }
@@ -139,7 +206,9 @@ describe('production main/preload primary reconnect routing', () => {
 
   it('mints a fresh ticket on that same primary through the actual preload and ws-url IPC', async () => {
     const h = harness()
-    expect(await h.api.getGatewayWsUrl('default', { inheritsPrimary: true })).toBe('wss://hub.invalid/api/ws?ticket=one-use-fixture')
+    expect(await h.api.getGatewayWsUrl('default', { inheritsPrimary: true })).toBe(
+      'wss://hub.invalid/api/ws?ticket=one-use-fixture'
+    )
     expect(h.mint).toHaveBeenCalledWith(h.primary.baseUrl, h.primary.headers)
     expect(h.start).toHaveBeenCalledWith('remote-primary', true)
     expect(h.pool).not.toHaveBeenCalled()

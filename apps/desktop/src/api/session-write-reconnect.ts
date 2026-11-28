@@ -101,7 +101,9 @@ export async function withSessionWriteReconnect<T>(
   for (let attempt = 1; ; attempt += 1) {
     const remainingMs = budgetMs - (now() - started)
 
-    if (remainingMs <= 0) { throw lastError }
+    if (remainingMs <= 0) {
+      throw lastError
+    }
 
     try {
       const result = await run(remainingMs)
@@ -121,7 +123,9 @@ export async function withSessionWriteReconnect<T>(
         budgetMs = Math.max(budgetMs, options.ownerRestartBudgetMs ?? SESSION_WRITE_OWNER_RESTART_BUDGET_MS)
       }
 
-      const replayable = options.retryable ? options.retryable(error) : restarting || isReconnectableSessionWriteError(error)
+      const replayable = options.retryable
+        ? options.retryable(error)
+        : restarting || isReconnectableSessionWriteError(error)
 
       if (!replayable || now() - started + wait > budgetMs) {
         if (attempt > 1 || replayable) {

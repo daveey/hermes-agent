@@ -8,7 +8,11 @@ import { isDefinitiveSessionMutationRefusal } from '../../../shared/src/session-
  *  so there is nothing to replay and no button: the user re-reads the row instead. A 503 owner
  *  stall, a timeout or a lost reply keeps it, so the retry carries the same request_id and
  *  expected revision and the owner answers an already-committed edit from its receipt. */
-export function sessionWriteRetryAction(error: unknown, label: string, retry: () => void): NotificationAction | undefined {
+export function sessionWriteRetryAction(
+  error: unknown,
+  label: string,
+  retry: () => void
+): NotificationAction | undefined {
   if (isDefinitiveSessionMutationRefusal(error)) {
     return undefined
   }

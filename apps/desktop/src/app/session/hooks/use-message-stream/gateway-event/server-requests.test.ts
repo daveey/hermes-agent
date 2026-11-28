@@ -677,6 +677,7 @@ describe('a hidden session keeps driving its own parked Browser page', () => {
 
   it('declines vault open in a parked window so the visible owner can answer', async () => {
     openOwn('stored-a', 'flow.example')
+
     const { decline, respond } = deliver(
       'preview.act',
       { action: 'vault', session_id: 'rt-a', vault: { operation: 'open' } },

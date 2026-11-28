@@ -53,21 +53,22 @@ const turn = { turn_id: 'turn-2', segment: 0 }
 
 // The canonical owner answers session.activate as session.resume with history
 // (canonical-protocol.ts drops `omit_messages`); a legacy owner omits it.
-const snapshotWith = (history: 'rows' | 'omitted'): SessionResumeResult => ({
-  session_id: runtimeId,
-  resumed: storedId,
-  ...(history === 'rows' ? { messages: storedRows } : { messages: [], messages_omitted: true }),
-  message_count: 3,
-  running: true,
-  turn_started_at: 19,
-  inflight: {
-    user: '',
-    assistant: 'A2 TAIL ',
-    streaming: true,
-    segment_only: true,
-    segment_stamp: { ...turn, offset: 0, end: 8 }
-  }
-}) as SessionResumeResult
+const snapshotWith = (history: 'rows' | 'omitted'): SessionResumeResult =>
+  ({
+    session_id: runtimeId,
+    resumed: storedId,
+    ...(history === 'rows' ? { messages: storedRows } : { messages: [], messages_omitted: true }),
+    message_count: 3,
+    running: true,
+    turn_started_at: 19,
+    inflight: {
+      user: '',
+      assistant: 'A2 TAIL ',
+      streaming: true,
+      segment_only: true,
+      segment_stamp: { ...turn, offset: 0, end: 8 }
+    }
+  }) as SessionResumeResult
 
 function mount(gate: Promise<void>, snapshot: SessionResumeResult) {
   const requestGateway = vi.fn().mockImplementation(async (method: string) => {
@@ -218,7 +219,10 @@ async function activateWithEarlyDeltas(
     const rows = result.current.cache.sessionStateByRuntimeIdRef.current.get(runtimeId)!.messages
     const prompt = rows.findLastIndex(row => row.role === 'user')
 
-    return rows.slice(prompt + 1).filter(row => row.role === 'assistant').map(row => chatMessageText(row))
+    return rows
+      .slice(prompt + 1)
+      .filter(row => row.role === 'assistant')
+      .map(row => chatMessageText(row))
   }
 
   return { replies, send }
@@ -231,39 +235,42 @@ const stampedRow: ChatMessage = {
   parts: [{ type: 'text', text: 'A2 ', streamSpan: { turnId: 'turn-2', segment: 0, start: 0, end: 3 } }]
 }
 
-describe.each(['rows', 'omitted'] as const)('a warm activate (history %s) answered after early stamped deltas', history => {
-  it.each([
-    ['painted before the answer', true],
-    ['still buffered at the answer', false]
-  ] as const)('keeps the snapshot and a delta past its cut %s', async (_when, flush) => {
-    const { replies, send } = await activateWithEarlyDeltas(history, stampedRow, [{ offset: 8, text: 'NEXT ' }], {
-      flushBeforeAnswer: flush
+describe.each(['rows', 'omitted'] as const)(
+  'a warm activate (history %s) answered after early stamped deltas',
+  history => {
+    it.each([
+      ['painted before the answer', true],
+      ['still buffered at the answer', false]
+    ] as const)('keeps the snapshot and a delta past its cut %s', async (_when, flush) => {
+      const { replies, send } = await activateWithEarlyDeltas(history, stampedRow, [{ offset: 8, text: 'NEXT ' }], {
+        flushBeforeAnswer: flush
+      })
+
+      expect(replies()).toEqual(['A2 TAIL NEXT '])
+
+      send('message.delta', { text: 'MORE', ...turn, offset: 13 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150)
+      })
+
+      expect(replies()).toEqual(['A2 TAIL NEXT MORE'])
     })
 
-    expect(replies()).toEqual(['A2 TAIL NEXT '])
+    it('continues the snapshot row with the next delta when the cache held no live row', async () => {
+      const { replies, send } = await activateWithEarlyDeltas(history, null, [], { flushBeforeAnswer: true })
 
-    send('message.delta', { text: 'MORE', ...turn, offset: 13 })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(150)
+      expect(replies()).toEqual(['A2 TAIL '])
+      send('message.delta', { text: 'NEXT', ...turn, offset: 8 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150)
+      })
+      expect(replies()).toEqual(['A2 TAIL NEXT'])
     })
 
-    expect(replies()).toEqual(['A2 TAIL NEXT MORE'])
-  })
+    it('takes the snapshot when no delta beat the answer', async () => {
+      const { replies } = await activateWithEarlyDeltas(history, stampedRow, [], { flushBeforeAnswer: true })
 
-  it('continues the snapshot row with the next delta when the cache held no live row', async () => {
-    const { replies, send } = await activateWithEarlyDeltas(history, null, [], { flushBeforeAnswer: true })
-
-    expect(replies()).toEqual(['A2 TAIL '])
-    send('message.delta', { text: 'NEXT', ...turn, offset: 8 })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(150)
+      expect(replies()).toEqual(['A2 TAIL '])
     })
-    expect(replies()).toEqual(['A2 TAIL NEXT'])
-  })
-
-  it('takes the snapshot when no delta beat the answer', async () => {
-    const { replies } = await activateWithEarlyDeltas(history, stampedRow, [], { flushBeforeAnswer: true })
-
-    expect(replies()).toEqual(['A2 TAIL '])
-  })
-})
+  }
+)

@@ -227,7 +227,10 @@ async function resumeWithEarlyDeltas(
     const rows = result.current.cache.sessionStateByRuntimeIdRef.current.get(sessionId)!.messages
     const prompt = rows.findLastIndex(row => row.role === 'user')
 
-    return rows.slice(prompt + 1).filter(row => row.role === 'assistant').map(row => chatMessageText(row))
+    return rows
+      .slice(prompt + 1)
+      .filter(row => row.role === 'assistant')
+      .map(row => chatMessageText(row))
   }
 
   return { replies, send }

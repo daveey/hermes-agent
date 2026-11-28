@@ -81,10 +81,14 @@ test('the environment overlay never writes its route or token to the shared gate
   const store = storeFor(root, userData)
   const overlay = new EnvironmentRegistry({ url: 'https://process-only.test', token: 'process-only-secret' })
   const registry = overlay.read(store.read())
+
   const next = {
     ...registry,
-    connections: registry.connections.map(entry => entry.kind === 'local' ? { ...entry, label: 'Renamed local' } : entry)
+    connections: registry.connections.map(entry =>
+      entry.kind === 'local' ? { ...entry, label: 'Renamed local' } : entry
+    )
   }
+
   store.write(overlay.stored(next))
   const persisted = readJson(path.join(root, GATEWAY_CONNECTIONS_FILE))
   assert.equal(JSON.stringify(persisted).includes('process-only'), false)
@@ -101,17 +105,41 @@ test.each([false, true])('overlay preserves another writer without refreshing it
   const { root, userData } = scratch()
   const a = storeFor(root, userData)
   const b = storeFor(root, userData)
-  const overlay = new EnvironmentRegistry(enabled ? { url: 'https://process-only.test', token: 'process-only-secret' } : {})
+  const overlay = new EnvironmentRegistry(
+    enabled ? { url: 'https://process-only.test', token: 'process-only-secret' } : {}
+  )
   const initial = overlay.read(a.read())
   const external = b.read()
-  b.write({ ...external, connections: [...external.connections,
-    { id: 'external', kind: 'remote', label: 'External', url: 'https://external.test', authMode: 'token' }] })
-  const next = { ...initial, connections: [...initial.connections,
-    { id: 'desktop', kind: 'remote' as const, label: 'Desktop', url: 'https://desktop.test', authMode: 'token' as const }] }
+  b.write({
+    ...external,
+    connections: [
+      ...external.connections,
+      { id: 'external', kind: 'remote', label: 'External', url: 'https://external.test', authMode: 'token' }
+    ]
+  })
+
+  const next = {
+    ...initial,
+    connections: [
+      ...initial.connections,
+      {
+        id: 'desktop',
+        kind: 'remote' as const,
+        label: 'Desktop',
+        url: 'https://desktop.test',
+        authMode: 'token' as const
+      }
+    ]
+  }
 
   a.write(overlay.stored(next))
   const persisted = readJson(path.join(root, GATEWAY_CONNECTIONS_FILE))
-  assert.deepEqual(normalizeRegistry(persisted).connections.map(entry => entry.id).sort(), ['desktop', 'external', 'local'])
+  assert.deepEqual(
+    normalizeRegistry(persisted)
+      .connections.map(entry => entry.id)
+      .sort(),
+    ['desktop', 'external', 'local']
+  )
   assert.equal(JSON.stringify(persisted).includes('process-only'), false)
 })
 

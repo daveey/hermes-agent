@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { mapUpdateProgress, type UpdateProgressResponse } from './background-update'
 
 const FETCHED = 1_000_000
+
 const wire = (over: Partial<NonNullable<UpdateProgressResponse['progress']>> = {}): UpdateProgressResponse => ({
   progress: {
     state: 'draining',

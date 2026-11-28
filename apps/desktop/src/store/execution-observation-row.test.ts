@@ -78,7 +78,10 @@ const classify = (r: SessionInfo) => {
   const counts = kanbanStripeCounts(r)
   const dot = withRowActivity('idle', r)
 
-  return { dot, stripe: sessionStatusStripe(dot, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled) }
+  return {
+    dot,
+    stripe: sessionStatusStripe(dot, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled)
+  }
 }
 
 const AT = 1001
@@ -129,7 +132,6 @@ describe('sidebar classification of the shared execution fixture', () => {
         // Terminal evidence never holds a row; the legacy stamps (none here) decide what it paints.
         expect(dot).toBe('idle')
         expect(executionHoldsRow(rowExecution(r))).toBe(false)
-
       } else {
         // Unknown is held, visibly, and is never zero work or done.
         expect(rowExecution(r)?.unknown).toBe(1)
@@ -163,7 +165,7 @@ describe('sidebar execution wiring', () => {
 
     expect(rowExecution(legacy)).toMatchObject({ live: 0, unknown: 1 })
     expect(withRowActivity('idle', legacy)).toBe('background')
-    expect(rowExecution(row({ kanban_active: 1, kanban_parked: 1 }, AT))).toBeNull()  // legacy wait stays a wait
+    expect(rowExecution(row({ kanban_active: 1, kanban_parked: 1 }, AT))).toBeNull() // legacy wait stays a wait
     // A current producer sends the array; its own records decide, the legacy count adds no unknown.
     expect(rowExecution(row({ execution_observations: [], kanban_active: 1 }, AT))).toBeNull()
   })
@@ -172,7 +174,12 @@ describe('sidebar execution wiring', () => {
     const fresh = [
       obs({
         set: {
-          delivery_receipt: { disposition: 'delivered', evidence_ref: 'completed:42', identity: base.identity, verified: true },
+          delivery_receipt: {
+            disposition: 'delivered',
+            evidence_ref: 'completed:42',
+            identity: base.identity,
+            verified: true
+          },
           state: 'done'
         }
       })
@@ -199,7 +206,11 @@ describe('sidebar execution wiring', () => {
   })
 
   it('keeps mixed capacity diagnostics separate from fresh work and arbitrary unknown work', () => {
-    const diagnostics = { source: 'kanban.dispatch', state: 'unknown', diagnostics: [{ code: 'capacity.global_limit' }] }
+    const diagnostics = {
+      source: 'kanban.dispatch',
+      state: 'unknown',
+      diagnostics: [{ code: 'capacity.global_limit' }]
+    }
     const r = row({ execution_observations: [diagnostics, obs(), { source: 'other.unknown' }] }, AT)
     const before = clone(r)
 
@@ -210,7 +221,12 @@ describe('sidebar execution wiring', () => {
 
   it('shows known fresh work and a partial unknown together', () => {
     const r = row(
-      { execution_observations: [obs(), obs({ set: { 'identity.work_id': 'task-b', state: 'unknown', unknown_reason: 'source_offline' } })] },
+      {
+        execution_observations: [
+          obs(),
+          obs({ set: { 'identity.work_id': 'task-b', state: 'unknown', unknown_reason: 'source_offline' } })
+        ]
+      },
       AT
     )
 
@@ -225,7 +241,9 @@ describe('sidebar execution wiring', () => {
 
     vi.setSystemTime(1181 * 1000)
     expect(projectExecutionObservation(completed, 1181, 'sidebar')).toMatchObject({
-      delivery_receipt: receipt, last_known_state: 'done', state: 'unknown'
+      delivery_receipt: receipt,
+      last_known_state: 'done',
+      state: 'unknown'
     })
     expect(rowExecution(r)).toMatchObject({ unknown: 1 })
     expect(executionHoldsRow(rowExecution(r))).toBe(true)
@@ -235,7 +253,12 @@ describe('sidebar execution wiring', () => {
 
   it('does not reclassify missing published status when local completion evidence expires', () => {
     const receipt = { disposition: 'delivered', evidence_ref: 'completed:42', identity: base.identity, verified: true }
-    setSessions([row({ execution_observations: [obs({ set: { delivery_receipt: receipt, state: 'done', valid_until: 1010 } })] }, AT)])
+    setSessions([
+      row(
+        { execution_observations: [obs({ set: { delivery_receipt: receipt, state: 'done', valid_until: 1010 } })] },
+        AT
+      )
+    ])
     expect(sessionHasStatusStripe('s1')).toBe(true)
     vi.setSystemTime(1011_000)
     $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
@@ -270,7 +293,13 @@ describe('sidebar execution wiring', () => {
     const asking = obs({
       set: {
         state: 'needs_user',
-        human_request: { action: 'Pick', evidence: 'request:1', interaction: 'reply', scope: 'task', why_human: 'Preference' },
+        human_request: {
+          action: 'Pick',
+          evidence: 'request:1',
+          interaction: 'reply',
+          scope: 'task',
+          why_human: 'Preference'
+        },
         wait: {
           kind: 'human',
           owner: { gateway: 'edge', profile: 'work' },

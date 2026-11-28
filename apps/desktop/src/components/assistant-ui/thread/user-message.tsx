@@ -461,7 +461,11 @@ function UserMessageUpdateHold() {
   const updateHeld = useAuiState(s => s.message.metadata.custom?.queued_reason === 'core_update')
   const updateStartedAt = useAuiState(s => s.message.metadata.custom?.queued_started_at)
 
-  return updateHeld ? <div className="text-xs text-muted-foreground"><UpdateHeldNote startedAt={updateStartedAt} /></div> : null
+  return updateHeld ? (
+    <div className="text-xs text-muted-foreground">
+      <UpdateHeldNote startedAt={updateStartedAt} />
+    </div>
+  ) : null
 }
 
 export const UserMessage: FC<{

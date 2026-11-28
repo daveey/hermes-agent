@@ -37,7 +37,9 @@ declare global {
       // Resolve a backend connection. Omit `profile` (or pass the primary) for
       // the window's backend; pass a named profile to dial/reuse that profile's
       // cached gateway descriptor.
-      getStartupConnection?: (route?: { connectionId?: null | string; profile?: null | string } | null) => Promise<StartupConnectionResult<HermesConnection>>
+      getStartupConnection?: (
+        route?: { connectionId?: null | string; profile?: null | string } | null
+      ) => Promise<StartupConnectionResult<HermesConnection>>
       getConnection: (profile?: string | null, opts?: { inheritsPrimary?: boolean }) => Promise<HermesConnection>
       // Registry-scoped backend resolution: dial (connectionId, profile). An
       // empty/local connectionId delegates to the legacy getConnection path.
@@ -295,8 +297,15 @@ declare global {
         test: (id: string) => Promise<DesktopConnectionTestResult>
         // Drain/update/restore one Desktop-managed SSH install. External URL
         // and cloud sources are refused without touching their processes.
-        reconnectTarget?: (id: string, profile: string) => Promise<{ connectionId: string; profile: string; generation: string } | null>
-        reconnect?: (target: { connectionId: string; profile: string; generation: string }) => Promise<{ ok: boolean; generation?: string }>
+        reconnectTarget?: (
+          id: string,
+          profile: string
+        ) => Promise<{ connectionId: string; profile: string; generation: string } | null>
+        reconnect?: (target: {
+          connectionId: string
+          profile: string
+          generation: string
+        }) => Promise<{ ok: boolean; generation?: string }>
         updateManaged?: (id: string) => Promise<DesktopManagedConnectionUpdateResult>
         // Fan out `hermes update` to every eligible registered connection;
         // cloud entries are skipped (platform-managed), each row independent.
@@ -732,7 +741,10 @@ declare global {
       }) => Promise<PreviewSigninsResult>
       // P2-7: the per-profile imported-sign-ins record + cookie jar live in Electron main (userData),
       // so the renderer's local profile rename/delete flow signals main to move/clear them.
-      migratePreviewSigninsForProfile?: (request: { oldProfile: string; newProfile: string }) => Promise<{ ok: boolean }>
+      migratePreviewSigninsForProfile?: (request: {
+        oldProfile: string
+        newProfile: string
+      }) => Promise<{ ok: boolean }>
       dropPreviewSigninsForProfile?: (request: { profile: string }) => Promise<{ ok: boolean }>
       setActiveConnectionRoute?: (
         route: {

@@ -150,7 +150,8 @@ export interface SessionOwner {
 }
 
 // hermes_cli/active_sessions.py session_owner_details(): keep the two in step.
-const SESSION_OWNER_DETAILS_RE = /Details: session \S+ opened by (.+?)(?: on (\S+?))?(?: (\d+h(?:\d+m)?|\d+m) ago)?\.\s*$/m
+const SESSION_OWNER_DETAILS_RE =
+  /Details: session \S+ opened by (.+?)(?: on (\S+?))?(?: (\d+h(?:\d+m)?|\d+m) ago)?\.\s*$/m
 
 /** Where a SESSION_NOT_OWNED refusal says the chat is open, or null when the text has no Details line. */
 export function parseSessionOwner(text: string | null | undefined): SessionOwner | null {

@@ -34,7 +34,8 @@ const onPowerResume = vi.fn((cb: () => void) => {
 })
 
 const counters = globalThis as unknown as Record<string, number | undefined>
-const version = (v: string) => `export default { id: "linked", register() { globalThis.__linked_${v} = (globalThis.__linked_${v} ?? 0) + 1 } }`
+const version = (v: string) =>
+  `export default { id: "linked", register() { globalThis.__linked_${v} = (globalThis.__linked_${v} ?? 0) + 1 } }`
 let source = version('v1')
 let watchN = 0
 let restoreBlob: () => void = () => undefined
@@ -127,7 +128,9 @@ describe('disk plugins: level-triggered refresh (missed fs events)', () => {
     // The orphaned watch is released and the current file is watched again.
     expect(stopPreviewFileWatch).toHaveBeenCalledWith('w-linked-1')
     expect(watchPreviewFile).toHaveBeenLastCalledWith(file)
-    expect(logLine).toHaveBeenCalledWith(expect.stringContaining('linked: plugin.js changed with no watch event; reloaded (resume)'))
+    expect(logLine).toHaveBeenCalledWith(
+      expect.stringContaining('linked: plugin.js changed with no watch event; reloaded (resume)')
+    )
 
     // Later change, still no event, no wake: the minute interval picks it up.
     source = version('v3')

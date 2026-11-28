@@ -59,12 +59,7 @@ import { handleServerRequest as dispatchServerRequest } from './gateway-event/se
 import { bindReceiptUserRows } from './receipt-user-rows'
 import { currentResponseParts, mergeCurrentResponseText } from './response-parts'
 import { admitSegmentDelta, admitSegmentSeal, type SegmentCursor, type SegmentStamp } from './segment-identity'
-import {
-  completionErrorText,
-  delegateTaskPayloads,
-  MAX_STREAM_FLUSH_GAP_MS,
-  STREAM_DELTA_FLUSH_MS
-} from './utils'
+import { completionErrorText, delegateTaskPayloads, MAX_STREAM_FLUSH_GAP_MS, STREAM_DELTA_FLUSH_MS } from './utils'
 
 interface MessageStreamOptions {
   activeGatewayProfile?: string
@@ -1019,7 +1014,12 @@ export function useMessageStream({
             // A bare `error` event (e.g. the agent build failing) already
             // painted this turn's error card; the turn's terminal error frame
             // is the same failure, so it settles onto that card.
-            const failureRepeatsErrorCard = completionSettlesErrorCard(existing, existingText, finalText, completionError)
+            const failureRepeatsErrorCard = completionSettlesErrorCard(
+              existing,
+              existingText,
+              finalText,
+              completionError
+            )
 
             // The terminal frame names the stored row it settled; this
             // trailing bubble is a still-unsettled display-only interim that
@@ -1043,7 +1043,6 @@ export function useMessageStream({
 
             if (
               existing.pending ||
-
               failureRepeatsErrorCard ||
               settlesPersistedRow ||
               (!interimBoundaryPending && finalText && existingText === finalText)

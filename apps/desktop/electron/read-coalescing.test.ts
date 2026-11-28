@@ -255,5 +255,4 @@ describe('main.ts wiring', () => {
     // Nothing else calls the uncoalesced transport, so no read can bypass the sharing.
     expect(main.match(/\bfetchJsonForBackendOnce\b/g)).toHaveLength(2)
   })
-
 })

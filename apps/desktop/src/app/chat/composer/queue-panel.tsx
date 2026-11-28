@@ -171,8 +171,10 @@ export function QueuePanel({
   // must be on screen without expanding the section, and the header names the pause (#134889 NF2).
   const lostEntries = entries.filter(entry => entry.serverStatus === 'unknown')
 
-  const previewEntries = entries.filter(entry => entry.serverStatus === 'unknown' ||
-    (entry.serverStatus === 'queued' && entry.queued_reason === 'core_update'))
+  const previewEntries = entries.filter(
+    entry =>
+      entry.serverStatus === 'unknown' || (entry.serverStatus === 'queued' && entry.queued_reason === 'core_update')
+  )
 
   const paused = parked || lostEntries.length > 0
 

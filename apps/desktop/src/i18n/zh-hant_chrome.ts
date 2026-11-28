@@ -204,7 +204,8 @@ export const zhHantChrome = {
       backgroundExternalDown: '外部服務已中斷',
       kanbanExternalRunning: '外部運行中',
       kanbanExternalDown: '外部中斷',
-      kanbanUnknown: count => `${count} 項工作的目前狀態未知：證據缺失、已過期或未經驗證。這不表示已完成；未要求新的檢查。`,
+      kanbanUnknown: count =>
+        `${count} 項工作的目前狀態未知：證據缺失、已過期或未經驗證。這不表示已完成；未要求新的檢查。`,
       pausedQueue: '重新啟動前排入佇列的訊息可能未執行：請重新傳送或捨棄',
       pin: '釘選',
       unpin: '取消釘選',
@@ -496,12 +497,9 @@ export const zhHantChrome = {
     terminalCloseAll: '全部關閉',
     terminalNewOn: '新增終端機於…',
     terminalGatewayRemoved: '已移除的閘道',
-    terminalGatewayRemovedBody:
-      '此終端機所在的閘道已被移除，無法重新開啟。請關閉此分頁。',
-    terminalGatewayNoShellBody:
-      '此閘道不提供 Shell 存取，此終端機無法重新開啟。請關閉此分頁。',
-    terminalDisconnectedBody:
-      '終端機已中斷連線。按 Enter 啟動新的 shell；捲動記錄會保留。',
+    terminalGatewayRemovedBody: '此終端機所在的閘道已被移除，無法重新開啟。請關閉此分頁。',
+    terminalGatewayNoShellBody: '此閘道不提供 Shell 存取，此終端機無法重新開啟。請關閉此分頁。',
+    terminalDisconnectedBody: '終端機已中斷連線。按 Enter 啟動新的 shell；捲動記錄會保留。',
     addToChat: '新增至聊天'
   },
 

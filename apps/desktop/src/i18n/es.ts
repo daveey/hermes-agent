@@ -31,9 +31,9 @@ import { introEs } from './intro-es'
 
 export const esOverrides = {
   gatewayGroupOpen: {
-    opening: "Abriendo el chat de grupo…",
-    lookupFailed: "No se pudo encontrar este grupo en la pasarela. Inténtalo de nuevo.",
-    missing: "Este chat de grupo ya no existe."
+    opening: 'Abriendo el chat de grupo…',
+    lookupFailed: 'No se pudo encontrar este grupo en la pasarela. Inténtalo de nuevo.',
+    missing: 'Este chat de grupo ya no existe.'
   },
   sharedMetrics: esSharedMetrics,
   firstRun: esFirstRun,
@@ -2399,12 +2399,15 @@ export const esOverrides = {
         enabledTitle: 'Navegación con perfil real activada',
         enabledMessage: 'Las sesiones nuevas navegarán con una instantánea de tu perfil predeterminado del navegador.',
         disabledTitle: 'Navegación con perfil real desactivada',
-        disabledMessage: 'Se eliminará la instantánea del perfil y se cerrará su sesión en el navegador integrado; las sesiones nuevas usan un navegador limpio.',
+        disabledMessage:
+          'Se eliminará la instantánea del perfil y se cerrará su sesión en el navegador integrado; las sesiones nuevas usan un navegador limpio.',
         failedSave: 'No se pudo guardar el ajuste del perfil real',
         reimportSignins: 'Volver a importar inicios de sesión',
         signinsImportedTitle: 'Inicios de sesión del navegador integrado',
-        signinsImported: count => `Se inició sesión en el navegador integrado con ${count} cookie${count === 1 ? '' : 's'} de tu perfil del navegador.`,
-        signinsRemote: 'Este backend se ejecuta en otro equipo, así que su perfil del navegador no se importa al navegador integrado.',
+        signinsImported: count =>
+          `Se inició sesión en el navegador integrado con ${count} cookie${count === 1 ? '' : 's'} de tu perfil del navegador.`,
+        signinsRemote:
+          'Este backend se ejecuta en otro equipo, así que su perfil del navegador no se importa al navegador integrado.',
         signinsFailed: 'No se pudieron importar los inicios de sesión al navegador integrado',
         prompt: {
           title: 'Mantén la sesión iniciada en tus sitios',
@@ -3006,7 +3009,8 @@ export const esOverrides = {
     relayLink: {
       title: 'Team Gateway',
       badge: 'Sin token de bot',
-      intro: (platform: string) => `${platform} llega a este agente a través del bot compartido de Hermes. Vincula tu cuenta de ${platform} y escribe al bot para hablar con tu agente.`,
+      intro: (platform: string) =>
+        `${platform} llega a este agente a través del bot compartido de Hermes. Vincula tu cuenta de ${platform} y escribe al bot para hablar con tu agente.`,
       link: (platform: string) => `Vincular ${platform}`,
       linkAnother: (platform: string) => `Vincular otra cuenta de ${platform}`,
       linkedAccounts: 'Cuentas vinculadas',
@@ -3024,10 +3028,12 @@ export const esOverrides = {
       refused: (platform: string) => `${platform} rechazó la vinculación. Pide un código nuevo e inténtalo otra vez.`,
       qrAlt: (platform: string) => `Código QR del bot compartido de ${platform}`,
       managed: 'Gestionado por Team Gateway',
-      managedNote: (platform: string) => `Team Gateway gestiona la mensajería en esta instancia, así que el gateway desactiva la conexión directa de ${platform} en cada inicio. Para usarla junto al relay, define GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true en el entorno del gateway (una conexión directa impide que la instancia escale a cero y puede entregar mensajes dos veces).`,
+      managedNote: (platform: string) =>
+        `Team Gateway gestiona la mensajería en esta instancia, así que el gateway desactiva la conexión directa de ${platform} en cada inicio. Para usarla junto al relay, define GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true en el entorno del gateway (una conexión directa impide que la instancia escale a cero y puede entregar mensajes dos veces).`,
       managedIntro: 'Las cuentas de este agente se vinculan desde Nous Portal.',
       openPortal: 'Vincular cuentas en Nous Portal',
-      noNewAccount: (platform: string) => `El código ya no está activo y no apareció ninguna cuenta nueva. Si tu cuenta de ${platform} no aparece, obtén un código nuevo e inténtalo otra vez.`
+      noNewAccount: (platform: string) =>
+        `El código ya no está activo y no apareció ninguna cuenta nueva. Si tu cuenta de ${platform} no aparece, obtén un código nuevo e inténtalo otra vez.`
     },
     telegramQr: {
       title: 'Elige cómo conectar tu bot de Telegram',
@@ -3236,7 +3242,8 @@ export const esOverrides = {
     fieldDeliver: 'Entregar a',
     fieldDeliverOnly: 'Entregar solo la carga útil',
     fieldSignature: 'Firma',
-    fieldSignatureHint: 'El único esquema de firma que acepta esta ruta. Las entregas de GitHub, GitLab y Linear necesitan su propio esquema.',
+    fieldSignatureHint:
+      'El único esquema de firma que acepta esta ruta. Las entregas de GitHub, GitLab y Linear necesitan su propio esquema.',
     signatureOptions: {
       generic: 'Genérica (con marca de tiempo)',
       github: 'GitHub',
@@ -3727,8 +3734,10 @@ export const esOverrides = {
       backgroundExternalDown: 'Un servicio externo está caído',
       kanbanExternalRunning: 'ejecutándose externamente',
       kanbanExternalDown: 'caída externa',
-      kanbanUnknown: count => `${count} elementos de trabajo con estado actual desconocido: faltan pruebas, han caducado o no están verificadas. Esto no significa terminado; no se solicitó una nueva comprobación.`,
-      pausedQueue: 'Puede que un mensaje en cola antes de un reinicio no se haya ejecutado: envíalo de nuevo o descártalo',
+      kanbanUnknown: count =>
+        `${count} elementos de trabajo con estado actual desconocido: faltan pruebas, han caducado o no están verificadas. Esto no significa terminado; no se solicitó una nueva comprobación.`,
+      pausedQueue:
+        'Puede que un mensaje en cola antes de un reinicio no se haya ejecutado: envíalo de nuevo o descártalo',
       pin: 'Fijar',
       unpin: 'Desfijar',
       markUnread: 'Marcar como no leído',
@@ -3929,7 +3938,8 @@ export const esOverrides = {
       '/topup': 'Mostrar tu saldo de Nous y gestionar la facturación en el portal',
       '/platform': 'Pausar, reanudar o listar una plataforma del gateway que falla',
       '/version': 'Mostrar la versión de Hermes Agent',
-      '/debug': 'Informe de depuración (versiones, claves de configuración, recuentos de errores; sin texto de registros): muestra primero el aviso de privacidad; /debug upload comparte enlaces',
+      '/debug':
+        'Informe de depuración (versiones, claves de configuración, recuentos de errores; sin texto de registros): muestra primero el aviso de privacidad; /debug upload comparte enlaces',
       '/model': 'Cambiar el modelo de esta sesión'
     },
     hotkeyDescs: {
@@ -3967,7 +3977,8 @@ export const esOverrides = {
     queueResume: 'Reanudar',
     queueResumeTip: 'La cola se pausó al detener; reanuda el envío de los turnos en cola',
     queueLostNote: 'Turno perdido durante el reinicio',
-    queueUpdateNote: (started: string | undefined) => `Esperando una actualización de Hermes${started ? ` (iniciada a las ${started})` : ''}, se enviará automáticamente`,
+    queueUpdateNote: (started: string | undefined) =>
+      `Esperando una actualización de Hermes${started ? ` (iniciada a las ${started})` : ''}, se enviará automáticamente`,
     restoreImageDraft: 'Restaurar borrador con imagen',
     queueCancelFailed: 'No se pudo quitar el turno en cola',
     queueLostDiscard: 'Descartar',
@@ -5530,7 +5541,8 @@ export const esOverrides = {
     archived: 'Archivado',
     archiveFailed: 'No se pudo archivar',
     archiveLinkedTitle: (title: string) => (title ? `¿Archivar «${title}»?` : '¿Archivar este chat?'),
-    archiveLinkedBody: 'Revisa el estado del trabajo vinculado a continuación. Archivar solo oculta el chat; no detiene tareas ni máquinas.',
+    archiveLinkedBody:
+      'Revisa el estado del trabajo vinculado a continuación. Archivar solo oculta el chat; no detiene tareas ni máquinas.',
     archiveLinkedConfirm: 'Archivar de todos modos',
     archiveLinkedCancel: 'Conservar chat',
     ...esArchiveTasks,

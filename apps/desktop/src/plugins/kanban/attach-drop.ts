@@ -16,11 +16,15 @@ export async function uploadFiles(taskId: string, files: readonly File[], owner?
   let stored = 0
 
   for (const file of files) {
-    await uploadAttachment(taskId, {
-      bytes: await file.arrayBuffer(),
-      contentType: file.type || undefined,
-      filename: file.name
-    }, owner)
+    await uploadAttachment(
+      taskId,
+      {
+        bytes: await file.arrayBuffer(),
+        contentType: file.type || undefined,
+        filename: file.name
+      },
+      owner
+    )
     stored += 1
   }
 

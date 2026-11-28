@@ -8,7 +8,13 @@ import { type TodoItem, type TodoStatus, todoTree } from '@/lib/todos'
 import { $gateway } from './gateway'
 import { $goalsBySession, type GoalStatus } from './goals'
 import { $kanbanObservationTick } from './kanban-observation'
-import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle, selectWorkObservations } from './live-work-roster'
+import {
+  $liveWorkRoster,
+  noteEventFed,
+  rosterLiveIds,
+  rosterSaysIdle,
+  selectWorkObservations
+} from './live-work-roster'
 import { dispatchNativeNotification } from './native-notifications'
 import { notifyError } from './notifications'
 import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone, noteRuntimeAlive } from './runtime-gone'
@@ -92,7 +98,14 @@ export const $backgroundRunningSessionIds = computed(
 
       const evidence = items.filter(i => i.state === 'running').flatMap(i => i.executionObservations ?? [])
 
-      if (summarizeExecutionObservations(selectWorkObservations(evidence, Date.now() / 1000), Date.now() / 1000, 'sidebar').counts.running > 0 && !rosterSaysIdle(roster, 'background', aliases, writtenAt)) {
+      if (
+        summarizeExecutionObservations(
+          selectWorkObservations(evidence, Date.now() / 1000),
+          Date.now() / 1000,
+          'sidebar'
+        ).counts.running > 0 &&
+        !rosterSaysIdle(roster, 'background', aliases, writtenAt)
+      ) {
         for (const alias of aliases) {
           ids.add(alias)
         }
@@ -393,7 +406,10 @@ const toBackgroundItem = (proc: GatewayProcessEntry): ComposerStatusItem => {
 }
 
 const sameItem = (a: ComposerStatusItem, b: ComposerStatusItem) =>
-  a.state === b.state && a.title === b.title && a.output === b.output && a.exitCode === b.exitCode &&
+  a.state === b.state &&
+  a.title === b.title &&
+  a.output === b.output &&
+  a.exitCode === b.exitCode &&
   JSON.stringify(a.executionObservations) === JSON.stringify(b.executionObservations)
 
 /**

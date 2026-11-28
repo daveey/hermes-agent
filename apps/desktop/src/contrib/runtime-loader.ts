@@ -40,7 +40,13 @@ import { atom } from 'nanostores'
 
 import { isReadFileErrorResult } from '@/lib/desktop-fs'
 import { identifyBytes } from '@/sdk/loaded-assets'
-import { beginSdkCapture, capturedSdkDependencies, installPluginSdk, sdkImportMap, sessionTasksRuntimeCurrent } from '@/sdk/runtime'
+import {
+  beginSdkCapture,
+  capturedSdkDependencies,
+  installPluginSdk,
+  sdkImportMap,
+  sessionTasksRuntimeCurrent
+} from '@/sdk/runtime'
 import { notifyError } from '@/store/notifications'
 import { forgetPluginPreviewAccess } from '@/store/plugin-preview-grants'
 
@@ -57,9 +63,13 @@ import {
 import { createSessionTasksIdentity } from './session-tasks-identity'
 const sessionTasksIdentity = createSessionTasksIdentity()
 
-export function readSessionTasksLoadedIdentity() { return sessionTasksIdentity.read() }
+export function readSessionTasksLoadedIdentity() {
+  return sessionTasksIdentity.read()
+}
 
-export function readSessionTasksLoadedIdentityJson(): string { return sessionTasksIdentity.readJson() }
+export function readSessionTasksLoadedIdentityJson(): string {
+  return sessionTasksIdentity.readJson()
+}
 
 interface LoadOptions {
   /** Root-level default-enable CAP: `false` ships the plugin opt-in (inventory
@@ -389,7 +399,9 @@ export function unloadRuntimePlugin(id: string): void {
   pendingIdentities.delete(id)
   const disposers = loaded.get(id)
 
-  if (disposers) {invalidators.get(disposers)?.()}
+  if (disposers) {
+    invalidators.get(disposers)?.()
+  }
 
   // Released BEFORE the disposers run, and each disposer in its own
   // try/catch: a disposer with its own bug must not wedge the registry
@@ -410,10 +422,14 @@ export function unloadRuntimePlugin(id: string): void {
 
 /** Evaluate + register one runtime plugin. Returns its id, or null on failure. */
 function invalidateRuntimeFile(file?: string): void {
-  if (!file) {return}
+  if (!file) {
+    return
+  }
 
   for (const [id, disposers] of loaded) {
-    if ($pluginRecords.get()[id]?.file === file) {invalidators.get(disposers)?.()}
+    if ($pluginRecords.get()[id]?.file === file) {
+      invalidators.get(disposers)?.()
+    }
   }
 }
 
@@ -421,26 +437,37 @@ async function runtimeIdentity(source: string, rewritten: string, pluginId: stri
   const ranges = codeRanges(source)
 
   const specifiers = [...source.matchAll(importSpecifierRe())]
-    .filter(match => inCode(ranges, match.index ?? 0)).map(match => match[3])
+    .filter(match => inCode(ranges, match.index ?? 0))
+    .map(match => match[3])
 
-  const dynamic = [...source.matchAll(/\bimport\b/g)].some(match =>
-    inCode(ranges, match.index ?? 0) && /^\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)\s*)*\(/.test(source.slice((match.index ?? 0) + 6)))
+  const dynamic = [...source.matchAll(/\bimport\b/g)].some(
+    match =>
+      inCode(ranges, match.index ?? 0) &&
+      /^\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)\s*)*\(/.test(source.slice((match.index ?? 0) + 6))
+  )
 
   const supported = new Set(['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'])
-  const dependencies = pluginId === 'session-tasks' ? await capturedSdkDependencies(specifiers) : { dependencies: [], reason: null }
+  const dependencies =
+    pluginId === 'session-tasks' ? await capturedSdkDependencies(specifiers) : { dependencies: [], reason: null }
 
   try {
     const [originalIdentity, rewrittenIdentity] = await Promise.all([identifyBytes(source), identifyBytes(rewritten)])
-    const dependencyReason = dynamic || specifiers.some(specifier => !supported.has(specifier)) ? 'UNSUPPORTED_DEPENDENCIES' : dependencies.reason
+    const dependencyReason =
+      dynamic || specifiers.some(specifier => !supported.has(specifier))
+        ? 'UNSUPPORTED_DEPENDENCIES'
+        : dependencies.reason
 
-    return {dependencies, originalIdentity, rewrittenIdentity, dependencyReason}
+    return { dependencies, originalIdentity, rewrittenIdentity, dependencyReason }
   } catch {
     // Diagnostic evidence is optional for loading, never optional for MATCH.
     // Retain lengths but no fabricated digest when WebCrypto is unavailable or
     // refuses the operation (older/non-secure renderer contexts).
-    return { dependencies, originalIdentity: {sha256:'', byteLength:new TextEncoder().encode(source).byteLength},
-      rewrittenIdentity: {sha256:'', byteLength:new TextEncoder().encode(rewritten).byteLength},
-      dependencyReason:'DIAGNOSTIC_IDENTITY_UNAVAILABLE' }
+    return {
+      dependencies,
+      originalIdentity: { sha256: '', byteLength: new TextEncoder().encode(source).byteLength },
+      rewrittenIdentity: { sha256: '', byteLength: new TextEncoder().encode(rewritten).byteLength },
+      dependencyReason: 'DIAGNOSTIC_IDENTITY_UNAVAILABLE'
+    }
   }
 }
 
@@ -523,7 +550,9 @@ async function evaluateRuntimePlugin(
       URL.revokeObjectURL(url)
     }
 
-    if (!isCurrent()) {return {id:null, cancelled:true}}
+    if (!isCurrent()) {
+      return { id: null, cancelled: true }
+    }
     const plugin = runtimePlugin(mod, origin)
 
     // A disk/runtime copy of a plugin that now ships BUNDLED (e.g. a
@@ -545,7 +574,7 @@ async function evaluateRuntimePlugin(
         status: 'disabled'
       })
 
-      return {id:null}
+      return { id: null }
     }
 
     // Two files claiming one id (a standalone install beside a unified-package
@@ -558,9 +587,13 @@ async function evaluateRuntimePlugin(
     try {
       identity = await runtimeIdentity(source, rewritten, plugin.id)
 
-      if (pendingIdentities.get(plugin.id) !== claim || !isCurrent()) {return {id:null, cancelled:true}}
+      if (pendingIdentities.get(plugin.id) !== claim || !isCurrent()) {
+        return { id: null, cancelled: true }
+      }
     } finally {
-      if (pendingIdentities.get(plugin.id) === claim) {pendingIdentities.delete(plugin.id)}
+      if (pendingIdentities.get(plugin.id) === claim) {
+        pendingIdentities.delete(plugin.id)
+      }
     }
 
     const capabilities = declaredCapabilities(plugin)
@@ -599,18 +632,33 @@ async function evaluateRuntimePlugin(
       // Registered BEFORE register() runs so a throw mid-way is disposable.
       loaded.set(plugin.id, disposers)
 
-      const activation = sessionTasksIdentity.activate({ pluginId:plugin.id, origin, path:options.file, module:mod, sourceText:{original:source, rewritten},
-        original:originalIdentity, rewritten:rewrittenIdentity, dependencies:dependencies.dependencies, dependencyReason:sdkWasCurrent ? dependencyReason : 'SDK_CHANGED', sdkCurrent:sessionTasksRuntimeCurrent })
+      const activation = sessionTasksIdentity.activate({
+        pluginId: plugin.id,
+        origin,
+        path: options.file,
+        module: mod,
+        sourceText: { original: source, rewritten },
+        original: originalIdentity,
+        rewritten: rewrittenIdentity,
+        dependencies: dependencies.dependencies,
+        dependencyReason: sdkWasCurrent ? dependencyReason : 'SDK_CHANGED',
+        sdkCurrent: sessionTasksRuntimeCurrent
+      })
 
       invalidators.set(disposers, () => activation.invalidate())
 
       let result: unknown
 
       try {
-        result = activation.run(() => trackGatewayEventDisposers(
-          dispose => disposers.push(dispose),
-          () => plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose), capabilities, activation.bind))
-        ))
+        result = activation.run(() =>
+          trackGatewayEventDisposers(
+            dispose => disposers.push(dispose),
+            () =>
+              plugin.register(
+                createPluginContext(plugin.id, dispose => disposers.push(dispose), capabilities, activation.bind)
+              )
+          )
+        )
       } catch (error) {
         failRegistration(error)
         activation.invalidate('REGISTRATION_REJECTED')
@@ -623,15 +671,17 @@ async function evaluateRuntimePlugin(
       // An `async register()` that rejects would otherwise be an unhandled
       // rejection beside a row that says "loaded".
       if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
-        void Promise.resolve(result).then(() => {
-          activation.settle()
-        }).catch((error: unknown) => {
-          if (loaded.get(plugin.id) === disposers) {
-            failRegistration(error)
-          }
+        void Promise.resolve(result)
+          .then(() => {
+            activation.settle()
+          })
+          .catch((error: unknown) => {
+            if (loaded.get(plugin.id) === disposers) {
+              failRegistration(error)
+            }
 
-          activation.invalidate('REGISTRATION_REJECTED')
-        })
+            activation.invalidate('REGISTRATION_REJECTED')
+          })
       } else {
         activation.settle()
       }
@@ -647,9 +697,11 @@ async function evaluateRuntimePlugin(
       activate()
     }
 
-    return {id:plugin.id}
+    return { id: plugin.id }
   } catch (error) {
-    if (!isCurrent()) {return {id:null, cancelled:true}}
+    if (!isCurrent()) {
+      return { id: null, cancelled: true }
+    }
     console.error(`[plugins] runtime load failed (${origin})`, error)
     notifyError(error, `Plugin "${origin}" failed to load`)
     publishPlugin({
@@ -663,7 +715,7 @@ async function evaluateRuntimePlugin(
       error: error instanceof Error ? error.message : String(error)
     })
 
-    return {id:null}
+    return { id: null }
   }
 }
 
@@ -881,21 +933,32 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
   const prevId = entry.id
   const previous = prevId ? loaded.get(prevId) : undefined
 
-  if (previous) {invalidators.get(previous)?.()}
+  if (previous) {
+    invalidators.get(previous)?.()
+  }
 
   try {
     const text = await readPluginSourceText(entry.file)
 
-    if (!isCurrent()) {return true}
+    if (!isCurrent()) {
+      return true
+    }
 
-    const result = await evaluateRuntimePlugin(text, entry.origin, {
-      defaultEnabled: entry.defaultEnabled,
-      file: entry.file,
-      packageName: entry.packageName,
-      packageOrigin: entry.packageOrigin
-    }, isCurrent)
+    const result = await evaluateRuntimePlugin(
+      text,
+      entry.origin,
+      {
+        defaultEnabled: entry.defaultEnabled,
+        file: entry.file,
+        packageName: entry.packageName,
+        packageOrigin: entry.packageOrigin
+      },
+      isCurrent
+    )
 
-    if (result.cancelled) {return true}
+    if (result.cancelled) {
+      return true
+    }
     const id = result.id
     entry.loadedSource = text
 
@@ -920,7 +983,9 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
 
     return true
   } catch (error) {
-    if (!isCurrent()) {return true}
+    if (!isCurrent()) {
+      return true
+    }
 
     // An oversize source is a REAL failure the user must see (the silent
     // shape was the bug: a truncated file evaluated as a syntax error, or

@@ -17,9 +17,18 @@ const saved = { ...gatewayTicketTiming }
 let home = ''
 let servers: net.Server[] = []
 
-const endpoint = () => ({ profile_id: home, instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' })
+const endpoint = () => ({
+  profile_id: home,
+  instance_id: 'owner',
+  authority_epoch: 1,
+  runtime_protocol: 1,
+  api_origin: 'http://127.0.0.1:1234',
+  capabilities: ['session-authority-v1'],
+  supervisor: 'none'
+})
 const socketPath = () => path.join(home, 'gateway.sock')
-const grant = (ticket: string) => JSON.stringify({ protocol: 1, id: 1, ok: true, result: { profile_id: home, instance_id: 'owner', ticket } }) + '\n'
+const grant = (ticket: string) =>
+  JSON.stringify({ protocol: 1, id: 1, ok: true, result: { profile_id: home, instance_id: 'owner', ticket } }) + '\n'
 
 async function listen(at: string, onRequest: (socket: net.Socket, n: number) => void) {
   let n = 0
@@ -86,7 +95,11 @@ test.skipIf(!posix)('one refused connect followed by a live listener returns the
 })
 
 test.skipIf(!posix)('one missed deadline followed by an answer returns the ticket', async () => {
-  const flaky = await listen(socketPath(), (socket, n) => { if (n > 1) {socket.end(grant('second-dial'))} })
+  const flaky = await listen(socketPath(), (socket, n) => {
+    if (n > 1) {
+      socket.end(grant('second-dial'))
+    }
+  })
   expect(await mintLocalGatewayTicket(endpoint())).toBe('second-dial')
   expect(flaky.connections()).toBe(2)
 })

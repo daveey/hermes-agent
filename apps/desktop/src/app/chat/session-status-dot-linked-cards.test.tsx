@@ -46,9 +46,12 @@ function dot(value: SessionDotState, runningCardCount?: number) {
 }
 
 describe('linked-card activity cannot classify missing canonical status', () => {
-  it.each(['idle', 'draft', 'background', 'stalled'] as const)('keeps %s unknown just like a working claim without published status', value => {
-    expect(dot(value, 2)).toEqual(dot('working', 0))
-  })
+  it.each(['idle', 'draft', 'background', 'stalled'] as const)(
+    'keeps %s unknown just like a working claim without published status',
+    value => {
+      expect(dot(value, 2)).toEqual(dot('working', 0))
+    }
+  )
   it.each(['needs-input', 'unread'] as const)('preserves %s precedence', value => {
     expect(dot(value, 2)).toEqual(dot(value, 0))
   })

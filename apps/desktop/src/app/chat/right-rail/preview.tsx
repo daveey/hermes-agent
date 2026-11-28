@@ -42,7 +42,8 @@ export function PreviewTilePane({ onClose, tabId }: PreviewTilePaneProps) {
     }
   }, [previewTabs, tabId])
 
-  const tab = previewTabs.find(candidate => candidate.id === tabId) ?? offViewTabs.find(candidate => candidate.id === tabId)
+  const tab =
+    previewTabs.find(candidate => candidate.id === tabId) ?? offViewTabs.find(candidate => candidate.id === tabId)
   const target = tab?.target
 
   useEffect(() => (target ? registerPreviewPaneMount(tabId) : undefined), [tabId, target])

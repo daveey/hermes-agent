@@ -120,7 +120,10 @@ const buildReport = (
   surface: CommittedStripeSurface,
   painted: null | string,
   override: null | string
-): null | Omit<CommittedStripeReport, 'mounted' | 'observation_client' | 'observation_lifetime' | 'observation_order'> => {
+): null | Omit<
+  CommittedStripeReport,
+  'mounted' | 'observation_client' | 'observation_lifetime' | 'observation_order'
+> => {
   const status = canonicalOutcomeStatus(outcome)
   const envelope = outcome?.status
   const stripe = painted ?? 'none'
@@ -204,19 +207,29 @@ const pruneEntries = (): void => {
     const oldest = entries.keys().next().value!
     const removed = entries.get(oldest)!
 
-    if (removed.timer) {clearTimeout(removed.timer)}
+    if (removed.timer) {
+      clearTimeout(removed.timer)
+    }
     entries.delete(oldest)
   }
 }
 
 const acceptLifetime = (entry: Entry, report: CommittedStripeReport): boolean => {
-  if (report.observation_lifetime < entry.lifetime ||
-      (report.observation_lifetime === entry.lifetime && entry.unmounted && report.mounted)) {return false}
+  if (
+    report.observation_lifetime < entry.lifetime ||
+    (report.observation_lifetime === entry.lifetime && entry.unmounted && report.mounted)
+  ) {
+    return false
+  }
 
-  if (report.observation_lifetime > entry.lifetime) {entry.unmounted = false}
+  if (report.observation_lifetime > entry.lifetime) {
+    entry.unmounted = false
+  }
   entry.lifetime = report.observation_lifetime
 
-  if (!report.mounted) {entry.unmounted = true}
+  if (!report.mounted) {
+    entry.unmounted = true
+  }
 
   return true
 }
@@ -262,7 +275,9 @@ export const reportCommittedStripe = (
   entries.set(key, entry)
   pruneEntries()
 
-  if (!acceptLifetime(entry, report)) {return}
+  if (!acceptLifetime(entry, report)) {
+    return
+  }
 
   const owner = ownerKey(report)
 
@@ -276,7 +291,9 @@ export const reportCommittedStripe = (
 
       if (entry.owner) {
         // Fail closed instead of forgetting an owner and permitting ABA after churn.
-        if (entry.retiredOwners.size >= 32) {return}
+        if (entry.retiredOwners.size >= 32) {
+          return
+        }
         entry.retiredOwners.add(entry.owner)
       }
 
@@ -290,8 +307,10 @@ export const reportCommittedStripe = (
     entry.highest = report.revision
   }
 
-  if ((!entry.pending && entry.acked === signature(report)) ||
-      (entry.pending && signature(entry.pending.report) === signature(report))) {
+  if (
+    (!entry.pending && entry.acked === signature(report)) ||
+    (entry.pending && signature(entry.pending.report) === signature(report))
+  ) {
     return
   }
 
@@ -325,7 +344,9 @@ export function useCommittedStripe(
   // This is custody of the last COMMITTED DOM paint, not a mirror of a live atom.
   // Layout cleanup must publish that old paint before a new identity can commit.
   useLayoutEffect(() => {
-    if (!enabled) {return}
+    if (!enabled) {
+      return
+    }
     lifetime.current = tick()
 
     return () => {

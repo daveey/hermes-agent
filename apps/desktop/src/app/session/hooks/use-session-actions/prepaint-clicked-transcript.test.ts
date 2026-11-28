@@ -13,7 +13,8 @@ import { prepaintClickedTranscript } from './provisional-transcript'
 // in the route effect's resume. Only when the click loads the session into main.
 
 const owner = { connectionId: 'hermes-hub', profile: 'default' }
-const row = (over: Partial<SessionInfo> = {}) => ({ connection_id: 'hermes-hub', id: 'h1', profile: 'default', ...over }) as SessionInfo
+const row = (over: Partial<SessionInfo> = {}) =>
+  ({ connection_id: 'hermes-hub', id: 'h1', profile: 'default', ...over }) as SessionInfo
 const cached = [{ content: 'cached', id: 1, role: 'user', timestamp: 1 }]
 const record = () => (globalThis as { __hermesOpenTimings?: OpenTimingRecord[] }).__hermesOpenTimings
 

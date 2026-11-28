@@ -48,11 +48,18 @@ describe('a backend that refuses submission_id', () => {
     const submits: Array<Record<string, unknown>> = []
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
-      if (method !== 'prompt.submit') {return {} as never}
+      if (method !== 'prompt.submit') {
+        return {} as never
+      }
       submits.push(params!)
 
       if ('submission_id' in params!) {
-        throw Object.assign(new Error('invalid params for prompt.submit: submission_id: Extra inputs are not permitted — the client and the Hermes backend are out of sync (different versions)'), { code: 4000 })
+        throw Object.assign(
+          new Error(
+            'invalid params for prompt.submit: submission_id: Extra inputs are not permitted — the client and the Hermes backend are out of sync (different versions)'
+          ),
+          { code: 4000 }
+        )
       }
 
       return { status: 'streaming' } as never
@@ -60,7 +67,12 @@ describe('a backend that refuses submission_id', () => {
 
     let handle: HarnessHandle | null = null
     await actRender(
-      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        rawAdmissionReceipts
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
     expect(await handle!.submitText('hi remote')).toBe(true)
     expect(submits).toHaveLength(2)
@@ -72,11 +84,18 @@ describe('a backend that refuses submission_id', () => {
     const submits: Array<Record<string, unknown>> = []
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
-      if (method !== 'prompt.submit') {return {} as never}
+      if (method !== 'prompt.submit') {
+        return {} as never
+      }
       submits.push(params!)
 
       if ('submission_id' in params!) {
-        throw Object.assign(new Error('invalid params for prompt.submit: submission_id: Extra inputs are not permitted — the client and the Hermes backend are out of sync (different versions)'), { code: 4000 })
+        throw Object.assign(
+          new Error(
+            'invalid params for prompt.submit: submission_id: Extra inputs are not permitted — the client and the Hermes backend are out of sync (different versions)'
+          ),
+          { code: 4000 }
+        )
       }
 
       return { status: 'streaming' } as never
@@ -84,7 +103,12 @@ describe('a backend that refuses submission_id', () => {
 
     let handle: HarnessHandle | null = null
     await actRender(
-      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        rawAdmissionReceipts
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
 
     expect(await handle!.submitText('first')).toBe(true)
@@ -103,13 +127,20 @@ describe('a backend that refuses submission_id', () => {
     let phase: 'uncertain' | 'legacy' | 'retry' = 'uncertain'
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
-      if (method !== 'prompt.submit') {return {} as never}
+      if (method !== 'prompt.submit') {
+        return {} as never
+      }
       submits.push(params!)
 
-      if (phase === 'uncertain') {throw new Error('socket closed before acknowledgement')}
+      if (phase === 'uncertain') {
+        throw new Error('socket closed before acknowledgement')
+      }
 
       if (phase === 'legacy' && 'submission_id' in params!) {
-        throw Object.assign(new Error('invalid params for prompt.submit: submission_id: Extra inputs are not permitted'), { code: 4000 })
+        throw Object.assign(
+          new Error('invalid params for prompt.submit: submission_id: Extra inputs are not permitted'),
+          { code: 4000 }
+        )
       }
 
       return { admission_id: params?.submission_id, status: 'started' } as never
@@ -117,7 +148,12 @@ describe('a backend that refuses submission_id', () => {
 
     let handle: HarnessHandle | null = null
     await actRender(
-      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        rawAdmissionReceipts
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
 
     expect(await handle!.submitText('maybe admitted', { submission_id: 'uncertain-1' })).toBe(false)
@@ -139,14 +175,22 @@ describe('a refused identityless send', () => {
   // so every send goes identityless; `refusal` answers the first identityless one.
   function refusingGateway(refusal: Error, submits: Array<Record<string, unknown>>) {
     return vi.fn(async (method: string, params?: Record<string, unknown>) => {
-      if (method === 'session.resume') {return { session_id: RUNTIME_SESSION_ID } as never}
+      if (method === 'session.resume') {
+        return { session_id: RUNTIME_SESSION_ID } as never
+      }
 
-      if (method !== 'prompt.submit') {return {} as never}
+      if (method !== 'prompt.submit') {
+        return {} as never
+      }
       submits.push(params!)
 
-      if (params?.submission_id) {throw Object.assign(new Error('capability refused'), { code: 4094 })}
+      if (params?.submission_id) {
+        throw Object.assign(new Error('capability refused'), { code: 4094 })
+      }
 
-      if (legacySends(submits) === 1) {throw refusal}
+      if (legacySends(submits) === 1) {
+        throw refusal
+      }
 
       return { ok: true } as never
     })
@@ -170,7 +214,12 @@ describe('a refused identityless send', () => {
     const requestGateway = refusingGateway(refusal, submits)
     let handle: HarnessHandle | null = null
     await actRender(
-      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        rawAdmissionReceipts
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
     expect(await handle!.submitText('take me over', { submission_id: 'refused-legacy' })).toBe(false)
     expect(legacySends(submits)).toBe(1)
@@ -218,7 +267,12 @@ describe('a refused identityless send', () => {
     const requestGateway = refusingGateway(refusal, submits)
     let handle: HarnessHandle | null = null
     await actRender(
-      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        rawAdmissionReceipts
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
     expect(await handle!.submitText('take me over', { submission_id: 'refused-unsaved' })).toBe(false)
     expect(legacySends(submits)).toBe(1)
@@ -227,11 +281,15 @@ describe('a refused identityless send', () => {
     const errors = handle!.state().messages.flatMap(m => (m.error ? [m.error] : []))
     expect(errors.at(-1)).toContain('active in another Hermes window')
     expect(errors.join('\n')).not.toContain('journal is full')
-    expect($notifications.get().map(n => n.message).join('\n')).not.toContain('journal is full')
+    expect(
+      $notifications
+        .get()
+        .map(n => n.message)
+        .join('\n')
+    ).not.toContain('journal is full')
     expect(warn).toHaveBeenCalledWith('[prepared-submission-reset]', storageError)
     expect(warn).not.toHaveBeenCalledWith('[prepared-submission-outcome]', storageError)
   })
-
 
   it('a refused legacy send whose reset and outcome saves both fail still surfaces the 4090 refusal', async () => {
     const submits: Array<Record<string, unknown>> = []
@@ -262,7 +320,12 @@ describe('a refused identityless send', () => {
     const requestGateway = refusingGateway(refusal, submits)
     let handle: HarnessHandle | null = null
     await actRender(
-      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        rawAdmissionReceipts
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
     expect(await handle!.submitText('take me over', { submission_id: 'refused-unsaved' })).toBe(false)
     expect(legacySends(submits)).toBe(1)
@@ -271,7 +334,12 @@ describe('a refused identityless send', () => {
     const errors = handle!.state().messages.flatMap(m => (m.error ? [m.error] : []))
     expect(errors.at(-1)).toContain('active in another Hermes window')
     expect(errors.join('\n')).not.toContain('journal is full')
-    expect($notifications.get().map(n => n.message).join('\n')).not.toContain('journal is full')
+    expect(
+      $notifications
+        .get()
+        .map(n => n.message)
+        .join('\n')
+    ).not.toContain('journal is full')
     expect(warn).toHaveBeenCalledWith('[prepared-submission-reset]', storageError)
     expect(warn).toHaveBeenCalledWith('[prepared-submission-outcome]', storageError)
   })
@@ -281,7 +349,12 @@ describe('a refused identityless send', () => {
     const requestGateway = refusingGateway(new JsonRpcGatewayError('session busy', { code: 4009 }), submits)
     let handle: HarnessHandle | null = null
     await actRender(
-      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        rawAdmissionReceipts
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
     expect(await handle!.submitText('wait for the turn', { submission_id: 'busy-legacy' })).toBe(true)
     expect(legacySends(submits)).toBe(2)

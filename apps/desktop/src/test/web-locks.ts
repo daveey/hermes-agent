@@ -11,7 +11,9 @@ export function archiveQueueLocksFixture() {
       const run = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback!
 
       if (held.has(name)) {
-        if (options.ifAvailable) {return run(null)}
+        if (options.ifAvailable) {
+          return run(null)
+        }
         await new Promise<void>(resolve => {
           const queue = waiters.get(name) ?? []
           queue.push(resolve)
@@ -21,11 +23,15 @@ export function archiveQueueLocksFixture() {
         held.add(name)
       }
 
-      try {return await run({ name, mode: 'exclusive' } as Lock)} finally {
+      try {
+        return await run({ name, mode: 'exclusive' } as Lock)
+      } finally {
         const queue = waiters.get(name)
         const next = queue?.shift()
 
-        if (next) {next()} else {
+        if (next) {
+          next()
+        } else {
           held.delete(name)
           waiters.delete(name)
         }

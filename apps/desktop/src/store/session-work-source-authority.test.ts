@@ -32,6 +32,7 @@ describe('captured positive read authority', () => {
     for (const source of sources) {
       store.reportWorkSourceRead({ ...scope, source, available: true })
     }
+
     expect(complete()).toBe(false)
 
     for (const source of sources) {

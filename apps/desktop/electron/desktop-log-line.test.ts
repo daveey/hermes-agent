@@ -76,7 +76,13 @@ describe('formatDesktopLogLine', () => {
   })
 
   it('round-trips sampled instants across the year in several zones', () => {
-    for (const tz of ['America/Los_Angeles', 'America/Cancun', 'Europe/London', 'Asia/Kolkata', 'Australia/Lord_Howe']) {
+    for (const tz of [
+      'America/Los_Angeles',
+      'America/Cancun',
+      'Europe/London',
+      'Asia/Kolkata',
+      'Australia/Lord_Howe'
+    ]) {
       process.env.TZ = tz
 
       for (let t = Date.UTC(2026, 0, 1); t < Date.UTC(2027, 0, 1); t += 37 * 60 * 1000 + 123) {

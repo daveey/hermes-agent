@@ -146,9 +146,11 @@ it('a frozen tab whose unsent edit another tab took over never re-sends it over 
   const frozenNet = { online: true }
   const frozen = await pageLoad(file, { favoritesStore: false, net: frozenNet })
   frozenNet.online = false
-  await frozen.writeAfter(() => frozen.storage.writeKey(MODE, 'dark')).catch(error => {
-    expect(error.message).toBe('fetch failed')
-  })
+  await frozen
+    .writeAfter(() => frozen.storage.writeKey(MODE, 'dark'))
+    .catch(error => {
+      expect(error.message).toBe('fetch failed')
+    })
 
   // That tab stops beating for two minutes; a new tab adopts its edit, then
   // the user picks again there.

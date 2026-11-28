@@ -8,7 +8,10 @@ import { mergePrimaryRecents, ownRecentsConnection, withPrimaryRecents } from '.
 const row = (id: string, over: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 3, profile: 'default', title: id, ...over }) as SessionInfo
 
-const page = (sessions: SessionInfo[], extra: Partial<SidebarSessionsResponse['recents']> = {}): SidebarSessionsResponse => ({
+const page = (
+  sessions: SessionInfo[],
+  extra: Partial<SidebarSessionsResponse['recents']> = {}
+): SidebarSessionsResponse => ({
   cron: { sessions: [] },
   messaging: { sessions: [] },
   recents: { sessions, ...extra }
@@ -19,7 +22,12 @@ describe('withPrimaryRecents', () => {
     const fetchPrimary = vi.fn()
 
     for (const windowConnection of [null, undefined, '', 'local']) {
-      const result = await withPrimaryRecents(Promise.resolve(page([row('a')])), windowConnection, 'local', fetchPrimary)
+      const result = await withPrimaryRecents(
+        Promise.resolve(page([row('a')])),
+        windowConnection,
+        'local',
+        fetchPrimary
+      )
 
       expect(result.recents.sessions.map(s => s.id)).toEqual(['a'])
     }
@@ -69,11 +77,17 @@ describe('ownRecentsConnection', () => {
     ({ connections: [{ id: primary, kind, label: primary }], primary, version: 1 }) as DesktopConnectionsRegistry
 
   it('names the registry primary, not the window primary socket that moved to the hub', () => {
-    expect(ownRecentsConnection(registry('local', 'local'), 'hermes-hub')).toEqual({ connectionId: 'local', passive: true })
+    expect(ownRecentsConnection(registry('local', 'local'), 'hermes-hub')).toEqual({
+      connectionId: 'local',
+      passive: true
+    })
   })
 
   it('reads a remote registry primary actively', () => {
-    expect(ownRecentsConnection(registry('mini', 'ssh'), 'hermes-hub')).toEqual({ connectionId: 'mini', passive: false })
+    expect(ownRecentsConnection(registry('mini', 'ssh'), 'hermes-hub')).toEqual({
+      connectionId: 'mini',
+      passive: false
+    })
   })
 
   it('falls back to the window primary without a registry (legacy topology)', () => {

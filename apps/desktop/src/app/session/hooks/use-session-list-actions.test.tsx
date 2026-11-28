@@ -4,7 +4,12 @@ import { Suspense } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DesktopConnectionsRegistry } from '@/global'
-import { getApiRequestConnection, type SessionInfo, setApiRequestConnection, type SidebarSessionsResponse } from '@/hermes'
+import {
+  getApiRequestConnection,
+  type SessionInfo,
+  setApiRequestConnection,
+  type SidebarSessionsResponse
+} from '@/hermes'
 import hubSyncPlugin from '@/plugins/hub-sync/plugin'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $cronJobs, setCronJobs } from '@/store/cron'
@@ -231,9 +236,22 @@ describe("this Mac's own chats while the window is on another gateway", () => {
     expect($sessions.get().find(s => s.id === 'cron-chat')).toMatchObject({ connection_id: 'local', cron_active: true })
 
     const bootCopy = offlineSessionsFromReplica(
-      [{ activity: 5_000, gateway: 'macbook', id: 'cron-chat', key: 'default/cron-chat', local: true,
-        message_count: 4, profile: 'default', source: 'desktop', stale: false, synced_at: 9_000, title: 'Cron chat',
-        version: 1 }],
+      [
+        {
+          activity: 5_000,
+          gateway: 'macbook',
+          id: 'cron-chat',
+          key: 'default/cron-chat',
+          local: true,
+          message_count: 4,
+          profile: 'default',
+          source: 'desktop',
+          stale: false,
+          synced_at: 9_000,
+          title: 'Cron chat',
+          version: 1
+        }
+      ],
       gateway => (gateway === 'macbook' ? 'local' : undefined),
       9_000,
       { includeLocal: true }
@@ -346,7 +364,9 @@ it('refreshes a retained remote row outside the recency page on its own owner', 
   listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('new')] }))
   getSession.mockResolvedValue(row('old', { kanban_active: 16, kanban_observed_at: 123 }))
   const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
-  await act(async () => { await result.current.refreshSessions() })
+  await act(async () => {
+    await result.current.refreshSessions()
+  })
   expect(getSession).toHaveBeenCalledWith('old', { connectionId: 'remote', profile: 'default' })
   expect($sessions.get().find(s => s.id === 'old')).toMatchObject({ kanban_active: 16, connection_id: 'remote' })
 })
@@ -359,7 +379,9 @@ it('reads a legacy primary\'s retained row unpinned, never pinned to the "This d
   listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('new')] }))
   getSession.mockResolvedValue(row('old', { kanban_active: 16, kanban_observed_at: 123 }))
   const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
-  await act(async () => { await result.current.refreshSessions() })
+  await act(async () => {
+    await result.current.refreshSessions()
+  })
   expect(getSession).toHaveBeenCalledWith('old', { connectionId: null, profile: 'default' })
 })
 
@@ -377,39 +399,48 @@ describe('publishing retained task evidence without count changes', () => {
     }
 
     const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
-    await act(async () => { await result.current.refreshSessions() })
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
     expect($sessions.get()[0]).toMatchObject({ kanban_active: 16, kanban_observed_at: 123, kanban_unknown: true })
 
     getSession.mockResolvedValue(row('old', { kanban_active: 16, kanban_observed_at: 456 }))
-    await act(async () => { await result.current.refreshSessions() })
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
     expect($sessions.get()[0]).toMatchObject({ kanban_active: 16, kanban_observed_at: 456 })
     expect($sessions.get()[0]?.kanban_unknown).toBeUndefined()
 
     const snapshot = $sessions.get()
-    await act(async () => { await result.current.refreshSessions() })
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
     expect($sessions.get()).toBe(snapshot)
   })
 
-  it.each([
-    { kanban_observed_at: 456 },
-    { kanban_remote_stale: 1 },
-    { kanban_unknown: undefined }
-  ])('publishes evidence-only change %j', async change => {
-    const previous = row('old', {
-      connection_id: 'remote', kanban_active: 16, kanban_observed_at: 123,
-      ...(Object.hasOwn(change, 'kanban_unknown') ? { kanban_unknown: true } : {})
-    })
+  it.each([{ kanban_observed_at: 456 }, { kanban_remote_stale: 1 }, { kanban_unknown: undefined }])(
+    'publishes evidence-only change %j',
+    async change => {
+      const previous = row('old', {
+        connection_id: 'remote',
+        kanban_active: 16,
+        kanban_observed_at: 123,
+        ...(Object.hasOwn(change, 'kanban_unknown') ? { kanban_unknown: true } : {})
+      })
 
-    setSessions([previous])
-    settled.ids = ['old']
-    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [] }))
-    // Valid detail evidence must not itself be unknown.
-    getSession.mockResolvedValue({ ...previous, kanban_unknown: undefined, ...change })
-    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
-    await act(async () => { await result.current.refreshSessions() })
-    expect($sessions.get()[0]).toMatchObject({ kanban_active: 16, ...change })
-    expect($sessions.get()[0]?.kanban_unknown).toBeUndefined()
-  })
+      setSessions([previous])
+      settled.ids = ['old']
+      listSidebarSessions.mockResolvedValue(sidebar({ sessions: [] }))
+      // Valid detail evidence must not itself be unknown.
+      getSession.mockResolvedValue({ ...previous, kanban_unknown: undefined, ...change })
+      const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+      await act(async () => {
+        await result.current.refreshSessions()
+      })
+      expect($sessions.get()[0]).toMatchObject({ kanban_active: 16, ...change })
+      expect($sessions.get()[0]?.kanban_unknown).toBeUndefined()
+    }
+  )
 
   it('publishes remote-stale-only list changes to every slice', async () => {
     const previous = row('old', { kanban_active: 16, kanban_observed_at: 123 })
@@ -417,11 +448,13 @@ describe('publishing retained task evidence without count changes', () => {
     setCronSessions([{ ...previous, source: 'cron' }])
     setMessagingSessions([{ ...previous, source: 'telegram' }])
     const incoming = { ...previous, kanban_remote_stale: 1 }
-    listSidebarSessions.mockResolvedValue(sidebar(
-      { sessions: [incoming] }, [{ ...incoming, source: 'cron' }], [{ ...incoming, source: 'telegram' }]
-    ))
+    listSidebarSessions.mockResolvedValue(
+      sidebar({ sessions: [incoming] }, [{ ...incoming, source: 'cron' }], [{ ...incoming, source: 'telegram' }])
+    )
     const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
-    await act(async () => { await result.current.refreshSessions() })
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
 
     for (const store of [$sessions, $cronSessions, $messagingSessions]) {
       expect(store.get()[0]?.kanban_remote_stale).toBe(1)
@@ -442,9 +475,13 @@ it.each(['rename', 'remove', 'switch'])('guards retained task refresh against a 
     await Promise.resolve()
   })
 
-  if (change === 'remove') { setSessions([]) }
+  if (change === 'remove') {
+    setSessions([])
+  }
 
-  if (change === 'rename') { setSessions([row('old', { connection_id: 'remote', title: 'New title' })]) }
+  if (change === 'rename') {
+    setSessions([row('old', { connection_id: 'remote', title: 'New title' })])
+  }
 
   if (change === 'switch') {
     gatewayScope.epoch++
@@ -457,9 +494,13 @@ it.each(['rename', 'remove', 'switch'])('guards retained task refresh against a 
     await refreshing
   })
 
-  if (change === 'remove') { expect($sessions.get()).toEqual([]) }
+  if (change === 'remove') {
+    expect($sessions.get()).toEqual([])
+  }
 
-  if (change === 'rename') { expect($sessions.get()[0]).toMatchObject({ title: 'New title', kanban_active: 16 }) }
+  if (change === 'rename') {
+    expect($sessions.get()[0]).toMatchObject({ title: 'New title', kanban_active: 16 })
+  }
 
   if (change === 'switch') {
     expect(listSidebarSessions).toHaveBeenCalledTimes(2)
@@ -1634,51 +1675,71 @@ describe('re-lists while a failed list leaves owners stale', () => {
     }
   })
 
-  it.each(['all', 'default'])('does not retry an off-window probe owner; follows scope changes (%s)', async profileScope => {
-    const { recordSessionGatewayUnavailable, sessionOwnerIsFresh } = await import('@/store/offline-sessions')
-    vi.useFakeTimers()
-    const owner = row('remote', { connection_id: 'conn-mini' })
-    listSidebarSessions.mockImplementation(() => Promise.resolve(sidebar({
-      sessions: getApiRequestConnection() === 'conn-mini' ? [owner] : [row('mine', { connection_id: 'local' })]
-    })))
-    const { result, unmount } = renderHook(() => useSessionListActions({ profileScope }))
+  it.each(['all', 'default'])(
+    'does not retry an off-window probe owner; follows scope changes (%s)',
+    async profileScope => {
+      const { recordSessionGatewayUnavailable, sessionOwnerIsFresh } = await import('@/store/offline-sessions')
+      vi.useFakeTimers()
+      const owner = row('remote', { connection_id: 'conn-mini' })
+      listSidebarSessions.mockImplementation(() =>
+        Promise.resolve(
+          sidebar({
+            sessions: getApiRequestConnection() === 'conn-mini' ? [owner] : [row('mine', { connection_id: 'local' })]
+          })
+        )
+      )
+      const { result, unmount } = renderHook(() => useSessionListActions({ profileScope }))
 
-    try {
-      await act(async () => { await result.current.refreshSessions() })
-      act(() => recordSessionGatewayUnavailable('conn-mini'))
-      const calls = listSidebarSessions.mock.calls.length
-      await act(async () => { await vi.advanceTimersByTimeAsync(3_600_000) })
-      expect(listSidebarSessions.mock.calls.length).toBe(calls)
-      expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(false)
-      act(() => setApiRequestConnection('conn-mini'))
-      // Switching away cancels the pending recovery; switching back re-arms it.
-      await act(async () => { await vi.advanceTimersByTimeAsync(14_999) })
-      expect(listSidebarSessions.mock.calls.length).toBe(calls)
-      act(() => setApiRequestConnection(null))
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
-      expect(listSidebarSessions.mock.calls.length).toBe(calls)
-      act(() => setApiRequestConnection('conn-mini'))
-      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
-      expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(true)
+      try {
+        await act(async () => {
+          await result.current.refreshSessions()
+        })
+        act(() => recordSessionGatewayUnavailable('conn-mini'))
+        const calls = listSidebarSessions.mock.calls.length
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3_600_000)
+        })
+        expect(listSidebarSessions.mock.calls.length).toBe(calls)
+        expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(false)
+        act(() => setApiRequestConnection('conn-mini'))
+        // Switching away cancels the pending recovery; switching back re-arms it.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(14_999)
+        })
+        expect(listSidebarSessions.mock.calls.length).toBe(calls)
+        act(() => setApiRequestConnection(null))
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000)
+        })
+        expect(listSidebarSessions.mock.calls.length).toBe(calls)
+        act(() => setApiRequestConnection('conn-mini'))
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(15_000)
+        })
+        expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(true)
 
-      if (profileScope === 'default') {
-        expect(sessionOwnerIsFresh('conn-mini', 'work')).toBe(false)
+        if (profileScope === 'default') {
+          expect(sessionOwnerIsFresh('conn-mini', 'work')).toBe(false)
+        }
+
+        const recoveredCalls = listSidebarSessions.mock.calls.length
+        expect(recoveredCalls).toBeGreaterThan(calls)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3_600_000)
+        })
+        expect(listSidebarSessions.mock.calls.length).toBe(recoveredCalls)
+      } finally {
+        unmount()
+        setApiRequestConnection(null)
+        vi.useRealTimers()
+        _resetOfflineSessionsForTests()
       }
-
-      const recoveredCalls = listSidebarSessions.mock.calls.length
-      expect(recoveredCalls).toBeGreaterThan(calls)
-      await act(async () => { await vi.advanceTimersByTimeAsync(3_600_000) })
-      expect(listSidebarSessions.mock.calls.length).toBe(recoveredCalls)
-    } finally {
-      unmount()
-      setApiRequestConnection(null)
-      vi.useRealTimers()
-      _resetOfflineSessionsForTests()
     }
-  })
+  )
 
   it('re-lists after probe failure with bounded backoff, failing closed until the owner answers', async () => {
-    const { recordSessionGatewayUnavailable, sessionOwnerIsFresh, staleSessionOwners } = await import('@/store/offline-sessions')
+    const { recordSessionGatewayUnavailable, sessionOwnerIsFresh, staleSessionOwners } =
+      await import('@/store/offline-sessions')
     _resetOfflineSessionsForTests()
     vi.useFakeTimers()
     setApiRequestConnection('conn-mini')
@@ -1686,19 +1747,25 @@ describe('re-lists while a failed list leaves owners stale', () => {
     const local = row('mine', { connection_id: 'local' })
     let failing = false
     listSidebarSessions.mockImplementation(({ connectionId }: { connectionId?: string }) => {
-      if (connectionId === 'local') { return Promise.resolve(sidebar({ sessions: [local] })) }
+      if (connectionId === 'local') {
+        return Promise.resolve(sidebar({ sessions: [local] }))
+      }
 
       return failing ? Promise.reject(new Error('unreachable')) : Promise.resolve(sidebar({ sessions: [owner] }))
     })
 
-    const remoteCalls = () => listSidebarSessions.mock.calls.filter((args: unknown[]) =>
-      (args[0] as { connectionId?: string }).connectionId === undefined).length
+    const remoteCalls = () =>
+      listSidebarSessions.mock.calls.filter(
+        (args: unknown[]) => (args[0] as { connectionId?: string }).connectionId === undefined
+      ).length
 
     const painted = () => mergeOfflineFallback([owner, local], []).find(s => s.id === 'remote')
     const { result, unmount } = renderHook(() => useSessionListActions({ profileScope: 'all' }))
 
     try {
-      await act(async () => { await result.current.refreshSessions() })
+      await act(async () => {
+        await result.current.refreshSessions()
+      })
       const calls = remoteCalls()
       failing = true
       act(() => recordSessionGatewayUnavailable('conn-mini'))
@@ -1709,9 +1776,13 @@ describe('re-lists while a failed list leaves owners stale', () => {
       // Repeated failures keep the row non-authoritative and cap retries at 60 seconds.
       for (const delay of [15_000, 30_000, 60_000, 60_000]) {
         const before = remoteCalls()
-        await act(async () => { await vi.advanceTimersByTimeAsync(delay - 1) })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(delay - 1)
+        })
         expect(remoteCalls()).toBe(before)
-        await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1)
+        })
         expect(remoteCalls()).toBe(before + 1)
         expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(false)
         expect(sessionOwnerIsFresh('local', 'default')).toBe(true)
@@ -1720,12 +1791,16 @@ describe('re-lists while a failed list leaves owners stale', () => {
 
       expect(remoteCalls()).toBe(calls + 4)
       failing = false
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000)
+      })
       expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(true)
       expect(staleSessionOwners()).toEqual([])
       expect(painted()?.offline_cached).not.toBe(true)
       expect(painted()?.outcome?.kind).toBe('done')
-      await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000)
+      })
       expect(remoteCalls()).toBe(calls + 5)
     } finally {
       unmount()
@@ -1746,7 +1821,9 @@ describe('refreshSessions and the stored outcome', () => {
 
   it('pushes the old local ⌘B parks to a backend that stamps muted, once', async () => {
     $blockedSessionIds.set(['a'])
-    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a', { muted: false }), row('b', { muted: false })] }))
+    listSidebarSessions.mockResolvedValue(
+      sidebar({ sessions: [row('a', { muted: false }), row('b', { muted: false })] })
+    )
     const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
 
     await act(async () => {
@@ -1774,7 +1851,9 @@ describe('refreshSessions and the stored outcome', () => {
   })
 
   it('swaps the rows when only the outcome or muted changed', async () => {
-    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a', { muted: false, outcome: { kind: 'waiting' } })] }))
+    listSidebarSessions.mockResolvedValue(
+      sidebar({ sessions: [row('a', { muted: false, outcome: { kind: 'waiting' } })] })
+    )
     const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
 
     await act(async () => {
@@ -1782,7 +1861,9 @@ describe('refreshSessions and the stored outcome', () => {
     })
     const first = $sessions.get()
 
-    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a', { muted: false, outcome: { kind: 'done' } })] }))
+    listSidebarSessions.mockResolvedValue(
+      sidebar({ sessions: [row('a', { muted: false, outcome: { kind: 'done' } })] })
+    )
     await act(async () => {
       await result.current.refreshSessions()
     })

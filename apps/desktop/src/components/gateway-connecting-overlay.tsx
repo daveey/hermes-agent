@@ -61,7 +61,12 @@ export function isInitialConnect(
   const initialBootActive = boot.visible || boot.running || boot.progress < 100
 
   return (
-    !coldBootDone && !snapshotPainted && !gatewaySwitching && gatewayState !== 'open' && !boot.error && initialBootActive
+    !coldBootDone &&
+    !snapshotPainted &&
+    !gatewaySwitching &&
+    gatewayState !== 'open' &&
+    !boot.error &&
+    initialBootActive
   )
 }
 

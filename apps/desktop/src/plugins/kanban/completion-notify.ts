@@ -214,12 +214,7 @@ function rawErrorFor(kind: string, ev: CompletionEvent): string {
   return kind === 'gave_up' ? trimmed(ev.payload?.error) : ''
 }
 
-function notifyOne(
-  slug: string,
-  kind: string,
-  spec: NotifySpec,
-  ev: CompletionEvent
-): void {
+function notifyOne(slug: string, kind: string, spec: NotifySpec, ev: CompletionEvent): void {
   const taskId = (ev.task_id ?? '').trim()
   const body = bodyFor(kind, ev)
 

@@ -93,7 +93,12 @@ describe('transcript cache (renderer side)', () => {
     saveTranscriptTail('s1', [row(7)], 'work')
     saveOlderTranscriptPage('s1', [row(6)], MINI)
 
-    expect(bridge.put).toHaveBeenNthCalledWith(1, { connectionId: '', profile: 'work', sessionId: 's1' }, [row(7)], 'latest')
+    expect(bridge.put).toHaveBeenNthCalledWith(
+      1,
+      { connectionId: '', profile: 'work', sessionId: 's1' },
+      [row(7)],
+      'latest'
+    )
     expect(bridge.put).toHaveBeenNthCalledWith(2, { ...MINI, sessionId: 's1' }, [row(6)], 'older')
     expect(JSON.stringify(loadTranscriptTail('s1', MINI))).toContain('text 7')
     expect(bridge.read).toHaveBeenCalledWith({ ...MINI, sessionId: 's1' })

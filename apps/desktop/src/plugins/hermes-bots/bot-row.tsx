@@ -102,15 +102,17 @@ interface BotRowProps {
   showHandle?: boolean
 }
 
-function BotCanonicalStatusDot({ bot, connectionId }: { bot: RosterRow, connectionId: string }) {
+function BotCanonicalStatusDot({ bot, connectionId }: { bot: RosterRow; connectionId: string }) {
   const id = botCanonicalSessionId(bot)
 
-  const session = id ? {
-    id,
-    connection_id: bot.connectionId || connectionId,
-    profile: bot.targetProfile || bot.name,
-    outcome: bot.canonical_session?.outcome
-  } : null
+  const session = id
+    ? {
+        id,
+        connection_id: bot.connectionId || connectionId,
+        profile: bot.targetProfile || bot.name,
+        outcome: bot.canonical_session?.outcome
+      }
+    : null
 
   return <SessionStatusDot session={session} storedSessionId={id} />
 }
@@ -336,7 +338,9 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
       <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => void openRosterBot(bot)}>{b.bot.openBotChat}</ContextMenuItem>
-        <ContextMenuItem onSelect={() => void openRosterBot(bot, { intent: 'tab' })}>{b.bot.openBotChatInNewTab}</ContextMenuItem>
+        <ContextMenuItem onSelect={() => void openRosterBot(bot, { intent: 'tab' })}>
+          {b.bot.openBotChatInNewTab}
+        </ContextMenuItem>
         <ContextMenuItem onSelect={() => openBotScreen(bot, meta)}>{b.screen.menu}</ContextMenuItem>
         <ContextMenuCheckboxItem
           checked={Boolean(meta?.screenAutoOpen)}

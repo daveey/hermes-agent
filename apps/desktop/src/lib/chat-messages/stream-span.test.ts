@@ -6,7 +6,12 @@ const span = (start: number, end: number, segment = 0) => ({ turnId: 'turn-1', s
 
 describe('appendAssistantTextPart with stamped offsets', () => {
   it('appends contiguous chunks and extends the claim', () => {
-    const parts = appendAssistantTextPart(appendAssistantTextPart([], 'Hello ', undefined, span(0, 6)), 'world', undefined, span(6, 11))
+    const parts = appendAssistantTextPart(
+      appendAssistantTextPart([], 'Hello ', undefined, span(0, 6)),
+      'world',
+      undefined,
+      span(6, 11)
+    )
 
     expect(parts).toEqual([{ ...textPart('Hello world'), streamSpan: span(0, 11) }])
   })
@@ -24,7 +29,10 @@ describe('appendAssistantTextPart with stamped offsets', () => {
     const journal = [textPart('A2 ')]
     const stamped = appendAssistantTextPart(journal, 'NEXT ', undefined, span(8, 13))
 
-    expect(closingStreamRun({ id: 'a', role: 'assistant', parts: stamped })).toEqual({ span: span(8, 13), text: 'NEXT ' })
+    expect(closingStreamRun({ id: 'a', role: 'assistant', parts: stamped })).toEqual({
+      span: span(8, 13),
+      text: 'NEXT '
+    })
     expect(appendAssistantTextPart(stamped, 'LATE', undefined, span(20, 24)).at(-1)).toMatchObject({
       text: 'A2 NEXT LATE',
       streamSpan: span(20, 24)
@@ -58,6 +66,8 @@ describe('closingStreamRun', () => {
   })
 
   it('refuses a claim longer than the text it is on', () => {
-    expect(closingStreamRun({ id: 'a', role: 'assistant', parts: [{ ...textPart('abc'), streamSpan: span(0, 9) }] })).toBeNull()
+    expect(
+      closingStreamRun({ id: 'a', role: 'assistant', parts: [{ ...textPart('abc'), streamSpan: span(0, 9) }] })
+    ).toBeNull()
   })
 })

@@ -19,7 +19,9 @@ afterEach(() => {
 it('shows a restart drop note from the marker written by a real queue, with a new renderer module and no sessionStorage', async () => {
   const queue = archiveQueueLifetime('renderer-before-restart', 'restart-chat', en.desktop)
   await queue.enqueue()
-  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '')).toContain('hermes:archive-preflight-queue:renderer-before-restart')
+  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '')).toContain(
+    'hermes:archive-preflight-queue:renderer-before-restart'
+  )
   sessionStorage.clear()
   queueLocks.held.clear() // Renderer destruction releases Chromium's locks.
   // A reload/app restart loses module memory, but not the durable marker.
@@ -28,7 +30,9 @@ it('shows a restart drop note from the marker written by a real queue, with a ne
   const { $notifications: freshNotifications } = await import('@/store/notifications')
   await reportDroppedArchiveQueues()
   expect(freshNotifications.get().find(n => n.id === 'archive-queue-reload')).toMatchObject({
-    kind: 'warning', persistent: true, message: en.desktop.archiveQueueDropped
+    kind: 'warning',
+    persistent: true,
+    message: en.desktop.archiveQueueDropped
   })
   expect(localStorage.getItem('hermes:archive-preflight-queue:renderer-before-restart')).toBeNull()
   await reportDroppedArchiveQueues()
@@ -42,8 +46,14 @@ it('cancels a queued backoff immediately, without leaving its timer or marker be
   const queue = archiveQueueLifetime('backoff-cancel', 'cancel-chat', en.desktop)
   await queue.enqueue()
   const baselineTimers = vi.getTimerCount()
-  const waiting = queue.sleep(10_000).then(() => 'slept', error => error.message)
-  $notifications.get().find(n => n.message === en.desktop.archiveQueued)?.action?.onClick()
+  const waiting = queue.sleep(10_000).then(
+    () => 'slept',
+    error => error.message
+  )
+  $notifications
+    .get()
+    .find(n => n.message === en.desktop.archiveQueued)
+    ?.action?.onClick()
   expect(await waiting).toBe(en.desktop.archiveQueueCancelled)
   expect(vi.getTimerCount()).toBeLessThanOrEqual(baselineTimers)
   queue.dispose()

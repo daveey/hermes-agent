@@ -61,7 +61,6 @@ import {
 } from '@/store/session-states'
 import { orderTilesByTree } from '@/store/session-tile-order'
 
-
 const tile = (storedSessionId: string): SessionTile => ({ storedSessionId })
 const tilePane = (id: string) => `session-tile:${id}`
 

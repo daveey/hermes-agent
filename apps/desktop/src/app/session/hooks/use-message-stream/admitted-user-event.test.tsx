@@ -12,11 +12,21 @@ import { renderMessageStream } from './test-harness'
 const sid = 'admission-runtime'
 
 const payload = {
-  stored_session_id: 'stored-admission', profile: 'work', message_uid: 'decision-uid',
-  user_row_id: 42, text: 'approved exact scope', timestamp: 20
+  stored_session_id: 'stored-admission',
+  profile: 'work',
+  message_uid: 'decision-uid',
+  user_row_id: 42,
+  text: 'approved exact scope',
+  timestamp: 20
 }
 
-const event = { type: 'message.admitted', session_id: sid, connectionId: 'owner', profile: 'work', payload } as GatewayEvent
+const event = {
+  type: 'message.admitted',
+  session_id: sid,
+  connectionId: 'owner',
+  profile: 'work',
+  payload
+} as GatewayEvent
 
 function mount() {
   recordSessionEventScope({ session_id: sid, connectionId: 'owner', profile: 'work' })
@@ -53,9 +63,10 @@ describe('authoritative admitted user row', () => {
     expect(hydrate).not.toHaveBeenCalled()
 
     // A storage refresh may use a different display ID for the same durable row.
-    stream.states.set(sid, { ...stream.state(), messages: toChatMessages([
-      { role: 'user', content: payload.text, row_id: 42, timestamp: 20 }
-    ]) })
+    stream.states.set(sid, {
+      ...stream.state(),
+      messages: toChatMessages([{ role: 'user', content: payload.text, row_id: 42, timestamp: 20 }])
+    })
     act(() => stream.handleEvent(event))
     expect(stream.state().messages).toHaveLength(1)
   })
@@ -63,8 +74,13 @@ describe('authoritative admitted user row', () => {
   it('inserts a delayed row ahead of live output without replacing any assistant parts', () => {
     const { stream } = mount()
 
-    const assistant = { id: 'live', role: 'assistant' as const, timestamp: 21, pending: true,
-      parts: [{ type: 'text' as const, text: 'delta kept' }] }
+    const assistant = {
+      id: 'live',
+      role: 'assistant' as const,
+      timestamp: 21,
+      pending: true,
+      parts: [{ type: 'text' as const, text: 'delta kept' }]
+    }
 
     stream.states.set(sid, { ...stream.state(), busy: true, turnLive: true, streamId: 'live', messages: [assistant] })
     act(() => stream.handleEvent(event))
@@ -78,9 +94,15 @@ describe('authoritative admitted user row', () => {
     const { stream } = mount()
     act(() => {
       stream.handleEvent(event)
-      stream.handleEvent({ ...event, payload: {
-        ...payload, user_row_id: 43, message_uid: 'another-decision', timestamp: 22
-      } })
+      stream.handleEvent({
+        ...event,
+        payload: {
+          ...payload,
+          user_row_id: 43,
+          message_uid: 'another-decision',
+          timestamp: 22
+        }
+      })
     })
     expect(stream.state().messages.map(message => message.rowId)).toEqual([42, 43])
   })
@@ -126,8 +148,10 @@ describe('authoritative admitted user row', () => {
   })
 
   it.each([
-    { session_id: undefined }, { session_id: 'unknown-runtime' },
-    { connectionId: 'foreign' }, { profile: 'foreign' },
+    { session_id: undefined },
+    { session_id: 'unknown-runtime' },
+    { connectionId: 'foreign' },
+    { profile: 'foreign' },
     { payload: { ...payload, profile: 'foreign' } },
     { payload: { ...payload, stored_session_id: 'other-stored' } }
   ])('rejects foreign or unbound identity %j', override => {

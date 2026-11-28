@@ -27,9 +27,10 @@ export function sessionActionRow(storedSessionId: string, selectedRow?: SessionI
       throw new Error('Session owner does not match the selected row')
     }
 
-    const current = matches.find(row =>
-      (row.connection_id?.trim() || '') === (selectedRow.connection_id?.trim() || '') &&
-      (row.profile?.trim() || 'default') === (selectedRow.profile?.trim() || 'default')
+    const current = matches.find(
+      row =>
+        (row.connection_id?.trim() || '') === (selectedRow.connection_id?.trim() || '') &&
+        (row.profile?.trim() || 'default') === (selectedRow.profile?.trim() || 'default')
     )
 
     // Resolve the same owner against current freshness, even if the menu

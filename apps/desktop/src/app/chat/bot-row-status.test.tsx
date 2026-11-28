@@ -19,26 +19,44 @@ afterEach(() => {
   resetCommittedStripeReports()
 })
 
-it.each<CanonicalStripe>(['done', 'waiting', 'stuck'])('the actual Bots row paints and reports canonical %s for its own owner', stripe => {
-  const outcome = canonicalOutcome(stripe, {
-    identity: { gateway: 'remote-gateway', profile: 'alpha', session_id: 'bot-tip', owner_epoch: 'epoch' }
-  })
+it.each<CanonicalStripe>(['done', 'waiting', 'stuck'])(
+  'the actual Bots row paints and reports canonical %s for its own owner',
+  stripe => {
+    const outcome = canonicalOutcome(stripe, {
+      identity: { gateway: 'remote-gateway', profile: 'alpha', session_id: 'bot-tip', owner_epoch: 'epoch' }
+    })
 
-  const bot: RosterRow = {
-    name: 'alpha', connectionId: 'remote-source', targetProfile: 'alpha', sourceScoped: true,
-    canonical_session: { id: 'bot-root', resolved_id: 'bot-tip', outcome }
+    const bot: RosterRow = {
+      name: 'alpha',
+      connectionId: 'remote-source',
+      targetProfile: 'alpha',
+      sourceScoped: true,
+      canonical_session: { id: 'bot-root', resolved_id: 'bot-tip', outcome }
+    }
+
+    const view = render(
+      <BotRow bot={bot} onDelete={vi.fn()} onEdit={vi.fn()} onGroup={vi.fn()} onNewSection={vi.fn()} />
+    )
+    expect(view.container.querySelector('[data-session-status-dot]')?.getAttribute('data-session-status-dot')).toBe(
+      stripe
+    )
+    expect(report).toHaveBeenCalledWith(
+      { connection_id: 'remote-source', profile: 'alpha', id: 'bot-tip' },
+      expect.objectContaining({
+        mounted: true,
+        surface: 'dot',
+        stripe,
+        revision: 7,
+        identity: outcome.status?.identity
+      })
+    )
   }
-
-  const view = render(<BotRow bot={bot} onDelete={vi.fn()} onEdit={vi.fn()} onGroup={vi.fn()} onNewSection={vi.fn()} />)
-  expect(view.container.querySelector('[data-session-status-dot]')?.getAttribute('data-session-status-dot')).toBe(stripe)
-  expect(report).toHaveBeenCalledWith(
-    { connection_id: 'remote-source', profile: 'alpha', id: 'bot-tip' },
-    expect.objectContaining({ mounted: true, surface: 'dot', stripe, revision: 7, identity: outcome.status?.identity })
-  )
-})
+)
 
 it('a roster without canonical protocol paints unknown rather than deriving green from activity', () => {
   const bot: RosterRow = { name: 'alpha', canonical_session: { id: 'bot-root', last_active: 1 } }
   const view = render(<BotRow bot={bot} onDelete={vi.fn()} onEdit={vi.fn()} onGroup={vi.fn()} onNewSection={vi.fn()} />)
-  expect(view.container.querySelector('[data-session-status-dot]')?.getAttribute('data-session-status-dot')).toBe('attention')
+  expect(view.container.querySelector('[data-session-status-dot]')?.getAttribute('data-session-status-dot')).toBe(
+    'attention'
+  )
 })

@@ -21,10 +21,19 @@ describe('plugin REST qualified owner', () => {
     { opts: { connectionId: 'owner' }, expected: { connectionId: 'owner' } },
     { opts: { connectionId: 'owner', profile: null }, expected: { connectionId: 'owner' } },
     { opts: { profile: null }, expected: { connectionId: 'ambient-gw' } },
-    { opts: { profile: 'worker' }, expected: { connectionId: 'ambient-gw', priority: 'foreground', profile: 'worker' } },
+    {
+      opts: { profile: 'worker' },
+      expected: { connectionId: 'ambient-gw', priority: 'foreground', profile: 'worker' }
+    },
     // A user-driven read (opening a detail view) carries its foreground tag, so main never thins or holds it.
-    { opts: { priority: 'foreground' as const }, expected: { connectionId: 'ambient-gw', priority: 'foreground', profile: 'ambient' } },
-    { opts: { connectionId: 'owner', priority: 'foreground' as const }, expected: { connectionId: 'owner', priority: 'foreground' } }
+    {
+      opts: { priority: 'foreground' as const },
+      expected: { connectionId: 'ambient-gw', priority: 'foreground', profile: 'ambient' }
+    },
+    {
+      opts: { connectionId: 'owner', priority: 'foreground' as const },
+      expected: { connectionId: 'owner', priority: 'foreground' }
+    }
   ])('preserves scoped semantics for $opts', async ({ opts, expected }) => {
     const api = vi.fn().mockResolvedValue({ ok: true })
     Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { api } })
@@ -32,8 +41,12 @@ describe('plugin REST qualified owner', () => {
     setApiRequestProfile('ambient')
     await pluginRest('kanban', '/tasks/t_one', opts)
     expect(api.mock.calls[0][0]).toEqual({
-      body: undefined, method: undefined, path: '/api/plugins/kanban/tasks/t_one',
-      timeoutMs: undefined, upload: undefined, ...expected
+      body: undefined,
+      method: undefined,
+      path: '/api/plugins/kanban/tasks/t_one',
+      timeoutMs: undefined,
+      upload: undefined,
+      ...expected
     })
   })
 
@@ -44,12 +57,20 @@ describe('plugin REST qualified owner', () => {
     setApiRequestProfile('ambient')
     const upload = { bytes: new ArrayBuffer(0), filename: 'proof.txt' }
     await pluginRest('kanban', '/tasks/t_one/attachments?board=ops', {
-      connectionId: 'owner', method: 'POST', profile: 'worker', upload
+      connectionId: 'owner',
+      method: 'POST',
+      profile: 'worker',
+      upload
     })
     expect(api).toHaveBeenCalledWith({
-      body: undefined, connectionId: 'owner', method: 'POST',
+      body: undefined,
+      connectionId: 'owner',
+      method: 'POST',
       path: '/api/plugins/kanban/tasks/t_one/attachments?board=ops',
-      priority: 'foreground', profile: 'worker', timeoutMs: undefined, upload
+      priority: 'foreground',
+      profile: 'worker',
+      timeoutMs: undefined,
+      upload
     })
   })
 })
@@ -118,7 +139,10 @@ describe('pluginSocket credentials and refusals (PLG-1)', () => {
     }
   }
 
-  const desktop = (connection: Record<string, unknown>, minted: unknown = 'ws://127.0.0.1:9/api/plugins/kanban/events?native_dial=n') => {
+  const desktop = (
+    connection: Record<string, unknown>,
+    minted: unknown = 'ws://127.0.0.1:9/api/plugins/kanban/events?native_dial=n'
+  ) => {
     const getPluginWsUrl = vi.fn(async (): Promise<unknown> => minted)
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
@@ -155,8 +179,15 @@ describe('pluginSocket credentials and refusals (PLG-1)', () => {
     const dispose = pluginSocket('kanban', '/events?board=b', () => undefined)
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(mint).toHaveBeenCalledWith({ connectionId: null, path: '/events?board=b', pluginId: 'kanban', profile: 'coder' })
-    expect(FakeSocket.all.map(socket => socket.url)).toEqual(['ws://127.0.0.1:9/api/plugins/kanban/events?native_dial=n'])
+    expect(mint).toHaveBeenCalledWith({
+      connectionId: null,
+      path: '/events?board=b',
+      pluginId: 'kanban',
+      profile: 'coder'
+    })
+    expect(FakeSocket.all.map(socket => socket.url)).toEqual([
+      'ws://127.0.0.1:9/api/plugins/kanban/events?native_dial=n'
+    ])
     dispose()
   })
 
@@ -313,7 +344,9 @@ describe('pluginSocket credentials and refusals (PLG-1)', () => {
     setApiRequestConnection('homelab')
     await vi.advanceTimersByTimeAsync(0)
     expect(mint).toHaveBeenCalledTimes(11)
-    expect(FakeSocket.all.map(socket => socket.url)).toEqual(['ws://127.0.0.1:9/api/plugins/kanban/events?native_dial=m'])
+    expect(FakeSocket.all.map(socket => socket.url)).toEqual([
+      'ws://127.0.0.1:9/api/plugins/kanban/events?native_dial=m'
+    ])
     dispose()
 
     // A disposed socket no longer follows the scope.
@@ -470,7 +503,9 @@ describe('pluginSocket credentials and refusals (PLG-1)', () => {
       socket.onclose?.()
       await vi.advanceTimersByTimeAsync(31_000)
 
-      if (FakeSocket.all.at(-1) !== socket) {delays.push(FakeSocket.all.at(-1)!.at - closedAt)}
+      if (FakeSocket.all.at(-1) !== socket) {
+        delays.push(FakeSocket.all.at(-1)!.at - closedAt)
+      }
     }
 
     expect(FakeSocket.all).toHaveLength(5)

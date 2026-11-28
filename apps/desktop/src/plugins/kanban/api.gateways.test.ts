@@ -93,24 +93,58 @@ afterEach(() => {
 describe('qualified task routes', () => {
   it('routes a drawer foreign_card 409 to its owner without losing profile or board', async () => {
     registry('local', 'hub')
-    await bind(({ path, opts }) => path.includes('/comments') && opts?.connectionId !== 'hub'
-      ? new Error('HTTP 409: {"detail":"foreign_card: t_drawer was created on hub and lives there; this gateway has only a replica copy. kanban_supervisor_request hub-comment"}')
-      : { ok: true })
+    await bind(({ path, opts }) =>
+      path.includes('/comments') && opts?.connectionId !== 'hub'
+        ? new Error(
+            'HTTP 409: {"detail":"foreign_card: t_drawer was created on hub and lives there; this gateway has only a replica copy. kanban_supervisor_request hub-comment"}'
+          )
+        : { ok: true }
+    )
     calls = []
-    await expect(api.addComment('t_drawer', 'Already answered, here is more context', { gateway: 'local', profile: 'research', board: 'ops' })).resolves.toEqual({ ok: true })
+    await expect(
+      api.addComment('t_drawer', 'Already answered, here is more context', {
+        gateway: 'local',
+        profile: 'research',
+        board: 'ops'
+      })
+    ).resolves.toEqual({ ok: true })
     expect(calls).toEqual([
-      { path: '/tasks/t_drawer/comments?board=ops', opts: { connectionId: 'local', profile: 'research', method: 'POST', body: { author: 'desktop', body: 'Already answered, here is more context' } } },
-      { path: '/tasks/t_drawer/comments?board=ops', opts: { connectionId: 'hub', profile: 'research', method: 'POST', body: { author: 'desktop', body: 'Already answered, here is more context' } } }
+      {
+        path: '/tasks/t_drawer/comments?board=ops',
+        opts: {
+          connectionId: 'local',
+          profile: 'research',
+          method: 'POST',
+          body: { author: 'desktop', body: 'Already answered, here is more context' }
+        }
+      },
+      {
+        path: '/tasks/t_drawer/comments?board=ops',
+        opts: {
+          connectionId: 'hub',
+          profile: 'research',
+          method: 'POST',
+          body: { author: 'desktop', body: 'Already answered, here is more context' }
+        }
+      }
     ])
   })
 
   it('explains an unreachable foreign owner without worker-only instructions', async () => {
     registry('local')
-    await bind(({ path }) => path.includes('/comments')
-      ? new Error('HTTP 409: foreign_card: t_unreachable was created on worker-8 and lives there; kanban_supervisor_request hub-comment')
-      : { ok: true })
+    await bind(({ path }) =>
+      path.includes('/comments')
+        ? new Error(
+            'HTTP 409: foreign_card: t_unreachable was created on worker-8 and lives there; kanban_supervisor_request hub-comment'
+          )
+        : { ok: true }
+    )
     calls = []
-    const result = api.addComment('t_unreachable', 'context', { gateway: 'local', profile: 'default', board: 'default' })
+    const result = api.addComment('t_unreachable', 'context', {
+      gateway: 'local',
+      profile: 'default',
+      board: 'default'
+    })
     await expect(result).rejects.toThrow('Your comment was not saved. Connect to that gateway')
     await expect(result).rejects.not.toThrow(/kanban_supervisor_request|hub-comment/)
     expect(calls).toHaveLength(1)
@@ -123,7 +157,12 @@ describe('qualified task routes', () => {
     await api.patchTask('nudge-task', { priority: 1 }, owner)
     routed.id = 'elsewhere'
     $boardSlug.set('other')
-    await vi.waitFor(() => expect(calls).toContainEqual({ path: '/dispatch?board=ops', opts: { connectionId: 'nudge-owner', profile: 'work', method: 'POST', body: {} } }))
+    await vi.waitFor(() =>
+      expect(calls).toContainEqual({
+        path: '/dispatch?board=ops',
+        opts: { connectionId: 'nudge-owner', profile: 'work', method: 'POST', body: {} }
+      })
+    )
   })
 
   it('rejects ambiguous legacy ids rather than using whichever owner was remembered last', async () => {
@@ -160,8 +199,15 @@ describe('qualified task routes', () => {
       expect(new URL(call.path, 'http://example.com').searchParams.get('board')).toBe(owner.board)
     }
 
-    expect(save).toHaveBeenCalledWith({ connectionId: owner.gateway, profile: owner.profile, path: '/stored/a', suggestedName: 'a' })
-    expect(api.logKey('local', '', 'drawer-id', owner)).not.toEqual(api.logKey('local', '', 'drawer-id', { ...owner, profile: 'other' }))
+    expect(save).toHaveBeenCalledWith({
+      connectionId: owner.gateway,
+      profile: owner.profile,
+      path: '/stored/a',
+      suggestedName: 'a'
+    })
+    expect(api.logKey('local', '', 'drawer-id', owner)).not.toEqual(
+      api.logKey('local', '', 'drawer-id', { ...owner, profile: 'other' })
+    )
     vi.unstubAllGlobals()
   })
 
@@ -175,7 +221,10 @@ describe('qualified task routes', () => {
     await api.patchTask('collision', { priority: 2 }, owner)
     expect(calls).toEqual([
       { path: '/tasks/collision?board=ops', opts: { connectionId: 'owner-a', profile: 'research' } },
-      { path: '/tasks/collision?board=ops', opts: { connectionId: 'owner-a', profile: 'research', method: 'PATCH', body: { priority: 2 } } }
+      {
+        path: '/tasks/collision?board=ops',
+        opts: { connectionId: 'owner-a', profile: 'research', method: 'PATCH', body: { priority: 2 } }
+      }
     ])
     expect(api.taskKey('local', '', 'collision', owner)).not.toEqual(
       api.taskKey('local', '', 'collision', { ...owner, profile: 'default' })
@@ -221,11 +270,15 @@ describe('mergeBoards', () => {
   it("shows a shadow board's remote copy once, and never over the owner's own live row", () => {
     const merged = mergeBoards([
       {
-        board: board({ ready: [task('own', { title: 'hub own' }), task('r1', { home_gateway: 'mini', remote: true })] }),
+        board: board({
+          ready: [task('own', { title: 'hub own' }), task('r1', { home_gateway: 'mini', remote: true })]
+        }),
         gateway: 'local'
       },
       {
-        board: board({ ready: [task('r1', { title: 'mini live' }), task('r2', { home_gateway: 'mini', remote: true })] }),
+        board: board({
+          ready: [task('r1', { title: 'mini live' }), task('r2', { home_gateway: 'mini', remote: true })]
+        }),
         gateway: 'mini'
       },
       { board: board({ ready: [task('r2', { home_gateway: 'mini', remote: true })] }), gateway: 'cloud' }
@@ -323,18 +376,29 @@ describe('gateway routing', () => {
 
   it('partitions bulk writes by owner board and profile even on the active gateway', async () => {
     registry('local')
-    await bind(call => call.path.startsWith('/tasks/bulk')
-      ? { results: (call.opts?.body as { ids: string[] }).ids.map(id => ({ id, ok: true })) }
-      : board({ ready: [] }))
+    await bind(call =>
+      call.path.startsWith('/tasks/bulk')
+        ? { results: (call.opts?.body as { ids: string[] }).ids.map(id => ({ id, ok: true })) }
+        : board({ ready: [] })
+    )
     api.rememberTaskOwner('bulk-a', 'ops', 'local', 'worker-a')
     api.rememberTaskOwner('bulk-b', 'ops', 'local', 'worker-b')
     api.rememberTaskOwner('bulk-c', 'other', 'local', 'worker-a')
     calls = []
     await bulkTasks(['bulk-a', 'bulk-b', 'bulk-c'], { status: 'todo' })
     expect(calls).toEqual([
-      { path: '/tasks/bulk?board=ops', opts: { connectionId: 'local', profile: 'worker-a', method: 'POST', body: { ids: ['bulk-a'], status: 'todo' } } },
-      { path: '/tasks/bulk?board=ops', opts: { connectionId: 'local', profile: 'worker-b', method: 'POST', body: { ids: ['bulk-b'], status: 'todo' } } },
-      { path: '/tasks/bulk?board=other', opts: { connectionId: 'local', profile: 'worker-a', method: 'POST', body: { ids: ['bulk-c'], status: 'todo' } } }
+      {
+        path: '/tasks/bulk?board=ops',
+        opts: { connectionId: 'local', profile: 'worker-a', method: 'POST', body: { ids: ['bulk-a'], status: 'todo' } }
+      },
+      {
+        path: '/tasks/bulk?board=ops',
+        opts: { connectionId: 'local', profile: 'worker-b', method: 'POST', body: { ids: ['bulk-b'], status: 'todo' } }
+      },
+      {
+        path: '/tasks/bulk?board=other',
+        opts: { connectionId: 'local', profile: 'worker-a', method: 'POST', body: { ids: ['bulk-c'], status: 'todo' } }
+      }
     ])
   })
 
@@ -455,9 +519,9 @@ describe('gateway routing', () => {
     expect(calls.filter(c => c.path === '/boards')).toHaveLength(1)
     // Every remote read still names the routed gateway's current board.
     expect(
-      calls.filter(c => c.opts?.connectionId === 'mini' && c.path.startsWith('/board?')).every(c =>
-        c.path.includes('board=work')
-      )
+      calls
+        .filter(c => c.opts?.connectionId === 'mini' && c.path.startsWith('/board?'))
+        .every(c => c.path.includes('board=work'))
     ).toBe(true)
 
     // Past the boards list's own freshness window it is read again.
@@ -466,12 +530,14 @@ describe('gateway routing', () => {
     expect(calls.filter(c => c.path === '/boards')).toHaveLength(2)
   })
 
-  it("keeps the last known current board when the routed /boards read fails, and retries it next time", async () => {
+  it('keeps the last known current board when the routed /boards read fails, and retries it next time', async () => {
     registry('local', 'mini')
     let down = false
     await bind(call => {
       if (call.path === '/boards') {
-        return down ? new Error('Timed out connecting to Hermes backend after 20000ms') : { boards: [], current: 'work' }
+        return down
+          ? new Error('Timed out connecting to Hermes backend after 20000ms')
+          : { boards: [], current: 'work' }
       }
 
       return board({ ready: [] })
@@ -485,7 +551,9 @@ describe('gateway routing', () => {
     await fetchBoard(false)
 
     expect(calls.filter(c => c.path === '/boards')).toHaveLength(1)
-    expect(calls).toContainEqual(expect.objectContaining({ path: '/board?board=work', opts: expect.objectContaining({ connectionId: 'mini' }) }))
+    expect(calls).toContainEqual(
+      expect.objectContaining({ path: '/board?board=work', opts: expect.objectContaining({ connectionId: 'mini' }) })
+    )
   })
 
   it('does not let a hung gateway stall the board, and cools it down', async () => {

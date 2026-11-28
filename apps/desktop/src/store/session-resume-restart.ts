@@ -11,17 +11,26 @@ export function holdRestartingSessionResume(key: string): () => void {
   let released = false
 
   return () => {
-    if (released) { return }
+    if (released) {
+      return
+    }
     released = true
     const next = new Map($restartingSessionResumes.get())
     const count = (next.get(key) ?? 1) - 1
 
-    if (count) { next.set(key, count) } else { next.delete(key) }
+    if (count) {
+      next.set(key, count)
+    } else {
+      next.delete(key)
+    }
     $restartingSessionResumes.set(next)
   }
 }
 
-export function sessionResumeIsRestarting(sessionId: string | null | undefined, connectionId: string | null | undefined,
-  pending = $restartingSessionResumes.get()): boolean {
+export function sessionResumeIsRestarting(
+  sessionId: string | null | undefined,
+  connectionId: string | null | undefined,
+  pending = $restartingSessionResumes.get()
+): boolean {
   return Boolean(sessionId && pending.has(JSON.stringify([connectionId || '', sessionId])))
 }

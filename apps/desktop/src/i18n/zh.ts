@@ -31,9 +31,9 @@ import { zhUpdateChannel } from './zh_update_channel'
 
 export const zhOverrides = {
   gatewayGroupOpen: {
-    opening: "正在打开群聊…",
-    lookupFailed: "无法在网关上查找此群组，请重试。",
-    missing: "此群聊已不存在。"
+    opening: '正在打开群聊…',
+    lookupFailed: '无法在网关上查找此群组，请重试。',
+    missing: '此群聊已不存在。'
   },
   catalog: zhCatalog,
   externalOpenFailed: {
@@ -697,7 +697,8 @@ export const zhOverrides = {
       sessionDensityComfortable: '舒适',
       sessionDensityDetailed: '详细',
       tabStripTitle: '标签栏',
-      tabStripDesc: '单标签模式只显示一个主标签，不关闭后台会话。自动、始终和从不控制标签栏的显示。侧面板标签不受影响。',
+      tabStripDesc:
+        '单标签模式只显示一个主标签，不关闭后台会话。自动、始终和从不控制标签栏的显示。侧面板标签不受影响。',
       tabStripSingle: '单标签',
       tabStripAuto: '自动',
       tabStripAlways: '始终',
@@ -2487,7 +2488,8 @@ export const zhOverrides = {
     relayLink: {
       title: 'Team Gateway',
       badge: '无需机器人令牌',
-      intro: (platform: string) => `${platform} 通过共享的 Hermes 机器人连接到此智能体。关联你的 ${platform} 账号，然后给机器人发消息即可与智能体对话。`,
+      intro: (platform: string) =>
+        `${platform} 通过共享的 Hermes 机器人连接到此智能体。关联你的 ${platform} 账号，然后给机器人发消息即可与智能体对话。`,
       link: (platform: string) => `关联 ${platform}`,
       linkAnother: (platform: string) => `关联另一个 ${platform} 账号`,
       linkedAccounts: '已关联账号',
@@ -2505,10 +2507,12 @@ export const zhOverrides = {
       refused: (platform: string) => `${platform} 拒绝了关联。请获取新代码后重试。`,
       qrAlt: (platform: string) => `共享 ${platform} 机器人的二维码`,
       managed: '由 Team Gateway 管理',
-      managedNote: (platform: string) => `此实例的消息由 Team Gateway 承载，因此网关每次启动都会关闭 ${platform} 的直连。若要与中继同时使用，请在网关环境中设置 GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true（直连会使实例无法缩容到零，并可能重复投递消息）。`,
+      managedNote: (platform: string) =>
+        `此实例的消息由 Team Gateway 承载，因此网关每次启动都会关闭 ${platform} 的直连。若要与中继同时使用，请在网关环境中设置 GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true（直连会使实例无法缩容到零，并可能重复投递消息）。`,
       managedIntro: '此代理的账号在 Nous Portal 中关联。',
       openPortal: '在 Nous Portal 中关联账号',
-      noNewAccount: (platform: string) => `该代码已失效，且没有出现新账号。如果你的 ${platform} 账号不在列表中，请获取新代码后重试。`
+      noNewAccount: (platform: string) =>
+        `该代码已失效，且没有出现新账号。如果你的 ${platform} 账号不在列表中，请获取新代码后重试。`
     },
     telegramQr: {
       title: '选择连接 Telegram 机器人的方式',
@@ -3137,7 +3141,8 @@ export const zhOverrides = {
       backgroundExternalDown: '外部服务已中断',
       kanbanExternalRunning: '外部运行中',
       kanbanExternalDown: '外部中断',
-      kanbanUnknown: count => `${count} 项工作的当前状态未知：证据缺失、已过期或未经验证。这不表示已完成；未请求新的检查。`,
+      kanbanUnknown: count =>
+        `${count} 项工作的当前状态未知：证据缺失、已过期或未经验证。这不表示已完成；未请求新的检查。`,
       pausedQueue: '重启前排队的消息可能未运行：请重新发送或丢弃',
       pin: '置顶',
       unpin: '取消置顶',
@@ -3371,7 +3376,8 @@ export const zhOverrides = {
     queueSend: '发送',
     queueDelete: '删除',
     queueLostNote: '重启期间该轮次已丢失',
-    queueUpdateNote: (started: string | undefined) => `正在等待 Hermes 更新${started ? `（开始于 ${started}）` : ''}，将自动发送`,
+    queueUpdateNote: (started: string | undefined) =>
+      `正在等待 Hermes 更新${started ? `（开始于 ${started}）` : ''}，将自动发送`,
     restoreImageDraft: '恢复图片草稿',
     queueCancelFailed: '无法移除排队的轮次',
     queueLostDiscard: '丢弃',
@@ -4127,12 +4133,9 @@ export const zhOverrides = {
     terminalCloseAll: '关闭全部',
     terminalNewOn: '新建终端于…',
     terminalGatewayRemoved: '已移除的网关',
-    terminalGatewayRemovedBody:
-      '此终端所在的网关已被移除，无法重新打开。请关闭此标签页。',
-    terminalGatewayNoShellBody:
-      '此网关不提供 Shell 访问，此终端无法重新打开。请关闭此标签页。',
-    terminalDisconnectedBody:
-      '终端已断开。按 Enter 启动新的 shell；滚动记录会保留。',
+    terminalGatewayRemovedBody: '此终端所在的网关已被移除，无法重新打开。请关闭此标签页。',
+    terminalGatewayNoShellBody: '此网关不提供 Shell 访问，此终端无法重新打开。请关闭此标签页。',
+    terminalDisconnectedBody: '终端已断开。按 Enter 启动新的 shell；滚动记录会保留。',
     addToChat: '添加到对话'
   },
 

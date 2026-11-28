@@ -24,7 +24,9 @@ function client(state = 'closed', synchronousOpen = false) {
         callback('open')
       }
 
-      return () => { listeners.delete(callback) }
+      return () => {
+        listeners.delete(callback)
+      }
     }
   }
 
@@ -65,11 +67,17 @@ it.each(['abort', 'timeout', 'dispose'])('cleans subscriptions after %s', async 
   const controller = new AbortController()
   const result = waitForPrimaryGateway(gateway, 1000, controller.signal).catch(error => error)
 
-  if (mode === 'abort') {controller.abort()}
+  if (mode === 'abort') {
+    controller.abort()
+  }
 
-  if (mode === 'timeout') {await vi.advanceTimersByTimeAsync(1000)}
+  if (mode === 'timeout') {
+    await vi.advanceTimersByTimeAsync(1000)
+  }
 
-  if (mode === 'dispose') {dispose()}
+  if (mode === 'dispose') {
+    dispose()
+  }
   expect(await result).toMatchObject({ name: mode === 'abort' ? 'AbortError' : 'Error' })
   expect(listeners.size).toBe(0)
   expect(vi.getTimerCount()).toBe(0)

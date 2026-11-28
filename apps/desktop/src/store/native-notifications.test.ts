@@ -90,9 +90,15 @@ describe('dispatchNativeNotification focus gating', () => {
     setActiveSessionId(sessionId)
     const observed = Date.now() / 1000
     const row = { id: sessionId, kanban_observed_at: observed }
-    setSessions((state === 'missing' ? [] : state === 'unstamped' ? [{ id: sessionId }]
-      : state === 'ambiguous' ? [row, { ...row, profile: 'other' }]
-        : [{ ...row, kanban_observed_at: observed + (state === 'future' ? 60 : -181) }]) as never)
+    setSessions(
+      (state === 'missing'
+        ? []
+        : state === 'unstamped'
+          ? [{ id: sessionId }]
+          : state === 'ambiguous'
+            ? [row, { ...row, profile: 'other' }]
+            : [{ ...row, kanban_observed_at: observed + (state === 'future' ? 60 : -181) }]) as never
+    )
     expect(dispatchNativeNotification({ kind: 'turnDone', sessionId, title: 'done' })).toBe(false)
     expect(notify).not.toHaveBeenCalled()
   })
@@ -107,12 +113,19 @@ describe('dispatchNativeNotification focus gating', () => {
 
     try {
       setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt - 1 } as never])
-      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt } as never)).toBe(false)
+      expect(
+        dispatchNativeNotification({
+          kind: 'turnDone',
+          sessionId: runtime,
+          title: 'done',
+          projectionAfter: endedAt
+        } as never)
+      ).toBe(false)
       expect(notify).not.toHaveBeenCalled()
       vi.advanceTimersByTime(5000)
-      setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000,
-        kanban_active: 1 } as never])
+      setSessions([
+        { id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000, kanban_active: 1 } as never
+      ])
       expect(notify).not.toHaveBeenCalled()
       setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
       expect(notify).toHaveBeenCalledTimes(1)
@@ -140,8 +153,13 @@ describe('dispatchNativeNotification focus gating', () => {
 
     try {
       setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt - 1 } as never])
-      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt, refreshProjection } as never)
+      dispatchNativeNotification({
+        kind: 'turnDone',
+        sessionId: runtime,
+        title: 'done',
+        projectionAfter: endedAt,
+        refreshProjection
+      } as never)
       await vi.advanceTimersByTimeAsync(15000)
       expect(refreshProjection).toHaveBeenCalledTimes(1)
       expect(notify).toHaveBeenCalledTimes(1)
@@ -162,14 +180,22 @@ describe('dispatchNativeNotification focus gating', () => {
     setActiveSessionId(runtime)
     const endedAt = Date.now() / 1000
 
-    const refreshProjection = vi.fn().mockRejectedValueOnce(new Error('owner offline')).mockImplementation(async () => {
-      setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
-    })
+    const refreshProjection = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('owner offline'))
+      .mockImplementation(async () => {
+        setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
+      })
 
     try {
       setSessions([{ id: stored, profile: 'default', kanban_unknown: true } as never])
-      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt, refreshProjection })
+      dispatchNativeNotification({
+        kind: 'turnDone',
+        sessionId: runtime,
+        title: 'done',
+        projectionAfter: endedAt,
+        refreshProjection
+      })
       await vi.advanceTimersByTimeAsync(15000)
       expect(notify).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(15000)
@@ -192,11 +218,19 @@ describe('dispatchNativeNotification focus gating', () => {
 
     try {
       setSessions([{ id: stored, profile: 'work', connection_id: 'owner-b', kanban_observed_at: endedAt } as never])
-      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt })).toBe(false)
+      expect(
+        dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
+      ).toBe(false)
       expect(notify).not.toHaveBeenCalled()
-      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt,
-        kanban_active: 1 } as never])
+      setSessions([
+        {
+          id: stored,
+          profile: 'work',
+          connection_id: 'owner-a',
+          kanban_observed_at: endedAt,
+          kanban_active: 1
+        } as never
+      ])
       expect(notify).not.toHaveBeenCalled()
       setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt } as never])
       expect(notify).toHaveBeenCalledTimes(1)
@@ -217,8 +251,9 @@ describe('dispatchNativeNotification focus gating', () => {
 
     try {
       setSessions([])
-      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt })).toBe(false)
+      expect(
+        dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
+      ).toBe(false)
       setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt } as never])
       expect(notify).toHaveBeenCalledTimes(1)
     } finally {
@@ -239,8 +274,9 @@ describe('dispatchNativeNotification focus gating', () => {
 
     try {
       setSessions([{ id: stored, profile: 'work', connection_id: 'owner-b', kanban_observed_at: endedAt } as never])
-      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt })).toBe(false)
+      expect(
+        dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
+      ).toBe(false)
       setSessions([{ id: stored, profile: 'work', kanban_observed_at: endedAt } as never])
       expect(notify).toHaveBeenCalledTimes(1)
     } finally {
@@ -259,7 +295,8 @@ describe('dispatchNativeNotification focus gating', () => {
     const endedAt = Date.now() / 1000
     let oldMayPublish: (() => boolean) | undefined
 
-    const refreshProjection = vi.fn()
+    const refreshProjection = vi
+      .fn()
       .mockImplementationOnce((mayPublish?: () => boolean) => {
         oldMayPublish = mayPublish
 
@@ -271,8 +308,13 @@ describe('dispatchNativeNotification focus gating', () => {
 
     try {
       setSessions([{ id: stored, profile: 'default', kanban_unknown: true } as never])
-      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt, refreshProjection })
+      dispatchNativeNotification({
+        kind: 'turnDone',
+        sessionId: runtime,
+        title: 'done',
+        projectionAfter: endedAt,
+        refreshProjection
+      })
       await vi.advanceTimersByTimeAsync(45000)
       expect(refreshProjection).toHaveBeenCalledTimes(2)
       expect(oldMayPublish?.()).toBe(false)
@@ -294,8 +336,9 @@ describe('dispatchNativeNotification focus gating', () => {
 
     try {
       setSessions([])
-      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
-        projectionAfter: endedAt })).toBe(false)
+      expect(
+        dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
+      ).toBe(false)
       setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt } as never])
       expect(notify).toHaveBeenCalledTimes(1)
     } finally {
@@ -314,15 +357,37 @@ describe('dispatchNativeNotification focus gating', () => {
     const endedAt = Date.now() / 1000
 
     try {
-      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt,
-        kanban_active: 1 } as never])
+      setSessions([
+        {
+          id: stored,
+          profile: 'work',
+          connection_id: 'owner-a',
+          kanban_observed_at: endedAt,
+          kanban_active: 1
+        } as never
+      ])
       dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
-      setSessions([{ id: next, _lineage_ids: [stored, next], profile: 'work', connection_id: 'owner-a',
-        kanban_observed_at: endedAt, kanban_active: 1 } as never])
+      setSessions([
+        {
+          id: next,
+          _lineage_ids: [stored, next],
+          profile: 'work',
+          connection_id: 'owner-a',
+          kanban_observed_at: endedAt,
+          kanban_active: 1
+        } as never
+      ])
       publishSessionState(runtime, createClientSessionState(next))
       expect(notify).not.toHaveBeenCalled()
-      setSessions([{ id: next, _lineage_ids: [stored, next], profile: 'work', connection_id: 'owner-a',
-        kanban_observed_at: endedAt } as never])
+      setSessions([
+        {
+          id: next,
+          _lineage_ids: [stored, next],
+          profile: 'work',
+          connection_id: 'owner-a',
+          kanban_observed_at: endedAt
+        } as never
+      ])
       expect(notify).toHaveBeenCalledTimes(1)
     } finally {
       dropSessionState(runtime)
@@ -340,14 +405,35 @@ describe('dispatchNativeNotification focus gating', () => {
     const endedAt = Date.now() / 1000
 
     try {
-      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt,
-        kanban_active: 1 } as never])
+      setSessions([
+        {
+          id: stored,
+          profile: 'work',
+          connection_id: 'owner-a',
+          kanban_observed_at: endedAt,
+          kanban_active: 1
+        } as never
+      ])
       dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
-      setSessions([{ id: next, _lineage_ids: reason === 'foreign' ? [stored, next] : [next], profile: 'work',
-        connection_id: reason === 'foreign' ? 'owner-b' : 'owner-a', kanban_observed_at: endedAt } as never])
+      setSessions([
+        {
+          id: next,
+          _lineage_ids: reason === 'foreign' ? [stored, next] : [next],
+          profile: 'work',
+          connection_id: reason === 'foreign' ? 'owner-b' : 'owner-a',
+          kanban_observed_at: endedAt
+        } as never
+      ])
       publishSessionState(runtime, createClientSessionState(next))
-      setSessions([{ id: next, _lineage_ids: [stored, next], profile: 'work', connection_id: 'owner-a',
-        kanban_observed_at: endedAt } as never])
+      setSessions([
+        {
+          id: next,
+          _lineage_ids: [stored, next],
+          profile: 'work',
+          connection_id: 'owner-a',
+          kanban_observed_at: endedAt
+        } as never
+      ])
       expect(notify).not.toHaveBeenCalled()
     } finally {
       dropSessionState(runtime)
@@ -364,8 +450,7 @@ describe('dispatchNativeNotification focus gating', () => {
     const endedAt = Date.now() / 1000
 
     try {
-      setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt,
-        kanban_active: 1 } as never])
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt, kanban_active: 1 } as never])
       dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
 
       if (reason === 'new-turn') {
@@ -386,31 +471,29 @@ describe('dispatchNativeNotification focus gating', () => {
     }
   })
 
-  it.each([
-    { kanban_active: 1 },
-    { kanban_blocked: 1 },
-    { kanban_unknown: true },
-    { kanban_remote_stale: 1 }
-  ])('does not announce finished while the origin projection is unresolved: %o', stamp => {
-    const runtime = freshSession()
-    const stored = `${runtime}-stored`
-    setActiveSessionId(runtime)
-    publishSessionState(runtime, createClientSessionState(stored))
+  it.each([{ kanban_active: 1 }, { kanban_blocked: 1 }, { kanban_unknown: true }, { kanban_remote_stale: 1 }])(
+    'does not announce finished while the origin projection is unresolved: %o',
+    stamp => {
+      const runtime = freshSession()
+      const stored = `${runtime}-stored`
+      setActiveSessionId(runtime)
+      publishSessionState(runtime, createClientSessionState(stored))
 
-    try {
-      setSessions([{ id: stored, ...stamp } as never])
-      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done' })).toBe(false)
-      expect(notify).not.toHaveBeenCalled()
-      // A later authoritative release is eligible; suppression must not consume
-      // the notification throttle. Error/attention paths remain independent.
-      setSessions([{ id: stored, kanban_observed_at: Date.now() / 1000 } as never])
-      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done' })).toBe(true)
-      expect(notify).toHaveBeenCalledTimes(1)
-    } finally {
-      dropSessionState(runtime)
-      setSessions([])
+      try {
+        setSessions([{ id: stored, ...stamp } as never])
+        expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done' })).toBe(false)
+        expect(notify).not.toHaveBeenCalled()
+        // A later authoritative release is eligible; suppression must not consume
+        // the notification throttle. Error/attention paths remain independent.
+        setSessions([{ id: stored, kanban_observed_at: Date.now() / 1000 } as never])
+        expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done' })).toBe(true)
+        expect(notify).toHaveBeenCalledTimes(1)
+      } finally {
+        dropSessionState(runtime)
+        setSessions([])
+      }
     }
-  })
+  )
 
   it('fires a completion notification for the active session when the window is hidden', () => {
     const sessionId = freshSession()

@@ -47,10 +47,7 @@ export function registryConnectionIdForGateway(gateway: string): string | undefi
   )?.id
 }
 
-export function resolveSessionRefOwner(
-  value: string,
-  originStoredId?: null | string
-): SessionOwnerRoute | undefined {
+export function resolveSessionRefOwner(value: string, originStoredId?: null | string): SessionOwnerRoute | undefined {
   const { gateway, profile, sessionId } = parseSessionRefValue(value)
 
   if (!sessionId) {

@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-
-
 // ⌘W / ⌘T / ⌘⇧T / the strip "+" used to hardcode the workspace's zone while
 // ⌘1…⌘9 followed the interacted zone — so every tab verb missed a SECOND chat
 // zone the user was working in. They now resolve the same focused zone.

@@ -45,6 +45,7 @@ afterEach(() => {
 
 it.each([0, 1, 3, 26])('singleton entered DOM equals actual main, %s rows', async count => {
   const path = '/code/app'
+
   const rows = Array.from({ length: count }, (_, i) =>
     makeSessionInfo({
       id: `E${i}`,
@@ -55,6 +56,7 @@ it.each([0, 1, 3, 26])('singleton entered DOM equals actual main, %s rows', asyn
       last_active: 1000 - i
     })
   )
+
   const node: SidebarProjectTree = {
     id: path,
     label: 'app',
@@ -72,9 +74,11 @@ it.each([0, 1, 3, 26])('singleton entered DOM equals actual main, %s rows', asyn
       }
     ]
   }
+
   $projectTree.set([node])
   $sessions.set(rows)
   $projectScope.set(path)
+
   const { container } = render(
     <MemoryRouter>
       <SidebarProvider>
@@ -95,8 +99,10 @@ it.each([0, 1, 3, 26])('singleton entered DOM equals actual main, %s rows', asyn
       </SidebarProvider>
     </MemoryRouter>
   )
+
   const html = container.innerHTML
   const digest = createHash('sha256').update(html).digest('hex')
+
   if (process.env.HERMES_CAPTURE_ENTERED_PARITY) {
     process.stdout.write(`ENTERED_PARITY ${JSON.stringify({ key: String(count), result: html, digest })}\n`)
   } else {

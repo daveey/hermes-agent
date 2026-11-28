@@ -6,16 +6,17 @@ import type { Translations } from '@/i18n'
 import { sessionKanbanLabel } from './session-kanban-label'
 
 /** Return null when absent: the parent row uses presence to reserve its metadata slot. */
-export function sessionRowKanbanCounts(session: SessionInfo, executionUnknown: number, r: Translations['sidebar']['row']) {
+export function sessionRowKanbanCounts(
+  session: SessionInfo,
+  executionUnknown: number,
+  r: Translations['sidebar']['row']
+) {
   const kanbanOpen = session.kanban_active ?? 0
   const kanbanBlocked = session.kanban_blocked ?? 0
   const kanbanAttention = session.kanban_attention ?? 0
   const kanbanStalled = session.kanban_stalled ?? 0
 
-  const kanbanLabel = [
-    executionUnknown > 0 ? r.kanbanUnknown(executionUnknown) : '',
-    sessionKanbanLabel(session, r)
-  ]
+  const kanbanLabel = [executionUnknown > 0 ? r.kanbanUnknown(executionUnknown) : '', sessionKanbanLabel(session, r)]
     .filter(Boolean)
     .join('; ')
 

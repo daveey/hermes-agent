@@ -4,16 +4,26 @@ import { test } from 'vitest'
 
 import { fetchSidebarPrimaryListBatch } from './sidebar-primary-list-batch'
 
-const response = (n: number) => ({ list_slices_version: 1, ...Object.fromEntries(
-  ['recents', 'cron', 'messaging'].map(key => [key, {
-    sessions: [{ id: `${key}-${n}`, profile: 'work' }], total: 731, profile_totals: { work: 731 }
-  }])
-) })
+const response = (n: number) => ({
+  list_slices_version: 1,
+  ...Object.fromEntries(
+    ['recents', 'cron', 'messaging'].map(key => [
+      key,
+      {
+        sessions: [{ id: `${key}-${n}`, profile: 'work' }],
+        total: 731,
+        profile_totals: { work: 731 }
+      }
+    ])
+  )
+})
 
 test('whole all-profile refresh reads primary once, retains exact bases and rereads without notification', async () => {
   let reads = 0
   const merged: any[] = []
-  const query = new URLSearchParams('recents_profile=all&recents_limit=50&cron_limit=50&messaging_limit=100&recents_exclude=cron')
+  const query = new URLSearchParams(
+    'recents_profile=all&recents_limit=50&cron_limit=50&messaging_limit=100&recents_exclude=cron'
+  )
 
   const deps = {
     fetch: async (path: string) => {
@@ -29,7 +39,8 @@ test('whole all-profile refresh reads primary once, retains exact bases and rere
 
       return base
     },
-    ownerTag: 'hub', fallback: async () => assert.fail('unexpected legacy read')
+    ownerTag: 'hub',
+    fallback: async () => assert.fail('unexpected legacy read')
   }
 
   const first: any = await fetchSidebarPrimaryListBatch(query, deps)
@@ -48,18 +59,27 @@ test('old, malformed and failed batches fall back, and the next refresh retries'
     let reads = 0
 
     const deps = {
-      fetch: async () => { reads++;
+      fetch: async () => {
+        reads++
 
- if (answer instanceof Error) {throw answer;}
+        if (answer instanceof Error) {
+          throw answer
+        }
 
- return answer },
-      merge: async () => assert.fail('incomplete base merged'), ownerTag: null,
-      fallback: async () => { fallbacks++;
+        return answer
+      },
+      merge: async () => assert.fail('incomplete base merged'),
+      ownerTag: null,
+      fallback: async () => {
+        fallbacks++
 
- return 'legacy' }
+        return 'legacy'
+      }
     }
 
-    for (let i = 0; i < 2; i++) {assert.equal(await fetchSidebarPrimaryListBatch(new URLSearchParams(), deps), 'legacy')}
+    for (let i = 0; i < 2; i++) {
+      assert.equal(await fetchSidebarPrimaryListBatch(new URLSearchParams(), deps), 'legacy')
+    }
     assert.equal(reads, 2)
     assert.equal(fallbacks, 2)
   }
@@ -67,9 +87,14 @@ test('old, malformed and failed batches fall back, and the next refresh retries'
 
 test('concrete profiles and large windows retain paginated legacy reads', async () => {
   for (const query of ['recents_profile=work', 'recents_limit=501']) {
-    assert.equal(await fetchSidebarPrimaryListBatch(new URLSearchParams(query), {
-      fetch: async () => assert.fail('batch must not truncate'), merge: async () => assert.fail('merge'),
-      fallback: async () => 'legacy', ownerTag: null
-    }), 'legacy')
+    assert.equal(
+      await fetchSidebarPrimaryListBatch(new URLSearchParams(query), {
+        fetch: async () => assert.fail('batch must not truncate'),
+        merge: async () => assert.fail('merge'),
+        fallback: async () => 'legacy',
+        ownerTag: null
+      }),
+      'legacy'
+    )
   }
 })

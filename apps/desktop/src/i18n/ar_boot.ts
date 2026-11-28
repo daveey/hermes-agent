@@ -20,8 +20,7 @@ export const arBoot = {
       backgroundExitedDuringStartup: 'خرجت عملية Hermes الخلفية أثناء بدء التشغيل.',
       backendStopped: 'توقف الخلفية',
       backendUpdating: 'جارٍ تحديث Hermes…',
-      backendUpdatingMessage:
-        'يعيد Hermes التشغيل لإكمال تحديث. ستُعاد محادثاتك الاتصال تلقائيًا.',
+      backendUpdatingMessage: 'يعيد Hermes التشغيل لإكمال تحديث. ستُعاد محادثاتك الاتصال تلقائيًا.',
       desktopBootFailed: 'فشل تشغيل سطح المكتب',
       gatewayConnectionLost: 'انقطع الاتصال بالبوابة',
       gatewayConnectionLostDetail:

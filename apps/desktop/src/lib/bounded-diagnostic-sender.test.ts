@@ -16,19 +16,16 @@ describe('boundDiagnosticSender', () => {
     let active = 0
     let peak = 0
 
-    const send = boundDiagnosticSender(
-      async (i: number) => {
-        started.push(i)
-        peak = Math.max(peak, ++active)
+    const send = boundDiagnosticSender(async (i: number) => {
+      started.push(i)
+      peak = Math.max(peak, ++active)
 
-        try {
-          return await gates[i]!.promise
-        } finally {
-          active -= 1
-        }
-      },
-      3
-    )
+      try {
+        return await gates[i]!.promise
+      } finally {
+        active -= 1
+      }
+    }, 3)
 
     const results = gates.map((_, i) => send(i))
     expect(started).toEqual([0, 1, 2])

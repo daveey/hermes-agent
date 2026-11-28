@@ -53,10 +53,7 @@ export function reconcileAuthoritativeChatMessages(
   const warmTail = previousMessages.at(-1)
 
   if (liveProjection?.inflight?.segment_only && warmTail?.role === 'assistant' && warmTail.pending) {
-    return reconcileDurableHistory(
-      authoritativeMessages,
-      appendLiveSessionProjection(previousMessages, liveProjection)
-    )
+    return reconcileDurableHistory(authoritativeMessages, appendLiveSessionProjection(previousMessages, liveProjection))
   }
 
   return reconcileDurableHistory(

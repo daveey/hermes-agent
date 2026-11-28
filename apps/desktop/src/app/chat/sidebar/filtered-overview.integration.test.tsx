@@ -153,6 +153,7 @@ it('uncaps all matching previews and Reset clears the plugin through the real me
     for (const row of rows) {
       expect(screen.getByText(row.title!)).toBeTruthy()
     }
+
     fireEvent.keyDown(screen.getByRole('button', { name: 'Filters' }), { key: 'ArrowDown' })
     fireEvent.click(await screen.findByText('Reset to defaults'))
     expect(onClear).toHaveBeenCalledOnce()
@@ -177,6 +178,7 @@ it('narrows with a core status filter and menu Reset restores the capped overvie
   for (const row of rows) {
     expect(screen.getByText(row.title!)).toBeTruthy()
   }
+
   expect(screen.queryByText('B chat')).toBeNull()
   fireEvent.keyDown(screen.getByRole('button', { name: 'Filters' }), { key: 'ArrowDown' })
   fireEvent.click(await screen.findByText('Reset to defaults'))

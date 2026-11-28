@@ -432,7 +432,9 @@ export function createPluginContext(
   pluginId: string,
   onDispose?: (dispose: () => void) => void,
   capabilities: readonly string[] = [],
-  bindSessionTasksDiagnostic: (surface: object) => void = () => { throw new Error('No runtime activation owns this binding') }
+  bindSessionTasksDiagnostic: (surface: object) => void = () => {
+    throw new Error('No runtime activation owns this binding')
+  }
 ): PluginContext {
   const source = `plugin:${pluginId}`
   const scope = (c: PluginContribution): Contribution => ({ ...c, id: `${pluginId}:${c.id}`, source })

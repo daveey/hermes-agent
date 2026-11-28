@@ -133,12 +133,17 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
 
   // a: green (read, finished turn)  b: no stripe (no turns)  c: working
   // d: red (blocked)  e: green (unread)
-  function setup(verified = true, statuses: Record<string, 'done' | 'none' | 'stuck'> = { a: 'done', b: 'none', c: 'none', d: 'stuck', e: 'done' }) {
+  function setup(
+    verified = true,
+    statuses: Record<string, 'done' | 'none' | 'stuck'> = { a: 'done', b: 'none', c: 'none', d: 'stuck', e: 'done' }
+  ) {
     const anchor = document.createElement('span')
     document.body.append(anchor)
     publishSidebarSection(key, {
       anchor,
-      rows: verified ? ['a', 'b', 'c', 'd', 'e'].map(id => ({ id, outcome: canonicalOutcome(statuses[id]) }) as never) : [],
+      rows: verified
+        ? ['a', 'b', 'c', 'd', 'e'].map(id => ({ id, outcome: canonicalOutcome(statuses[id]) }) as never)
+        : [],
       ids: ['a', 'b', 'c', 'd', 'e'],
       turnIds: ['a', 'c', 'd', 'e'],
       virtualized: true
@@ -152,16 +157,22 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
     expect(nextSidebarSessionId('a', 1, false)).toBeNull()
   })
 
-  it.each([{ kanban_active: 1 }, { kanban_unknown: true }, { kanban_observed_at: 1 }])('offers unverified extant tree rows as unknown attention: %j', evidence => {
-    setup()
-    const anchor = document.createElement('span')
-    document.body.append(anchor)
-    publishSidebarSection(key, {
-      anchor, ids: ['a', 'e'], turnIds: ['a', 'e'], virtualized: true,
-      rows: [{ id: 'e', kanban_observed_at: Date.now() / 1000, ...evidence } as never]
-    })
-    expect(nextSidebarSessionId('a', 1, false)).toBe('e')
-  })
+  it.each([{ kanban_active: 1 }, { kanban_unknown: true }, { kanban_observed_at: 1 }])(
+    'offers unverified extant tree rows as unknown attention: %j',
+    evidence => {
+      setup()
+      const anchor = document.createElement('span')
+      document.body.append(anchor)
+      publishSidebarSection(key, {
+        anchor,
+        ids: ['a', 'e'],
+        turnIds: ['a', 'e'],
+        virtualized: true,
+        rows: [{ id: 'e', kanban_observed_at: Date.now() / 1000, ...evidence } as never]
+      })
+      expect(nextSidebarSessionId('a', 1, false)).toBe('e')
+    }
+  )
 
   it('lands only on rows with a status stripe, including read-but-finished (green) ones', () => {
     setup()

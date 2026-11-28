@@ -20,6 +20,7 @@ function setEventOwner(id: string, owner: SessionOwnerScope): void {
   if (JSON.stringify(sessionOwnerByRuntimeId.get(id)) === JSON.stringify(owner)) {
     return
   }
+
   sessionOwnerByRuntimeId.set(id, owner)
   $sessionEventOwnersRevision.set($sessionEventOwnersRevision.get() + 1)
 }

@@ -24,7 +24,11 @@ const stampedExternalTotal = (session: SessionInfo): number =>
 export function externalClockOnly(session: SessionInfo): boolean {
   const cards = session.kanban_external_cards ?? []
 
-  return cards.length > 0 && cards.length >= stampedExternalTotal(session) && cards.every(c => c.external?.adapter === 'clock')
+  return (
+    cards.length > 0 &&
+    cards.length >= stampedExternalTotal(session) &&
+    cards.every(c => c.external?.adapter === 'clock')
+  )
 }
 
 /** Hover copy for an external/external_down stripe; absent cards → null. */

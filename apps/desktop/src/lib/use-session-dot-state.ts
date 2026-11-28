@@ -35,9 +35,9 @@ const dotRow = (id: string, row: null | SessionInfo | undefined): Partial<Sessio
 
 /** Fold tree-only row evidence too, and repaint when its observation expires or its execution evidence changes. */
 export function useSessionDotState(id: null | string, row?: null | SessionInfo) {
-  const state = useStoreSelector($sessionDotStateById, states => id ? (states[id] ?? 'idle') : 'draft')
+  const state = useStoreSelector($sessionDotStateById, states => (id ? (states[id] ?? 'idle') : 'draft'))
 
-  return useStoresSelector(dotRowStores(), () => id ? withRowActivity(state, dotRow(id, row)) : state)
+  return useStoresSelector(dotRowStores(), () => (id ? withRowActivity(state, dotRow(id, row)) : state))
 }
 
 /** Whether any lineage alias of `id` is in `ids` (the store claims every alias the same way). */

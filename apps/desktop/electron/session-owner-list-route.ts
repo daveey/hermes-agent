@@ -6,5 +6,9 @@ export function isMergeableSessionListRequest(method: string, pathname: string, 
 }
 
 export function parseSessionRequestPath(path: string): URL | null {
-  try { return new URL(path, 'http://x') } catch { return null }
+  try {
+    return new URL(path, 'http://x')
+  } catch {
+    return null
+  }
 }

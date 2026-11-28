@@ -219,7 +219,9 @@ describe('SessionActionsMenu', () => {
   it('a stalled-owner rename keeps the dialog and offers a Retry of the same id, title and owner', async () => {
     const { renameSession } = await import('@/hermes')
     const { notifyError } = await import('@/store/notifications')
-    const stalled = new Error('503: owner_unavailable: control_timeout: the gateway that owns this profile did not answer in time; nothing was changed, retry')
+    const stalled = new Error(
+      '503: owner_unavailable: control_timeout: the gateway that owns this profile did not answer in time; nothing was changed, retry'
+    )
     vi.mocked(renameSession).mockReset()
     vi.mocked(notifyError).mockClear()
     vi.mocked(renameSession).mockRejectedValueOnce(stalled).mockResolvedValueOnce({ ok: true, title: 'Prep Butler' })
@@ -250,7 +252,10 @@ describe('SessionActionsMenu', () => {
 
     options!.action!.onClick()
     await waitFor(() => expect(renameSession).toHaveBeenCalledTimes(2))
-    expect(vi.mocked(renameSession).mock.calls).toEqual([['s1', 'Prep Butler', 'personal'], ['s1', 'Prep Butler', 'personal']])
+    expect(vi.mocked(renameSession).mock.calls).toEqual([
+      ['s1', 'Prep Butler', 'personal'],
+      ['s1', 'Prep Butler', 'personal']
+    ])
     expect(vi.mocked(notifyError).mock.calls.slice(1)).toEqual([])
   })
 

@@ -65,7 +65,9 @@ it('mounts ordered contributions after the tabs of only the Sessions zone strip'
 
 it('keeps clicks in the slot from starting a pane drag', () => {
   const clicked = vi.fn()
-  disposers.push(registry.register({ id: 'btn', area: 'sessions.tabStrip', render: () => <button onClick={clicked}>Go</button> }))
+  disposers.push(
+    registry.register({ id: 'btn', area: 'sessions.tabStrip', render: () => <button onClick={clicked}>Go</button> })
+  )
   const { getByText } = render(<LayoutTreeRoot />)
   const pointer = new Event('pointerdown', { bubbles: true })
   const stop = vi.spyOn(pointer, 'stopPropagation')

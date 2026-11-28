@@ -108,6 +108,7 @@ describe('registry session sources with the SSH primary reused', () => {
       { id: 'box-default-1', profile: 'default', last_active: 3 },
       { id: 'box-gamma-1', profile: 'gamma', last_active: 2 }
     ]
+
     const first = { sessions: primaryRows, total: 2, profile_totals: { default: 1, gamma: 1 } }
     const reused = await read(first)
 

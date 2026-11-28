@@ -35,11 +35,21 @@ afterEach(cleanup)
 
 it.each([true, false])('shows update-held reason without expanding (known start: %s)', async known => {
   const started = new Date(2026, 10, 5, 9, 7).getTime() / 1000
-  renderPanel([{ ...entry('held', 'after update'), serverStatus: 'queued',
-    queued_reason: 'core_update', queued_started_at: known ? started : null } as QueuedPromptEntry])
-  expect(await screen.findByText(known
-    ? 'Waiting for a Hermes update (started 09:07), sends automatically'
-    : 'Waiting for a Hermes update, sends automatically')).toBeTruthy()
+  renderPanel([
+    {
+      ...entry('held', 'after update'),
+      serverStatus: 'queued',
+      queued_reason: 'core_update',
+      queued_started_at: known ? started : null
+    } as QueuedPromptEntry
+  ])
+  expect(
+    await screen.findByText(
+      known
+        ? 'Waiting for a Hermes update (started 09:07), sends automatically'
+        : 'Waiting for a Hermes update, sends automatically'
+    )
+  ).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Send now' })).toBeNull()
 })
 
@@ -98,7 +108,10 @@ describe('QueuePanel expandable previews', () => {
 describe('QueuePanel lost turn', () => {
   it('shows the lost turn and its Discard without expanding, and names the pause', async () => {
     const onDiscardLost = vi.fn()
-    renderPanel([{ ...entry('lost', 'doomed turn'), serverStatus: 'unknown' }, entry('next', 'follow up')], onDiscardLost)
+    renderPanel(
+      [{ ...entry('lost', 'doomed turn'), serverStatus: 'unknown' }, entry('next', 'follow up')],
+      onDiscardLost
+    )
 
     expect(await screen.findByText('Turn lost during restart')).toBeTruthy()
     expect(screen.getByRole('button', { name: /2 queued — paused/i })).toBeTruthy()

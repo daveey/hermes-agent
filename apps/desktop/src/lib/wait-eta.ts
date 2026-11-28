@@ -15,7 +15,8 @@ export const ORANGE_OVER = '#f0883e'
 
 const KIND_LABEL: Record<WaitKind, string> = { ci: 'CI', clock: 'timer', deploy: 'deploy' }
 
-export const isWaitKind = (value: unknown): value is WaitKind => value === 'ci' || value === 'clock' || value === 'deploy'
+export const isWaitKind = (value: unknown): value is WaitKind =>
+  value === 'ci' || value === 'clock' || value === 'deploy'
 
 /** Largest unit: `30s`, `12m`, `3.4h`, `14h`, `2d`, `1.5d`. Minutes are whole numbers; hours and days take one
  *  decimal below 10 (a trailing .0 dropped) and whole numbers from 10 up. */

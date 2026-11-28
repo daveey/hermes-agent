@@ -984,12 +984,18 @@ describe('useSessionTileDelegate takeOverSession', () => {
     const requestGateway = vi.fn(async (..._args: unknown[]) => ({ status: 'taken_over', acknowledged: true }) as never)
     renderTile(requestGateway)
     await sessionTileDelegate()!.takeOverSession!('runtime-unrouted')
-    expect(requestGateway).toHaveBeenCalledWith('session.take_over', { session_id: 'runtime-unrouted' }, expect.any(Number))
+    expect(requestGateway).toHaveBeenCalledWith(
+      'session.take_over',
+      { session_id: 'runtime-unrouted' },
+      expect.any(Number)
+    )
     expect(requestGateway.mock.calls[0][2]).toBeGreaterThanOrEqual(75_000)
 
     setSessions([row({ id: 'stored-takeover', profile: 'ai-engineer' })])
     vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({ status: 'taken_over', acknowledged: true } as never)
-    renderTile(requestGateway, { runtimeIdByStoredSessionIdRef: { current: new Map([['stored-takeover', 'runtime-routed']]) } })
+    renderTile(requestGateway, {
+      runtimeIdByStoredSessionIdRef: { current: new Map([['stored-takeover', 'runtime-routed']]) }
+    })
     await sessionTileDelegate()!.takeOverSession!('runtime-routed')
     const routed = vi.mocked(requestGatewayForProfile).mock.calls.find(call => call[1] === 'session.take_over')
     expect(routed?.[0]).toBe('ai-engineer')

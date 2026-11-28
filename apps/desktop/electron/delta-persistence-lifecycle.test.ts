@@ -24,7 +24,9 @@ const reopen = (dir: string) => {
 
 const gate = () => {
   let release!: () => void
-  const promise = new Promise<void>(resolve => { release = resolve })
+  const promise = new Promise<void>(resolve => {
+    release = resolve
+  })
 
   return { promise, release }
 }
@@ -32,7 +34,9 @@ const gate = () => {
 afterEach(() => {
   vi.restoreAllMocks()
 
-  for (const dir of dirs.splice(0)) {fs.rmSync(dir, { recursive: true, force: true })}
+  for (const dir of dirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 describe('delta persistence lifecycle ordering', () => {
@@ -86,16 +90,25 @@ describe('delta persistence lifecycle ordering', () => {
         const rm = fs.rm.bind(fs)
         let removed: Promise<void> | undefined
         vi.spyOn(fs, 'rm').mockImplementation((file, options, callback) => {
-          removed = new Promise(resolve => rm(file, options, error => { callback(error); resolve() }))
+          removed = new Promise(resolve =>
+            rm(file, options, error => {
+              callback(error)
+              resolve()
+            })
+          )
         })
         store.delete('k')
 
-        if (removed) {await removed}
+        if (removed) {
+          await removed
+        }
         // The async deletion must fence publication even without a quit epoch change.
       } else {
         store.put('k', bodyHash(next), next)
 
-        if (action === 'quit') {store.flushSync()}
+        if (action === 'quit') {
+          store.flushSync()
+        }
       }
     } finally {
       resume.release()
@@ -115,7 +128,9 @@ describe('delta persistence lifecycle ordering', () => {
     await store.flush()
     store.put('k', bodyHash(Buffer.from('changed')), Buffer.from('changed'))
 
-    for (let i = 0; i < 100; i++) {store.put(`other${i}`, bodyHash(old), old)}
+    for (let i = 0; i < 100; i++) {
+      store.put(`other${i}`, bodyHash(old), old)
+    }
     await store.flush()
     expect(reopen(dir).get('k')?.body).toEqual(old)
   })
@@ -142,9 +157,13 @@ describe('delta persistence lifecycle ordering', () => {
       store.put(`k${i}`, bodyHash(body), body)
       store.flushSync()
       const files = fs.readdirSync(dir)
-      expect(files.reduce((sum, name) => sum + fs.statSync(path.join(dir, name)).size, 0)).toBeLessThanOrEqual(DELTA_STORE_MAX_BYTES)
+      expect(files.reduce((sum, name) => sum + fs.statSync(path.join(dir, name)).size, 0)).toBeLessThanOrEqual(
+        DELTA_STORE_MAX_BYTES
+      )
 
-      for (const name of files) {expect(fs.statSync(path.join(dir, name)).mode & 0o777).toBe(0o600)}
+      for (const name of files) {
+        expect(fs.statSync(path.join(dir, name)).mode & 0o777).toBe(0o600)
+      }
       expect(reopen(dir).get(`k${i}`)?.hash).toBe(bodyHash(body))
     }
   })

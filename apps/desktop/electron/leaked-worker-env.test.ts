@@ -17,7 +17,11 @@ describe('dropAgentProvenance', () => {
     }
 
     expect(scrubLeakedWorkerEnv(env)).toEqual([])
-    expect(dropAgentProvenance(env).sort()).toEqual(['HERMES_AGENT_HOME', 'HERMES_AGENT_ORIGIN', 'HERMES_AGENT_TOOL_CALL'])
+    expect(dropAgentProvenance(env).sort()).toEqual([
+      'HERMES_AGENT_HOME',
+      'HERMES_AGENT_ORIGIN',
+      'HERMES_AGENT_TOOL_CALL'
+    ])
     expect(env).toEqual({ PATH: '/bin' })
   })
 })

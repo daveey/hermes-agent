@@ -73,20 +73,33 @@ function shimUrl(globalKey: PluginGlobalKey): string {
 
 let cached: Record<string, string> | null = null
 const shimSources = new Map<string, string>()
-const captures = new Map<string, { handle: string; namespace: object; evidence: Promise<{ shim: Awaited<ReturnType<typeof identifyBytes>>; servedAssets: Awaited<ReturnType<typeof readServedAssets>>; reason: string | null }> }>()
+const captures = new Map<
+  string,
+  {
+    handle: string
+    namespace: object
+    evidence: Promise<{
+      shim: Awaited<ReturnType<typeof identifyBytes>>
+      servedAssets: Awaited<ReturnType<typeof readServedAssets>>
+      reason: string | null
+    }>
+  }
+>()
 let captureUsers = 0
 let priorCapture: PropertyDescriptor | undefined
 const captureKey = '__HERMES_CAPTURE_PLUGIN_SHIM__'
 
 const capture = (url: string, namespace: object) => {
-  if (!shimSources.has(url) || captures.has(url)) {return}
+  if (!shimSources.has(url) || captures.has(url)) {
+    return
+  }
 
   // Start IO at evaluation, never from whatever globals happen to exist at register().
   const evidence = Promise.all([identifyBytes(shimSources.get(url)!), readServedAssets(import.meta.url)])
     .then(([shim, servedAssets]) => ({ shim, servedAssets, reason: null as string | null }))
-    .catch(() => ({ shim: {sha256:'',byteLength:0}, servedAssets:[], reason:'SERVED_ASSETS_UNAVAILABLE' }))
+    .catch(() => ({ shim: { sha256: '', byteLength: 0 }, servedAssets: [], reason: 'SERVED_ASSETS_UNAVAILABLE' }))
 
-  captures.set(url, { handle:`dependency:${captures.size + 1}`, namespace, evidence })
+  captures.set(url, { handle: `dependency:${captures.size + 1}`, namespace, evidence })
 }
 
 /** Internal evaluation scope. The shim reports references, never a caller receipt.
@@ -94,38 +107,62 @@ const capture = (url: string, namespace: object) => {
 export function beginSdkCapture(): () => void {
   if (captureUsers++ === 0) {
     priorCapture = Object.getOwnPropertyDescriptor(globalThis, captureKey)
-    Object.defineProperty(globalThis, captureKey, { value:capture, configurable:true, writable:false, enumerable:false })
+    Object.defineProperty(globalThis, captureKey, {
+      value: capture,
+      configurable: true,
+      writable: false,
+      enumerable: false
+    })
   }
 
   let ended = false
 
   return () => {
-    if (ended) {return}
+    if (ended) {
+      return
+    }
     ended = true
 
     if (--captureUsers === 0) {
-      if (priorCapture) {Object.defineProperty(globalThis, captureKey, priorCapture)}
-      else {Reflect.deleteProperty(globalThis, captureKey)}
+      if (priorCapture) {
+        Object.defineProperty(globalThis, captureKey, priorCapture)
+      } else {
+        Reflect.deleteProperty(globalThis, captureKey)
+      }
     }
   }
 }
 
-export async function capturedSdkDependencies(specifiers: string[]): Promise<{ dependencies: CapturedDependency[]; reason: string | null }> {
+export async function capturedSdkDependencies(
+  specifiers: string[]
+): Promise<{ dependencies: CapturedDependency[]; reason: string | null }> {
   const map = sdkImportMap()
   const dependencies: CapturedDependency[] = []
 
   for (const specifier of [...new Set(specifiers)].sort()) {
-    const url = map[specifier], captured = captures.get(url)
+    const url = map[specifier],
+      captured = captures.get(url)
 
-    if (!captured) {return { dependencies, reason:'MISSING_DEPENDENCY_CAPTURE' }}
+    if (!captured) {
+      return { dependencies, reason: 'MISSING_DEPENDENCY_CAPTURE' }
+    }
     const evidence = await captured.evidence
 
-    if (evidence.reason) {return { dependencies, reason:evidence.reason }}
-    dependencies.push({ specifier, handle:captured.handle, shimUrl:url, namespace:captured.namespace,
-      importedNamespace: await import(/* @vite-ignore */ url), shim:evidence.shim, servedAssets:evidence.servedAssets })
+    if (evidence.reason) {
+      return { dependencies, reason: evidence.reason }
+    }
+    dependencies.push({
+      specifier,
+      handle: captured.handle,
+      shimUrl: url,
+      namespace: captured.namespace,
+      importedNamespace: await import(/* @vite-ignore */ url),
+      shim: evidence.shim,
+      servedAssets: evidence.servedAssets
+    })
   }
 
-  return { dependencies, reason:null }
+  return { dependencies, reason: null }
 }
 
 /** Specifier -> shim URL map for the runtime loader (longest keys first). */

@@ -553,8 +553,8 @@ export function toolEventOwnerMessageId(
     : toolCallOwnerMessageId(messages, payload, phase, turnAnchorId)
 }
 
-const isQueuedPromptRow = (message: ChatMessage) => message.role === 'user' &&
-  (message.id.startsWith('user-queued-') || message.queued_reason === 'core_update')
+const isQueuedPromptRow = (message: ChatMessage) =>
+  message.role === 'user' && (message.id.startsWith('user-queued-') || message.queued_reason === 'core_update')
 
 /**
  * True while a projected queued prompt still waits for a later turn.
@@ -592,7 +592,13 @@ export function markQueuedPromptStarted(messages: ChatMessage[]): ChatMessage[] 
 /** An idle session whose prompt the owner holds until a core update ends: no turn is
  *  running, so Stop has nothing to cancel and must not latch away the held turn's stream. */
 export function holdsUpdateHeldPromptIdle(
-  state: { awaitingResponse: boolean; busy: boolean; messages: ChatMessage[]; streamId: null | string; turnLive: boolean },
+  state: {
+    awaitingResponse: boolean
+    busy: boolean
+    messages: ChatMessage[]
+    streamId: null | string
+    turnLive: boolean
+  },
   queuedHeld = false
 ): boolean {
   return !holdsTurnClaim(state) && !state.streamId && (queuedHeld || state.messages.some(awaitsUpdate))

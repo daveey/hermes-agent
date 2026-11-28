@@ -2,8 +2,13 @@
  * The reviewed manifest's static closure covers the chunk containing runtime.ts
  * (including bundler wrappers). Lazy chunks are deliberately outside this proof.
  */
-export interface ByteIdentity { sha256: string; byteLength: number }
-export interface ServedAsset extends ByteIdentity { url: string }
+export interface ByteIdentity {
+  sha256: string
+  byteLength: number
+}
+export interface ServedAsset extends ByteIdentity {
+  url: string
+}
 
 export async function identifyBytes(source: string): Promise<ByteIdentity> {
   return identifyRawBytes(new TextEncoder().encode(source))
@@ -12,7 +17,10 @@ export async function identifyBytes(source: string): Promise<ByteIdentity> {
 async function identifyRawBytes(bytes: Uint8Array<ArrayBuffer>): Promise<ByteIdentity> {
   const digest = await crypto.subtle.digest('SHA-256', bytes)
 
-  return { sha256: Array.from(new Uint8Array(digest), n => n.toString(16).padStart(2, '0')).join(''), byteLength: bytes.byteLength }
+  return {
+    sha256: Array.from(new Uint8Array(digest), n => n.toString(16).padStart(2, '0')).join(''),
+    byteLength: bytes.byteLength
+  }
 }
 
 export async function readServedAssets(root: string): Promise<ServedAsset[]> {
@@ -29,23 +37,34 @@ export async function readServedAssets(root: string): Promise<ServedAsset[]> {
   const read = async (url: string) => {
     const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin', signal })
 
-    if (!response.ok || response.url && response.url !== url) {throw new Error('SERVED_ASSET_READ_FAILED')}
+    if (!response.ok || (response.url && response.url !== url)) {
+      throw new Error('SERVED_ASSET_READ_FAILED')
+    }
 
     return new Uint8Array(await response.arrayBuffer())
   }
 
   const manifestBytes = await read(manifestUrl)
-  const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as Record<string, { file: string; imports?: string[] }>
+  const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as Record<
+    string,
+    { file: string; imports?: string[] }
+  >
   const rootKey = Object.keys(manifest).find(key => new URL(manifest[key].file, base).href === rootUrl.href)
 
-  if (!rootKey) {throw new Error('SDK_ASSET_NOT_IN_MANIFEST')}
+  if (!rootKey) {
+    throw new Error('SDK_ASSET_NOT_IN_MANIFEST')
+  }
   const seen = new Set<string>()
   const urls = new Set<string>()
 
   const visit = (key: string) => {
-    if (seen.has(key)) {return}
+    if (seen.has(key)) {
+      return
+    }
 
-    if (seen.size >= 256) {throw new Error('SERVED_ASSET_GRAPH_LIMIT')}
+    if (seen.size >= 256) {
+      throw new Error('SERVED_ASSET_GRAPH_LIMIT')
+    }
     seen.add(key)
     const item = manifest[key]
 
@@ -57,13 +76,17 @@ export async function readServedAssets(root: string): Promise<ServedAsset[]> {
 
     urls.add(url.href)
 
-    for (const dependency of item.imports ?? []) {visit(dependency)}
+    for (const dependency of item.imports ?? []) {
+      visit(dependency)
+    }
   }
 
   visit(rootKey)
-  const assets: ServedAsset[] = [{ url: manifestUrl, ...await identifyRawBytes(manifestBytes) }]
+  const assets: ServedAsset[] = [{ url: manifestUrl, ...(await identifyRawBytes(manifestBytes)) }]
 
-  for (const url of [...urls].sort()) {assets.push({ url, ...await identifyRawBytes(await read(url)) })}
+  for (const url of [...urls].sort()) {
+    assets.push({ url, ...(await identifyRawBytes(await read(url))) })
+  }
 
   return assets
 }

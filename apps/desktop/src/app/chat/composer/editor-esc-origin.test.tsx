@@ -31,7 +31,14 @@ function Harness({ busy, onCancel }: Pick<ChatBarProps, 'busy' | 'onCancel'>) {
     <AssistantRuntimeProvider runtime={runtime}>
       <MemoryRouter>
         <I18nProvider configClient={null} initialLocale="en">
-          <ChatBar busy={busy} disabled={false} gateway={null} onCancel={onCancel} onSubmit={() => true} state={state} />
+          <ChatBar
+            busy={busy}
+            disabled={false}
+            gateway={null}
+            onCancel={onCancel}
+            onSubmit={() => true}
+            state={state}
+          />
         </I18nProvider>
       </MemoryRouter>
     </AssistantRuntimeProvider>

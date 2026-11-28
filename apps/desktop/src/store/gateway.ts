@@ -252,7 +252,11 @@ function dispatchServerRequest(request: ServerRequest, profile: string, connecti
     return false
   }
 
-  g.config.onServerRequest({ ...request, ...(connectionId ? { connectionId } : {}), profile: canonicalOwnerProfile(request) ?? profile })
+  g.config.onServerRequest({
+    ...request,
+    ...(connectionId ? { connectionId } : {}),
+    profile: canonicalOwnerProfile(request) ?? profile
+  })
 
   return true
 }
@@ -961,8 +965,13 @@ function createSecondary(profile: string, connectionId: null | string = null): S
   // sockets prove it through this closure. Stamp before registry fan-in,
   // never promote an arbitrary wire `profile` field into ownership.
   entry.offEvent = gateway.onEvent(event => {
-    if (event.type === 'gateway.ready') { recordSecondaryWire(connectionId, entry.connection, gateway.sessionWire) }
-    const scopedEvent = stampSecondaryProfileOwner({ ...event, ...(connectionId ? { connectionId } : {}) }, canonicalOwnerProfile(event) ?? profile)
+    if (event.type === 'gateway.ready') {
+      recordSecondaryWire(connectionId, entry.connection, gateway.sessionWire)
+    }
+    const scopedEvent = stampSecondaryProfileOwner(
+      { ...event, ...(connectionId ? { connectionId } : {}) },
+      canonicalOwnerProfile(event) ?? profile
+    )
 
     g.config?.onEvent(scopedEvent)
     releaseTerminalTurnLease(entry.scope, event)
@@ -1020,7 +1029,11 @@ async function gatewayForProfile(
   // cooling-down scope has to be held back before it, not just before openSecondary.
   const existing = g.secondaries.get(key)
 
-  if (spawnPriority !== 'foreground' && !(existing && isOpen(existing.gateway)) && backgroundDialCoolingDown(g.dialFailures.get(key))) {
+  if (
+    spawnPriority !== 'foreground' &&
+    !(existing && isOpen(existing.gateway)) &&
+    backgroundDialCoolingDown(g.dialFailures.get(key))
+  ) {
     throw new Error(`Backend for "${key}" is reconnecting; retry after it settles.`)
   }
 

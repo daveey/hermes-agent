@@ -7,8 +7,7 @@ import { requestForSessionProfile } from '@/store/session-request-router'
 
 import { deferred } from '../../../test/deferred'
 import { FakeWebSocket } from '../../../test/fake-gateway-socket'
-import type {
-  fakeBootDesktop} from '../../../test/gateway-boot-harness';
+import type { fakeBootDesktop } from '../../../test/gateway-boot-harness'
 import {
   advanceBackoff,
   BootHarness,
@@ -206,7 +205,9 @@ describe('owner-pinned requests on a closed primary', () => {
     desktop.getConnection.mockReturnValueOnce(lookup.promise)
 
     act(() => primarySockets()[0].drop())
-    const outcome = requestForSessionProfile(OWNER, ambient, 'session.steer', {}, 1_000).catch((error: unknown) => error)
+    const outcome = requestForSessionProfile(OWNER, ambient, 'session.steer', {}, 1_000).catch(
+      (error: unknown) => error
+    )
     await flushAsync(1_000)
     expect(String(await outcome)).toMatch(/timed out/i)
 

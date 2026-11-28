@@ -423,7 +423,9 @@ export function migratePreviewTabsForProfile(oldProfile: string, newProfile: str
   syncOffViewTabs()
   // P2-7 (#150283): move the imported sign-ins record + per-profile cookie jar (Electron main,
   // userData) old→new so the rename does not strand or orphan the cookies.
-  void window.hermesDesktop?.migratePreviewSigninsForProfile?.({ oldProfile: from, newProfile: to })?.catch(() => undefined)
+  void window.hermesDesktop
+    ?.migratePreviewSigninsForProfile?.({ oldProfile: from, newProfile: to })
+    ?.catch(() => undefined)
 }
 
 if (typeof window !== 'undefined') {
@@ -1110,13 +1112,19 @@ function openOffViewPreview(
     viewKey
   ).filter(tab => !tab.pinned)
 
-  const existing = target.kind === 'url' ? browserTabFor(own) : target.kind === 'file' ? fileTabFor(own, target) : undefined
+  const existing =
+    target.kind === 'url' ? browserTabFor(own) : target.kind === 'file' ? fileTabFor(own, target) : undefined
   const everyTab = [...$previewTabs.get(), ...Object.values(tabsByProfile).flat()]
 
   const id =
     existing?.id ?? (target.kind === 'url' ? mintBrowserTabId() : unusedTabId(previewTabId(target, owner), everyTab))
 
-  const tab: PreviewTab = { id, pinned: false, sessionId: owner ?? undefined, target: withRenderMode(target, existing?.target) }
+  const tab: PreviewTab = {
+    id,
+    pinned: false,
+    sessionId: owner ?? undefined,
+    target: withRenderMode(target, existing?.target)
+  }
 
   setPendingRuntime(id, tab.sessionId == null ? runtimeId : null)
   tabsByProfile[key] = existing ? bucket.map(item => (item === existing ? tab : item)) : [...bucket, tab]

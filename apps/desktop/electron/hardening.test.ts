@@ -57,7 +57,10 @@ test('textReadLimits: preview skims, full never truncates', async () => {
   fs.writeFileSync(board, 'x'.repeat(700 * 1024))
   const ok = await resolveReadableFileForIpc(board, { maxBytes: full.maxBytes, purpose: 'Full text read' })
   assert.ok(ok.stat.size <= full.readLimit)
-  await assert.rejects(resolveReadableFileForIpc(board, { maxBytes: 600 * 1024, purpose: 'Full text read' }), /too large/)
+  await assert.rejects(
+    resolveReadableFileForIpc(board, { maxBytes: 600 * 1024, purpose: 'Full text read' }),
+    /too large/
+  )
   fs.rmSync(dir, { force: true, recursive: true })
 })
 

@@ -18,11 +18,19 @@ import {
 } from './prompts'
 import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone } from './runtime-gone'
 import {
-  $activeSessionId, $cronSessions, $messagingSessions, $sessions,
-  ownerLookupSessionRows, sessionMatchesStoredId
+  $activeSessionId,
+  $cronSessions,
+  $messagingSessions,
+  $sessions,
+  ownerLookupSessionRows,
+  sessionMatchesStoredId
 } from './session'
 import {
-  $sessionStates, holdsTurnClaim, knownOwnerForSession, runtimeSessionOwner, storedSessionIdForRuntimeId
+  $sessionStates,
+  holdsTurnClaim,
+  knownOwnerForSession,
+  runtimeSessionOwner,
+  storedSessionIdForRuntimeId
 } from './session-states'
 
 export type { HermesOpenTarget }
@@ -269,8 +277,12 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
       const currentId = storedSessionIdForRuntimeId(id)
       const owner = runtimeSessionOwner(id)
 
-      const runtimePin = typeof owner === 'string' ? projectionOwner({ profile: owner })
-        : owner ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+      const runtimePin =
+        typeof owner === 'string'
+          ? projectionOwner({ profile: owner })
+          : owner
+            ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile })
+            : undefined
 
       if (runtimePin !== undefined && runtimePin !== pending.owner) {
         deferredCompletions.delete(id)
@@ -313,8 +325,12 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
     }
   }
 
-  const stops = [$sessions.listen(retry), $cronSessions.listen(retry),
-    $messagingSessions.listen(retry), $sessionStates.listen(retry)]
+  const stops = [
+    $sessions.listen(retry),
+    $cronSessions.listen(retry),
+    $messagingSessions.listen(retry),
+    $sessionStates.listen(retry)
+  ]
 
   let stopped = false
   let timer: ReturnType<typeof setTimeout>
@@ -334,9 +350,14 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
 
     try {
       await Promise.race([
-        Promise.allSettled([...callbacks].filter(Boolean).map(callback =>
-          Promise.resolve().then(() => callback?.(() => current && !stopped)))),
-        new Promise<void>(resolve => { deadline = setTimeout(resolve, 15000) })
+        Promise.allSettled(
+          [...callbacks]
+            .filter(Boolean)
+            .map(callback => Promise.resolve().then(() => callback?.(() => current && !stopped)))
+        ),
+        new Promise<void>(resolve => {
+          deadline = setTimeout(resolve, 15000)
+        })
       ])
     } finally {
       current = false
@@ -347,12 +368,16 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
       retry()
 
       if (!stopped) {
-        timer = setTimeout(() => { void refresh() }, 15000)
+        timer = setTimeout(() => {
+          void refresh()
+        }, 15000)
       }
     }
   }
 
-  timer = setTimeout(() => { void refresh() }, 15000)
+  timer = setTimeout(() => {
+    void refresh()
+  }, 15000)
 
   stopCompletionWatch = () => {
     stopped = true
@@ -364,8 +389,11 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
 function completionOwnerPin(sessionId: string): string | undefined {
   const owner = runtimeSessionOwner(sessionId) ?? knownOwnerForSession(sessionId)
 
-  return typeof owner === 'string' ? projectionOwner({ profile: owner })
-    : owner ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+  return typeof owner === 'string'
+    ? projectionOwner({ profile: owner })
+    : owner
+      ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile })
+      : undefined
 }
 
 /** A terminal turn is not completion of its dispatched work: consult the ledger projection. */
@@ -377,14 +405,19 @@ function deferUnfinishedCompletion(input: NativeNotificationInput): boolean {
   const storedId = storedSessionIdForRuntimeId(input.sessionId) ?? input.sessionId
   const ownerPin = completionOwnerPin(input.sessionId)
 
-  const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId) &&
-    (ownerPin === undefined || projectionOwner(row) === ownerPin))
+  const rows = ownerLookupSessionRows().filter(
+    row => sessionMatchesStoredId(row, storedId) && (ownerPin === undefined || projectionOwner(row) === ownerPin)
+  )
 
   const row = rows.length === 1 ? rows[0] : undefined
   const known = hasFreshKanbanObservation(row, input.projectionAfter)
 
-  const unfinished = !row || !known || row.kanban_unknown === true ||
-    (row.kanban_active ?? 0) > 0 || (row.kanban_blocked ?? 0) > 0 ||
+  const unfinished =
+    !row ||
+    !known ||
+    row.kanban_unknown === true ||
+    (row.kanban_active ?? 0) > 0 ||
+    (row.kanban_blocked ?? 0) > 0 ||
     (row.kanban_remote_stale ?? 0) > 0
 
   if (unfinished) {

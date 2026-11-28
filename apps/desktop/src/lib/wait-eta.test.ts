@@ -29,7 +29,12 @@ describe('waitReadout', () => {
   const now = 100_000
 
   it('counts left down from the client clock', () => {
-    const eta = { estimate_source: 'median of last 20 CI runs (acme/widgets)', expected_s: 25 * 60, wait_kind: 'ci', waited_since: now - 12 * 60 }
+    const eta = {
+      estimate_source: 'median of last 20 CI runs (acme/widgets)',
+      expected_s: 25 * 60,
+      wait_kind: 'ci',
+      waited_since: now - 12 * 60
+    }
     const early = waitReadout(eta, now)
     const later = waitReadout(eta, now + 60)
 
@@ -48,7 +53,10 @@ describe('waitReadout', () => {
   })
 
   it('past the estimate reads +over and says so in the title', () => {
-    const readout = waitReadout({ estimate_source: 'wakes 14:30', expected_s: 25 * 60, wait_kind: 'clock', waited_since: now - 41 * 60 }, now)
+    const readout = waitReadout(
+      { estimate_source: 'wakes 14:30', expected_s: 25 * 60, wait_kind: 'clock', waited_since: now - 41 * 60 },
+      now
+    )
 
     expect([readout?.left, readout?.over]).toEqual(['+16m', true])
     expect(readout?.title).toBe('Waiting on timer · waited 41m · expected 25m (wakes 14:30) · 16m over')

@@ -124,7 +124,11 @@ function bridgeKey(storedSessionId: string, scope?: TranscriptTailScope): Bridge
 }
 
 /** Persist the latest REST page of a session (raw rows, chronological). */
-export function saveTranscriptTail(storedSessionId: string, messages: SessionMessage[], scope?: TranscriptTailScope): void {
+export function saveTranscriptTail(
+  storedSessionId: string,
+  messages: SessionMessage[],
+  scope?: TranscriptTailScope
+): void {
   const key = bridgeKey(storedSessionId, scope)
 
   if (!key || !Array.isArray(messages) || messages.length === 0) {
@@ -191,7 +195,9 @@ export function loadTranscriptTail(
   }
 
   try {
-    const rows = (options.all ? entry.messages : entry.messages.slice(-LATEST_SESSION_MESSAGES_LIMIT)) as SessionMessage[]
+    const rows = (
+      options.all ? entry.messages : entry.messages.slice(-LATEST_SESSION_MESSAGES_LIMIT)
+    ) as SessionMessage[]
     const messages = toChatMessages(rows)
 
     // Repair, don't just trust: a poisoned entry would be re-read identically
