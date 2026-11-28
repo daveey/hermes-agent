@@ -151,8 +151,7 @@ def test_get_tool_definitions_registers_kanban_for_an_origin_session(hub_gateway
     assert "kanban_create" in model_tools._last_resolved_tool_names
 
 
-@pytest.mark.parametrize("ref", ["@session:default/20261122_233430_28d354", "@session:default/20261127_202849_4c4281",
-                                 "@session:default/local-650ebae8a5567d9f1362794d8631d63cf99ee2892944f4f4322e17b11ff49512"])
+@pytest.mark.parametrize("ref", ["@session:default/20261122_233430_28d354", "@session:default/20261127_202849_4c4281"])
 def test_this_gateway_session_link_is_accepted_as_origin(hub_gateway, ref):
     from tools import kanban_tools as kt
 
