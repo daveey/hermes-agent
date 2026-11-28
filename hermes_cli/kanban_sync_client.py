@@ -1794,14 +1794,8 @@ def _child_uids(conn: sqlite3.Connection, table: str, task_ids: set[str],
     elsewhere are left out: a picked-up copy of a foreign card carries no chat links (``import_cards`` copies
     only runs/comments/attachments/events, and the creator's chats are read from the replica), so counting them
     made every running foreign copy a permanent ``task_chat_links`` mismatch with nothing in flight."""
-    if table == "task_links":
-        return {(p, f"{p}>{c}") for p, c in conn.execute("SELECT parent_id, child_id FROM task_links") if c in task_ids}
-    if table == "task_chat_links" and gateway is not None:
-        rows = conn.execute(
-            "SELECT l.task_id, l.uid FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id WHERE l.uid IS NOT NULL "
-            "AND NOT (t.created_on IS NOT NULL AND t.created_on != ?1 AND COALESCE(l.chat_gateway, '') != ?1)", (gateway,))
-        return {(t, u) for t, u in rows if t in task_ids}
-    return {(t, u) for t, u in conn.execute(f"SELECT task_id, uid FROM {table} WHERE uid IS NOT NULL") if t in task_ids}
+    from hermes_cli.kanban_sync_diff_rows import child_uids
+    return child_uids(conn, table, task_ids, gateway)
 
 
 def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str, *, evidence=None) -> dict[str, Any]:
