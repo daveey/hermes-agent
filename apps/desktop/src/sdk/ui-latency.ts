@@ -9,5 +9,6 @@ export {
   finishUiLatencyAfterPaint,
   startUiLatency,
   type UiLatencyIds,
-  type UiLatencyName
+  type UiLatencyName,
+  type UiLatencyToken
 } from '@/lib/ui-latency'

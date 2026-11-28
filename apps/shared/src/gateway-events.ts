@@ -52,7 +52,7 @@ export interface ClientLocalGatewayEventMap {
     card_id?: string
     duration_ms: number
     gateway?: string
-    name: 'ui.card_create' | 'ui.card_read' | 'ui.new_session' | 'ui.session_switch'
+    name: 'ui.card_create' | 'ui.card_read' | 'ui.decision_submit' | 'ui.new_session' | 'ui.session_switch'
     profile?: string
     session_id?: string
     start_ms: number

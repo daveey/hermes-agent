@@ -79,10 +79,10 @@ afterEach(() => {
 describe('ui.session_switch wiring through the real Thread', () => {
   it('ends the span for the session whose transcript committed, after a paint', async () => {
     startUiLatency('ui.session_switch', { gateway: 'g', session_id: 'b' })
-    const view = render(<Pane messages={[]} stored="b" />)
+    const view = render(<Pane loading="session" messages={[]} stored="b" />)
 
     await settle()
-    expect(events).toEqual([]) // selected, but no transcript rows yet: nothing to have painted
+    expect(events).toEqual([]) // selected, still loading: nothing to have painted
 
     view.rerender(<Pane messages={transcript('b')} stored="b" />)
     expect(events).toEqual([]) // committed, not yet painted
@@ -90,6 +90,14 @@ describe('ui.session_switch wiring through the real Thread', () => {
     await waitFor(() => expect(events).toHaveLength(1))
     expect(events[0]).toMatchObject({ gateway: 'g', name: 'ui.session_switch', session_id: 'b' })
     expect(events[0].duration_ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('a loaded, genuinely empty transcript is a real result and ends the span', async () => {
+    startUiLatency('ui.session_switch', { session_id: 'e' })
+    render(<Pane messages={[]} stored="e" />)
+
+    await waitFor(() => expect(events).toHaveLength(1))
+    expect(events[0]).toMatchObject({ name: 'ui.session_switch', session_id: 'e' })
   })
 
   it('does not end a switch to B on the transcript of A, then ends it when B commits', async () => {
@@ -128,10 +136,10 @@ describe('ui.session_switch wiring through the real Thread', () => {
     expect(peekUiLatency('ui.session_switch')).not.toBeNull()
   })
 
-  it('does not emit when the transcript is torn down before the second frame', async () => {
+  it('does not emit when the pane starts loading again before the second frame', async () => {
     startUiLatency('ui.session_switch', { session_id: 'b' })
     const view = render(<Pane messages={transcript('b')} stored="b" />)
-    view.rerender(<Pane messages={[]} stored="b" />) // emptied again before any frame ran
+    view.rerender(<Pane loading="session" messages={[]} stored="b" />) // reloading before any frame ran
     await settle()
 
     expect(events).toEqual([])

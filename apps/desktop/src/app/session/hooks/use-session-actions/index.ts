@@ -981,7 +981,7 @@ export function useSessionActions({
     ) => {
       const listed = options?.listed ?? true
 
-      newSessionLatency.tileClick() // [daveey] ui.new_session (tile form)
+      const latencyToken = newSessionLatency.tileClick() // [daveey] ui.new_session (tile form)
 
       try {
         // A tile anchored at a project path belongs to the profile the project
@@ -1132,7 +1132,7 @@ export function useSessionActions({
 
           await closeCreated.catch(() => undefined)
           notify({ kind: 'error', title: copy.sessionUnavailable, message: copy.createSessionFailed })
-          newSessionLatency.cancel()
+          newSessionLatency.cancel(latencyToken)
 
           return
         }
@@ -1165,7 +1165,7 @@ export function useSessionActions({
 
         openSessionTile(stored, dir, options?.anchor, options?.before, workspaceScope)
         patchSessionTile(stored, { runtimeId: created.session_id })
-        newSessionLatency.tileCreated(capturedRoute, stored, created.session_id)
+        newSessionLatency.tileCreated(latencyToken, capturedRoute, stored, created.session_id)
 
         if (dir === 'center' && runtimeInfo?.cwd) {
           setCurrentCwdTransient(runtimeInfo.cwd)
@@ -1178,7 +1178,7 @@ export function useSessionActions({
           broadcastSessionsChanged()
         }
       } catch (error) {
-        newSessionLatency.cancel()
+        newSessionLatency.cancel(latencyToken)
         notifyError(error, copy.createSessionFailed)
       }
     },
@@ -1925,7 +1925,8 @@ export function useSessionActions({
                   const latestCachedMessages = sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)?.messages
 
                   const cachedWithoutEarlyClarify =
-                    latestCachedMessages && withoutEarlyClarifyProjection(latestCachedMessages, pendingClarify?.requestId)
+                    latestCachedMessages &&
+                    withoutEarlyClarifyProjection(latestCachedMessages, pendingClarify?.requestId)
 
                   const currentLiveTurn = reconcilePersistedLiveTurn(
                     persistedMessages,
@@ -1957,7 +1958,11 @@ export function useSessionActions({
               // Either branch above can adopt the live row a stamped delta past
               // the snapshot's cut reached during the RPC; that row never held
               // the snapshot's range.
-              activatedMessages = mergeSegmentSnapshotIntoLiveRow(activatedMessages, cachedRuntimeId, activated.inflight)
+              activatedMessages = mergeSegmentSnapshotIntoLiveRow(
+                activatedMessages,
+                cachedRuntimeId,
+                activated.inflight
+              )
 
               const pendingClarifyProjection = pendingClarify
                 ? restorePendingClarifyToolCall(activatedMessages, pendingClarifyToolPayload(pendingClarify))
@@ -2002,7 +2007,8 @@ export function useSessionActions({
                 // same guard the cold-resume path uses below.
                 const messages = preserveEquivalentTranscript(state.messages, visibleActivatedMessages)
 
-                const snapshotRowId = running && !state.streamId ? pendingSnapshotRowId(messages, cachedRuntimeId) : null
+                const snapshotRowId =
+                  running && !state.streamId ? pendingSnapshotRowId(messages, cachedRuntimeId) : null
 
                 const streamTarget = snapshotRowId ?? state.streamId
 
@@ -2230,7 +2236,12 @@ export function useSessionActions({
             : viewMessagesForReconcile()
 
           // Tail page + previously backfilled prefix (same-session re-resume).
-          prefetchedPage = await graftTranscriptPage(prefetchedResult, previousMessages, storedSessionId, sessionRestScope)
+          prefetchedPage = await graftTranscriptPage(
+            prefetchedResult,
+            previousMessages,
+            storedSessionId,
+            sessionRestScope
+          )
           prefetchedTranscriptMessages = prefetchedPage.transcript
           localSnapshot = prefetchedPage.snapshot
           prefetchApplied = true

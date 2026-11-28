@@ -234,4 +234,38 @@ describe('ui latency producer', () => {
 
     expect(peekUiLatency('ui.new_session')).toEqual({ expect: { runtimeId: 'rt-1' }, ids: { session_id: 'stored-1' } })
   })
+
+  it('a stale attempt token cannot bind, cancel or complete a newer attempt', () => {
+    const first = startUiLatency('ui.card_create', { board: 'a' })
+    const second = startUiLatency('ui.card_create', { board: 'b' })
+
+    expect(second).not.toBe(first)
+    bindUiLatency('ui.card_create', { card_id: 'old' }, {}, first)
+    cancelUiLatency('ui.card_create', first)
+    completeUiLatency('ui.card_create', { card_id: 'old' }, first)
+
+    expect(events).toEqual([])
+    expect(peekUiLatency('ui.card_create')?.ids).toEqual({ board: 'b' })
+
+    completeUiLatency('ui.card_create', { card_id: 'new' }, second)
+    expect(events).toMatchObject([{ board: 'b', card_id: 'new' }])
+  })
+
+  it('a token for the current attempt cancels it', () => {
+    const token = startUiLatency('ui.new_session', {}, { runtimeId: null })
+    cancelUiLatency('ui.new_session', token)
+
+    expect(peekUiLatency('ui.new_session')).toBeNull()
+  })
+
+  it('a finisher that already captured its span does not emit for a newer start', () => {
+    startUiLatency('ui.session_switch', { session_id: 's1' })
+    finishUiLatencyAfterPaint('ui.session_switch', { session_id: 's1' })
+    startUiLatency('ui.session_switch', { session_id: 's2' })
+    frame()
+    frame()
+
+    expect(events).toEqual([])
+    expect(peekUiLatency('ui.session_switch')?.ids).toEqual({ session_id: 's2' })
+  })
 })

@@ -4,7 +4,6 @@
  * They subscribe to `$uiLatencyEpoch` so a click on what is ALREADY on screen still finishes.
  */
 
-import { useAuiState } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type RefObject, useEffect, useRef } from 'react'
 
@@ -23,8 +22,9 @@ export function UiLatencyTranscriptProbe({
   storedSessionId?: null | string
 }) {
   const epoch = useStore($uiLatencyEpoch)
-  const hasRows = useAuiState(s => s.thread.messages.length > 0)
-  const ready = usePaneVisible() && !loading && hasRows
+  // Empty loaded transcripts count too. The caller supplies the runtime's stored identity (not the
+  // selected route), and its loading gate covers route/runtime mismatch and pending hydration.
+  const ready = usePaneVisible() && !loading
   const latest = useRef({ ready, storedSessionId })
   latest.current = { ready, storedSessionId }
 
@@ -65,6 +65,8 @@ export function UiLatencyComposerProbe({
   const epoch = useStore($uiLatencyEpoch)
   const paneVisible = usePaneVisible()
   const bound = runtimeId ?? null
+  const latest = useRef({ bound, disabled, paneVisible })
+  latest.current = { bound, disabled, paneVisible }
 
   useEffect(() => {
     const span = peekUiLatency('ui.new_session')
@@ -77,7 +79,20 @@ export function UiLatencyComposerProbe({
       return
     }
 
-    finishUiLatencyAfterPaint('ui.new_session', {}, () => editorShown(editorRef.current))
+    const expected = span.expect.runtimeId
+
+    // After the frames re-read the CURRENT props: the composer may be disabled, hidden or rebound by then.
+    finishUiLatencyAfterPaint('ui.new_session', {}, () => {
+      const now = latest.current
+
+      return (
+        !now.disabled &&
+        now.paneVisible &&
+        now.bound === bound &&
+        (expected === undefined || expected === now.bound) &&
+        editorShown(editorRef.current)
+      )
+    })
   }, [bound, disabled, editorRef, epoch, paneVisible])
 
   return null

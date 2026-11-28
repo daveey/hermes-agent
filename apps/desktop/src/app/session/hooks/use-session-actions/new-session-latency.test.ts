@@ -30,10 +30,10 @@ describe('newSessionLatency', () => {
   })
 
   it('a tile "+" is unbound until the created session is known, then bound to it, ids only', () => {
-    newSessionLatency.tileClick()
+    const token = newSessionLatency.tileClick()
     expect(peekUiLatency('ui.new_session')?.expect.runtimeId).toBe(UI_LATENCY_UNBOUND)
 
-    newSessionLatency.tileCreated({ connectionId: 'mini', profile: 'p' }, 'stored-1', 'rt-1')
+    newSessionLatency.tileCreated(token, { connectionId: 'mini', profile: 'p' }, 'stored-1', 'rt-1')
 
     expect(peekUiLatency('ui.new_session')).toEqual({
       expect: { runtimeId: 'rt-1' },
@@ -42,9 +42,19 @@ describe('newSessionLatency', () => {
   })
 
   it('a failed create cancels the span', () => {
-    newSessionLatency.tileClick()
-    newSessionLatency.cancel()
+    const token = newSessionLatency.tileClick()
+    newSessionLatency.cancel(token)
 
     expect(peekUiLatency('ui.new_session')).toBeNull()
+  })
+
+  it('a slow first tile create cannot bind or cancel a newer tile click', () => {
+    const first = newSessionLatency.tileClick()
+    newSessionLatency.tileClick()
+
+    newSessionLatency.tileCreated(first, null, 'stale', 'rt-stale')
+    newSessionLatency.cancel(first)
+
+    expect(peekUiLatency('ui.new_session')).toEqual({ expect: { runtimeId: UI_LATENCY_UNBOUND }, ids: {} })
   })
 })

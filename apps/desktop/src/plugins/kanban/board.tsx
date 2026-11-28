@@ -744,7 +744,7 @@ function NewTaskDialog({
     setBusy(true)
     setError(null)
     // [daveey] ui.card_create: submit is the clock; it ends when the card exists (below), never on failure.
-    startUiLatency('ui.card_create', { board: $boardSlug.get(), gateway })
+    const latencyToken = startUiLatency('ui.card_create', { board: $boardSlug.get(), gateway })
 
     try {
       const skillList = skills
@@ -777,9 +777,9 @@ function NewTaskDialog({
       }
 
       if (task?.id) {
-        completeUiLatency('ui.card_create', { card_id: task.id })
+        completeUiLatency('ui.card_create', { card_id: task.id }, latencyToken)
       } else {
-        cancelUiLatency('ui.card_create')
+        cancelUiLatency('ui.card_create', latencyToken)
       }
 
       // Dispatcher-presence warning ("this ready task will sit idle") — not an
@@ -791,7 +791,7 @@ function NewTaskDialog({
       await qc.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
       onClose()
     } catch (err) {
-      cancelUiLatency('ui.card_create')
+      cancelUiLatency('ui.card_create', latencyToken)
       setError(errText(err))
       setBusy(false)
     }

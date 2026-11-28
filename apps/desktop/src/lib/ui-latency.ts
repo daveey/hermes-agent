@@ -6,6 +6,7 @@
  *   ui.new_session     click → the new composer is visible and editable
  *   ui.card_read       click → the matching card detail is committed AND painted
  *   ui.card_create     click → the card was created (no paint wait: the API answer is the result)
+ *   ui.decision_submit click → authoritative decision recording receipt (not downstream delivery)
  *
  * Rules (each is covered by `ui-latency.test.ts`):
  *   - "After paint" is two requestAnimationFrames past the commit that showed the result. A store
@@ -13,7 +14,7 @@
  *   - A span ends only through `finishUiLatencyAfterPaint` / `completeUiLatency`. A failure, a
  *     superseding click, a hidden window or the time bound CANCELS it: nothing is emitted.
  *   - One pending span per name; the session switch and new-session spans share one navigation
- *     channel, so a later click on either supersedes the earlier one. At most 3 spans are pending.
+ *     channel, so a later click on either supersedes the earlier one. At most 4 spans are pending.
  *   - Payload is identifiers only. `start_ms` is the click's Unix epoch (Date.now); `duration_ms`
  *     comes from performance.now(), so a wall-clock step cannot make it negative.
  */
@@ -22,7 +23,8 @@ import { atom } from 'nanostores'
 
 import { emitGatewayEvent } from '@/contrib/events'
 
-export type UiLatencyName = 'ui.card_create' | 'ui.card_read' | 'ui.new_session' | 'ui.session_switch'
+export type UiLatencyName =
+  'ui.card_create' | 'ui.card_read' | 'ui.decision_submit' | 'ui.new_session' | 'ui.session_switch'
 
 export interface UiLatencyIds {
   board?: string
@@ -38,12 +40,18 @@ export interface UiLatencyExpect {
   runtimeId?: null | string
 }
 
+/** Identity of one started span: returned by `startUiLatency`, so async work can only act on ITS attempt. */
+export type UiLatencyToken = number
+
+let nextToken = 1
+
 interface Span {
   expect: UiLatencyExpect
   finishing: boolean
   ids: UiLatencyIds
   name: UiLatencyName
   startEpoch: number
+  token: UiLatencyToken
   startMono: number
   timer: ReturnType<typeof setTimeout>
 }
@@ -57,6 +65,7 @@ export const UI_LATENCY_UNBOUND = '\u0000unbound'
 const CHANNEL: Record<UiLatencyName, string> = {
   'ui.card_create': 'card_create',
   'ui.card_read': 'card_read',
+  'ui.decision_submit': 'decision_submit',
   'ui.new_session': 'nav',
   'ui.session_switch': 'nav'
 }
@@ -95,7 +104,11 @@ const clean = (ids: UiLatencyIds): UiLatencyIds =>
   Object.fromEntries(Object.entries(ids).filter(([, value]) => typeof value === 'string' && value)) as UiLatencyIds
 
 /** The click. Supersedes (cancels) any earlier span on the same channel. */
-export function startUiLatency(name: UiLatencyName, ids: UiLatencyIds = {}, expect: UiLatencyExpect = {}): void {
+export function startUiLatency(
+  name: UiLatencyName,
+  ids: UiLatencyIds = {},
+  expect: UiLatencyExpect = {}
+): UiLatencyToken {
   bindVisibility()
 
   const channel = CHANNEL[name]
@@ -107,6 +120,7 @@ export function startUiLatency(name: UiLatencyName, ids: UiLatencyIds = {}, expe
     ids: clean(ids),
     name,
     startEpoch: Date.now(),
+    token: nextToken++,
     startMono: monoNow(),
     timer: setTimeout(() => {
       if (pending.get(channel) === span) {
@@ -117,13 +131,20 @@ export function startUiLatency(name: UiLatencyName, ids: UiLatencyIds = {}, expe
 
   pending.set(channel, span)
   $uiLatencyEpoch.set($uiLatencyEpoch.get() + 1)
+
+  return span.token
 }
 
 /** Add facts learned after the click (the created session's ids, the runtime the composer must show). */
-export function bindUiLatency(name: UiLatencyName, ids: UiLatencyIds = {}, expect: UiLatencyExpect = {}): void {
+export function bindUiLatency(
+  name: UiLatencyName,
+  ids: UiLatencyIds = {},
+  expect: UiLatencyExpect = {},
+  token?: UiLatencyToken
+): void {
   const span = pending.get(CHANNEL[name])
 
-  if (span?.name === name && !span.finishing) {
+  if (span?.name === name && !span.finishing && (token === undefined || span.token === token)) {
     span.ids = { ...span.ids, ...clean(ids) }
     span.expect = { ...span.expect, ...expect }
     $uiLatencyEpoch.set($uiLatencyEpoch.get() + 1)
@@ -138,10 +159,11 @@ export function peekUiLatency(name: UiLatencyName): { expect: UiLatencyExpect; i
 }
 
 /** Failure, supersession by something else, or the result never appeared: end without emitting. */
-export function cancelUiLatency(name: UiLatencyName): void {
+export function cancelUiLatency(name: UiLatencyName, token?: UiLatencyToken): void {
   const channel = CHANNEL[name]
+  const span = pending.get(channel)
 
-  if (pending.get(channel)?.name === name) {
+  if (span?.name === name && (token === undefined || span.token === token)) {
     dropChannel(channel)
   }
 }
@@ -228,11 +250,11 @@ export function finishUiLatencyAfterPaint(
 }
 
 /** A result with no paint to wait for (the create call succeeded). */
-export function completeUiLatency(name: UiLatencyName, ids: UiLatencyIds = {}): void {
+export function completeUiLatency(name: UiLatencyName, ids: UiLatencyIds = {}, token?: UiLatencyToken): void {
   const channel = CHANNEL[name]
   const span = pending.get(channel)
 
-  if (!span || span.name !== name || span.finishing) {
+  if (!span || span.name !== name || span.finishing || (token !== undefined && span.token !== token)) {
     return
   }
 

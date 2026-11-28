@@ -810,7 +810,7 @@ const ChatViewContent = memo(function ChatViewContent({
             scrollProfile={modelOptionsProfile || activeGatewayProfile}
             sessionId={activeSessionId}
             sessionKey={threadKey}
-            storedSessionId={selectedSessionId}
+            storedSessionId={transcriptStoredSessionId}
           />
           {isPrimary && isMainWindow() && <IntroCopy />}
           {resumeExhausted && routedSessionId && (

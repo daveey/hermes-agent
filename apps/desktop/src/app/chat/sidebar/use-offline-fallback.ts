@@ -70,7 +70,7 @@ export function useOfflineFallback(
       // [daveey] ui.session_switch: this click is the clock. It covers resuming into main AND fronting a chat
       // that is already a tile (openStoredSession → focusOpenSession); the transcript pane ends it after paint.
       startUiLatency('ui.session_switch', {
-        gateway: session?.connection_id,
+        gateway: sessionGatewayId(session ?? {}, $connectionsRegistry.get()),
         profile: session?.profile,
         session_id: sessionId
       })

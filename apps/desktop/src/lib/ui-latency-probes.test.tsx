@@ -129,4 +129,31 @@ describe('ui.new_session composer finisher', () => {
 
     expect(events).toEqual([])
   })
+
+  it('does not emit when the composer is disabled before the second frame', async () => {
+    startUiLatency('ui.new_session', {}, { runtimeId: null })
+    const view = render(<Composer runtimeId={null} />)
+    view.rerender(<Composer disabled runtimeId={null} />)
+    await settle()
+
+    expect(events).toEqual([])
+  })
+
+  it('does not emit when the composer is rebound to another runtime before the second frame', async () => {
+    startUiLatency('ui.new_session', {}, { runtimeId: null })
+    const view = render(<Composer runtimeId={null} />)
+    view.rerender(<Composer runtimeId="rt-other" />)
+    await settle()
+
+    expect(events).toEqual([])
+  })
+
+  it('does not emit when the pane is hidden before the second frame', async () => {
+    startUiLatency('ui.new_session', {}, { runtimeId: null })
+    const view = render(<Composer runtimeId={null} />)
+    view.rerender(<Composer runtimeId={null} visible={false} />)
+    await settle()
+
+    expect(events).toEqual([])
+  })
 })
