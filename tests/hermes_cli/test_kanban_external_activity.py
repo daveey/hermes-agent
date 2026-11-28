@@ -125,8 +125,10 @@ def _fresh_stamp(conn, rows):
     """What the pre-cache code answered: every board opened and read."""
     kea.reset_for_tests()
     path = Path(str(kbc._main_db_file(conn)))
-    return kea.stamp_boards(rows, lambda: [path], ksa._open_ro, ksa._parked_pairs, ksa._identity.row_ids,
-                            signature=None)
+    # No declaration means whole-board coverage; signature=None alone still narrows to row IDs.
+    with kea.one_board_read():
+        return kea.stamp_boards(rows, lambda: [path], ksa._open_ro, ksa._parked_pairs, ksa._identity.row_ids,
+                                signature=None)
 
 
 def _session_card(conn, sid, **kw):
@@ -371,6 +373,7 @@ def test_a_one_session_stamp_reads_only_that_sessions_cards(kanban_home, gh, clo
         assert len(opens) == 1
         assert got[0]["kanban_external"] == 1
         assert got == _fresh_stamp(conn, [{"id": "s2", "kanban_parked": 2}])
+        assert read[-1] == {"s1", "s2", "s3"}, "the reference must actually read the whole board"
 
 
 def test_lineage_ids_are_read_and_rows_match_a_whole_board_read(kanban_home, gh, clock, monkeypatch):
