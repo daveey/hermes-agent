@@ -154,8 +154,7 @@ def observe_local_bindings(bindings: list[dict], *, profile: str, now: float, ho
                 # One wait read for every parked card in this snapshot (each alone cost ~10 statements).
                 from hermes_cli.kanban_session_activity import _local_wait_info
                 parked = sorted(tid for tid, row in read['tasks'].items() if row['status'] in ('scheduled', 'blocked'))
-                read['wait_info'] = {'ids': frozenset(parked),
-                                     'info': _local_wait_info(conn, parked, now=now) if parked else {}}
+                read['wait_info'] = _local_wait_info(conn, parked, now=now) if parked else {}
                 while alone:
                     try:
                         out[alone[0]] = _observe_prefetched(conn, bindings[alone[0]], read, now=now,

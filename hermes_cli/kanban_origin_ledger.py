@@ -287,11 +287,9 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float,
                                         'payload': json.loads(event[3] or '{}')}
     if row[0] in ('scheduled', 'blocked'):
         from hermes_cli.kanban_wait_replica import observe_wait, published_park
+        # The batch caller derives this row and the parked IDs from the same snapshot.
         infos = read.get('wait_info') if read is not None else None
-        if infos is not None and task['id'] not in infos.get('ids', ()):
-            infos = None  # not part of the shared read: read this card alone
-        payload['wait_observation'] = observe_wait(conn, task['id'], now=now,
-                                                   infos=None if infos is None else infos['info'])
+        payload['wait_observation'] = observe_wait(conn, task['id'], now=now, infos=infos)
         if row[0] == 'scheduled' or task.get('block_kind') == 'time':
             # [daveey] What the park waits on, so other gateways name its producer (``describe_replica``) instead
             # of "a producer the owner did not publish". Before the hash: the observation attests these too.

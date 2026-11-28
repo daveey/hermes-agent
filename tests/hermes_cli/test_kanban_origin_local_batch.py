@@ -120,6 +120,25 @@ def test_parked_cards_share_one_wait_read(world, board, monkeypatch, state):
     assert len(seen) <= 16 * 8, len(seen)
 
 
+@pytest.mark.parametrize('explicit', [False, True])
+def test_shared_wait_info_decides_parked_agent_without_an_orphan(world, board, monkeypatch, explicit):
+    tasks = seed(world, monkeypatch, ('ready', 'ready'))
+    with kbc.connect_closing() as conn:
+        conn.executemany("UPDATE tasks SET status='blocked', block_kind='assignment' WHERE id=?",
+                         [(tid,) for tid in tasks])
+        bindings = [json.loads(r[0]) for r in conn.execute(
+            'SELECT binding_json FROM origin_creation_intents ORDER BY rowid')]
+    kw = {'home': kb.kanban_db_path('default').parent} if explicit else {}
+    single = [local.observe_local_binding(b, profile='default', now=5000, **kw) for b in bindings]
+    batched = local.observe_local_bindings(bindings, profile='default', now=5000, **kw)
+    assert len(batched) == 2
+    for answer in single:
+        assert answer is not None
+        assert answer['wait_observation']['orphan_reason'] is None
+        assert answer['wait_observation']['parked_agent'] is True
+    assert batched == single  # Compare the wait observation and its payload hash, not just project().
+
+
 def test_batched_pass_statement_count_does_not_grow_with_cards(world, board, monkeypatch):
     seed(world, monkeypatch, ('done', 'done_archived', 'archived', 'withdrawn') * 4)
     seen = count_board_statements(monkeypatch)
