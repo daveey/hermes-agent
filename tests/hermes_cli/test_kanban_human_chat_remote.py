@@ -81,6 +81,8 @@ def test_enqueue_is_exact_idempotent_and_never_writes_task(conn, monkeypatch):
     def run(argv, **kw):
         calls.append(argv)
         assert kw['timeout'] == 20 and kw['check'] is False
+        assert kw['encoding'] == 'utf-8' and kw['errors'] == 'replace'
+        assert kw['stdin'] == remote.subprocess.DEVNULL
         return SimpleNamespace(returncode=0, stderr='')
     monkeypatch.setattr(remote.subprocess, 'run', run)
     card = {'gateway': 'worker-a1', 'profile': 'default', 'board': 'default', 'task': 't_01a219b2895e8640'}
@@ -92,6 +94,19 @@ def test_enqueue_is_exact_idempotent_and_never_writes_task(conn, monkeypatch):
     monkeypatch.setattr(remote.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=2, stderr='refused'))
     with pytest.raises(RuntimeError, match='refused'):
         remote.enqueue(card, 'kanban_owner_needs_you')
+
+
+def test_enqueue_drain_refusal_prevents_courier_spawn(monkeypatch):
+    from hermes_cli import worker_drain_fence as fence
+    calls = []
+    monkeypatch.setattr(remote.subprocess, 'run', lambda *a, **kw: calls.append(a))
+    def refuse(purpose):
+        assert purpose == 'kanban.human_chat_remote'
+        raise fence.DrainRefused('draining')
+    monkeypatch.setattr(fence, 'admit', refuse)
+    with pytest.raises(fence.DrainRefused, match='draining'):
+        remote.enqueue({'gateway': 'worker-a1'}, human.needs_you_session())
+    assert calls == []
 
 
 def test_profile_routes_are_preserved_and_ambiguous_routes_fail_closed(conn, worker_shadow, monkeypatch):

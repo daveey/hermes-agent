@@ -495,6 +495,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/kanban_human_chat_remote.py": {
+   "direct": 0,
+   "routed": 2,
+   "status": "fenced"
+  },
   "hermes_cli/kanban_lane_classifier.py": {
    "direct": 1,
    "routed": 0,
@@ -895,6 +900,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/update_bytecode.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/update_cmd.py": {
    "direct": 1,
    "routed": 0,
@@ -917,11 +927,6 @@
   },
   "hermes_cli/update_cmd_git.py": {
    "direct": 2,
-   "routed": 0,
-   "status": "pending"
-  },
-  "hermes_cli/update_bytecode.py": {
-   "direct": 1,
    "routed": 0,
    "status": "pending"
   },

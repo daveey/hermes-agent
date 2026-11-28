@@ -10,6 +10,8 @@ import logging
 import subprocess
 from contextlib import closing
 
+from hermes_cli.worker_drain_fence import fenced
+
 log = logging.getLogger(__name__)
 
 
@@ -49,6 +51,7 @@ def candidates(conn) -> list[dict]:
     return out
 
 
+@fenced('kanban.human_chat_remote')
 def enqueue(card: dict, session: str) -> dict:
     """An idempotent authenticated adoption request, NOT a successful link receipt."""
     from hermes_cli.profiles import get_active_profile_name
@@ -59,7 +62,8 @@ def enqueue(card: dict, session: str) -> dict:
     rid = 'human-chat-' + hashlib.sha256(identity.encode()).hexdigest()
     result = subprocess.run(
         ['hermes-hub', 'adopt-task', card['gateway'], target, '--origin-session', session,
-         '--origin-profile', profile, '--id', rid], capture_output=True, text=True, timeout=20, check=False)
+         '--origin-profile', profile, '--id', rid], capture_output=True, text=True,
+        encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL, timeout=20, check=False)
     if result.returncode:
         raise RuntimeError(f'origin adoption enqueue failed: {result.stderr[:500]}')
     return {**card, 'session': session, 'request_id': rid}
