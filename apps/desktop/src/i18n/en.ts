@@ -3,7 +3,6 @@ import { FIELD_DESCRIPTIONS, FIELD_LABELS } from '@/app/settings/constants'
 
 import { enArchiveTasks } from './archive-task-copy'
 import { enAppTour } from './en_app_tour'
-import { enBackgroundUpdate } from './en_background_update'
 import { enBilling } from './en_billing'
 import { enBoot } from './en_boot'
 import { enCatalog } from './en_catalog'
@@ -4180,7 +4179,6 @@ export const en: Translations = {
       restart: 'restart',
       update: 'update',
       updateInProgress: 'Update in progress',
-      backgroundUpdate: enBackgroundUpdate,
       forceUpdate: enForceUpdate,
       commitsBehind: (count, branch) => `${count} commit${count === 1 ? '' : 's'} behind ${branch}`,
       releaseAvailable: (tag: string) => `Version ${tag} is available.`,
@@ -4216,7 +4214,6 @@ export const en: Translations = {
       hideStatusbar: 'Hide status bar',
       resetStatusbar: 'Reset to defaults',
       toggleApprovalMode: 'Approvals',
-      toggleBackendVersion: 'Backend version',
       toggleCacheHitRate: 'Cache hit rate',
       toggleCommandCenter: 'Command Center',
       toggleContextUsage: 'Context meter',
@@ -4224,7 +4221,6 @@ export const en: Translations = {
       toggleSessionTimer: 'Session timer',
       toggleTerminal: 'Terminal',
       toggleTokensPerSecond: 'Tokens per second',
-      toggleVersion: 'Version & updates',
       toggleFreeTier: 'Free tier',
       toggleWorkspace: 'Workspace',
       cacheHitRateTitle: 'Prompt cache hit rate this session — cached tokens cost less, so higher is cheaper',

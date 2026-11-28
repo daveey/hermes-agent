@@ -11,7 +11,6 @@ import type { TipId } from '@/lib/tips/catalog'
 
 import type { ArchiveTaskCopy } from './archive-task-copy'
 import type { AppTourTranslations } from './types_app_tour'
-import type { BackgroundUpdateCopy } from './types_background_update'
 import type { BillingTranslations } from './types_billing'
 import type { BootTranslations } from './types_boot'
 import type { CatalogTranslations } from './types_catalog'
@@ -3626,9 +3625,7 @@ export interface Translations extends NoticeTranslations {
       restart: string
       update: string
       updateInProgress: string
-      /** [daveey] A core update the host runs on its own (hermes-sync). */
-      backgroundUpdate: BackgroundUpdateCopy
-      /** [daveey] "Force update" on the backend version pill's context menu. */
+      /** [daveey] Synced update overlay copy. */
       forceUpdate: ForceUpdateCopy
       commitsBehind: (count: number, branch: string) => string
       releaseAvailable: (tag: string) => string
@@ -3664,7 +3661,6 @@ export interface Translations extends NoticeTranslations {
       hideStatusbar: string
       resetStatusbar: string
       toggleApprovalMode: string
-      toggleBackendVersion: string
       toggleCacheHitRate: string
       toggleCommandCenter: string
       toggleContextUsage: string
@@ -3672,7 +3668,6 @@ export interface Translations extends NoticeTranslations {
       toggleSessionTimer: string
       toggleTerminal: string
       toggleTokensPerSecond: string
-      toggleVersion: string
       toggleFreeTier: string
       toggleWorkspace: string
       cacheHitRateTitle: string

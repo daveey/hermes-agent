@@ -4653,7 +4653,6 @@ export const deOverrides = {
       hideStatusbar: 'Statusleiste ausblenden',
       resetStatusbar: 'Auf Standard zurücksetzen',
       toggleApprovalMode: 'Genehmigungen',
-      toggleBackendVersion: 'Backend-Version',
       toggleCacheHitRate: 'Cache-Trefferquote',
       toggleCommandCenter: 'Command Center',
       toggleContextUsage: 'Kontext-Anzeige',
@@ -4661,7 +4660,6 @@ export const deOverrides = {
       toggleSessionTimer: 'Session-Timer',
       toggleTerminal: 'Terminal',
       toggleTokensPerSecond: 'Tokens pro Sekunde',
-      toggleVersion: 'Version & Updates',
       toggleFreeTier: 'Gratis-Tarif',
       toggleWorkspace: 'Workspace',
       cacheHitRateTitle:

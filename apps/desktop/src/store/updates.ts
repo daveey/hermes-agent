@@ -1458,7 +1458,7 @@ let pollerStarted = false
 let backgroundTimer: ReturnType<typeof setInterval> | null = null
 let progressTimer: ReturnType<typeof setInterval> | null = null
 
-/** [daveey] How often the version pills re-read their host's background update (a few small file reads there). */
+/** [daveey] Detect completed host swaps and refresh version metadata; Hub owns update rendering. */
 export const UPDATE_PROGRESS_POLL_MS = 10_000
 
 const progressBusy = (p: BackgroundUpdateProgress | null): boolean => p?.state === 'draining' || p?.state === 'applying'

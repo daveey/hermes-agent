@@ -111,7 +111,6 @@ export function StatusbarControls({
   className,
   leftItems = [],
   items = [],
-
   ...props
 }: StatusbarControlsProps) {
   const navigate = useNavigate()
@@ -128,7 +127,6 @@ export function StatusbarControls({
             className
           )}
           data-slot="statusbar"
-
           {...props}
         >
           {/* `overflow-x-clip` (not `overflow-x-auto`) so a wide status item — for

@@ -1401,26 +1401,7 @@
 .decode-cursor-blink {
   animation: decode-cursor 1s step-end infinite;
 }
-/* [daveey] Background core update in progress with no measurable end: a sliver sweeping the version pill's bar. */
-@keyframes update-bar-sweep {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(300%);
-  }
-}
-.update-bar-sweep {
-  animation: update-bar-sweep 1.4s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .update-bar-sweep {
-    animation: none;
-    transform: none;
-    width: 100%;
-    opacity: 0.5;
-  }
-}
+
 /* 0.001 start mirrors ZonesOverlay::GetAnimationAlpha's clamp(t / 200ms, 0.001, 1). */
 @keyframes hermes-zone-fade {
   from {

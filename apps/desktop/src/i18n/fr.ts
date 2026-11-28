@@ -4663,7 +4663,6 @@ export const frOverrides = {
       hideStatusbar: "Masquer la barre d'état",
       resetStatusbar: 'Réinitialiser les valeurs par défaut',
       toggleApprovalMode: 'Approbations',
-      toggleBackendVersion: 'Version du backend',
       toggleCacheHitRate: 'Taux de cache',
       toggleCommandCenter: 'Centre de commandes',
       toggleContextUsage: 'Jauge de contexte',
@@ -4671,7 +4670,6 @@ export const frOverrides = {
       toggleSessionTimer: 'Minuteur de session',
       toggleTerminal: 'Terminal',
       toggleTokensPerSecond: 'Tokens par seconde',
-      toggleVersion: 'Version et mises à jour',
       toggleFreeTier: 'Offre gratuite',
       toggleWorkspace: 'Espace de travail',
       cacheHitRateTitle:

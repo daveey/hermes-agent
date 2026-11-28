@@ -677,11 +677,9 @@ export function useStatusbarItems({
     ],
     [
       approvalModeItem,
-
       busy,
       cacheHit,
       chatOpen,
-
       compactConversation,
       contextBar,
       contextBreakdown,
