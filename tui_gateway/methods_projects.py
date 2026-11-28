@@ -344,7 +344,8 @@ def _discover_repos_payload(
             root, {"root": root, "label": "", "sessions": 0, "last_active": 0.0})
     # ``db`` is None for a profile whose session store was never initialized (read-only foreign
     # handles never bootstrap it): the scan cache in projects.db is still authoritative.
-    cwd_rows = list(db.distinct_session_cwds()) if db is not None else []
+    from tui_gateway import project_tree_scan
+    cwd_rows = project_tree_scan.session_cwds(db) if db is not None else []  # per store commit [daveey]
     # Parallel-warm the per-cwd git probes so a cold first paint doesn't serialize them.
     git_probe.warm_roots(str(r.get("cwd") or "") for r in cwd_rows)
     cwd_to_root: dict[str, str] = {}
@@ -486,7 +487,10 @@ def _project_tree_inputs(
     the distinct-cwd scan + git probes) on that per-turn path. ``rows`` [daveey]: this store's
     ``project_tree_rows`` when the caller already holds them (then ``db`` is only read for discovery)."""
     if rows is None:
-        rows = project_tree_rows(db, session_limit)
+        # [daveey] Kept until the store commits, like the all-profiles HTTP tree (tui_gateway/project_tree_scan.py).
+        from tui_gateway import project_tree_scan
+        rows = project_tree_scan.read(db, project_tree_rows_key(session_limit),
+                                      lambda: project_tree_rows(db, session_limit))
     sessions = _annotate_tree_activity(rows)
     # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.
     git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
