@@ -31,3 +31,36 @@ def pairs(path, ids, statuses):
         conn.row_factory = sqlite3.Row
         _found, members = select_listed_local_task_set(conn, ids, statuses, strict=False)
         return [{"session": sid, "id": tid} for sid, tid in members]
+
+
+def without_local_open_duplicates(rows, *, gateway, profile):
+    """Prefer exact local open associations without retiring receipt obligations.
+
+    Legacy rows lack origin_session. Every supplied alias still needs local
+    coverage; different/unknown owners and terminal/missing tasks remain visible.
+    """
+    from hermes_cli import kanban_session_activity as activity
+
+    local = [r for r in rows if (r.get('gateway'), r.get('profile')) == (gateway, profile)]
+    if not local:
+        return rows
+    boards = {activity._board_slug(p): p for p in activity._board_db_paths()}
+    represented = set()
+    wanted = {}
+    for row in local:
+        path = boards.get(row['board'])
+        if path is not None:
+            wanted.setdefault(path, set()).update((row['session'], row.get('origin_session') or row['session']))
+    members = {path: activity._association_pairs(path, sids) for path, sids in wanted.items()}
+    reads = getattr(activity._origin_rows_sink, 'local_boards', None)
+    if reads is not None:
+        reads.update(str(path) for path in wanted)
+    for row in local:
+        path = boards.get(row['board'])
+        if path is None:
+            continue
+        aliases = {row['session'], row.get('origin_session') or row['session']}
+        if all((sid, row['id']) in members[path] for sid in aliases):
+            represented.add((row['key'], row['session'], row.get('origin_session')))
+    return [row for row in rows
+            if (row['key'], row['session'], row.get('origin_session')) not in represented]

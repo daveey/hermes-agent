@@ -82,12 +82,22 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
 
   const text = (c: TimedCard) => compactElapsed(now - c.since)
 
-  const label = cards
-    .map(
-      c =>
-        `${c.title} · ${c.state === 'waiting' ? (c.wait_kind === 'deploy' ? t.sidebar.row.cardColours.deploy : t.sidebar.row.outcomeWaiting) : t.sidebar.row.cardColours[c.state === 'running' ? 'blue' : 'red']} · ${text(c)}`
-    )
-    .join('\n')
+  // Historical elapsed clocks remain useful, but cannot renew an answered ask.
+  const unknown = Boolean(
+    session.kanban_unknown ||
+    timers.confirmedAt ||
+    (session.kanban_observed_at !== undefined && !hasFreshKanbanObservation(session))
+  )
+
+  const label =
+    (unknown ? `${t.sidebar.row.kanbanUnknown(cards.length)}\n` : '') +
+    cards
+      .map(c =>
+        unknown
+          ? `${c.title} · ${text(c)}`
+          : `${c.title} · ${c.state === 'waiting' ? (c.wait_kind === 'deploy' ? t.sidebar.row.cardColours.deploy : t.sidebar.row.outcomeWaiting) : t.sidebar.row.cardColours[c.state === 'running' ? 'blue' : 'red']} · ${text(c)}`
+      )
+      .join('\n')
 
   let used = 12
 
@@ -115,7 +125,7 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
       >
         {visible.map(c => (
           <span
-            className={timerColour(session, c, now)}
+            className={unknown && c.state !== 'waiting' ? 'text-muted-foreground' : timerColour(session, c, now)}
             data-card-timer={c.state}
             data-wait-kind={c.state === 'waiting' ? c.wait_kind : undefined}
             key={c.id}

@@ -895,36 +895,9 @@ def _association_pairs(path: Path, sids: set[str]) -> set[tuple[str, str]]:
 
 def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
                                    profile: str) -> list[dict[str, Any]]:
-    """Prefer exact local open associations, without inferring receipt release.
-
-    Terminal/missing tasks and receipt-only aliases remain obligations. This is
-    display deduplication only: it never updates or deletes the durable ledger.
-    """
-    local = [r for r in rows if (r.get('gateway'), r.get('profile')) == (gateway, profile)]
-    if not local:
-        return rows
-    boards = {_board_slug(p): p for p in _board_db_paths()}
-    represented = set()
-    # [daveey] One association read per board for every alias the local receipts name (it was one guarded
-    # connection per board/alias: a third of each projection, under _links_lock). Request-local: never extends
-    # freshness or shares evidence across profiles.
-    wanted: dict[Path, set[str]] = {}
-    for row in local:
-        path = boards.get(row['board'])
-        if path is not None:
-            wanted.setdefault(path, set()).update((row['session'], row['origin_session']))
-    members = {path: _association_pairs(path, sids) for path, sids in wanted.items()}
-
-    for row in local:
-        path = boards.get(row['board'])
-        if path is None:
-            continue
-        aliases = {row['session'], row['origin_session']}
-        # Require coverage of every receipt alias, not just a matching task id.
-        if all((sid, row['id']) in members[path] for sid in aliases):
-            represented.add((row['key'], row['session'], row['origin_session']))
-    return [row for row in rows
-            if (row['key'], row['session'], row['origin_session']) not in represented]
+    """Display deduplication only: never infer durable receipt release."""
+    from hermes_cli.kanban_links_associations import without_local_open_duplicates
+    return without_local_open_duplicates(rows, gateway=gateway, profile=profile)
 
 
 _links_lock = threading.Lock()
@@ -1050,7 +1023,13 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
 
 def _publish_links(scope: tuple, fingerprint: tuple) -> tuple:
     projector = _project_remote_links  # the one ``_store_links`` runs: a replaced projection declares no reads
-    return _links_narrow.remember(_store_links(scope, fingerprint), projector, _board_db_paths(), _board_slug)
+    _origin_rows_sink.local_boards = set()
+    try:
+        entry = _store_links(scope, fingerprint)
+        return _links_narrow.remember(entry, projector, _board_db_paths(), _board_slug,
+                                      local_boards=_origin_rows_sink.local_boards)
+    finally:
+        _origin_rows_sink.local_boards = None
 
 
 def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
@@ -1113,7 +1092,7 @@ def _project_remote_links() -> list[dict[str, Any]]:
     if sink is not None:
         sink.extend(rows)
     rows = _without_local_open_duplicates(rows, gateway=gateway, profile=profile)
-    legacy = _legacy_remote_links()
+    legacy = _without_local_open_duplicates(_legacy_remote_links(), gateway=gateway, profile=profile)
     # A receipt proves its original and accepted tip aliases. Other aliases
     # require the canonical compression predicate in this origin's state DB.
     # Never lend current-origin provenance to historical cached associations.

@@ -26,7 +26,8 @@ _lock = threading.Lock()
 _read: dict[tuple, tuple[tuple, frozenset[str], frozenset[str]]] = {}
 
 
-def remember(entry: tuple, project: Callable, board_paths: Iterable[Any], slug_of: Callable[[Any], str]) -> tuple:
+def remember(entry: tuple, project: Callable, board_paths: Iterable[Any], slug_of: Callable[[Any], str], *,
+             local_boards: Iterable[str] = ()) -> tuple:
     """Record which local boards ``entry`` (``(expires, scope, fingerprint, cards, origin rows)``) read; returns it."""
     with _lock:
         _read.pop(entry[1], None)
@@ -35,7 +36,9 @@ def remember(entry: tuple, project: Callable, board_paths: Iterable[Any], slug_o
     paths: dict[str, set[str]] = {}
     for p in board_paths:  # a slug two boards share (boards/default vs kanban.db) counts as read on both
         paths.setdefault(slug_of(p), set()).add(str(p))
-    read: set[str] = set()
+    # Legacy duplicates can disappear from the output; retain their read custody
+    # separately without adding non-ledger rows to the public origin inventory.
+    read: set[str] = set(local_boards)
     for row in entry[4]:
         try:
             local = (row["gateway"], row["profile"]) == (row["origin_gateway"], row["origin_profile"])
