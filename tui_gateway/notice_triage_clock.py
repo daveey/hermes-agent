@@ -13,6 +13,12 @@ def reset():
     _remote_due = None
 
 
+def _delivery_key(card):
+    # A Keep-parked acknowledgement starts a new attention generation inside the
+    # same lifecycle episode; prior red delivery must not swallow its expiry.
+    return card['id'], card.get('triage_entered_at'), attention.quiet_until(card)
+
+
 def local(conn, ident, top, *, now):
     stat = Path(ident).stat()
     identity = (stat.st_dev, stat.st_ino)
@@ -28,10 +34,10 @@ def local(conn, ident, top, *, now):
         acked = set() if hit is None or hit[0] != identity else hit[3]
     else:
         cards, acked = hit[2], hit[3]
-    episodes = {(c['id'], c.get('triage_entered_at')) for c in cards}
+    episodes = {_delivery_key(c) for c in cards}
     acked &= episodes
     _cache[ident] = (identity, top, cards, acked)
-    ready = {c['id'] for c in cards if attention.overdue(c, now=now) and (c['id'], c.get('triage_entered_at')) not in acked}
+    ready = {c['id'] for c in cards if attention.overdue(c, now=now) and _delivery_key(c) not in acked}
     due = min((at for c in cards if (at := attention.next_transition(c, now=now)) is not None), default=None)
     return ready, due
 
@@ -39,7 +45,7 @@ def local(conn, ident, top, *, now):
 def ack(ident, tids):
     hit = _cache.get(ident)
     if hit:
-        hit[3].update((c['id'], c.get('triage_entered_at')) for c in hit[2] if c['id'] in tids)
+        hit[3].update(_delivery_key(c) for c in hit[2] if c['id'] in tids)
 
 
 def remote_cards(cards, *, now):

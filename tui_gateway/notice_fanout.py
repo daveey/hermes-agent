@@ -46,7 +46,7 @@ STATUS_EVENT_KINDS = (
     "created", "blocked", "unblocked", "scheduled", "promoted", "promoted_manual", "claimed", "reclaimed",
     "spawned", "completed", "archived", "gave_up", "crashed", "timed_out", "review_requested",
     "changes_requested", "review_reopened", "reopened", "status", "dependency_wait", "triage_swept", "moved",
-    "continued", "continuation_woken", "condition_met",
+    "continued", "continuation_woken", "condition_met", "triage_park_acknowledged",
 )
 MAX_EVENTS_PER_PASS = 2000
 _not_hosted_logged: set[tuple[str, str]] = set()

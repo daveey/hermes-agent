@@ -170,3 +170,33 @@ def test_keep_parked_quiets_the_real_canonical_stripe_and_session_count_for_a_da
     assert refresh_outcome(helpers.CHAT, 'card_change', db=db)['status']['presentation']['stripe'] == 'stuck'
     attention.project(row, markers, now=now[0])
     assert row['kanban_triage_attention']['refs'] == [card['key']]
+
+
+@pytest.mark.parametrize('end_by_event', [False, True])
+def test_keep_parked_rearms_previously_delivered_attention(db, monkeypatch, end_by_event):
+    now = [1_800_000_000.]
+    monkeypatch.setattr(fanout.time, 'time', lambda: now[0])
+    tid = helpers._card(done=False)
+    hold(tid, now[0] - 7200)
+    opener = helpers._opener(db)
+    assert fanout.card_change_pass(session_db=opener)
+    assert helpers.so.get_outcome(helpers.CHAT, db=db)['status']['presentation']['stripe'] == 'stuck'
+    assert not fanout.card_change_pass(session_db=opener)
+    with contextlib.closing(kbc.connect()) as conn:
+        conn.execute("INSERT INTO task_events(task_id,kind,created_at,payload) VALUES (?,?,?,'{}')",
+                     (tid, attention.PARK_ACK, int(now[0])))
+        conn.commit()
+    quiet = fanout.card_change_pass(session_db=opener)
+    assert quiet.clock_deadline is not None
+    assert helpers.so.get_outcome(helpers.CHAT, db=db)['status']['presentation']['stripe'] != 'stuck'
+    assert not fanout.card_change_pass(session_db=opener)
+    if end_by_event:
+        now[0] += 1
+        hold(tid, now[0])  # repeated hold ends quiet, not the original triage episode
+    else:
+        now[0] += attention.PARK_QUIET_S + 1
+    # No manual outcome refresh or cache reset: exercise the actual quiet-board clock.
+    assert [r['task_id'] for r in fanout.card_change_pass(session_db=opener)] == [tid]
+    assert helpers.so.get_outcome(helpers.CHAT, db=db)['status']['presentation']['stripe'] == 'stuck'
+    assert not fanout.card_change_pass(session_db=opener)
+
