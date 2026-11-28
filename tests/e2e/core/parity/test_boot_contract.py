@@ -24,11 +24,12 @@ import contextlib
 import json
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
+import httpx
 import pytest
 
+from tests.e2e.core._service_readiness import service_response
 from tests.e2e.core.parity._boot_contract import desktop_parse, require_node
 from tests.e2e.core.parity._drive_rpc import (
     READY_TIMEOUT,
@@ -81,11 +82,13 @@ def _check_serve_ready(home) -> None:
             f"(stdout must carry nothing before READY)\nstderr tail:\n{sp.cap.stderr[-1500:]}")
         port = int(verdict["port"])
 
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/status",
-                                     headers={"X-Hermes-Session-Token": sp.token})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            assert resp.status == 200, resp.status
-            json.loads(resp.read())
+        # READY announces the listener; standalone services can still be warming.
+        # Only that explicit fence is retryable, not auth or application failures.
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=30,
+                          headers={"X-Hermes-Session-Token": sp.token}) as client:
+            resp = service_response(client, "/api/status", timeout=READY_TIMEOUT)
+            assert resp.status_code == 200, resp.text
+            resp.json()
     finally:
         terminate(sp.proc, timeout=60)
 

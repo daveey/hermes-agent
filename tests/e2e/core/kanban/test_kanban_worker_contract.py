@@ -177,10 +177,11 @@ def test_worker_with_unresolvable_pinned_skill_still_starts_its_session(tmp_path
                             raises=KnownGap):
                 if not srv.main_requests() and ((exits and exits[-1] != 0) or "e2e-archived" in log):
                     raise KnownGap(f"worker died before its session (exits={exits}); board:\n{board.diag(tid)}")
-            first = srv.main_requests()[0]["messages"]
-            assert SKILL_MARK not in str(first), "removed skill still loaded"
-            assert "e2e-archived" in str(first) and "kanban_block" in str(first)
-            assert "kind='assignment'" in str(first)
+            # Inspect actual prompt text, not repr(messages), which escapes its quotes.
+            first = "\n".join(message["content"] for message in srv.main_requests()[0]["messages"])
+            assert SKILL_MARK not in first, "removed skill still loaded"
+            assert "e2e-archived" in first and "kanban_block" in first
+            assert "kind='assignment'" in first
             assert board.task(tid)["status"] == "done", board.diag(tid)
         finally:
             board.kill_workers()
