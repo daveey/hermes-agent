@@ -143,7 +143,12 @@ def _admit_continuation(conn, pol, action, row, state):
     return admit(conn, pol, action, row, state)
 
 
-_HANDLERS = {"admit": _admit, "admit_continuation": _admit_continuation,
+def _archive(conn, pol, action, row, state):
+    from hermes_cli.kanban_lanes_archive import archive
+    return archive(conn, pol, action, row, state)
+
+
+_HANDLERS = {"archive": _archive, "admit": _admit, "admit_continuation": _admit_continuation,
              "merge": _merge, "reprioritize": _reprioritize, "relane": _relane}
 
 
