@@ -268,6 +268,45 @@ def test_new_stop_with_same_projection_generation_is_not_suppressed(kanban_home,
         assert offer_tests._ask(conn, tid)['release_target'] != ask['release_target']
 
 
+@pytest.mark.parametrize('change', [None, 'old-scope', 'new-scope', 'new-cost', 'new-choice', 'unfiled'])
+def test_legacy_producer_migration(kanban_home, own_gateway, board_allowance, monkeypatch, change):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_stranded_brief as brief
+    from hermes_cli import kanban_release_reserved as reserved
+    with kbc.connect_closing() as conn:
+        tid = offer_tests._stopped_with_live_chat(conn, board_allowance)
+        row = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+        legacy = brief.request(conn, row, stranded.park_entry(conn, tid), 10800, 'Original filing')
+        if change == 'old-scope':
+            legacy['scope'] += '\nAdditional material decision'
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, stranded.EVENT, stranded._record(legacy))
+        path = source(kanban_home, monkeypatch, tid, legacy)
+        current = offers.request(conn, row, 'allowance_exhausted', gateway='hub')
+        current['scope'] = current['scope'].replace('Why it stopped: ', 'Why it stopped: Updated context: ')
+        if change == 'new-scope':
+            current['scope'] += '\nAdditional material decision'
+        if change == 'new-cost':
+            current['scope'] = current['scope'].replace('Cost: up to 10', 'Cost: up to 20')
+        if change == 'new-choice':
+            current['choices'][1]['value'] = 'archive'
+        with kb.write_txn(conn):
+            conn.execute('UPDATE tasks SET human_request=? WHERE id=?', (_dump(current), tid))
+            if change != 'unfiled':
+                kb._append_event(conn, tid, stranded.EVENT, stranded._record(current))
+        original = path.read_bytes()
+        assert reserved.reconcile(conn, tid) is (change is None)
+        if change is None:
+            assert answers.snapshot(conn, tid) is None
+            assert park._sweep(conn, now=park._later(3), cfg={}) == []
+            assert answers.snapshot(conn, tid) is None
+        else:
+            assert offer_tests._ask(conn, tid) == current
+        assert path.read_bytes() == original
+        assert not board_allowance['renewed'] and offer_tests._released(conn, tid) == 0
+        assert kanban_release.offer(conn, tid) == legacy['release_target']
+
+
 @pytest.mark.parametrize('entrypoint', ['escalate', 'refile'])
 def test_direct_filing_paths_recheck_reservation(kanban_home, own_gateway, board_allowance, monkeypatch, entrypoint):
     with kbc.connect_closing() as conn:

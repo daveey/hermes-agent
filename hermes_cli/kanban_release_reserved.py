@@ -112,6 +112,46 @@ def _filed(conn, task, ask):
                for e in release.own_events(conn, task, (release.ESCALATED, release.REFILED)))
 
 
+def _decision(value):
+    result = {k: v for k, v in value.items() if k != 'evidence'}
+    lines = str(value.get('scope', '')).splitlines()
+    if sum(line.startswith('Why it stopped: ') for line in lines) == 1:
+        result['scope'] = '\n'.join('Why it stopped: ' if line.startswith('Why it stopped: ') else line
+                                    for line in lines)
+    return result
+
+
+def _legacy_migration(conn, row, old, current):
+    """Recognize only the two complete HOME producer templates, not a stamp alone.
+
+    Regenerate against the unchanged work summary. Historical reason/age and
+    current reason/evidence are context; all decision text and costs must match.
+    This is suppression only: the templates have different dismissal semantics.
+    """
+    import re
+    from hermes_cli import kanban_release_offer as offers
+    from hermes_cli import kanban_stranded_brief as brief
+    from hermes_cli.kanban_stranded_park import park_entry
+    summary, _, _ = brief.context(conn, row, park_entry(conn, row['id']))
+    prefix = f'Situation: {summary} '
+    scope = old.get('scope', '')
+    age = re.fullmatch(r'Tried: checking for an active owner and a usable request after ([0-9]{1,8})h stopped\. '
+                       r'Only you can: choose whether to dismiss this work or give its owner new direction\.',
+                       old.get('why_human', ''))
+    if not age or not scope.startswith(prefix) or '\nOptions:\n' not in scope:
+        return False
+    reason = scope[len(prefix):].split('\nOptions:\n', 1)[0]
+    entry = dict(kind='spend_budget_triaged', payload=dict(summary=reason))
+    expected = brief.request(conn, row, entry, int(age[1]) * 3600, old.get('evidence', ''))
+    if old != expected:
+        return False
+    link = re.match(r'Card: @task:([^\s/@]+)@([^\s/]+)/([^\s.]+)\. What it is: ', current.get('scope', ''))
+    if not link or link[1] != offers._board(conn) or link[3] != old['release_target']['task']:
+        return False
+    return any(_decision(current) == _decision(offers.request(conn, row, code, gateway=link[2]))
+               for code in offers._WHY)
+
+
 def reconcile(conn, task, *, for_filing=False):
     """Suppress a repeated offer; clear only an exact home-filed ask on this stop.
 
@@ -142,15 +182,9 @@ def reconcile(conn, task, *, for_filing=False):
         # a matching stamp on an edited column alone has no custody.
         # Only the producer's single stop-reason line may change in scope.
         # Body/summary, cost and options remain decision content, not context.
-        def decision(value):
-            result = {k: v for k, v in value.items() if k != 'evidence'}
-            lines = str(value.get('scope', '')).splitlines()
-            if sum(line.startswith('Why it stopped: ') for line in lines) == 1:
-                result['scope'] = '\n'.join('Why it stopped: ' if line.startswith('Why it stopped: ') else line
-                                            for line in lines)
-            return result
-        exact = ask == projected or (isinstance(ask, dict) and decision(ask) == decision(projected)
-                                     and _filed(conn, task, ask))
+        exact = ask == projected or (isinstance(ask, dict) and _filed(conn, task, ask)
+                                     and (_decision(ask) == _decision(projected)
+                                          or _legacy_migration(conn, dict(row), projected, ask)))
         if exact:
             store_request(conn, task, None)
         record = {k: v for k, v in proof.items() if k != 'projected_ask'}
