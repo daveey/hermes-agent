@@ -1925,8 +1925,7 @@ export function useSessionActions({
                   const latestCachedMessages = sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)?.messages
 
                   const cachedWithoutEarlyClarify =
-                    latestCachedMessages &&
-                    withoutEarlyClarifyProjection(latestCachedMessages, pendingClarify?.requestId)
+                    latestCachedMessages && withoutEarlyClarifyProjection(latestCachedMessages, pendingClarify?.requestId)
 
                   const currentLiveTurn = reconcilePersistedLiveTurn(
                     persistedMessages,
@@ -1958,11 +1957,7 @@ export function useSessionActions({
               // Either branch above can adopt the live row a stamped delta past
               // the snapshot's cut reached during the RPC; that row never held
               // the snapshot's range.
-              activatedMessages = mergeSegmentSnapshotIntoLiveRow(
-                activatedMessages,
-                cachedRuntimeId,
-                activated.inflight
-              )
+              activatedMessages = mergeSegmentSnapshotIntoLiveRow(activatedMessages, cachedRuntimeId, activated.inflight)
 
               const pendingClarifyProjection = pendingClarify
                 ? restorePendingClarifyToolCall(activatedMessages, pendingClarifyToolPayload(pendingClarify))
@@ -2006,10 +2001,7 @@ export function useSessionActions({
                 // Keep the existing array when the content is unchanged —
                 // same guard the cold-resume path uses below.
                 const messages = preserveEquivalentTranscript(state.messages, visibleActivatedMessages)
-
-                const snapshotRowId =
-                  running && !state.streamId ? pendingSnapshotRowId(messages, cachedRuntimeId) : null
-
+                const snapshotRowId = running && !state.streamId ? pendingSnapshotRowId(messages, cachedRuntimeId) : null
                 const streamTarget = snapshotRowId ?? state.streamId
 
                 return {
@@ -2236,12 +2228,7 @@ export function useSessionActions({
             : viewMessagesForReconcile()
 
           // Tail page + previously backfilled prefix (same-session re-resume).
-          prefetchedPage = await graftTranscriptPage(
-            prefetchedResult,
-            previousMessages,
-            storedSessionId,
-            sessionRestScope
-          )
+          prefetchedPage = await graftTranscriptPage(prefetchedResult, previousMessages, storedSessionId, sessionRestScope)
           prefetchedTranscriptMessages = prefetchedPage.transcript
           localSnapshot = prefetchedPage.snapshot
           prefetchApplied = true
