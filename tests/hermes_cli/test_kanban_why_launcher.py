@@ -1,6 +1,7 @@
 """Exercise the rendered installed launcher against real dispatcher evidence."""
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -55,6 +56,21 @@ sys.meta_path.insert(0, Guard())
                           text=True, timeout=30, check=False)
 
 
+def _normalize_ages(text):
+    text = re.sub(r'\d+(?:\.\d+)?s old', '<age>s old', text)
+    return re.sub(r'(?m)(, since )\d+[smhd]$', r'\1<age>', text)
+
+
+@pytest.mark.parametrize('before,after', [('1s', '2s'), ('59s', '1m'), ('59m', '1h'), ('23h', '1d')])
+def test_text_parity_ignores_advancing_clocks_only(before, after):
+    first = f'cpu: reading 15 threshold 8, since {before}\n  source: snapshot 1s old'
+    second = f'cpu: reading 15 threshold 8, since {after}\n  source: snapshot 2s old'
+    assert _normalize_ages(first) == _normalize_ages(second)
+    assert _normalize_ages(first) != _normalize_ages(second.replace('reading 15', 'reading 16'))
+    assert _normalize_ages(first) != _normalize_ages(second.replace('threshold 8', 'threshold 9'))
+    assert _normalize_ages(first) != _normalize_ages(second.replace('snapshot', 'dry_run'))
+
+
 @pytest.mark.parametrize('json_mode', [False, True])
 @pytest.mark.parametrize('guard', [False, True])
 def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch, tmp_path, capsys, json_mode, guard):
@@ -71,14 +87,12 @@ def test_launcher_fresh_snapshot_before_dependency_activation(board, monkeypatch
     assert result.returncode == 0, result.stderr
     if not json_mode:
         from hermes_cli.kanban_governors_cli import _print_why
-        import re
 
         capsys.readouterr()
         _print_why(expected)
         expected_text = capsys.readouterr().out
-        # Snapshot ages advance between the two reads; all formatting stays identical.
-        normalize = lambda text: re.sub(r'\d+(?:\.\d+)?s old', '<age>s old', text)
-        assert normalize(result.stdout) == normalize(expected_text)
+        # Snapshot age and rendered since duration advance independently.
+        assert _normalize_ages(result.stdout) == _normalize_ages(expected_text)
         return
     actual = json.loads(result.stdout)
     for answer in (actual, expected):
