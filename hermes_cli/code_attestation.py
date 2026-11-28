@@ -280,6 +280,19 @@ def _codes(code):
             yield from _codes(value)
 
 
+def _resolves_under(filename, root, parents=None):
+    """``Path(filename).resolve().is_relative_to(root)`` for a ``Path.resolve()``d root, without Paths."""
+    if os.name != "posix" or type(filename) is not str or not isinstance(root, PurePosixPath):
+        return Path(filename).resolve().is_relative_to(root)
+    head, tail = os.path.split(filename)
+    if parents is None or not head or tail in ("", ".", "..") or "\0" in tail:
+        resolved = os.path.realpath(filename)
+    else:  # realpath(parent) once per sweep; the leaf is still lstat()ed and a symlink leaf fully resolved
+        resolved = os.path.join(parents.get(head) or parents.setdefault(head, os.path.realpath(head)), tail)
+        resolved = os.path.realpath(resolved) if os.path.islink(resolved) else resolved
+    return (resolved + "/").startswith(os.path.join(str(root), ""))
+
+
 def _same(actual, expected):
     # CodeType equality includes bytecode, constants, exception/line tables and
     # signature but omits filename; require that recursively as well.
@@ -865,9 +878,10 @@ class Attestation:
                 self.mark_unknown("missing-manifest:" + component)
             self._components[component] = (root, kind, dict(digests or {}))
             self._generation += 1
+            parents = {}
             for name, module in self._module_snapshot():
                 filename = getattr(module, "__file__", None)
-                if filename and Path(filename).resolve().is_relative_to(root):
+                if filename and _resolves_under(filename, root, parents):
                     self.mark_unknown("pre-registration-module:" + name)
 
     def _owner(self, filename):
