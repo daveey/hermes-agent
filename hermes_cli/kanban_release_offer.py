@@ -148,6 +148,32 @@ def _refusal(conn: sqlite3.Connection, task_id: str) -> Optional[OfferRefused]:
     return None
 
 
+def _bind_chats(conn: sqlite3.Connection, task_id: str, chats, gateway: str, now: int) -> None:
+    """An offer recipient shepherds this card, even if an earlier comment subscribed it only to notices.
+
+    Preserve routing metadata, delivery mode and cursor; promote only notice-only provenance. Binding before
+    the filing event also keeps a new subscriber's cursor behind the event it must receive.
+    """
+    from hermes_cli import kanban_db_notify as notify
+    from hermes_cli import kanban_stranded_park as stranded
+    linked = [origin for origin, _ in linked_chats(conn, task_id, own=gateway)]
+    for chat in chats:
+        stranded._subscribe_desk(conn, task_id, chat)
+        origin, local = chat
+        key = (task_id, "tui" if local else "hub",
+               origin.session if local else f"{origin.gateway}/{origin.profile}/{origin.session}")
+        row = conn.execute("SELECT delivery_metadata FROM kanban_notify_subs "
+                           "WHERE task_id=? AND platform=? AND chat_id=? AND thread_id=''", key).fetchone()
+        metadata = notify._decode_notify_delivery_metadata(row[0])
+        if metadata.get("reason") in notify.UNCOUNTED_SUB_REASONS:
+            metadata["reason"] = stranded.SHEPHERD_KIND
+            conn.execute("UPDATE kanban_notify_subs SET delivery_metadata=? "
+                         "WHERE task_id=? AND platform=? AND chat_id=? AND thread_id=''",
+                         (json.dumps(metadata), *key))
+        if origin not in linked:
+            stranded._link_desk(conn, task_id, chat, now)
+
+
 def file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(), gateway: str,
          episode_entry: Optional[dict] = None, sweep: bool = False, now: Optional[int] = None,
          note: Optional[str] = None) -> dict:
@@ -176,6 +202,7 @@ def file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(
             ask = json.loads(row.get("human_request") or "null")
         except (TypeError, ValueError):
             ask = None
+        _bind_chats(conn, task_id, chats, gateway, now)
         outcome = "already_offered"
         if not (is_offer(ask) and kanban_release.offered(conn, task_id, ask) == offer["task"]):
             outcome, kind = "offered", row.get("block_kind")
@@ -189,11 +216,6 @@ def file(conn: sqlite3.Connection, task_id: str, *, code: Optional[str], chats=(
                 "episode_start": entry["created_at"] if entry else int(row.get("created_at") or 0),
                 "reason": stranded._reason(entry), "desk_chat": None, "request": True, "human_only": code,
                 "chats": [f"{o.gateway}/{o.profile}/{o.session}" for o, _ in chats], **stranded._record(filed)})
-        linked = [origin for origin, _ in linked_chats(conn, task_id, own=gateway)]
-        for chat in chats:
-            stranded._subscribe_desk(conn, task_id, chat)
-            if chat[0] not in linked:  # an already-linked chat keeps its own link; no duplicate shepherd row
-                stranded._link_desk(conn, task_id, chat, now)
     return {"outcome": outcome, "task": task_id, "target": offer["task"], "episode": offer["episode"]}
 
 
