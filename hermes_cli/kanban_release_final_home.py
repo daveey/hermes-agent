@@ -35,8 +35,10 @@ def process(conn, hub, row, own, board):
         proof = replica.verified_consumption(conn, home.queue.wire(row)['client_op_id'])
         if proof is None:
             raise ValueError('HOME final application lacks winning private consumption')
-        wire = (final.freeze(conn, proof, delivery_uid=row['delivery_uid'], application_version=2)
-                if v2 else final.freeze(conn, proof, delivery_uid=row['delivery_uid']))
+        from hermes_cli import kanban_release_scope
+        with kanban_release_scope.observe(conn, hub, proof):
+            wire = (final.freeze(conn, proof, delivery_uid=row['delivery_uid'], application_version=2)
+                    if v2 else final.freeze(conn, proof, delivery_uid=row['delivery_uid']))
     # Historical GET of the exact frozen wire needs no present-day capability.
     try:
         value = hub.owner_release_application(board, row['intent_uid'])

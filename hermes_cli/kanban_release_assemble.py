@@ -18,12 +18,8 @@ _BUDGET_OBSERVATION: contextvars.ContextVar[list[int] | None] = contextvars.Cont
 
 
 def _scope(conn, proof):
-    body = proof['intent']
-    evidence = renewal.scope_evidence(conn, body['task_id'], body['episode'])
-    covered = cert.coverage(proof)
-    if not evidence or frozenset(renewal.key(e) for e in evidence) != covered:
-        raise ValueError('HOME current scope evidence differs from winning consumption')
-    return covered
+    from hermes_cli import kanban_release_scope
+    return kanban_release_scope.evidence(conn, proof)
 
 
 def _comments(conn, proof):
