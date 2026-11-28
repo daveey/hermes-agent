@@ -225,3 +225,99 @@ def test_close_all_under_retires_idle_and_borrowed(store, ro_opens):
     assert held[0]._conn is None  # closed at give-back, never pooled
     routes._with_db(None, _messages, read_only=True)
     assert len(ro_opens) == 2
+
+
+def test_close_all_under_closes_idle_handles_now(store, ro_opens):
+    """Gateway shutdown (``hermes_state_registry.close_all``) and profile delete must not leave an idle lent
+    descriptor open until some later borrow happens to discard it."""
+    path, _writer = store
+    routes._with_db(None, _messages, read_only=True)
+    idle_db = kept._idle[kept._key(path)][0].db
+    assert idle_db._conn is not None
+    kept.close_all_under(Path(path).parent)
+    assert idle_db._conn is None
+    assert kept._key(path) not in kept._idle
+
+
+def test_idle_pool_is_capped_per_path(store, ro_opens):
+    """A burst of concurrent borrowers must not leave one idle descriptor per borrower behind."""
+    path, _writer = store
+    borrowers = kept._LEND_IDLE_PER_PATH + 1
+    gate = threading.Barrier(borrowers, timeout=10)
+    held: list = []
+
+    def hold(db):
+        held.append(db)
+        gate.wait()  # every borrower holds its own handle at once
+        return _messages(db)
+
+    threads = [threading.Thread(target=routes._with_db, args=(None, hold), kwargs={"read_only": True})
+               for _ in range(borrowers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(ro_opens) == borrowers
+    assert len({id(db) for db in held}) == borrowers
+    assert len(kept._idle[kept._key(path)]) == kept._LEND_IDLE_PER_PATH
+    assert sum(db._conn is None for db in held) == borrowers - kept._LEND_IDLE_PER_PATH
+
+
+def test_retired_profile_handle_is_never_lent_again(profile_home, monkeypatch):
+    """Between the delete mark and the retirement monitor's next pass, a borrow must not get the idle handle
+    of the deleted profile. The monitor is held off so only ``_lendable``'s lease check can refuse it."""
+    import hermes_profile_resources
+    from hermes_constants import mark_named_profile_deleted
+
+    monkeypatch.setattr(hermes_profile_resources, "_start_retirement", lambda lease: None)
+    path = profile_home / "state.db"
+    with SessionDB(path) as writer:
+        writer.create_session("s1", source="cli")
+    first: list = []
+    with kept.lend(path, lambda: SessionDB(path, read_only=True)) as db:
+        first.append(db)
+    assert kept._idle.get(kept._key(path)), "the handle went back idle"
+    mark_named_profile_deleted(profile_home)
+    assert first[0]._conn is not None, "monitor held off: the idle handle is still open"
+    opened: list = []
+
+    def opener():
+        opened.append(True)
+        raise FileNotFoundError("profile deleted")
+
+    with pytest.raises(FileNotFoundError):
+        with kept.lend(path, opener) as db:
+            pytest.fail(f"lent a retired profile's handle: {db!r}")
+    assert opened == [True]
+    assert first[0]._conn is None  # discarded on the take, not handed out
+    assert kept._key(path) not in kept._idle
+
+
+def test_store_replaced_during_open_is_served_but_never_pooled(tmp_path):
+    """The handle opened against a file that replaced the store mid-open; even if the original file comes back
+    (same inode, same sidecars) before the give-back, that handle reads the other file and must not be lent."""
+    path = tmp_path / "state.db"
+    aside = tmp_path / "aside.db"
+    other = tmp_path / "other.db"
+    with SessionDB(path) as a:
+        a.create_session("s1", source="cli")
+        a.append_message("s1", role="user", content="original")
+    with SessionDB(other) as b:
+        b.create_session("s1", source="cli")
+        b.append_message("s1", role="user", content="replacement")
+
+    def swapping_opener():
+        os.replace(path, aside)
+        os.replace(other, path)
+        return SessionDB(path, read_only=True)
+
+    try:
+        with kept.lend(path, swapping_opener) as db:
+            assert _messages(db) == ["replacement"]
+            os.replace(path, other)
+            os.replace(aside, path)  # the original inode is back at the path
+            held = db
+        assert held._conn is None
+        assert kept._key(path) not in kept._idle
+    finally:
+        kept.close_all_under(None)

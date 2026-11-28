@@ -247,6 +247,8 @@ def _take_idle(path: Path) -> Optional[_Lent]:
             lent = pool.pop()
             if not pool:
                 del _idle[path]
+            # Belt-and-braces: ``close_all_under`` empties the idle pool under ``_lock`` when it bumps the epoch and
+            # ``_put_back`` re-checks the epoch under the same lock, so a stale idle handle cannot be found here today.
             current = lent.epoch == _lend_epoch.get(path, 0)
         if current and _lendable(lent):
             lend_stats["reuses"] += 1
