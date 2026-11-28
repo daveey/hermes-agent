@@ -720,6 +720,12 @@ _SPECS = [
             "renewal, a spend budget of spent + N runs and the promotion (a card with an open parent waits in "
             "todo). For a human operator, the card's owning chat or a delegate chat; worker shells are fenced. "
             "Safety and containment holds are refused"),
+    _cmd("offer-release", [
+        _TASK_ID,
+        _arg("--for-chat", default=None, help="The requesting chat session (bare id on this gateway, or a session ref)"),
+        _json_flag(),
+    ], help="File the stamped Release / Don't ask for the card's pending stop on its home and show it in its "
+            "linked chats; releases nothing (only a person's answer does). Refused under a safety or containment hold"),
     _cmd("spend-stop-watch", [], help="File once for each spend stop older than 30 minutes with no review or route"),
     _cmd("spend-budget", [
         _TASK_ID,

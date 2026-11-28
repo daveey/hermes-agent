@@ -12,7 +12,9 @@ an optional binding to the triage desk chat (``kanban.triage_owner_chat``) and a
 
 The park episode starts at the newest park-entry event (``PARK_ENTRY_EVENTS``), never at the newest event of any
 kind: a comment does not reset the clock. A live owner is an unreleased chat link whose chat is live
-(``chat_live``) or an open spend-decision supervisor card for the card's current spend episode.
+(``chat_live``) or an open spend-decision supervisor card for the card's current spend episode. A live chat that
+cannot release a human-only stop (``kanban_release_offer.human_only``: the Board's reviewer allowance refuses every
+agent release) owns nothing it can act on: that card gets the stamped Release / Don't offer at once instead.
 """
 from __future__ import annotations
 
@@ -506,6 +508,29 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
 REFILED = "stranded_park_refiled"  # kanban_release.REFILED: not the escalation kind, so no second desk notice
 
 
+def _may_offer(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Local reads only: a young park is looked at early only when it may be a human-only release."""
+    from hermes_cli.kanban_release_offer import candidate
+    return candidate(conn, task_id)
+
+
+def _offer_human_only(conn: sqlite3.Connection, task_id: str, entry: Optional[dict], *, own: str, desk,
+                      now: int) -> bool:
+    """File the stamped Release / Don't ask at once when only a person can release the card (``kanban_release_offer``),
+    bound to every chat linked to it and the desk chat; once per park episode. Never releases."""
+    from hermes_cli import kanban_release_offer as offers
+    code = offers.human_only(conn, task_id)  # one Board read, outside any transaction
+    if code is None:
+        return False
+    chats = offers.linked_chats(conn, task_id, own=own) + ([desk] if desk is not None else [])
+    try:
+        out = offers.file(conn, task_id, code=code, chats=chats, gateway=own, episode_entry=entry, sweep=True, now=now)
+    except offers.OfferRefused as exc:
+        logger.info("kanban: no human-only release offer on %s (%s)", task_id, exc.code)
+        return False
+    return out["outcome"] == "offered"
+
+
 def _dead_offer(conn: sqlite3.Connection, row: dict) -> bool:
     from hermes_cli import kanban_release
     try:
@@ -708,12 +733,23 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                     logger.warning("kanban: stranded-park re-file failed for %s", tid, exc_info=True)
                 continue
             try:
-                if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
+                young = age < park_s
+                if young and not _may_offer(conn, tid):
+                    continue
+                if (_shared_blocker(entry) or _escalated(conn, tid, entry)
                         or _excluded(conn, _gated(conn, row), now, age=age, defer=defer_s)):
                     continue
                 human_only = None
-                if live_owner(conn, tid, own=own, liveness=liveness):
-                    human_only = human_only_stop(conn, tid)
+                owner = None if young else live_owner(conn, tid, own=own, liveness=liveness)
+                if young or owner:
+                    # A live chat (or none yet) that cannot release a human-only stop owns nothing it can act on.
+                    if not str(owner or "").startswith("supervisor ") and _offer_human_only(
+                            conn, tid, entry, own=own, desk=desk, now=now):
+                        escalated.append(tid)
+                        continue
+                    if young:
+                        continue
+                    human_only = human_only_stop(conn, tid)  # e.g. a cache-read limit no agent may raise
                     if not human_only:
                         continue
                 if _escalate(conn, row, entry, now=now, age=age, defer=defer_s, desk=desk,

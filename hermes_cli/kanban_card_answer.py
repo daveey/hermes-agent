@@ -122,7 +122,8 @@ def _receipt(conn, request, fingerprint):
     task, operation_id = request["task"], request["operationId"]
     for row in conn.execute(
         "SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN "
-        "('unblocked','archived','card_answer_recorded','card_answer_released') ORDER BY id DESC",
+        "('unblocked','archived','card_answer_recorded','card_answer_released','card_answer_declined') "
+        "ORDER BY id DESC",
         (task,),
     ):
         payload = _payload(row[1])
@@ -138,6 +139,7 @@ def _receipt(conn, request, fingerprint):
 
 
 RELEASED = "card_answer_released"  # receipt of a default Unblock that released a spend/scope stop
+DECLINED = "card_answer_declined"  # receipt of Don't on a human-only release offer: nothing changed
 
 
 def _record_release(conn, request, fingerprint, receipt, note, provenance):
@@ -181,6 +183,45 @@ def _release(conn, request, fingerprint, receipt, note, provenance, fence, ask):
             kb.add_comment(conn, task, "user-steps", reason, system=True)
         raise AnswerRefused(f"release_refused: {out['refusal']}")
     return _record_release(conn, request, fingerprint, receipt, note, provenance)
+
+
+def _offers(conn, request, fingerprint, receipt, note, origin, fence, ask, plain):
+    """``(exception, receipt)`` for an answer that may act on a home-filed offer: the default Unblock
+    (:func:`_default_unblock`) or Release / Don't on a human-only offer (:func:`_human_offer`). ``plain``: an
+    archive or an informational comment, which never does."""
+    if plain:
+        return None, None
+    if not ask.get("choices") and request["choice"] == "unblock":
+        return _default_unblock(conn, request, fingerprint, receipt, note, origin, fence, ask)
+    return None, _human_offer(conn, request, fingerprint, receipt, note, origin, fence, ask)
+
+
+def _human_offer(conn, request, fingerprint, receipt, note, origin, fence, ask):
+    """Release / Don't on this home's own human-only offer (``kanban_release_offer``), else None.
+
+    Release is :func:`_release`: the recorded human answer releases the stopped card as that person's act, exactly
+    as the default Unblock on a stamped ask does. Don't records the answer and leaves the card and its ask as they
+    are. Both need the live, home-filed stamp (``kanban_release.offered``, whose digest covers the choices): an ask
+    whose stamp went stale after a new stop, or text the home did not file, falls through to the plain transition."""
+    from hermes_cli import kanban_release
+    from hermes_cli import kanban_release_offer as offers
+    if request["choice"] not in (offers.RELEASE, offers.DONT) or not offers.is_offer(ask):
+        return None
+    if kanban_release.offered(conn, request["task"], ask) is None:
+        return None
+    provenance = {**request, "originGateway": origin}
+    if request["choice"] == offers.RELEASE:
+        return _release(conn, request, fingerprint, receipt, note, provenance, fence, ask)
+    with kb.write_txn(conn):
+        old = _receipt(conn, request, fingerprint)
+        if old is not None:
+            return old
+        error = fence(conn)
+        if error:
+            raise AnswerRefused(error)
+        kb.add_comment(conn, request["task"], "user-steps", note, writer_kind="agent", recorded_decision=provenance)
+        kb._append_event(conn, request["task"], DECLINED, {FIELD: receipt})
+    return _receipt(conn, request, fingerprint)
 
 
 def _default_unblock(conn, request, fingerprint, receipt, note, origin, fence, ask):
@@ -253,13 +294,14 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
         # A release by this very operation that died before its receipt: the card left its ask because the
         # click worked. Record the receipt now instead of refusing the retry.
         from hermes_cli import kanban_release
-        if request.get("mode") != "comment" and request["choice"] == "unblock" and kanban_release.released_by(
+        label = {"unblock": "Unblock", "release": "Release"}.get(request["choice"])
+        if request.get("mode") != "comment" and label and kanban_release.released_by(
                 conn, request["task"], kanban_release.desktop_note(request["operationId"])):
             return _record_release(
                 conn, request, fingerprint,
                 {**request, "originGateway": origin, "fingerprint": fingerprint, "destination": "kanban_ask",
                  "executionStarted": False, "decisionProvenance": "recorded_desktop_operation"},
-                "Choice recorded in Desktop (remote): " + encoded({"label": "Unblock", "value": "unblock"})
+                "Choice recorded in Desktop (remote): " + encoded({"label": label, "value": request["choice"]})
                 + "\nOperation: " + request["operationId"], {**request, "originGateway": origin})
         raise AnswerRefused("stale_ask")
     options = current["ask"].get("choices") or [
@@ -291,12 +333,11 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
         return None if sx.same_offer(c, fresh, current, exception) else "stale_ask"
 
     from hermes_cli import kanban_selfwork_exception as sx
-    exception = None
-    if not archive and not informational and not current["ask"].get("choices") and request["choice"] == "unblock":
-        exception, released = _default_unblock(conn, request, fingerprint, receipt, note, origin,
-                                               lambda c: fence(c, releasing=True), current["ask"])
-        if released is not None:
-            return released
+    exception = None  # read by fence() while _offers runs
+    exception, released = _offers(conn, request, fingerprint, receipt, note, origin,
+                                  lambda c: fence(c, releasing=True), current["ask"], archive or informational)
+    if released is not None:
+        return released
 
     transition = kb.archive_task if archive else kb.unblock_task
     from hermes_cli.kanban_reason_comment import RecordedDecisionComment

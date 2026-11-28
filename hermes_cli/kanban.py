@@ -274,7 +274,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",
     "gc", "origin-bind", "origin-forward", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget", "lanes",
-    "record-actionability", "release",
+    "record-actionability", "release", "offer-release",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
@@ -1836,6 +1836,7 @@ _HANDLERS = {
     "human-chats": lambda a: importlib.import_module("hermes_cli.kanban_human_chat").command(a),
     "delegate": lambda a: importlib.import_module("hermes_cli.kanban_scope_delegate").command(a),
     "release": lambda a: importlib.import_module("hermes_cli.kanban_release").command(a),
+    "offer-release": lambda a: importlib.import_module("hermes_cli.kanban_release_offer").command(a),
     "spend-stop-watch": lambda a: importlib.import_module("hermes_cli.kanban_spend_stop_watch").command(a),
     "governors": lambda a: importlib.import_module("hermes_cli.kanban_governors_cli").governors_command(a),
     "why": lambda a: importlib.import_module("hermes_cli.kanban_governors_cli").why_command(a),

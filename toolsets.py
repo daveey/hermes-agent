@@ -29,6 +29,7 @@ _HERMES_CORE_TOOLS = [
     "kanban_complete", "kanban_block", "kanban_request_review",
     "kanban_contain", "kanban_resume_contained", "kanban_retain", "kanban_protect_stopped",
     "kanban_stop_ended",  # owning interactive chat only: live turn token, refused everywhere else [daveey]
+    "kanban_offer_release",  # chats only: files a stamped Release ask; releases nothing [daveey]
     "kanban_request_changes",
     "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link", "kanban_unlink",

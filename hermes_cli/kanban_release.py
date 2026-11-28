@@ -640,11 +640,12 @@ def _board_allowance(conn: sqlite3.Connection, s) -> None:
         s.supersede = True
         return
     route = f"a human operator runs `hermes kanban release {s.tid}`"
-    if allowance.state(conn, s.tid) != allowance.BOARD:
-        raise _Refusal("allowance_in_force", f"the Board still holds {s.tid}'s reviewer allowance and a newer "
+    code = agent_allowance_refusal(conn, s.tid, seen)
+    if code == "allowance_in_force":
+        raise _Refusal(code, f"the Board still holds {s.tid}'s reviewer allowance and a newer "
                        f"budget does not replace it; {route}")
-    if seen.get("remaining") == 0:
-        raise _Refusal("allowance_exhausted", f"{s.tid}'s ten fresh-lease reviewer allowance is exhausted and an "
+    if code == "allowance_exhausted":
+        raise _Refusal(code, f"{s.tid}'s ten fresh-lease reviewer allowance is exhausted and an "
                        f"agent release does not replace it; {route}")
     s.keep_allowance = True
 
@@ -669,6 +670,18 @@ def agent_cache_limit_in_force(conn: sqlite3.Connection, task_id: str) -> bool:
     current window and is one an agent may not raise (a person may have set it). Only a human release lifts it."""
     _, _, keeps, _, _, _, reached = _cache_limit(conn, task_id, agent=True)
     return bool(keeps and reached)
+
+
+def agent_allowance_refusal(conn: sqlite3.Connection, tid: str, seen: Any) -> Optional[str]:
+    """``allowance_in_force`` / ``allowance_exhausted`` when an agent release of ``tid`` is refused because of the
+    Board's active allowance ``seen`` (``kanban_allowance_observation.board_state``), else None: only a person can
+    then release it (``kanban_release_offer`` offers that). Unknown, absent or invalidated allowances are None."""
+    from hermes_cli import kanban_spend_allowance as allowance
+    if not isinstance(seen, dict) or seen.get("state") != "active":
+        return None
+    if allowance.state(conn, tid) != allowance.BOARD:
+        return "allowance_in_force"
+    return "allowance_exhausted" if seen.get("remaining") == 0 else None
 
 
 def _budget_plan(conn: sqlite3.Connection, s) -> tuple[Optional[int], Optional[int], int, str]:

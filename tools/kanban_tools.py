@@ -1955,7 +1955,7 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
 
 # kanban_list routes the board and is hidden from task workers. kanban_unblock's
 # gate lives in kanban_tools_self_heal (orchestrators, plus a self-heal requeue grant).
-_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_stop_ended"})  # stop_ended: owning chat only [daveey]
+_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_stop_ended", "kanban_offer_release"})  # chats only [daveey]
 from tools import kanban_tools_graph as _graph
 _handle_link = _kanban_handler("kanban_link")(_graph.handle_link)
 _handle_unlink = _kanban_handler("kanban_unlink")(_graph.handle_unlink)
