@@ -74,6 +74,11 @@ class InventoryDiagnostics:
         if self.enabled:
             try:
                 preparation = getattr(self, 'preparation_total', (0, 0))
+                if hasattr(self, 'preparation_total') and not getattr(self, 'classifying', False):
+                    # Preparation finished, but classification never began.
+                    # Reacquire/settlement time is not inventory scan time.
+                    self.total = preparation
+                    return
                 self.total = (monotonic_ns() - self.begin[0] + preparation[0],
                               thread_time_ns() - self.begin[1] + preparation[1])
             except Exception:  # health: allow BLE001 -- optional clocks cannot replace inventory failure
@@ -105,6 +110,7 @@ def inventory_modules(ledger, *, deadline=None, diagnostics=None, prepared=None)
 
     if diagnostics is not None:
         diagnostics.scanned = True
+        diagnostics.classifying = True
         diagnostics.count = 0
         if diagnostics.enabled:
             try:
@@ -163,15 +169,15 @@ class InventoryObservation:
         self.prepared = None
 
     def __enter__(self):
-        if self.prepare:
-            try:
+        try:
+            if self.prepare:
                 self._prepare()
-            except BaseException:
-                if self.diagnostics is not None and getattr(self.diagnostics, 'scanned', False):
-                    self.diagnostics.stop(False)
-                    self.diagnostics.finish()
-                raise
-        self._acquire()
+            self._acquire()
+        except BaseException:
+            if self.diagnostics is not None and getattr(self.diagnostics, 'scanned', False):
+                self.diagnostics.stop(False)
+                self.diagnostics.finish()
+            raise
         return self.diagnostics
 
     def _acquire(self):
@@ -233,4 +239,6 @@ class InventoryObservation:
     def __exit__(self, _kind, _value, _traceback):
         self.lock.release()
         if self.diagnostics is not None and getattr(self.diagnostics, 'scanned', False):
+            if _kind is not None and not hasattr(self.diagnostics, 'total'):
+                self.diagnostics.stop(False)
             self.diagnostics.finish()
