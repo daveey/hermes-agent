@@ -5,6 +5,7 @@ file-serving helpers shared with the local-skill path. Helpers tests patch on th
 import json
 import os
 import logging
+import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List
@@ -122,6 +123,57 @@ def _available_skill_files(skill_dir: Path) -> dict[str, list[str]]:
     return {k: groups[k] for k in (*_SUPPORT_DIRS, "other") if k in groups}
 
 
+def _inline_reference(skill_root: Path, file_path: str, label: str, mark_read: bool) -> str | None:
+    """Recover a section citation mistaken for a reference path; never guess a file.
+
+    Only exact heading/leading-bold slugs (optionally qualified with ``for ...``)
+    qualify. Serve the whole source so surrounding rules are not silently omitted.
+    """
+    from tools.path_security import validate_within_dir
+
+    requested = re.fullmatch(r"references/([a-z0-9]+(?:-[a-z0-9]+)+)\.md", file_path)
+    source = skill_root / "SKILL.md"
+    if not requested or validate_within_dir(source, skill_root) or not source.is_file():
+        return None
+    try:
+        content = _read_skill_text(source)
+    except OSError:
+        return None
+    slug = requested[1]
+    matches = []
+    fence = ""
+    frontmatter = content.startswith("---\n")
+    for index, line in enumerate(content.splitlines()):
+        if frontmatter:
+            if index and line.strip() == "---":
+                frontmatter = False
+            continue
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + r"{" + str(len(fence)) + r",}\s*", line):
+                fence = ""
+            continue
+        if marker:
+            fence = marker[1]
+            continue
+        heading = re.match(r"^ {0,3}#{1,6}\s+(.+?)(?:\s+#+)?\s*$", line)
+        bold = re.match(r"^\*\*([^*]+)\*\*(?:[.:]|\s*$)", line)
+        if not (section := heading or bold):
+            continue
+        title = section[1].strip()
+        title_slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        if title_slug == slug or title_slug.startswith(slug + "-for-"):
+            matches.append(title)
+    if len(matches) != 1:
+        return None
+    if mark_read:
+        _mark_background_review_read(source)
+    return _json({
+        "success": True, "name": label, "file": "SKILL.md", "file_type": ".md",
+        "requested_file": file_path, "inline_section": matches[0], "content": content,
+        "hint": "The requested file does not exist; this section is inline in SKILL.md. Full source returned."})
+
+
 def _serve_skill_file(
     skill_root: Path, file_path: str, label: str, *, hint: str | None = None,
     list_available: bool = False, read_error_prefix: bool = False, mark_read: bool = False) -> str:
@@ -138,6 +190,8 @@ def _serve_skill_file(
         return _fail(path_error, **extra)
     # is_file(), not exists(): a bare directory must take the not-found branch.
     if not target.is_file():
+        if not target.exists() and (recovered := _inline_reference(skill_root, file_path, label, mark_read)):
+            return recovered
         listing = {} if not list_available else {
             "available_files": _available_skill_files(skill_root),
             "hint": "Use one of the available file paths listed above"}
