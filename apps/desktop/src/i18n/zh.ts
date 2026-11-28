@@ -4290,6 +4290,7 @@ export const zhOverrides = {
     thread: {
       loadingSession: '正在加载会话',
       showEarlier: '显示更早的消息',
+      modelThinking: '模型正在思考 — 尚未收到推理内容',
       loadingResponse: 'Hermes 正在加载回复',
       loadingLocalModel: model => `正在将 ${model} 载入内存`,
       processingPrompt: '正在处理提示词',

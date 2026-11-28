@@ -4513,6 +4513,7 @@ export const en: Translations = {
     thread: {
       loadingSession: 'Loading session',
       showEarlier: 'Show earlier messages',
+      modelThinking: 'Model thinking — no reasoning streamed yet',
       loadingResponse: 'Hermes is loading a response',
       loadingLocalModel: model => `Loading ${model} into memory`,
       processingPrompt: 'Processing prompt',

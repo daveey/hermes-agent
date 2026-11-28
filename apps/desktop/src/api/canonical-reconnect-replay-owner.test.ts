@@ -21,7 +21,9 @@ test.each(['native', 'public'] as const)('%s canonical reconnect replays the ret
   const ring = [
     frame(1, 'message.delta', { text: 'before ' }), frame(2, 'tool.start', { tool_id: 't0', name: 'read_file' }),
     frame(3, 'message.delta', { text: 'during ' }), frame(4, 'tool.start', { tool_id: 't1', name: 'read_file' }),
-    frame(5, 'tool.complete', { tool_id: 't1', name: 'read_file' }), frame(6, 'message.delta', { text: 'after' })
+    frame(5, 'tool.complete', { tool_id: 't1', name: 'read_file' }),
+    frame(6, 'tool.start', { tool_id: 't2', name: 'terminal' }),
+    frame(7, 'tool.complete', { tool_id: 't2', name: 'terminal', result: 'done' })
   ]
 
   const calls: any[] = []
@@ -39,6 +41,13 @@ test.each(['native', 'public'] as const)('%s canonical reconnect replays the ret
       const request = JSON.parse(bytes.toString())
       calls.push(request)
       const { method, params } = request
+
+      if (method === 'session.resume') {
+        peer.subscribed = true
+
+        // Produced after the replay answer, caught up under the attach lock.
+        if (peers.length > 1) { push(peer, ring[5]) }
+      }
 
       // The owner only answers its own profile; an unrouted replay is a different session.
       const result = method === 'session.events.since'
@@ -70,14 +79,18 @@ test.each(['native', 'public'] as const)('%s canonical reconnect replays the ret
     await closed
 
     await client.connect(url)
-    await vi.waitFor(() => expect(seen.map(event => event.seq)).toEqual([1, 2, 3, 4, 5]))
-    push(peers[1], ring[5])
     await vi.waitFor(() => expect(seen.map(event => event.seq)).toEqual([1, 2, 3, 4, 5, 6]))
+    expect(peers[1].subscribed).toBe(true)
+
+    if (peers[1].subscribed) { push(peers[1], ring[6]) }
+    await vi.waitFor(() => expect(seen.map(event => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]))
 
     const replays = calls.filter(call => call.method === 'session.events.since')
     expect(replays).toHaveLength(1)
     expect(replays[0].params).toMatchObject({ session_id: sid, profile: 'alpha', last_seen: 2, replay_epoch: epoch })
-    expect(seen.filter(event => event.type === 'tool.complete')).toHaveLength(1)
+    expect(seen.filter(event => event.type === 'tool.complete')).toHaveLength(2)
+    expect(calls.filter(call => call.method === 'session.resume')).toHaveLength(2)
+    expect(calls.filter(call => call.method === 'session.resume')[1].params).toMatchObject({ session_id: sid, profile: 'alpha', omit_messages: true })
     expect(new Set(seen.map(event => event.profile))).toEqual(new Set(['alpha']))
   } finally {
     client.close()

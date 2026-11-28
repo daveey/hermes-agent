@@ -76,6 +76,7 @@ import {
   replyAfterLastTool
 } from './committed-reply'
 import { appendCurrentSegment, projectionCorrections } from './current-segment'
+import { retainLiveTurnTools } from './live-turn-tools'
 import { chatMessageArraysEquivalent, chatMessagesEquivalent } from './message-equivalence'
 import {
   isLiveTailRow,
@@ -675,9 +676,8 @@ export function preserveLocalPendingTurnMessages(
 
     crossedUserBoundary ||= message.role === 'user' || message.role === 'system'
 
-    // A second segment of the acknowledged turn can still be folded into its
-    // final row. A new prompt closes that ownership; identical later replies
-    // must not be consumed by the already-acknowledged prefix.
+    // A new prompt closes the acknowledged turn's fold ownership; identical
+    // later replies must not be consumed by its already-acknowledged prefix.
     const candidates = (crossedUserBoundary ? remainingNext : acknowledgedTurn).filter(
       candidate => !conflictingTranscriptIdentity(message, candidate)
     )
@@ -899,10 +899,10 @@ export function preserveLocalPendingTurnMessages(
   const withReplacements =
     replacements.size > 0 ? nextMessages.map(message => replacements.get(message.id) ?? message) : nextMessages
 
-  // #120978: a kept run whose rowIds predate the whole hydrated page belongs
-  // earlier — splice it in front of the first newer row instead of appending it
-  // below the newest turn (non-qualifying runs keep the trailing behavior).
-  return preserved.length ? spliceOlderPreservedRows(withReplacements, preserved) : withReplacements
+  return retainLiveTurnTools(
+    preserved.length ? spliceOlderPreservedRows(withReplacements, preserved) : withReplacements,
+    previousMessages
+  )
 }
 
 /**

@@ -3357,6 +3357,7 @@ export const jaOverrides = {
     thread: {
       loadingSession: 'セッションを読み込み中',
       showEarlier: '以前のメッセージを表示',
+      modelThinking: 'モデルが思考中 — 推論はまだ配信されていません',
       loadingResponse: 'Hermes が応答を読み込み中',
       resumeWhenBackgroundDone: count =>
         count === 1

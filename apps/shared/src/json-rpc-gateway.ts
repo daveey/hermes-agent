@@ -682,10 +682,17 @@ export class JsonRpcGatewayClient {
       }
     } finally {
       if (this.replayGeneration === replayGeneration) {
-        this.flushReplayHold(sid, replayGeneration)
+        try {
+          await this.restoreReplaySubscription(sid, this.replayEpochBySession.get(sid))
+        } finally {
+          if (this.replayGeneration === replayGeneration) { this.flushReplayHold(sid, replayGeneration) }
+        }
       }
     }
   }
+
+  /** Canonical viewers must reattach the new transport after replaying its cursor. */
+  protected async restoreReplaySubscription(_sid: string, _epoch?: string): Promise<void> {}
 
   /** Adopt the replay answer's epoch identity; true when the window must not be dispatched. */
   private applyReplayEpochs(

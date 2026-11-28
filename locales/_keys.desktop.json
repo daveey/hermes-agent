@@ -362,6 +362,7 @@
     "assistant.thread.loadingLocalModel",
     "assistant.thread.loadingResponse",
     "assistant.thread.loadingSession",
+    "assistant.thread.modelThinking",
     "assistant.thread.moreActions",
     "assistant.thread.preparingAudio",
     "assistant.thread.processingPrompt",

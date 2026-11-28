@@ -4947,6 +4947,7 @@ export const frOverrides = {
     thread: {
       loadingSession: 'Chargement de la session',
       showEarlier: 'Afficher les messages précédents',
+      modelThinking: 'Le modèle réfléchit — aucun raisonnement reçu pour le moment',
       loadingResponse: 'Hermes charge une réponse',
       loadingLocalModel: model => `Chargement de ${model} en mémoire`,
       processingPrompt: "Traitement de l'invite",

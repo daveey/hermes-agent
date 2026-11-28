@@ -357,6 +357,18 @@ export class HermesGateway extends JsonRpcGatewayClient {
     }
   }
 
+  protected override async restoreReplaySubscription(sid: string, epoch?: string): Promise<void> {
+    const owner = epoch ? this.replayProfiles.get(epoch) : undefined
+
+    if (!this.canonical || !owner || owner.sessionId !== sid || this.attached.has(canonicalSessionKey(sid, owner.profile))) { return }
+
+    try {
+      await this.request('session.resume', { session_id: sid, profile: owner.profile, defer_history: true, omit_messages: true }, 10_000)
+    } catch (error) {
+      console.warn('Reconnect subscription restore failed', error)
+    }
+  }
+
   override async connect(wsUrl: string): Promise<void> {
     if (this.connectionState === 'open' || this.connectionState === 'connecting') { return this.readiness.promise }
     const generation = ++this.connectionGeneration

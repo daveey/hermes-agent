@@ -3953,6 +3953,7 @@ export interface Translations extends NoticeTranslations {
     thread: {
       loadingSession: string
       showEarlier: string
+      modelThinking: string
       loadingResponse: string
       loadingLocalModel: (model: string) => string
       processingPrompt: string

@@ -4920,6 +4920,7 @@ export const esOverrides = {
     thread: {
       loadingSession: 'Cargando sesión',
       showEarlier: 'Mostrar mensajes anteriores',
+      modelThinking: 'El modelo está pensando — aún no se ha recibido razonamiento',
       loadingResponse: 'Hermes está cargando una respuesta',
       loadingLocalModel: (model: string) => `Cargando ${model} en memoria`,
       processingPrompt: 'Procesando el prompt',

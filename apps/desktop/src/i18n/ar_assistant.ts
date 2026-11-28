@@ -35,6 +35,7 @@ export const arAssistant = {
     thread: {
       loadingSession: 'جار تحميل الجلسة...',
       showEarlier: 'عرض الرسائل الأقدم',
+      modelThinking: 'النموذج يفكر — لم يتم بث أي استدلال بعد',
       loadingResponse: 'جار تحميل الرد...',
       resumeWhenBackgroundDone: count =>
         count === 1 ? 'سيُستأنف عند انتهاء المهمة الخلفية' : `سيُستأنف عند انتهاء ${count} مهام خلفية`,
