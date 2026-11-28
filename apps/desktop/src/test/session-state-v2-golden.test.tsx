@@ -1,14 +1,17 @@
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+
 import { produceSessionStateV2 } from './session-state-v2-producer'
 
 // Substitute transport/runtime inputs, never the status classifier or consumer under test.
 vi.mock('@/store/session', async () => {
   const { atom } = await import('nanostores')
   const sessions = atom<any[]>([])
+
   return { $sessions: sessions, $messagingSessions: atom([]), $cronSessions: atom([]),
     $unlistedSessionOwnerRows: atom([]), $unreadFinishedSessionIds: atom([]), $activeSessionId: atom('fixture-chat'),
     lineageAliases: (id: string) => [id], sessionMatchesStoredId: (row: any, id: string) => row.id === id,
@@ -16,12 +19,15 @@ vi.mock('@/store/session', async () => {
 })
 vi.mock('@/store/session-states', async () => {
   const { atom } = await import('nanostores')
+
   return { $sessionStates: atom({}), $sessionTiles: atom([]), $attentionSessionIds: atom([]),
     $draftSessionIds: atom([]), $stalledSessionIds: atom([]), $workingSessionIds: atom([]),
     holdsTurnClaim: () => false, knownOwnerForSession: () => undefined, runtimeSessionOwner: () => undefined,
     storedSessionIdForRuntimeId: (id: string) => id }
 })
-vi.mock('@/store/composer-status', async () => { const { atom } = await import('nanostores'); return {
+vi.mock('@/store/composer-status', async () => { const { atom } = await import('nanostores');
+
+ return {
   $backgroundRunningSessionIds: atom([]), $backgroundStatusBySession: atom({}) } })
 vi.mock('@/store/subagents', async () => ({ $subagentsBySession: (await import('nanostores')).atom({}) }))
 vi.mock('@/store/project-tree', async () => ({ $projectTree: (await import('nanostores')).atom([]) }))
@@ -45,29 +51,35 @@ vi.mock('@/plugins/kanban/comment-route', () => ({ commentOnOwner: vi.fn() }))
 const view = vi.hoisted(() => ({ tasks: [] as any[], rows: [] as any[], queries: [] as any[] }))
 vi.mock('@hermes/plugin-sdk', async () => {
   const { atom } = await import('nanostores')
+
   return { atom, host: { activeConnectionId: () => 'local', state: { connectionId: atom('local'), gateways: atom([{ id: 'local', kind: 'local' }]) }, navigate: vi.fn(), openSession: vi.fn() },
     captureGatewayFileDownload: vi.fn(), hubGatewayForConnection: () => null, hubGatewayTasks: vi.fn(), hubRequest: vi.fn(), learnHubGatewayName: vi.fn(),
     queryClient: new (await import('@tanstack/react-query')).QueryClient(), useValue: (store: any) => store.get(),
-    useQuery: (query: any) => { view.queries.push(query); return { data: view.tasks } },
+    useQuery: (query: any) => { view.queries.push(query);
+
+ return { data: view.tasks } },
     SidebarSection: ({ children, count }: any) => createElement('section', { 'data-count': count }, children),
-    SidebarSectionRow: (props: any) => { view.rows.push(props); return createElement('div', { 'data-icon': props.icon }, props.label) } }
+    SidebarSectionRow: (props: any) => { view.rows.push(props);
+
+ return createElement('div', { 'data-icon': props.icon }, props.label) } }
 })
 vi.mock('@/plugins/kanban/ui', () => ({ ago: () => null, useKanban: () => ({ sidebar: {
   blocked: 'Blocked', noSession: 'No managing session', untitledSession: 'Untitled session', openSession: (s: string) => s, blockedTip: (s: string) => s } }) }))
 
-import { $sessions } from '@/store/session'
-import { $sessionDotStateById, sessionStatusStripe } from '@/store/session-dot-state'
 import { SessionTabAccent } from '@/app/chat/session-tab-accent'
-import { dispatchNativeNotification } from '@/store/native-notifications'
-import { __resetNativeNotifyBaselineForTests } from '@/store/notify-baseline'
-import { $tabFlashText, flagTabAttention } from '@/store/browser-tab-attention'
-import { installBrowserTabTitle } from '@/store/browser-tab-title'
 import { bindApi, fetchBlockedTasks, resetGatewayCooldowns } from '@/plugins/kanban/api'
 import { BlockedTasksSection, groupBlockedTasks } from '@/plugins/kanban/blocked-section'
+import { $tabFlashText, flagTabAttention } from '@/store/browser-tab-attention'
+import { installBrowserTabTitle } from '@/store/browser-tab-title'
+import { dispatchNativeNotification } from '@/store/native-notifications'
+import { __resetNativeNotifyBaselineForTests } from '@/store/notify-baseline'
+import { $sessions } from '@/store/session'
+import { $sessionDotStateById, sessionStatusStripe } from '@/store/session-dot-state'
 
-const scenarios = JSON.parse(readFileSync(resolve(import.meta.dirname, '../../../../tests/fixtures/session-state-v2/scenarios.json'), 'utf8')).scenarios
+const scenarios: Array<{ id: string }> = JSON.parse(readFileSync(resolve(import.meta.dirname, '../../../../tests/fixtures/session-state-v2/scenarios.json'), 'utf8')).scenarios
 let produced: ReturnType<typeof produceSessionStateV2>
 beforeAll(() => { produced = produceSessionStateV2() }, 90_000)
+
 // Reviewed expectations: dot, canonical stripe, turnDone dispatch, Blocked section count.
 const expected: Record<string, [string, string, boolean, number]> = {
   running_card: ['background', 'waiting', false, 0], human_brief: ['background', 'stuck', false, 1],
@@ -80,11 +92,13 @@ const expected: Record<string, [string, string, boolean, number]> = {
   subagent_running: ['background', 'waiting', true, 0], process_running: ['background', 'waiting', true, 0],
   turn_failed: ['idle', 'attention', true, 0]
 }
+
 // Important pinned producer semantics: the card prerequisite is external, triage only
 // escalates strictly after 600 s, and failed-turn presentation is amber attention.
 // turnDone currently checks card release only: running processes/children and failed
 // turns still pass this guard. These goldens expose that limitation, not an endorsement.
 let dispose = () => {}
+
 let uninstallTitle = () => {}
 const initialDesktop = window.hermesDesktop
 afterEach(() => {
@@ -122,27 +136,35 @@ describe('Python producer → Desktop golden surfaces', () => {
     vi.setSystemTime((produced.now + produced.cases.indexOf(c) * 2) * 1000)
     expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: c.session_row.id, title: c.id })).toBe(notifyExpected)
     expect(notify).toHaveBeenCalledTimes(notifyExpected ? 1 : 0)
-    if (notifyExpected) expect(notify).toHaveBeenCalledWith(expect.objectContaining({
+
+    if (notifyExpected) {expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'turnDone', sessionId: 'fixture-chat', focusSessionId: 'fixture-chat', title: c.id
-    }))
+    }))}
+
     // Real browser attention consumer exercised only after a notification is accepted.
     uninstallTitle = installBrowserTabTitle()
-    if (notifyExpected) flagTabAttention(c.id)
+
+    if (notifyExpected) {flagTabAttention(c.id)}
     expect($tabFlashText.get()).toBe(notifyExpected ? c.id : null)
     expect(document.title).toBe(notifyExpected ? c.id : 'Hermes')
+
     if (notifyExpected) {
       vi.advanceTimersByTime(1000)
       expect(document.title).toBe('Hermes')
       vi.advanceTimersByTime(1000)
       expect(document.title).toBe(c.id)
     }
+
     const blocked = c.cards.filter((card: any) => card.status === 'blocked')
     const calls: string[] = []
     dispose = bindApi((async (path: string) => {
       calls.push(path)
-      if (path === '/boards') return { boards: [{ slug: 'default', counts: { blocked: blocked.length } }], current: 'default' }
-      if (path.startsWith('/board?')) return { columns: [{ name: 'blocked', tasks: blocked }], latest_event_id: 0 }
-      if (path.startsWith('/session-labels?')) return { profile: 'default', sessions: { 'fixture-chat': { tip_id: 'fixture-chat', title: 'Fixture chat' } } }
+
+      if (path === '/boards') {return { boards: [{ slug: 'default', counts: { blocked: blocked.length } }], current: 'default' }}
+
+      if (path.startsWith('/board?')) {return { columns: [{ name: 'blocked', tasks: blocked }], latest_event_id: 0 }}
+
+      if (path.startsWith('/session-labels?')) {return { profile: 'default', sessions: { 'fixture-chat': { tip_id: 'fixture-chat', title: 'Fixture chat' } } }}
       throw new Error(`unexpected transport ${path}`)
     }) as never, { get: (_: string, fallback: any) => fallback, set: vi.fn(), remove: vi.fn() }, (() => () => {}) as never)
     view.tasks = await fetchBlockedTasks(); view.rows = []; view.queries = []
