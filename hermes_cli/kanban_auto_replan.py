@@ -78,14 +78,16 @@ def state(conn, tid) -> State | None:
     for request in _requests(conn, tid):
         parent = request['parent']
         status = _parent_status(conn, parent)
-        if status in (None, 'archived') or (status == 'done' and not read_plan(conn, parent)):
+        if status in (None, 'archived', 'done', 'unknown') and published(conn, tid, parent):
+            # The original owns this durable reset even after its plan parent is retired.
+            episode, baseline = parent, tuple(request['baseline'])
+            continue
+        if status in (None, 'archived') or (status == 'done' and not (read_plan(conn, parent) or '').strip()):
             # Cancellation is not a completed plan or a counter reset. Replace its prerequisite.
             episode = f'replace-{parent}'
             continue
-        if status != 'done' or not published(conn, tid, parent):
-            return State(request['episode'], len(set(rows) - set(baseline)), request['threshold'],
-                         tuple(request['baseline']), parent)
-        episode, baseline = parent, tuple(request['baseline'])
+        return State(request['episode'], len(set(rows) - set(baseline)), request['threshold'],
+                     tuple(request['baseline']), parent)
     threshold = _threshold(conn, tid, rows, baseline)
     return State(episode, len(set(rows) - set(baseline)), threshold, tuple(rows))
 
