@@ -104,6 +104,8 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
         user.mkdir()
         (home / 'config.yaml').write_text(json.dumps({
             'gateway': {'multiplex_profiles': False},
+            # A detached plugin installer otherwise outlives the daemon and races cleanup.
+            'security': {'allow_lazy_installs': False},
             'model': {'provider': 'custom', 'default': 'local-wire-stub',
                       'base_url': 'http://127.0.0.1:1/v1'},
             'terminal': {'cwd': str(tmp_path)},

@@ -72,6 +72,7 @@ def test_existing_session_keeps_frozen_mcp_transport_after_profile_edit(tmp_path
     url = f'http://127.0.0.1:{peer.server_port}/v1'
     (home / 'peer.py').write_text(PEER)
     config = {'gateway': {'multiplex_profiles': False, 'managed_workers': True},
+              'security': {'allow_lazy_installs': False},
               'model': {'provider': 'custom', 'default': 'frozen-model', 'base_url': url},
               'auxiliary': {'title_generation': {'enabled': False}},
               'mcp_servers': {'owned': {'command': sys.executable, 'args': [str(home / 'peer.py'), 'FROZEN_A']}},

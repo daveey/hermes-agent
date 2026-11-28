@@ -54,6 +54,7 @@ def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, p
     thread.start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'
     (home / 'config.yaml').write_text(json.dumps({'gateway': {'multiplex_profiles': False},
+        'security': {'allow_lazy_installs': False},
         'model': {'provider': 'custom', 'default': 'worker-model', 'base_url': url},
         'auxiliary': {'title_generation': {'enabled': False}}, 'platform_toolsets': {'cli': []}}))
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
