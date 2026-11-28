@@ -1614,12 +1614,10 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...], *
 
     Pass ``scope=(gateway, profile)`` to skip ``card_scope(path)`` (explicit home).
     """
-    with cached_ro(path) as conn, _execution_transaction(conn) as read_at:
-        conn.row_factory = sqlite3.Row
-        if "session_id" not in table_columns(conn, "tasks"):
+    from hermes_cli.kanban_session_source_cache import selected
+    with cached_ro(path) as conn, selected(conn, path, ids, statuses) as (found, read_at):
+        if found is None:
             return []  # explicitly supported pre-session schema
-        from hermes_cli.kanban_session_outcome_tasks import select_listed_local_tasks
-        found = select_listed_local_tasks(conn, ids, statuses)
         from hermes_cli.kanban_session_acquisition import LEGACY_REPLICA, enrich_session_tasks
         if scope is None:
             from hermes_cli.kanban_execution_observations import card_scope

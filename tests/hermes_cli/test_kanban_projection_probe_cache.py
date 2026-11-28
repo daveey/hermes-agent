@@ -47,6 +47,40 @@ def test_integrated_unchanged_zero_sql_and_changed_fresh(board):
     assert probe(path, conn) == changed
 
 
+@pytest.mark.parametrize('background', [False, True])
+def test_links_consumers_skip_sql_and_refresh_changed_board(board, monkeypatch, background):
+    from hermes_cli import kanban_session_activity as activity
+    path, conn = board
+    scope = ('fixture',)
+    activity._reset_cache_for_tests()
+    monkeypatch.setattr(activity, '_origin_scope', lambda: scope)
+    monkeypatch.setattr(activity, '_board_db_paths', lambda: [path])
+    monkeypatch.setattr(activity, '_links_fingerprint', lambda: probe(path, conn))
+    def project():
+        return [{'id': row[0], 'title': row[1]} for row in conn.execute('SELECT id,title FROM tasks')]
+    monkeypatch.setattr(activity, '_project_remote_links', project)
+    try:
+        first = activity.remote_links_and_origin_rows()
+        sql = []
+        conn.set_trace_callback(sql.append)
+        if background:
+            activity._refresh_links_scope(scope)
+        assert activity.remote_links_and_origin_rows() == first
+        assert not sql
+        conn.execute("UPDATE tasks SET title='consumer changed'")
+        conn.commit()
+        sql.clear()
+        if background:
+            activity._refresh_links_scope(scope)
+        changed = activity.remote_links_and_origin_rows()
+        assert sql and changed != first
+        activity._reset_cache_for_tests()
+        cache._cache.clear()
+        assert activity.remote_links_and_origin_rows() == changed
+    finally:
+        activity._reset_cache_for_tests()
+
+
 def test_unknown_schema_not_cached_and_repair_visible(board):
     path, conn = board
     conn.execute(f'DROP TRIGGER {rev.PREFIX}task_events_insert')
