@@ -48,7 +48,7 @@ def _resolve_ownership(conn, task_id, creator_task_id, parents, created_at, chat
     _inherit_notify_subs(conn, task_id, parents, created_at=created_at)
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.profiles import get_active_profile_name
-    local = origin.gateway == gateway_names()[0] and origin.profile == get_active_profile_name()
+    local = origin.gateway == (gateway_names()[0] or "local") and origin.profile == get_active_profile_name()
     platform, chat_id = ("tui", origin.session) if local else ("hub", origin.chat_id)
     conn.execute(
         "INSERT OR IGNORE INTO kanban_notify_subs "

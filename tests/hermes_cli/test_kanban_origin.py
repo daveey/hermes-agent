@@ -158,3 +158,18 @@ def test_this_gateway_session_link_is_accepted_as_origin(hub_gateway, ref):
     res = json.loads(kt._handle_create({"title": "x", "assignee": "default", "origin_session": ref}))
     assert res.get("ok"), res
     assert _hub_subs(res["task_id"]) == [] and "origin_binding" not in res
+
+
+def test_this_gateway_origin_without_hub_keeps_local_ownership(hub_gateway, monkeypatch, tmp_path):
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "absent-hub"))
+    monkeypatch.setenv("HERMES_MAIL_CONFIG", str(tmp_path / "absent-mail.json"))
+    assert ko.gateway_names()[0] == ""
+    ref = "@session:default/20261122_233430_28d354"
+    res = json.loads(kt._handle_create({"title": "local without hub", "assignee": "default", "origin_session": ref}))
+    assert res.get("ok"), res
+    assert "origin_binding" not in res
+    with kbc.connect_closing() as conn:
+        assert [(s["platform"], s["chat_id"]) for s in kn.list_notify_subs(conn, res["task_id"])] == [
+            ("tui", "20261122_233430_28d354")]
