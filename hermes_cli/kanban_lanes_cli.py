@@ -87,6 +87,10 @@ def _cards(args, rows, *, continuations=None) -> int:
     if continuations is not None:
         for card in data:
             card["continuation"] = continuations[card["id"]]
+    if rows and "idempotency_key" in rows[0].keys():
+        from hermes_cli.kanban_lanes_archive import hint
+        for card, row in zip(data, rows):
+            card["producer"] = hint(row)  # typed subject/target an archive basis may cite; None = not catalogued
     if not _json_out(args, data):
         print("\n".join(f"{c['id']}  [{c['lane']}]  {c['title']}" for c in data) or "none")
     return 0
@@ -137,6 +141,16 @@ def _admit(args) -> int:
             done = True
     print(f"{args.task_id}: {'admitted' if done else 'not held at a lane gate'}")
     return 0 if done else 1
+
+
+def _withdraw(args) -> int:
+    """A producer retires its own gate-held card once its condition clears (same guard as the planner's archive)."""
+    from hermes_cli.kanban_lanes_archive import withdraw
+
+    with kbc.connect_closing() as conn:
+        why = withdraw(conn, args.task_id, producer=args.producer, reason=args.reason or "condition cleared")
+    print(f"{args.task_id}: {why or 'withdrawn'}")
+    return 1 if why else 0
 
 
 def _pin(args) -> int:
@@ -269,7 +283,7 @@ def _explain(args) -> int:
 
 
 _ACTIONS = {None: _show, "show": _show, "flow": _flow, "held": _held, "unclassified": _unclassified,
-            "assign": _assign, "admit": _admit, "pin": _pin, "set": _set, "apply": _apply, "explain": _explain}
+            "assign": _assign, "admit": _admit, "withdraw": _withdraw, "pin": _pin, "set": _set, "apply": _apply, "explain": _explain}
 
 
 def command(args: argparse.Namespace) -> int:

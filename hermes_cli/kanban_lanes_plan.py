@@ -8,7 +8,11 @@ refuses everything else, one refusal per action, so a bad plan degrades to its v
 ``admit``       a gate-held card to ready, at most the lane's ``admit_per_day`` per local day, never a
                 title matching the lane's ``never_admit``
 ``merge``       a gate-held card into an open card of the same lane: a link and a comment; the merged
-                card stays held and is never archived
+                card stays held (``archive`` with basis ``superseded`` retires it once proved)
+``archive``     a moot gate-held card filed by a catalogued automation, with a typed ``basis``
+                (``target_done``, ``superseded`` + ``by``, ``condition_cleared``, ``stale``) that
+                :mod:`kanban_lanes_archive` proves itself; spends no admit budget. A dry run reports
+                the same verdict without writing.
 ``reprioritize``  0..1000, never a pinned card
 ``relane``      only a card whose lane came from ``inherited``, ``unclassified`` or ``llm``
 ``note``        one line per lane, kept for the panel
@@ -144,8 +148,17 @@ def _admit_continuation(conn, pol, action, row, state):
 
 
 def _archive(conn, pol, action, row, state):
-    from hermes_cli.kanban_lanes_archive import archive
-    return archive(conn, pol, action, row, state)
+    from hermes_cli.kanban_lanes_archive import plan_archive
+    return plan_archive(conn, pol, action, row, state)
+
+
+def _archive_check(conn, _pol, action, row, state):
+    from hermes_cli.kanban_lanes_archive import check
+    return check(conn, action, row, now=state["now"])
+
+
+# Read-only verdicts a dry run can give without earlier actions' writes; other kinds are shape-checked only.
+_DRY_CHECKS = {"archive": _archive_check}
 
 
 _HANDLERS = {"archive": _archive, "admit": _admit, "admit_continuation": _admit_continuation,
@@ -197,6 +210,10 @@ def _refusal(conn, pol, action, index, state, out, dry_run) -> Optional[str]:
             why = _HANDLERS[kind](conn, pol, action, row, state)
         except (ValueError, RuntimeError) as exc:  # a refused link or edit is this action's refusal, not the plan's
             why = str(exc)
+        if why:
+            return why
+    elif kind in _DRY_CHECKS:
+        why = _DRY_CHECKS[kind](conn, pol, action, row, state)
         if why:
             return why
     out["applied"].append(action)

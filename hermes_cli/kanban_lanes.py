@@ -519,8 +519,8 @@ def assign(conn, task_id: str, lane: str, *, source: str, reason: str, pol: Opti
 
 def held(conn, lane: Optional[str] = None) -> list[sqlite3.Row]:
     """Cards waiting at a lane gate, oldest first; ``lane`` filters by the lane a card counts in."""
-    rows = conn.execute(f"SELECT id, title, tenant, priority, created_at, created_by FROM tasks WHERE {HELD} "
-                        "ORDER BY created_at, id").fetchall()
+    rows = conn.execute(f"SELECT id, title, tenant, priority, created_at, created_by, idempotency_key FROM tasks "
+                        f"WHERE {HELD} ORDER BY created_at, id").fetchall()
     if lane is None:
         return rows
     pol = safe_policy()
