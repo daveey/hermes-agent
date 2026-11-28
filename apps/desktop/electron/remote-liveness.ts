@@ -1,4 +1,5 @@
 import { isMissingHealthEndpointError } from './backend-health'
+import type { PrimaryRevalidationObserver } from './primary-revalidation-observation'
 
 export const REMOTE_LIVENESS_TIMEOUT_MS = 10_000
 // Dispatch is synchronous user intent: a cached descriptor must prove its
@@ -67,6 +68,7 @@ interface RemoteConnectionDescriptor {
 }
 
 export interface RevalidateRemoteConnectionOptions<TConnection extends RemoteConnectionDescriptor> {
+  observe?: PrimaryRevalidationObserver
   connectionPromise: Promise<TConnection>
   currentConnectionPromise: () => null | Promise<TConnection>
   log: (message: string) => void
@@ -512,7 +514,8 @@ export async function revalidateRemoteConnection<TConnection extends RemoteConne
   log,
   probe,
   resetConnection,
-  tracker
+  tracker,
+  observe
 }: RevalidateRemoteConnectionOptions<TConnection>): Promise<RemoteRevalidationResult> {
   let connection: TConnection
 
@@ -520,35 +523,49 @@ export async function revalidateRemoteConnection<TConnection extends RemoteConne
     connection = await connectionPromise
   } catch {
     // The cached boot already rejected; its own recovery path will clear it.
+    observe?.('connection_rejected')
+
     return { ok: true, rebuilt: false }
   }
 
   if (currentConnectionPromise() !== connectionPromise) {
+    observe?.('stale_connection')
+
     return { ok: true, rebuilt: false }
   }
 
   if (connection.mode !== 'remote' || !connection.baseUrl) {
+    observe?.('not_remote')
+
     return { ok: true, rebuilt: false }
   }
 
   const baseUrl = connection.baseUrl.replace(/\/+$/, '')
+  const started = performance.now()
 
   try {
+    observe?.('probe_start')
     await probe(connection, '/api/status', { timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS })
 
     if (currentConnectionPromise() !== connectionPromise) {
+      observe?.('stale_connection', { duration_ms: performance.now() - started })
+
       return { ok: true, rebuilt: false }
     }
 
     tracker.recordSuccess(baseUrl)
+    observe?.('probe_success', { failures: 0, duration_ms: performance.now() - started })
 
     return { ok: true, rebuilt: false }
   } catch {
     if (currentConnectionPromise() !== connectionPromise) {
+      observe?.('stale_connection', { duration_ms: performance.now() - started })
+
       return { ok: true, rebuilt: false }
     }
 
     const failure = tracker.recordFailure(baseUrl)
+    observe?.('probe_failure', { failures: failure.failures, should_reset: failure.shouldReset, duration_ms: performance.now() - started })
 
     if (!failure.shouldReset) {
       log(

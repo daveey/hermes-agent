@@ -570,7 +570,7 @@ import { missingRendererAssets, presentRendererIndexes } from './renderer-bundle
 import { applyLaunchSwitches, readDesktopLaunchConfig } from './renderer-heap-flags'
 import { loadRendererLoadErrorPage } from './renderer-load-error-page'
 import { attachRendererConsoleCapture, formatRendererBoundaryReport } from './renderer-log'
-import { withApiRequestStages } from './request-stages'
+import { observePrimaryRevalidation, withApiRequestStages, withRegistryRevalidationStages } from './request-stages'
 import { fetchRosterSourceData } from './roster-source-fetch'
 import { rosterSourceStatus } from './roster-source-status'
 import { registerSaveDialogIpc } from './save-text-file'
@@ -10143,9 +10143,7 @@ async function ensureBackend(
 // a genuinely-local dial when the v1 mode says remote; non-local connections
 // cache under the composite key from backendScopeKey() with the same entry
 // lifecycle as per-profile local descriptors.
-// Part B (instant session loads): dial every SSH gateway at startup and keep it warm (remote-prewarm.ts): its
-// default profile plus each named profile dispatched to in the last 24 h (one remote backend per profile).
-// Warm set + the keep-alive bound to it (remote-warm-set.ts).
+// Prewarm registry SSH defaults and profiles used in the last24h (remote-warm-set.ts).
 const remoteWarmSet = createRemoteWarmSet({
   statePath: () => path.join(app.getPath('userData'), 'remote-prewarm-profiles.json'),
   readRegistry: readDesktopConnectionsRegistry,
@@ -10157,7 +10155,7 @@ const remoteWarmSet = createRemoteWarmSet({
 const remotePrewarmer = new RemotePrewarmer({
   listTargets: remoteWarmSet.listTargets,
   ensure: ({ connectionId, profile }, { forceProbe }) =>
-    ensureRegistryBackend(connectionId, profile, '', { forceProbe }),
+    ensureRegistryBackend(connectionId, profile, '', { forceProbe, revalidationTrigger: 'prewarm' }),
   log: line => rememberLog(line)
 })
 
@@ -10185,11 +10183,15 @@ async function sharedSshProfileBackend(existing, source, id, profile, managedUpd
   return shared
 }
 
-async function ensureRegistryBackend(
+function ensureRegistryBackend(connectionId, profile, managedUpdateCorrelation = '', opts: RegistryDialUseOpts & { revalidationTrigger?: 'prewarm' } = {}) {
+  return withRegistryRevalidationStages(opts, () => ensureRegistryBackendUnobserved(connectionId, profile, managedUpdateCorrelation, opts))
+}
+
+async function ensureRegistryBackendUnobserved(
   connectionId,
   profile,
   managedUpdateCorrelation = '',
-  opts: RegistryDialUseOpts = {}
+  opts: RegistryDialUseOpts & { revalidationTrigger?: 'prewarm' } = {}
 ) {
   const passive = Boolean(opts.passive)
   const registry = readDesktopConnectionsRegistry()
@@ -10244,11 +10246,7 @@ async function ensureRegistryBackend(
     return registryEffectiveFingerprintPromise
   }
 
-  // The v2 registry is migrated from (but intentionally coexists with) the
-  // v1 primary connection config. Reuse the already-booted primary descriptor
-  // when both identities match; otherwise a default-profile registry request
-  // opens a second SSH dashboard under a different scope and the competing
-  // lifecycle probes repeatedly tear down each other's tunnel.
+  // Reuse a matching primary: duplicate SSH dashboards compete for tunnel lifecycle.
   const primary = await reuseMatchingPrimarySshBackend({
     connectionId: id,
     effectiveFingerprint: resolveRegistryEffectiveFingerprint,
@@ -10258,10 +10256,12 @@ async function ensureRegistryBackend(
     source
   })
 
+  observePrimaryRevalidation('registry_match', { matched: Boolean(primary), force_probe: Boolean(opts.forceProbe), passive, trigger: opts.revalidationTrigger || 'registry' })
+
   if (primary) {
     return {
       ...(await ensureProbedPrimaryBackend(primary, { forceProbe: opts.forceProbe, passive }, {
-        revalidate: revalidatePrimaryRemoteBackend,
+        revalidate: () => revalidatePrimaryRemoteBackend(opts.revalidationTrigger || 'registry'), observe: observePrimaryRevalidation,
         ensure: () => ensureBackend(profile, { passive })
       })),
       profile: profileKey,
@@ -13729,9 +13729,9 @@ function recordWindowConnectionRoute(sender: Electron.WebContents, route: unknow
 
 ipcMain.on('hermes:connection:active-route', (event, route) => recordWindowConnectionRoute(event.sender, route))
 
-// Explicit warm-set probes and renderer reconnects share the primary's existing
-// failure policy and teardown barrier. A matching registry alias must not swallow forceProbe.
+// Warm-set probes and renderer reconnects share primary policy and teardown.
 const revalidatePrimaryRemoteBackend = createPrimaryRemoteRevalidator({
+  observe: observePrimaryRevalidation,
   currentConnectionPromise: () => backendConnectionState.getPromise(),
   coordinator: remoteRevalidation,
   log: rememberLog,
@@ -13740,7 +13740,7 @@ const revalidatePrimaryRemoteBackend = createPrimaryRemoteRevalidator({
   tracker: remoteLiveness,
   captureSshTeardown: connection => capturePrimarySshTeardown(connection, {
     states: sshConnections,
-    log: rememberLog,
+    log: rememberLog, observe: observePrimaryRevalidation,
     cancelAndWait: (scope, teardown) => sshBootstrapCoordinator.cancelAndWait(scope, teardown),
     teardown: scope => teardownSshConnection(scope, 'revalidate')
   })
@@ -13748,7 +13748,7 @@ const revalidatePrimaryRemoteBackend = createPrimaryRemoteRevalidator({
 
 ipcMain.handle('hermes:connection:revalidate', () =>
   remoteRevalidation.run(backendPool, async () => {
-    const [result] = await Promise.all([revalidatePrimaryRemoteBackend(), revalidatePool()])
+    const [result] = await Promise.all([revalidatePrimaryRemoteBackend('renderer'), revalidatePool()])
 
     return result
   })

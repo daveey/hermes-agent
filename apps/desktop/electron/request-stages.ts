@@ -7,10 +7,11 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { resolveDesktopHermesHome } from './data-paths'
+import { currentRevalidationRound, type PrimaryRevalidationObserver, type PrimaryRevalidationTrigger, revalidationIdentity, withRevalidationInvocation } from './primary-revalidation-observation'
 
 const POLL_PATHS = new Set([
   '/api/plugins/user-steps/requests', '/api/plugins/hub-sync/status',
-  '/api/plugins/kanban/board', '/api/sessions', '/api/health',
+  '/api/plugins/kanban/board', '/api/sessions', '/api/health', '/api/status',
   '/api/plugins/session-mentions/result'
 ])
 
@@ -72,6 +73,29 @@ export class StageBuffer {
 
 let sink: StageBuffer | undefined
 const calls = new AsyncLocalStorage<string>()
+
+export function observePrimaryRevalidation(event: Parameters<PrimaryRevalidationObserver>[0], fields: Parameters<PrimaryRevalidationObserver>[1] = {}, output?: StageBuffer) {
+  (output || journal()).emit('primary_revalidation', { ...currentRevalidationRound(), ...fields, event, call_id: calls.getStore() || '' })
+}
+
+/** Start before registry/fingerprint/bootstrap awaits, including background warm calls. */
+export function withRegistryRevalidationStages<T>(opts: { forceProbe?: boolean; passive?: boolean; revalidationTrigger?: PrimaryRevalidationTrigger }, operation: () => Promise<T>, output?: StageBuffer): Promise<T> {
+  const context = { invocation: revalidationIdentity({}), trigger: opts.revalidationTrigger || 'registry' as PrimaryRevalidationTrigger }
+
+  return withRevalidationInvocation(context, async () => {
+    observePrimaryRevalidation('registry_start', { force_probe: Boolean(opts.forceProbe), passive: Boolean(opts.passive) }, output)
+
+    try {
+      const result = await operation()
+      observePrimaryRevalidation('registry_end', {}, output)
+
+      return result
+    } catch (error) {
+      observePrimaryRevalidation('registry_error', {}, output)
+      throw error
+    }
+  })
+}
 
 function pollUrl(raw: string, base?: string): URL | undefined {
   try {
@@ -158,7 +182,7 @@ export function requestStages(url: string, method: string, output?: StageBuffer)
 
   const id = randomUUID().replaceAll('-', '')
 
-  const fields = { id, call_id: calls.getStore() || '', path: parsed.pathname,
+  const fields = { ...currentRevalidationRound(), id, call_id: calls.getStore() || '', path: parsed.pathname,
     method: /^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(method) ? method : 'OTHER',
     port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)) }
 
