@@ -166,7 +166,7 @@ def run_shared(channel, config, *, gate=None) -> None:
     """Broker role entry (``serve_producer_process.main``). ``channel`` is the spawner's one-shot
     startup channel: it carries only READY/REFUSED and is closed before serving."""
     from hermes_cli._startup_fast import project_root_str
-    from hermes_cli.serve_producer_custody import CustodyConflict, FamilyCustody
+    from hermes_cli.serve_producer_custody import CustodyConflict, CustodyUnsafe, FamilyCustody
     from hermes_cli.serve_producer_enrollment import BrokerEnrollment
     from hermes_cli.serve_producer_process import authorized, shutdown_channel
     from hermes_cli.serve_producer_runtime import spawn
@@ -220,6 +220,7 @@ def run_shared(channel, config, *, gate=None) -> None:
 
     stop = threading.Event()
     child_lock = threading.Lock()
+    publication_lock = threading.Lock()
     state = {'child': child, 'data': data, 'hello': hello}
     conns, conns_lock = set(), threading.Lock()
 
@@ -237,14 +238,35 @@ def run_shared(channel, config, *, gate=None) -> None:
                 state['data'].send(request, uuid.uuid4().hex)
                 return state['data'].receive()
             except (EOFError, BrokenPipeError, ConnectionResetError):
+                with publication_lock:
+                    _unpublish_owner(runtime)  # dead child can no longer support READY
                 # waitpid reaps only the leader; the replacement must re-take the execution
                 # fence before any provider import, and refuses over surviving descendants.
                 state['child'].wait()
                 state['data'].close()
                 if attempt == 2 or stop.is_set() or stop.wait(1 << attempt):
                     raise EOFError('producer restart budget') from None
-                state['child'], state['data'] = spawn('producer', config, custody_fd=owner.fd)
-                state['hello'] = state['data'].receive()
+                from hermes_cli.serve_producer_admission import LaunchGate
+                try:
+                    replacement_gate = LaunchGate.acquire(runtime)
+                except (CustodyConflict, CustodyUnsafe):
+                    raise EOFError('replacement admission gate busy') from None
+                try:
+                    state['child'], state['data'] = spawn('producer', config, custody_fd=owner.fd)
+                    state['hello'] = state['data'].receive()
+                    state['data'].send({'verb': 'PRODUCE', 'key': 'initial', 'payload': initial,
+                                       'capability': config['capability'], 'generation': config['generation']},
+                                      uuid.uuid4().hex)
+                    first = state['data'].receive()
+                    if first.get('verb') != 'PUBLISHED' or not first.get('wire'):
+                        raise EOFError('replacement initial publication refused')
+                    with publication_lock:
+                        if stop.is_set():
+                            raise EOFError('owner stopping')
+                        record['child_pid'] = state['hello']['pid']
+                        _publish_owner(runtime, record)
+                finally:
+                    replacement_gate.close()
 
     def serve(conn):
         from hermes_cli.serve_producer_runtime import Channel
@@ -312,8 +334,9 @@ def run_shared(channel, config, *, gate=None) -> None:
             worker.start()
             threads.append(worker)
     finally:
-        stop.set()
-        _unpublish_owner(runtime)  # READY is withdrawn before anything drains
+        with publication_lock:
+            stop.set()
+            _unpublish_owner(runtime)  # READY is withdrawn before anything drains; no later republish
         listener.close()
         _with_address(runtime, lambda address: os.path.lexists(address) and os.unlink(address))
         with conns_lock:

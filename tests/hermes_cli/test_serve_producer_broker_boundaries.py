@@ -167,7 +167,7 @@ class Schedule:
         def spawn(*args, **kwargs):
             schedule.spawns += 1
             schedule.trace.append('spawn')
-            return Child(), Data(schedule.spawns == 1)
+            return Child(), Data()  # replacements must complete initial publication too
 
         def publish(runtime, record):
             schedule.published = record

@@ -105,7 +105,7 @@ def verify_declared(manifest, base: Path) -> dict:
     return files
 
 
-def verify_loaded(manifest, base: Path, *, allowed=(), modules=None) -> None:
+def verify_loaded(manifest, base: Path, *, allowed=(), modules=None, executed=None) -> None:
     """Post-import: nothing was loaded from ``base`` that the manifest (or ``allowed``) does not name."""
     declared = dict(declared_files(manifest))
     if 'callback_registry' in manifest:
@@ -127,3 +127,6 @@ def verify_loaded(manifest, base: Path, *, allowed=(), modules=None) -> None:
             raise ProtocolError('undeclared provider module loaded')
         if digest is not None and hashlib.sha256(_read(root / relative)).hexdigest() != digest:
             raise ProtocolError('loaded provider module digest mismatch')
+        actual = (executed or {}).get(str((root / relative).resolve()))
+        if actual is None or (digest is not None and actual != digest):
+            raise ProtocolError('loaded provider executable bytes unverified')

@@ -175,7 +175,7 @@ def test_producer_bad_manifest_refuses_before_import_and_ready(tmp_path):
 def test_producer_refuses_undeclared_module_loaded_by_import(tmp_path):
     helper = write(tmp_path, 'helper_undeclared.py', 'VALUE = 1\n')
     path, _ = provider(tmp_path, imports='helper_undeclared')
-    with pytest.raises(ProtocolError, match='^undeclared provider module loaded$'):
+    with pytest.raises(ProtocolError, match='^undeclared provider module executed$'):
         run_producer(tmp_path, config(tmp_path, path, shared=True, declared=manifest(path)))
     assert helper.exists()
     assert not (tmp_path / 'projection.sqlite3').exists(), 'READY path ran after an undeclared import'

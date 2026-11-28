@@ -185,9 +185,14 @@ def test_spawn_owner_accepts_ready_hello(tmp_path, monkeypatch):
 def test_spawn_owner_refuses_non_ready_hello(tmp_path, monkeypatch):
     relay = make_relay(tmp_path)
     channel = FakeHelloChannel({'verb': 'ERROR', 'error': 'nope'})
-    monkeypatch.setattr(runtime_mod, 'spawn', lambda *a, **k: (object(), channel))
+    from types import SimpleNamespace
+
+    waits = []
+    process = SimpleNamespace(wait=lambda timeout: waits.append(timeout))
+    monkeypatch.setattr(runtime_mod, 'spawn', lambda *a, **k: (process, channel))
     with pytest.raises(ProtocolError, match='refused'):
         relay._spawn_owner(1)
+    assert waits == [1]
     assert channel.closed is True
 
 

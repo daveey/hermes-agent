@@ -123,19 +123,25 @@ def test_verify_loaded_rejects_undeclared_and_mutated_members_only_inside_the_pr
     modules = {'provider': _module(tmp_path / 'provider.py'), 'done': _module(tmp_path / 'done.py'),
                'outside': _module(outside), 'builtin': type('Module', (), {'__file__': None}),
                'nofile': type('Module', (), {})}
-    verify_loaded(base(), tmp_path, modules=modules)
+    executed = {str((tmp_path / 'provider.py').resolve()): A,
+                str((tmp_path / 'done.py').resolve()): B,
+                str((tmp_path / 'extra.py').resolve()): 'entry-digest'}
+    with pytest.raises(ProtocolError, match='executable bytes unverified'):
+        verify_loaded(base(), tmp_path, modules=modules)
+    # Pure post-import predicate fixture; real audit/loader proof is exercised separately.
+    verify_loaded(base(), tmp_path, modules=modules, executed=executed)
     modules['extra'] = _module(tmp_path / 'extra.py')
     with pytest.raises(ProtocolError, match='undeclared'):
-        verify_loaded(base(), tmp_path, modules=modules)
-    verify_loaded(base(), tmp_path, allowed=('extra.py',), modules=modules)  # allowed: named, digest unchecked
+        verify_loaded(base(), tmp_path, modules=modules, executed=executed)
+    verify_loaded(base(), tmp_path, allowed=('extra.py',), modules=modules, executed=executed)
     (tmp_path / 'extra.py').write_text('changed')
-    verify_loaded(base(), tmp_path, allowed=('extra.py',), modules=modules)
+    verify_loaded(base(), tmp_path, allowed=('extra.py',), modules=modules, executed=executed)
     with pytest.raises(ProtocolError, match='manifest path'):
-        verify_loaded(base(), tmp_path, allowed=('../extra.py',), modules=modules)
+        verify_loaded(base(), tmp_path, allowed=('../extra.py',), modules=modules, executed=executed)
     del modules['extra']
     (tmp_path / 'done.py').write_bytes(b'tampered')
     with pytest.raises(ProtocolError, match='loaded provider module digest mismatch'):
-        verify_loaded(base(), tmp_path, modules=modules)
+        verify_loaded(base(), tmp_path, modules=modules, executed=executed)
 
 
 def test_verify_loaded_defaults_to_the_live_module_table(tmp_path):

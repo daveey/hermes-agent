@@ -134,6 +134,8 @@ class ProjectionRelay:
         self._owner = None  # the shared owner's published record once attached
         self._spawned = None
         self._lock = threading.Lock()
+        self._delivery = threading.RLock()  # callbacks may revoke/rebind reentrantly
+        self._sink_revision = 0
         self._pending = OrderedDict()
         self._outputs = OrderedDict()
         self._bytes = 0
@@ -225,10 +227,17 @@ class ProjectionRelay:
                                  gate_fd=gate.fd if gate is not None else None)
         self._spawned = process
         channel.sock.settimeout(ready_timeout)
+        ready = False
         try:
             hello = channel.receive()
+            ready = hello.get('verb') == 'READY'
         finally:
             channel.close()
+            if not ready:
+                try:
+                    process.wait(timeout=ready_timeout)
+                except subprocess.TimeoutExpired:
+                    pass  # retain a live owner; close/retire must still report a failed drain
         if hello.get('verb') != 'READY':
             raise ProtocolError('shared owner refused: ' + str(hello.get('error')))
 
@@ -288,12 +297,18 @@ class ProjectionRelay:
                 raise RuntimeError('relay retired: a retained callback cannot attach it again')
             self._event_sink = sink
             self._event_cursor = None
+            self._sink_revision += 1
+        with self._delivery:
+            pass  # return only after any prior sink call completed
         self._wake.set()
 
     def _poll_events(self):
         """Pull one bounded batch; deliver in order, or one reset+snapshot on any gap/overflow."""
         with self._lock:
+            if self._stop.is_set() or self._withdrawn:
+                return
             sink, cursor, revision = self._event_sink, self._event_cursor, self._revision
+            sink_revision = self._sink_revision
             partition, identity = self._partition, self._partition_identity
         if sink is None:
             return
@@ -311,7 +326,7 @@ class ProjectionRelay:
                            str(self._sequence))
         result = self._channel.receive()
         with self._lock:
-            if self._stop.is_set() or revision != self._revision:
+            if self._stop.is_set() or self._withdrawn or revision != self._revision or sink_revision != self._sink_revision:
                 return  # revoked while in flight: nothing from the old generation is delivered
             if result.get('generation') != self.config['generation'] or result.get('key') != 'events':
                 raise ProtocolError('event generation mismatch')
@@ -341,10 +356,15 @@ class ProjectionRelay:
                 else:
                     self._event_cursor = expect
         for payload in deliver:
-            try:
-                sink(payload)
-            except Exception:  # health: allow BLE001 -- a consumer failure must not stop projection custody; surfaced via self.error
-                self.error = 'event sink failed'
+            with self._delivery:
+                with self._lock:
+                    if (self._stop.is_set() or self._withdrawn or revision != self._revision
+                            or sink_revision != self._sink_revision):
+                        return
+                try:
+                    sink(payload)
+                except Exception:  # health: allow BLE001 -- a consumer failure must not stop projection custody; surfaced via self.error
+                    self.error = 'event sink failed'
 
     def revoke_generation(self):
         """Atomically drop queued work, prepared outputs and event cursor for this generation."""
@@ -354,12 +374,14 @@ class ProjectionRelay:
             self._bytes = 0
             self._event_cursor = None
             self._revision += 1  # output generation; the child's IPC generation is its auth and stays fixed
+        with self._delivery:
+            pass  # revision is revoked before waiting; no later batch item can acquire authorization
 
     def withdraw(self):
         """Retire this generation for good (lifecycle drain): revoke everything, then refuse all further use."""
-        self.revoke_generation()
         with self._lock:
             self._withdrawn = True
+        self.revoke_generation()
 
     @property
     def partition_identity(self):
@@ -371,31 +393,35 @@ class ProjectionRelay:
         prepared outputs, ACKs and the event cursor before any later reply; an identical one is a no-op."""
         wire = binding.wire()
         with self._lock:
-            if self._partition_identity == binding.identity:
-                return False
-            self._partition = wire
-            self._partition_identity = binding.identity
-            self._pending.clear()
-            self._outputs.clear()
-            self._bytes = 0
-            self._event_cursor = None
-            self._revision += 1
+            changed = self._partition_identity != binding.identity
+            if changed:
+                self._partition = wire
+                self._partition_identity = binding.identity
+                self._pending.clear()
+                self._outputs.clear()
+                self._bytes = 0
+                self._event_cursor = None
+                self._revision += 1
+        with self._delivery:
+            pass  # an identical bind also waits for an earlier concurrent rebind's sink
         self._wake.set()
-        return True
+        return changed
 
     def unbind_partition(self):
         """The bound home is no longer authorized: revoke everything and refuse all requests until rebound."""
         with self._lock:
-            if self._partition_identity is None:
-                return False
-            self._partition = None
-            self._partition_identity = None
-            self._pending.clear()
-            self._outputs.clear()
-            self._bytes = 0
-            self._event_cursor = None
-            self._revision += 1
-        return True
+            changed = self._partition_identity is not None
+            if changed:
+                self._partition = None
+                self._partition_identity = None
+                self._pending.clear()
+                self._outputs.clear()
+                self._bytes = 0
+                self._event_cursor = None
+                self._revision += 1
+        with self._delivery:
+            pass  # even an idempotent unbind fences a concurrent revoker's in-flight sink
+        return changed
 
     def _stamped(self, payload):
         """The payload with the relay's own partition claim; a caller-supplied claim is always overwritten."""
@@ -414,6 +440,8 @@ class ProjectionRelay:
         return body
 
     def submit(self, payload):
+        with self._lock:
+            revision = self._revision
         payload = self._stamped(payload)
         identity = payload.get('body', payload)
         key = hashlib.sha256(b''.join(encode_request('budget', identity))).hexdigest()
@@ -423,6 +451,8 @@ class ProjectionRelay:
         with self._lock:
             if self._stop.is_set() or self._withdrawn:
                 raise ResourceExhausted('relay draining')
+            if revision != self._revision:
+                raise ResourceExhausted('home binding changed')
             if key not in self._pending:
                 if len(self._pending) >= MAX_KEYS or self._bytes + size > MAX_BYTES:
                     raise ResourceExhausted('relay mailbox full')
@@ -593,6 +623,11 @@ class ProjectionRelay:
                 self._process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 return False  # actual producer retains custody; never terminate or steal
+        if self._spawned is not None:
+            try:
+                self._spawned.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return False  # refused/partly attached shared owner still retains its own custody
         if self._channel is not None:
             self._channel.close()
         if self._thread is not None:

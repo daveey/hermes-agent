@@ -5,7 +5,7 @@ strings never do. The binding is derived from facts the platform already owns:
 
 * canonical home: ``Path.resolve(strict=True)``, so aliases of one home share one binding and equal-label
   homes under different roots never collide;
-* lifecycle generation: the home directory's device/inode plus its live (not tombstoned) state, so a
+* lifecycle generation: the home directory's exclusive random incarnation xattr plus its live state, so a
   deleted-then-recreated profile is a new generation even under the same name;
 * authorization generation: the serving ``SessionAuthority`` (profile, instance, epoch) when the process
   has one, otherwise the standalone process's own launch authority (its pid and start time, valid for its
@@ -18,12 +18,15 @@ reply.
 from __future__ import annotations
 
 import hashlib
+import errno
 import os
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 MAX_HOME_BYTES = 4096
+_INCARNATION = 'user.hermes.producer-incarnation'
 
 
 class HomeRevoked(Exception):
@@ -80,8 +83,34 @@ def lifecycle_generation(home) -> tuple[Path, str]:
     named = named_profile_home(path)
     if named is not None and named_profile_is_deleted(named):
         raise HomeRevoked('profile home is tombstoned')
-    info = os.stat(path)
-    return path, _digest('life', path, info.st_dev, info.st_ino)
+    # An inode number is reusable. A random, atomically installed directory attribute survives
+    # readers/process restarts, but not deletion of the directory it belongs to. Unsupported or
+    # inaccessible storage fails closed instead of reverting to reusable filesystem identity.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            try:
+                incarnation = os.getxattr(fd, _INCARNATION)
+            except OSError as exc:
+                if exc.errno not in (errno.ENODATA, getattr(errno, 'ENOATTR', errno.ENODATA)):
+                    raise
+                try:
+                    os.setxattr(fd, _INCARNATION, secrets.token_hex(32).encode('ascii'), os.XATTR_CREATE)
+                except OSError as race:
+                    if race.errno != errno.EEXIST:
+                        raise
+                incarnation = os.getxattr(fd, _INCARNATION)
+            info = os.fstat(fd)
+            current = os.stat(path)
+            if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+                raise HomeRevoked('home replaced while binding')
+        finally:
+            os.close(fd)
+    except (OSError, AttributeError) as exc:
+        raise HomeRevoked('home incarnation unavailable') from exc
+    if len(incarnation) != 64 or any(c not in b'0123456789abcdef' for c in incarnation):
+        raise HomeRevoked('home incarnation malformed')
+    return path, _digest('life', path, info.st_dev, info.st_ino, incarnation.decode('ascii'))
 
 
 def _process_start() -> str:
@@ -108,7 +137,7 @@ def authorization_generation(path: Path, app_state=None) -> str:
         except (AttributeError, OSError):
             raise HomeRevoked('session authority has no home') from None
         if owned != path:
-            authority = None
+            raise HomeRevoked('session authority belongs to another home')
     if runner is not None or authority is not None:
         if authority is None or getattr(authority, 'retiring', False) or getattr(authority, 'retired', False):
             raise HomeRevoked('home is not served by an active authority')

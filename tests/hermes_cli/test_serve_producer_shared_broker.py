@@ -293,7 +293,8 @@ def test_tampered_loaded_module_digest_refuses_ready(tmp_path):
     modules = {'sibling_mod': type('M', (), {'__file__': str(sibling)})}
     from hermes_cli.serve_producer_manifest import verify_loaded
     from hermes_cli.serve_producer_protocol import ProtocolError
-    verify_loaded(spec['manifest'], tmp_path, allowed=('provider.py',), modules=modules)
+    with pytest.raises(ProtocolError, match='executable bytes unverified'):
+        verify_loaded(spec['manifest'], tmp_path, allowed=('provider.py',), modules=modules)
     sibling.write_text('VALUE = 8\n')
     with pytest.raises(ProtocolError, match='digest mismatch'):
         verify_loaded(spec['manifest'], tmp_path, allowed=('provider.py',), modules=modules)

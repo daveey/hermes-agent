@@ -56,11 +56,22 @@ def load_provider(config):
     module = importlib.util.module_from_spec(module_spec)
     sys.modules[name] = module
     # Execute the bytes just authenticated, not a second path read or stale pyc.
-    exec(compile(source, str(path), 'exec'), module.__dict__)
+    exec(compile(source, str(path), 'exec', dont_inherit=True), module.__dict__)
     return module
 
 
 def producer(channel, config):
+    spec = config['provider']
+    if spec.get('manifest') is None:
+        return _producer(channel, config)
+    from hermes_cli.serve_producer_execution import authenticated_execution
+
+    path = Path(spec['path'])
+    with authenticated_execution(spec['manifest'], path.parent, entry={path.name: spec['sha256']}) as executed:
+        return _producer(channel, config, executed=executed)
+
+
+def _producer(channel, config, *, executed=None):
     from hermes_cli.serve_producer_protocol import ProtocolError, ResourceExhausted, encode_request
 
     module = load_provider(config)
@@ -69,7 +80,7 @@ def producer(channel, config):
         from hermes_cli.serve_producer_manifest import verify_loaded
         # The factory may load readers/callbacks too; verify the complete bootstrap before READY.
         verify_loaded(config['provider']['manifest'], Path(config['provider']['path']).parent,
-                      allowed=(Path(config['provider']['path']).name,))
+                      allowed=(Path(config['provider']['path']).name,), executed=executed)
     db_path = Path(config['runtime']) / 'projection.sqlite3'
     fd = os.open(db_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     os.close(fd)
