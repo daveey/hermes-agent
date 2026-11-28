@@ -12,8 +12,8 @@ MAX_DEPTH = 16
 def initialize_ownership(conn, task_id, creator_task_id, parents, created_at, chat_origin, native_origin=None):
     """Resolve chat ownership, then record the machine-local native origin receipt (same transaction)."""
     _resolve_ownership(conn, task_id, creator_task_id, parents, created_at, chat_origin)
-    from hermes_cli.kanban_origin_native import record
-    record(conn, task_id, native_origin, created_at)
+    from hermes_cli.kanban_origin_native import record_creation
+    record_creation(conn, task_id, native_origin, created_at)
 
 
 def _resolve_ownership(conn, task_id, creator_task_id, parents, created_at, chat_origin):

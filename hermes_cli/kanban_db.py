@@ -1281,7 +1281,7 @@ def create_task(
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
-    if existing := native_admission.early_existing(conn, idempotency_key, created_by):
+    if existing := native_admission.early_existing(conn, idempotency_key, created_by, native_origin):
         return existing
 
     from hermes_cli.kanban_db_creation import validate_worktree
@@ -1313,7 +1313,7 @@ def create_task(
             # allow_nested: graph builders compose create_task under one outer
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
-                if existing := native_admission.existing(conn, idempotency_key):
+                if existing := native_admission.existing(conn, idempotency_key, native_origin):
                     return existing
                 run_insert_guard(conn, insert_guard)
                 task_status, tenant, lane = lane_state(conn, parents, initial_status, triage, tenant, locals())

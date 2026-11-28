@@ -137,6 +137,40 @@ def record(conn, task_id, context, created_at):
                  (task_id, json.dumps(binding, sort_keys=True), creator, created_at))
 
 
+def record_creation(conn, task_id, captured, created_at):
+    """Commit a captured native source and its forwarding custody atomically.
+
+    Recording stays bounded and revalidates authority itself. A declined record
+    must roll back creation, not dispatch an unforwardable source. Legacy callers
+    without a captured capability, unsynced boards and courier intents acquire
+    no authority from this check. Freeze eligibility before recording so losing
+    primary scope during the observation cannot silently downgrade admission.
+    """
+    from agent.origin_turn_custody import CapturedOrigin
+    scope = _primary_scope(conn) if type(captured) is CapturedOrigin else None
+    record(conn, task_id, captured, created_at)
+    if scope is None:
+        return
+    require_created_receipt(conn, task_id, captured, scope=scope)
+
+
+def require_created_receipt(conn, task_id, captured, *, scope=None):
+    """Refuse silent legacy replay as well as a declined new record; never adopt."""
+    from agent.origin_turn_custody import CapturedOrigin
+    from hermes_cli.kanban_origin_admission import AdmissionRefused
+    if type(captured) is not CapturedOrigin:
+        return
+    scope = scope or _primary_scope(conn)
+    if scope is None:
+        return
+    binding = _receipt(conn, task_id)
+    gateway, profile, board = scope
+    owner = {'gateway': gateway, 'profile': profile, 'board': board, 'task_id': task_id}
+    if (_primary_scope(conn) != scope or binding is None
+            or binding['origin'] != captured['origin'] or binding['owner'] != owner):
+        raise AdmissionRefused("native receipt unavailable; no source admitted; retry the live owning turn or use supported origin adoption")
+
+
 def lookup(origin, creator, *, gateway):
     """Read only the qualified local primary board; never a shadow replica."""
     if creator["gateway"] != gateway:

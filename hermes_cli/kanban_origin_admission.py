@@ -92,7 +92,7 @@ def require_receipt(conn, task_id):
     state.admitted.add(task_id)
 
 
-def existing(conn, idempotency_key):
+def existing(conn, idempotency_key, native_origin=None):
     """Recheck every replay under the insertion lock; validate strict custody too."""
     if not idempotency_key:
         return None
@@ -100,15 +100,18 @@ def existing(conn, idempotency_key):
     row = existing_creation_key(conn, idempotency_key)
     if row is not None:
         require_receipt(conn, row["id"])
+        native.require_created_receipt(conn, row["id"], native_origin)
         return row["id"]
     return None
 
 
-def early_existing(conn, idempotency_key, created_by):
+def early_existing(conn, idempotency_key, created_by, native_origin=None):
     """Keep the legacy early replay, but strict replays wait for the write lock."""
     if not idempotency_key:
         return None
     from hermes_cli.kanban_db_creation import existing_creation_key, reject_reserved_key
     reject_reserved_key(idempotency_key, created_by)
-    row = None if active() else existing_creation_key(conn, idempotency_key)
+    from agent.origin_turn_custody import CapturedOrigin
+    strict_native = type(native_origin) is CapturedOrigin and native._primary_scope(conn) is not None
+    row = None if active() or strict_native else existing_creation_key(conn, idempotency_key)
     return row["id"] if row is not None else None
