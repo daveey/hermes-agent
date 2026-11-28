@@ -269,3 +269,31 @@ def test_empty_unvalidated_projection_is_defensively_refused(assembly, monkeypat
     monkeypatch.setattr(scope.renewal, 'scope_evidence', lambda *args: [])
     with pytest.raises(ValueError, match='current scope evidence differs'):
         scope.evidence(a.conn, damaged)
+
+
+@pytest.mark.parametrize('shape', ['single', 'aggregate'])
+def test_sql_projection_bounds_materialized_payload_bytes(foreign, shape):
+    """A post-fetch JSON limit must not materialize an unbounded history first."""
+    a = foreign
+    count, width = (1, cert.MAX_BYTES + 1) if shape == 'single' else (3, cert.MAX_BYTES // 2)
+    ignored = cert.encode(dict(superseded_by_safety_stop=False,
+                               disposition=dict(reason='other'), filler='x' * width))
+    with kb.write_txn(a.conn):
+        a.conn.executemany("INSERT INTO task_events(uid,task_id,kind,payload,created_at) "
+                           "VALUES (?,?,'decision_retained',?,90)",
+                           [(f'payload-{i}', a.tid, ignored) for i in range(count)])
+    materialized = []
+    class Capture:
+        def execute(self, *args):
+            cursor = a.conn.execute(*args)
+            class Cursor:
+                def fetchall(self):
+                    rows = cursor.fetchall()
+                    materialized.extend(row['payload'] for row in rows)
+                    return rows
+            return Cursor()
+    with pytest.raises(ValueError, match='bytes exceed bound'):
+        scope._rows(Capture(), a.proof)
+    assert materialized
+    assert sum(len(raw.encode()) for raw in materialized if isinstance(raw, str)) <= cert.MAX_BYTES
+

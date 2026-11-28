@@ -21,10 +21,15 @@ _REQUIRED = {'version', 'task_uid', 'run_uid', 'request_uid', 'event_uid', 'epis
 
 def _rows(conn, proof):
     body = proof['intent']
-    rows = conn.execute("SELECT e.*,r.uid AS run_uid,r.task_id AS run_task,r.ended_at AS run_end,"
+    # Bound the same SQL snapshot before payloads enter the result sorter/Python.
+    rows = conn.execute("SELECT e.uid,e.task_id,e.kind,CASE WHEN (SELECT sum(n) FROM "
+                        "(SELECT length(CAST(payload AS BLOB)) AS n FROM task_events "
+                        "WHERE task_id=? AND kind='decision_retained' ORDER BY uid LIMIT 4097)) <= ? "
+                        "THEN e.payload ELSE NULL END AS payload,e.created_at,e.origin_gateway,"
+                        "r.uid AS run_uid,r.task_id AS run_task,r.ended_at AS run_end,"
                         "r.outcome AS run_outcome FROM task_events e LEFT JOIN task_runs r ON r.id=e.run_id "
                         "WHERE e.task_id=? AND e.kind='decision_retained' ORDER BY e.uid LIMIT 4097",
-                        (body['task_id'],)).fetchall()
+                        (body['task_id'], cert.MAX_BYTES, body['task_id'])).fetchall()
     if len(rows) > 4096:
         raise ValueError('HOME foreign scope inventory exceeds bound')
     result, size = {}, 0
