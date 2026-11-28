@@ -13740,6 +13740,7 @@ const revalidatePrimaryRemoteBackend = createPrimaryRemoteRevalidator({
   tracker: remoteLiveness,
   captureSshTeardown: connection => capturePrimarySshTeardown(connection, {
     states: sshConnections,
+    log: rememberLog,
     cancelAndWait: (scope, teardown) => sshBootstrapCoordinator.cancelAndWait(scope, teardown),
     teardown: scope => teardownSshConnection(scope, 'revalidate')
   })

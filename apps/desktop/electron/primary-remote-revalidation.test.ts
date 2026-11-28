@@ -75,6 +75,32 @@ test.each(['', 'default', 'registry:hub'])('pins exact SSH scope %j without reti
   expect(states.get('bystander')).toBe(bystander)
 })
 
+test('reports a missing captured tunnel without fencing or retiring a bystander', async () => {
+  const bystander = { localPort: 23456 }
+  const states = new Map([['bystander', bystander]])
+  const logs: string[] = []
+  let fences = 0
+  let retired = 0
+  const teardown = capturePrimarySshTeardown(
+    { baseUrl: 'http://127.0.0.1:12345' },
+    {
+      states,
+      log: line => logs.push(line),
+      cancelAndWait: async (_scope, stop) => {
+        fences++
+        await stop()
+      },
+      teardown: async () => { retired++ }
+    }
+  )
+
+  await teardown()
+  expect(logs).toEqual(['[remote] primary SSH retirement skipped: no tracked tunnel for local port 12345'])
+  expect(fences).toBe(0)
+  expect(retired).toBe(0)
+  expect(states.get('bystander')).toBe(bystander)
+})
+
 test('a replacement in the captured scope survives a late teardown', async () => {
   const old = { localPort: 12345 }
   const fresh = { localPort: 34567 }

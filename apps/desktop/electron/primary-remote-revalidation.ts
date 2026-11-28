@@ -12,6 +12,7 @@ export function capturePrimarySshTeardown<T extends { localPort?: number }>(
   connection: { baseUrl?: string | null },
   deps: {
     states: ReadonlyMap<string, T>
+    log?: (line: string) => void
     cancelAndWait: (scope: string, teardown: () => Promise<void>) => Promise<void>
     teardown: (scope: string) => Promise<void>
   }
@@ -20,7 +21,11 @@ export function capturePrimarySshTeardown<T extends { localPort?: number }>(
   const entry = [...deps.states].find(([, state]) => state.localPort === port)
 
   return async () => {
-    if (!entry || deps.states.get(entry[0]) !== entry[1]) {return}
+    if (!entry) {
+      deps.log?.(`[remote] primary SSH retirement skipped: no tracked tunnel for local port ${port}`)
+      return
+    }
+    if (deps.states.get(entry[0]) !== entry[1]) {return}
     await deps.cancelAndWait(entry[0], async () => {
       if (deps.states.get(entry[0]) === entry[1]) {await deps.teardown(entry[0])}
     })
