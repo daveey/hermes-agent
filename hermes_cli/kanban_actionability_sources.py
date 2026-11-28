@@ -222,7 +222,10 @@ def _route_owner(reader: Reader, route: dict) -> dict:
         held = stop or restricted or task.get('containment_episode')
         return {'kind': 'unavailable' if held else 'task', 'refs': [tid]}
     if route.get('kind') in ('chat', 'chats'):
-        return {'kind': 'chat', 'refs': []}  # route exists, exact counted/liveness evidence not loaded offline
+        refs = route.get('refs')
+        # Recorded routing is provenance, not proof that a chat is live or counted.
+        return {'kind': 'chat', 'refs': list(dict.fromkeys(
+            ref for ref in refs if isinstance(ref, str) and ref.strip())) if isinstance(refs, list) else []}
     return {'kind': 'unavailable', 'refs': []}
 
 
@@ -272,10 +275,10 @@ def describe(conn: sqlite3.Connection, tid: str, *, now: int | None = None, read
         return row
 
 
-def _private_reason(conn, task, reader) -> str | None:
+def _private_reason(conn, task, reader, *, explain=False):
     """Local-order diagnostic hold, with the execution reader's mandate-digest verification."""
     if not reader.events_complete:
-        return None
+        return [] if explain else None
     from hermes_cli.kanban_actionability_private import DECISIONS, PRIVATE, held
     kinds = tuple(PRIVATE | DECISIONS)
     live = ' AND deleted_at IS NULL' if 'deleted_at' in reader.event_columns else ''
@@ -284,10 +287,10 @@ def _private_reason(conn, task, reader) -> str | None:
             f"SELECT * FROM task_events WHERE task_id=? AND kind IN ({','.join('?' * len(kinds))}){live} ORDER BY id",
             (task['id'], *kinds))
     except sqlite3.OperationalError:
-        return None
+        return [] if explain else None
     private = [row for row in rows if row['kind'] in PRIVATE]
     if not private or any(not reader.uid(row) for row in private):
-        return None  # Unattributed (synced, UIDless) history stays UNKNOWN, not a positive hold classification.
+        return [] if explain else None  # UIDless history stays UNKNOWN, never positive provenance.
     from hermes_cli.kanban_actionability_evidence import Rows
     from hermes_cli.kanban_scope_renewal import covered, key
     events = [{'uid': key(row), 'kind': row['kind'], 'ord': row['id'], 'payload': row['payload']} for row in rows]
@@ -311,6 +314,9 @@ def _private_reason(conn, task, reader) -> str | None:
     releases = frozenset(key(row) for row in rows if row['kind'] == 'stop_released' and (
         verified_release(Rows(conn), row) is not None if native_release(Rows(conn), row, record(row['payload']))
         else row.get('origin_gateway') in origins))
+    if explain:
+        from hermes_cli.kanban_actionability_restrictions import details
+        return details(task, reader, events, verified, releases)
     return held(task['status'], events, verified_cover=verified, verified_releases=releases)
 
 
@@ -368,7 +374,8 @@ def _describe(conn, tid, *, now, reader):
              # _release_offer is release's own eligibility; unknown evidence never vetoes it. A receipt-only row
              # (no pending stop) fails it because offer() requires the pending stop release acts on.
              'release_offer': _release_offer(conn, tid) if stop else None,
-             'unknown': reader.synced or reader.partial or missing or bool(unknown) or bool(source and not reader.uid(source))
+             'unknown': reader.synced or reader.partial or missing or bool(unknown) or admin and admin.get('kind') == 'chat'
+                        or bool(source and not reader.uid(source))
                         or bool(task.get('human_request') and not _human_step(task['human_request']))}
     if source and not any((stop, facts['containment'], facts['pending_command'])):
         from hermes_cli.kanban_actionability_creation import validated_intent
@@ -421,6 +428,7 @@ def _describe(conn, tid, *, now, reader):
     from hermes_cli.kanban_actionability_confirmed import compose
     observed_at = int(time.time()) if now is None else now
     row = compose(reader, task, facts, project(facts, now=observed_at), now=observed_at)
+    row['private_restrictions'] = _private_reason(conn, task, reader, explain=True)
     if lane_deadline and not row['escalation']['at'] and 'escalation_deadline_missing' in row['violations']:
         row['escalation'].update(at=lane_deadline, state='pending')
         row['violations'] = [v for v in row['violations'] if v != 'escalation_deadline_missing']

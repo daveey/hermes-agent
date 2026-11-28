@@ -1131,7 +1131,7 @@ def test_parent_trigger_wording_is_exact(stop, contained, human, trigger):
 
 @pytest.mark.parametrize('route,expect', [
     ({'task_id': 'owner', 'kind': 'task', 'refs': ['root']}, {'kind': 'task', 'refs': ['owner']}),   # M3283
-    ({'kind': 'chat', 'refs': ['owner']}, {'kind': 'chat', 'refs': []}),                              # M3284
+    ({'kind': 'chat', 'refs': ['owner']}, {'kind': 'chat', 'refs': ['owner']}),  # recorded, never resolved
     ({'kind': 'task', 'refs': ['owner', 'root']}, {'kind': 'task', 'refs': ['owner']}),
 ])
 def test_route_owner_prefers_task_id_and_never_resolves_chat_refs(route, expect):
