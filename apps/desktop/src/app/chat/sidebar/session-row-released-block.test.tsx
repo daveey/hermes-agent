@@ -55,6 +55,22 @@ it.each(['retained', 'explicit-unknown', 'expired'])(
   }
 )
 
+it('does not let an unknown deploy watch withdraw a separate fresh human ask', () => {
+  vi.useFakeTimers({ now: NOW * 1000 })
+
+  const { container } = draw({
+    ...blocked,
+    kanban_external_unknown: 1,
+    kanban_timed_cards: [
+      ...blocked.kanban_timed_cards!,
+      { id: 'default/deploy', title: 'Deploy watch', state: 'waiting', wait_kind: 'deploy', since: NOW - 60 }
+    ]
+  })
+
+  expect(container.querySelector('[data-card-timer="blocked"]')?.className).toContain('text-red-500')
+  expect(container.querySelector('[aria-label]')?.getAttribute('aria-label')).toContain('Needs you')
+})
+
 it('keeps a fresh real ask red and replaces its elapsed with the current running clock after release', () => {
   vi.useFakeTimers({ now: NOW * 1000 })
   const first = draw(blocked)

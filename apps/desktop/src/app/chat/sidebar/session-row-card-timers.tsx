@@ -85,7 +85,6 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
   // Historical elapsed clocks remain useful, but cannot renew an answered ask.
   const unknown = Boolean(
     session.kanban_unknown ||
-    timers.confirmedAt ||
     (session.kanban_observed_at !== undefined && !hasFreshKanbanObservation(session))
   )
 
