@@ -6,7 +6,8 @@ private ledger for that exact release and charges every fresh lease grant agains
 its existing signed ``spend_windows`` stay an independent intersection. Core therefore never counts the
 allowance from replica ``task_runs`` history, on any host:
 
-* :func:`state` classifies the card's newest override: ``None`` (no basis: ordinary cumulative accounting),
+* :func:`state` classifies the effective override (agent-only generic budget renewals retain the preceding
+  reviewer basis; explicit bases and non-agent budgets remain barriers): ``None`` (no basis: cumulative accounting),
   :data:`BOARD` (a well-formed recognized override on a ``primary`` synced board: the run limit is the Board's,
   enforced on each grant) or :data:`UNPROVEN` (any other basis, a retired draft basis, malformed fields, or a
   board that is not ``primary``: the run limit holds). There is no cumulative or local fallback.
@@ -47,13 +48,38 @@ def _newest(conn: sqlite3.Connection, task_id: str) -> Optional[tuple]:
                         "AND kind = ? ORDER BY id DESC LIMIT 1", (task_id, budget.OVERRIDE_EVENT)).fetchone()
 
 
+def _effective(conn: sqlite3.Connection, task_id: str, data):
+    """Agent-only generic renewals cannot supersede a private Board allowance.
+
+    Stop at every explicit basis (including malformed ones) or non-agent budget.
+    This selects an expected identity, never authority: the Board still validates
+    its active private ledger and the claim must prove the matching charged grant.
+    """
+    import json
+    from hermes_cli import kanban_spend_budget as budget
+    row = _newest(conn, task_id)
+    if not isinstance(data, dict) or "runs_basis" in data or data.get("writer_kind") != "agent":
+        return data, row
+    has_uid = "uid" in {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
+    rows = conn.execute(f"SELECT {'uid' if has_uid else 'NULL'}, payload FROM task_events WHERE task_id=? "
+                        "AND kind=? ORDER BY id DESC", (task_id, budget.OVERRIDE_EVENT))
+    for candidate in rows:
+        try:
+            prior = json.loads(candidate[1])
+        except (TypeError, ValueError):
+            return {}, candidate
+        if not isinstance(prior, dict) or "runs_basis" in prior or prior.get("writer_kind") != "agent":
+            return prior, candidate
+    return data, row
+
+
 def expected(conn: sqlite3.Connection, task_id: str, data: Optional[dict] = None) -> Optional[dict]:
     """The exact grant evidence a :data:`BOARD` card needs, else None."""
     from hermes_cli import kanban_spend_budget as budget
     data = budget.card_override(conn, task_id) if data is None else data
+    data, row = _effective(conn, task_id, data)
     if not isinstance(data, dict) or data.get("runs_basis") != BASIS:
         return None
-    row = _newest(conn, task_id)
     uid = row[0] if row else None
     if not (_exact(data.get("runs"), BOARD_RUNS) and _text(data.get("review_uid")) and _text(uid)):
         return None
@@ -67,7 +93,8 @@ def state(conn: sqlite3.Connection, task_id: str, data: Optional[dict] = None) -
     """``None`` (cumulative accounting), :data:`BOARD` or :data:`UNPROVEN` (the run limit holds)."""
     from hermes_cli import kanban_spend_budget as budget
     data = budget.card_override(conn, task_id) if data is None else data
-    if not isinstance(data, dict) or "runs_basis" not in data:
+    effective, _ = _effective(conn, task_id, data)
+    if not isinstance(effective, dict) or "runs_basis" not in effective:
         return None
     return BOARD if expected(conn, task_id, data) is not None else UNPROVEN
 
