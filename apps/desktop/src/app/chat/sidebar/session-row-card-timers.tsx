@@ -93,7 +93,7 @@ export function SessionRowCardTimers({ session }: { session: SessionInfo }) {
     (unknown ? `${t.sidebar.row.kanbanUnknown(cards.length)}\n` : '') +
     cards
       .map(c =>
-        unknown
+        unknown && c.state !== 'waiting'
           ? `${c.title} · ${text(c)}`
           : `${c.title} · ${c.state === 'waiting' ? (c.wait_kind === 'deploy' ? t.sidebar.row.cardColours.deploy : t.sidebar.row.outcomeWaiting) : t.sidebar.row.cardColours[c.state === 'running' ? 'blue' : 'red']} · ${text(c)}`
       )
