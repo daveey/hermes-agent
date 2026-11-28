@@ -1486,6 +1486,16 @@
         "kanban_active": 1,
         "kanban_observed_at": 1800000000,
         "kanban_parked": 1,
+        "kanban_timed_cards": [
+          {
+            "id": "default/t_1111111111111111",
+            "since": 1799999940.0,
+            "state": "waiting",
+            "title": "Fixture work",
+            "wait_kind": "ci"
+          }
+        ],
+        "kanban_timed_more": 0,
         "kanban_waiting_on": [
           "t_1111111111111111"
         ],
@@ -1764,6 +1774,16 @@
         "kanban_active": 1,
         "kanban_observed_at": 1800000000,
         "kanban_parked": 1,
+        "kanban_timed_cards": [
+          {
+            "id": "default/t_1111111111111111",
+            "since": 1799999940.0,
+            "state": "waiting",
+            "title": "Fixture work",
+            "wait_kind": "clock"
+          }
+        ],
+        "kanban_timed_more": 0,
         "kanban_waiting_on": [
           "t_1111111111111111"
         ],
@@ -2054,6 +2074,16 @@
         "kanban_active": 1,
         "kanban_observed_at": 1800000000,
         "kanban_parked": 1,
+        "kanban_timed_cards": [
+          {
+            "id": "default/t_1111111111111111",
+            "since": 1799999940.0,
+            "state": "waiting",
+            "title": "Fixture work",
+            "wait_kind": "deploy"
+          }
+        ],
+        "kanban_timed_more": 0,
         "kanban_waiting_on": [
           "t_1111111111111111"
         ],
