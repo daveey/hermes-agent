@@ -476,7 +476,8 @@ def projection_content_key(path: Path, tables: Iterable[str], open_ro: Callable)
             return None
         try:
             with open_ro(path) as conn:
-                row = _projection_covered_read(conn, path, db, tables)
+                from hermes_cli.kanban_projection_probe_cache import read
+                row = read(conn, path, db, tables, _projection_covered_read)
                 if row is not None:
                     return ("projection", db[0], db[1], *row)
                 # Same open as ``_content_key``: an older file must not hide a write, and must
