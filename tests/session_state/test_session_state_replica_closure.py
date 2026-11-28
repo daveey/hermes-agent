@@ -98,6 +98,48 @@ def test_missing_parent_is_unknown_indexed_then_arrival_pushes(store, replica):
     assert after["cards"]["owner2/default/default/parent"]["title"] == "Arrived"
 
 
+@pytest.mark.parametrize("remote", [False, True])
+def test_local_arrival_wakes_unknown_dependency_without_borrowing_owner(store, board, replica, remote):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import write_txn
+
+    if remote:
+        child = "remote/default/default/child"
+        with sqlite3.connect(replica) as conn:
+            conn.execute("DELETE FROM tasks WHERE id='parent'")
+    else:
+        tid = kb.create_task(board, title="Local child", assignee="worker", session_id="chat")
+        child = f"default/{tid}"
+        with write_txn(board):
+            board.execute("INSERT INTO task_links(parent_id,child_id) VALUES ('later',?)", (tid,))
+    pid = "parent" if remote else "later"
+    missing = f"?/default/default/{pid}"
+    drain(store)  # Consume setup events before the parent-only arrival.
+    before = store.recompute("chat")
+    assert before["cards"][child]["parents"] == [missing]
+    assert store.lineages_for_card(missing) == ["chat"]
+    count = len(store.pushed)
+    with write_txn(board):
+        board.execute("INSERT INTO tasks(id,title,status,assignee,created_at) VALUES (?, 'Arrived','done','worker',1)",
+                      (pid,))
+        board.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES (?,'completed','{}',2)", (pid,))
+    drain(store)
+    after = store.get("chat")
+    if remote:
+        assert after["cards"][child]["parents"] == [missing]
+        assert after["cards"][missing]["blocked_on"] == "unknown"
+        assert f"default/{pid}" not in after["cards"]
+        assert after["rev"] == before["rev"]
+    else:
+        assert len(store.pushed) > count
+        assert after["rev"] > before["rev"]
+        assert missing not in after["cards"]
+        assert after["cards"][child]["parents"] == [f"default/{pid}"]
+        assert after["cards"][f"default/{pid}"]["lifecycle"] == "done"
+        assert store.lineages_for_card(missing) == []
+        assert store.lineages_for_card(f"default/{pid}") == ["chat"]
+
+
 def test_local_same_id_cannot_replace_remote_parent(store, replica, board):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import write_txn

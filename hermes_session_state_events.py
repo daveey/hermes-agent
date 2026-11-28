@@ -112,6 +112,10 @@ class BoardWatcher(_Watched):
         except sqlite3.Error:
             chats = []
         self.store.emit_card(slug, task_id, chats)
+        # An absent local ancestor is indexed without an owner until arrival.
+        # Invalidate that placeholder only; collection still decides ownership,
+        # so a same-ID local arrival cannot supply a foreign root's dependency.
+        self.store.emit_card(slug, task_id, (), key=f"?/default/{slug}/{task_id}")
 
     def _drain(self, path: Path, emit: Callable[[str, sqlite3.Connection], None]) -> None:
         key = str(path)
