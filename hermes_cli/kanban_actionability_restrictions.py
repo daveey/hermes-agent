@@ -7,14 +7,31 @@ from __future__ import annotations
 
 import shlex
 
-from hermes_cli.kanban_actionability_private import STOPS, _payload, held
+from hermes_cli.kanban_actionability_private import DECISIONS, RELEASE, RENEWAL, STOPS, _payload, held
+
+
+def _context(events, source):
+    """Only source-specific resolution evidence; aggregate uncertainty is handled by held()."""
+    for event in events:
+        if event['kind'] in DECISIONS:
+            yield event
+        payload = _payload(event) or {}
+        if event['kind'] == RELEASE and payload.get('episode') == source:
+            yield event
+        if event['kind'] == RENEWAL:
+            covered = payload.get('covered_restriction_uids')
+            if isinstance(covered, list) and source in covered:
+                # A valid multi-source renewal contributes only this source's mandate.
+                # Keep malformed targeted evidence intact so held() still refuses it.
+                if all(isinstance(uid, str) and uid for uid in covered):
+                    event = {**event, 'payload': {**payload, 'covered_restriction_uids': [source]}}
+                yield event
 
 
 def details(task, reader, events, verified, releases):
     """Name every unresolved stop, including history hidden by a newer stop's deadline."""
     from hermes_cli.kanban_actionability_sources import _administration
 
-    context = [e for e in events if e['kind'] not in STOPS]
     source_events = reader.events(task['id'])
     out = []
     for event in events:
@@ -22,7 +39,8 @@ def details(task, reader, events, verified, releases):
             continue
         # Triage itself is not source attribution. Classify the exact stop against
         # the unchanged verified resolution evidence, without the status shortcut.
-        reason = held('ready', [event, *context], verified_cover=verified, verified_releases=releases)
+        reason = held('ready', [event, *_context(events, event['uid'])],
+                      verified_cover=verified, verified_releases=releases)
         if reason is None:
             continue
         payload = _payload(event) or {}
