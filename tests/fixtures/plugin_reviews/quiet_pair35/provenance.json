@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "review_task": "t_01a21fe9ccd7cfbd",
+  "source_commit": "00277ac1fe6ab053afce5d0c254607cb5ea8a493",
+  "source_tree": "468ca16808504a33621ffaf30105ba86ae487931",
+  "report_sha256": "462d54022b3fcebf2f981b3d2dcb3e2b880a9481a549300891eade336cf664bd",
+  "source_only": true,
+  "plugins": {
+    "remote-screen": {
+      "verdict": "approve",
+      "files": {
+        "README.md": "e857cb08305c145d36f4ba786865ecee0fe0bc7ab0bab2c9171994715e5d45d3",
+        "__init__.py": "525c91a48b6d63757cdcd4c95da70efa5fcf422c41bf4dffdc2a75c01888f986",
+        "ocr.swift": "f5e4a7475a4baa47ecad8cd775588c9fb0b64418c87d73e6f01b9dcfd18c50ee",
+        "plugin.yaml": "91f259a365b73706e2c4534725ef45903cdb7917aa58d3e624af85a7d4dada62",
+        "rfb.py": "daf760c279ad358e6781cccc176885c5d94ed5d9e50229acfd847b0a36839272",
+        "screen_guard.py": "e340ec622c87317ff6fcf6f4362bffd86de61692b5367a16b28ce2df5c1f7bff",
+        "tests/test_source_review.py": "12d4399793ccdfccb83b68a61979e4f9f8d662f234eb66795327b10db2ceeaaf",
+        "tests_remote_screen.py": "80a5fb813d1f1f6b7400c62312af8ae1bcbe25f1feae40a72fbc0828c53ec65e",
+        "tests_screen_guard.py": "32d13d071256f3f8696c2e99fa1c20d62733b7a19ca5fbb88e7044a20562427d"
+      },
+      "subtree": "109f7383703e00e5c93ab78c6fc9f223f51c5435",
+      "executable_closure": {
+        "reviewed": [
+          "__init__.py -> rfb.py, screen_guard.py",
+          "digest-bound ocr.swift -> private generated binary"
+        ],
+        "unverified": [
+          "native compiler/runtime behavior, toolchain/environment integrity, remote peer"
+        ],
+        "environment_only": [
+          "Hermes constants",
+          "Pillow",
+          "cryptography",
+          "YAML loaders",
+          "credential helper security",
+          "/usr/bin/swiftc"
+        ]
+      },
+      "residual_findings": [
+        {
+          "id": "RS-1",
+          "severity": "medium",
+          "classification": "baseline",
+          "blocking": false,
+          "location": "__init__.py:472-510",
+          "summary": "Explicit remote control remains general-purpose; inspection allowlist is not its authorization gate."
+        },
+        {
+          "id": "RS-DIRECTIVE",
+          "severity": "low",
+          "classification": "baseline",
+          "blocking": false,
+          "location": "_screenshare_hint",
+          "summary": "Directive host/label fields interpolated without escaping."
+        },
+        {
+          "id": "RS-CONNECT",
+          "severity": "low",
+          "classification": "baseline",
+          "blocking": false,
+          "location": "__init__.py:209; rfb.py:143-158",
+          "summary": "connect helper plus context entry reconnect redundantly."
+        },
+        {
+          "id": "RS-RETENTION",
+          "severity": "low",
+          "classification": "baseline",
+          "blocking": false,
+          "location": "handle_approve",
+          "summary": "Approval screenshots have no pruning policy."
+        }
+      ]
+    },
+    "worktree-owner": {
+      "verdict": "approve",
+      "files": {
+        "README.md": "00d69fa6d756b333299216ea139ce1a188b1c3857d1d9d84e9b83b1cf9cacfd7",
+        "__init__.py": "180b68b350151ce7045da585afacb9feeb5c6092a596e33261a6afa6f0a2eb29",
+        "agent_hook.py": "155e4cddbdf9f8fbc4a36b6c2ce32613c27d413d9b7f5ce0e90ee3133a82128f",
+        "plugin.yaml": "f5e61e2be99d9e2f1a9b3b9c2b0631025bfe17b524aa99aafdf4f5ad2b972257",
+        "tests/runtime_fixture.py": "27aa7eb68fe9a9bead99ca482700d29acd759d6003961e380974ff57735fe189",
+        "tests/test_agent_hook.py": "154858972bc7281ef01a51efa32e6266cc0a6e45f392d65e645721410c47e478",
+        "tests/test_cross_board.py": "fcebc8b0165a1b3822d90e5b95b69078ae6fff18ee3d707423efd24806cd6e95",
+        "tests/test_lifecycle.py": "b028fe683d1de7324e0cd7323b8182f927578de35d55f13dfe9e1dcabb4a1575",
+        "tests/test_worktree_owner.py": "c58a764fa35e237025cd79ac64f466abfd1dfcaef1d531fe78d4608fde964306"
+      },
+      "subtree": "0425ee6f6ef93f3dd94ed192e24023102aa51e00",
+      "executable_closure": {
+        "reviewed": [
+          "agent_hook.py -> __init__.py",
+          "detached Python same-file reload paths (current source only)"
+        ],
+        "unverified": [
+          "CLI/config-selected helpers, future source bytes",
+          "core scratch preservation, external GC and runtime fixture integration",
+          "native Mac process visibility"
+        ],
+        "environment_only": [
+          "Git/gh and transport/credential/filter/fsmonitor helpers",
+          "stat, lsof",
+          "opt-in sudo /usr/bin/readlink",
+          "Python interpreter"
+        ]
+      },
+      "residual_findings": [
+        {
+          "id": "WT-CARD-IDENTITY",
+          "severity": "low",
+          "classification": "baseline",
+          "blocking": false,
+          "location": "__init__.py:863-873",
+          "summary": "Card teardown lacks agent path forward-gitdir check; coordinated Git metadata forgery not covered by approval."
+        },
+        {
+          "id": "WT-SNAPSHOT",
+          "severity": "low",
+          "classification": "baseline",
+          "blocking": false,
+          "location": "agent_hook.py:118-133; __init__.py:492-551",
+          "summary": "Cached merge refs after fetch failure, disposable-cache policy and filesystem snapshot races remain."
+        },
+        {
+          "id": "WT-MARKER-SHAPE",
+          "severity": "low",
+          "classification": "baseline",
+          "blocking": false,
+          "location": "agent_hook.py:245-251",
+          "summary": "Non-object JSON markers can abort a teardown batch, preserving trees but skipping healthy siblings."
+        }
+      ]
+    }
+  }
+}
