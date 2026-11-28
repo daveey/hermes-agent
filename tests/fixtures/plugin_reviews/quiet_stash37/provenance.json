@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "review_task": "t_01a22039b040e865",
+  "source_commit": "a362991f2b57e59e52d2e66c2b62ebc64e3a6ada",
+  "report_sha256": "cf15fa4bf5d72d58ae334b28a32d3cf7e123b48ceead24adc93ac864bdbb2dd2",
+  "source_only": true,
+  "plugins": {
+    "stash-worktree-guard": {
+      "verdict": "approve",
+      "files": {
+        "README.md": "928e90f9787da7e08783f87944b3501b85a03bd97284c68885ab2b1fd1bbb432",
+        "__init__.py": "15d38601224f3ddb4a12299d59bc704034b7b64575cb19908a296fe0ae4714ee",
+        "fixtures/awk_pipeline_main_verdicts.json": "b90c5bc4ffa987c5bec8b62564f842c733d0605f04ea4ec29b099f31099c48c7",
+        "fixtures/sql_inventory.txt": "5b2e168bd5b26ee52918c5e5dfb5479db0fcaa3c40ecb559d01e57139748ed5e",
+        "guard.py": "61b305b7feb282342e61e6b160a35754f53bcf987d9cfe5470a4521e23ec138c",
+        "plugin.yaml": "379552da5cb10de2207452af3716df9626f5acd187a90f2b2c8f11d52747effc",
+        "test_env_split.py": "06de0667a7e14fab18918947d45b5d202f8b89822808e0116498d7034c42dc97",
+        "test_ref_mutations.py": "363635fc9a87e82edc29a959bd162c932d0fdd858c8db39ecb6e3dee692938e6",
+        "test_shared_mutations.py": "c625342affdc4a51fdd39ceeb7ccc39dcb9230329f4caf03ecbc224a99094102",
+        "tests/test_source_review.py": "18d1eb7f387a7824eeef0418a3d7427e533497a374e8a82786f0cabd9dda1719",
+        "tests_awk_pipelines.py": "2a7d7cab62e06453ae6d37bf38e0dd8be4e7d766802231742849a463826ada11",
+        "tests_broker_fences.py": "a0b6bda4e5fdf7a47991df7d9aca55f26f38ffde44a2286a57ecb25ff0c25865",
+        "tests_guard.py": "65ad1b0246cf5df43d9453b4b9c5a453aa5ebe9cf44ecc07909b648307ea433d",
+        "tests_scoped_uncertainty.py": "4816cb9640c1289ce9e648f2416382398c8e6139811d522593904b58a6cb3d4e"
+      },
+      "subtree": "748168551eb6aceb60b50fb6e1cc26e955686b4c",
+      "approval_scope": "Exact bounded advisory-plugin source tree, with managed core/system Git as separate trust; no installed/runtime/adversarial containment approval.",
+      "exclusions": [
+        "README.md:33-37",
+        "README.md:237-244",
+        "README.md:261-320",
+        "README.md:346-415"
+      ],
+      "retained_boundaries": [
+        "caller opt-out flags",
+        "outer hook unexpected exception allow",
+        "last-good reload fallback",
+        "branch-label metadata not authenticated worker ownership",
+        "mutable ref-to-use TOCTOU",
+        "current_branch failure maps to HEAD",
+        "runtime-computed Python and external/generated script/config semantics",
+        "managed Git environment/config not hermetic; custom git shim NOT approved"
+      ],
+      "managed_dependencies_separate_trust": [
+        "Python/stdlib",
+        "managed Hermes tools.terminal_tool.get_session_cwd and dispatch",
+        "system Git metadata commands"
+      ]
+    }
+  }
+}
