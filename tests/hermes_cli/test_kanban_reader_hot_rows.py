@@ -328,6 +328,19 @@ def test_hosts_match_the_old_incremental_reader_in_one_statement(watch_board):
         assert counted.statements == 2 and counted.rows == 2  # database_list, then one row for every new record
 
 
+def test_hosts_unchanged_cursor_does_not_rescan_watch_history(watch_board):
+    for at in range(2000):
+        _watch(watch_board, json.dumps({"host": "hub", "observed_at": at}))
+    assert kew.hosts_seen(watch_board) == {"hub": 1999.0}
+    steps = []
+    watch_board.set_progress_handler(lambda: steps.append(1) or 0, 100)
+    try:
+        assert kew.hosts_seen(watch_board) == {"hub": 1999.0}
+    finally:
+        watch_board.set_progress_handler(None, 0)
+    assert len(steps) < 10, f"unchanged watch cursor scanned history: {len(steps) * 100} VM steps"
+
+
 def test_hosts_start_over_on_a_smaller_board_behind_the_same_key(watch_board):
     for at in (5, 9):
         _watch(watch_board, json.dumps({"host": "old", "observed_at": at}))

@@ -1,4 +1,5 @@
 """The COUNTS state input is canonical compression lineage, not transcript bytes."""
+import contextlib
 import sqlite3
 
 import pytest
@@ -84,6 +85,49 @@ def test_unknown_lineage_schema_is_not_an_empty_certificate(tmp_path):
         conn.execute('DROP TABLE messages')
     with pytest.raises(sqlite3.Error):
         lineage.key(path)
+
+
+def test_lineage_inventory_handoffs_are_independent_of_session_count(tmp_path, monkeypatch):
+    from hermes_cli import kanban_session_activity as ksa
+    from tests.hermes_cli.test_kanban_reader_hot_rows import Counting
+
+    path = tmp_path / 'state.db'
+    db = SessionDB(db_path=path)
+    db.create_session('seed', 'cli')
+    db.close()
+    with sqlite3.connect(path) as conn:
+        conn.executemany('INSERT INTO sessions(id, source, started_at) VALUES (?, ?, ?)',
+                         [(f'session-{i:05}', 'cli', 1.0) for i in range(4000)])
+    original = ksa.cached_ro
+    observed = []
+
+    @contextlib.contextmanager
+    def counted(*args, **kwargs):
+        with original(*args, **kwargs) as conn:
+            proxy = Counting(conn)
+            observed.append(proxy)
+            yield proxy
+
+    monkeypatch.setattr(ksa, 'cached_ro', counted)
+    value = lineage.key(path)
+    assert value == (('seed', *(f'session-{i:05}' for i in range(4000))), ())
+    assert sum(c.rows for c in observed) <= 3
+
+
+@pytest.mark.parametrize('rows', [
+    [], [('z', None), ('a', 'compression'), ('q"\\\n雪', '')],
+    [(None, b'legacy'), (b'id', 'compression'), (1.5, -0.0), ('text', float('inf'))],
+])
+def test_session_transport_preserves_literal_sqlite_rows(rows):
+    with sqlite3.connect(':memory:') as conn:
+        conn.execute('CREATE TABLE sessions(id, end_reason)')
+        conn.executemany('INSERT INTO sessions VALUES (?, ?)', rows)
+        expected = tuple(conn.execute('SELECT id, end_reason FROM sessions ORDER BY id'))
+        actual = lineage._session_rows(conn)
+        assert actual == expected
+        assert [[type(cell) for cell in row] for row in actual] == [
+            [type(cell) for cell in row] for row in expected]
+        assert repr(actual) == repr(expected)
 
 
 def test_unknown_state_is_never_certified(world, monkeypatch):

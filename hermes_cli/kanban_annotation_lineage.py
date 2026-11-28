@@ -8,7 +8,24 @@ An unreadable/missing/unknown schema raises: the holder must read afresh.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+
+def _session_rows(conn) -> tuple:
+    """Transport the ordered TEXT/NULL inventory without one GIL handoff per session.
+
+    Nontext legacy cells retain the literal SQLite path in this same transaction;
+    JSON must never reinterpret BLOBs, nonfinite REALs or signed zero as IDs.
+    """
+    count, packed = conn.execute(
+        "SELECT COUNT(*), json_group_array(json_array(id, end_reason)) FILTER (WHERE "
+        "typeof(id) IN ('text','null') AND typeof(end_reason) IN ('text','null')) "
+        "FROM (SELECT id, end_reason FROM sessions ORDER BY id)").fetchone()
+    rows = json.loads(packed)
+    if len(rows) != count:
+        return tuple(conn.execute('SELECT id, end_reason FROM sessions ORDER BY id'))
+    return tuple(tuple(row) for row in rows)
 
 
 def key(path: Path) -> tuple:
@@ -21,7 +38,7 @@ def key(path: Path) -> tuple:
             # Compile every canonical dependency even with no compressed rows;
             # an incomplete schema must not certify a reusable empty graph.
             conn.execute(_CHAIN_STEP_SQL, (None,)).fetchone()
-            sessions = tuple(conn.execute('SELECT id, end_reason FROM sessions ORDER BY id'))
+            sessions = _session_rows(conn)
             edges = {}
             for sid, reason in sessions:
                 if reason == 'compression':
