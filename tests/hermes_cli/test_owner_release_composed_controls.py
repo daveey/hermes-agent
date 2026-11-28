@@ -139,6 +139,12 @@ def test_real_changed_comments_invalidate_emitted_read_nonce(origin, parties, mo
 def test_real_postpublication_current_gates_refuse_before_effects(origin, parties, monkeypatch, caplog, mode):
     home, executor = parties
     ident, native = origin
+    # This one control exercises the legacy signed-window v1 contract. The
+    # ordinary v2 path deliberately needs no signer (covered by the v2 suite).
+    if mode == "no-allowance":
+        capability = ksc.Hub.decision_retain_capability
+        monkeypatch.setattr(ksc.Hub, "decision_retain_capability",
+                            lambda hub, board: {**capability(hub, board), "owner_release_application": 1})
     task, episode = helpers.seed_stopped_task(home, ident, chats.CHAT)
     intent_uid = publish(native, task, episode)
     wire = consume_wire(home, task, intent_uid)
