@@ -189,3 +189,42 @@ def test_an_agent_release_still_refuses_the_exhausted_allowance(kanban_home, own
             assert supersession._refusal(conn, supersession._state(tid, supersession.AGENT, authority)) \
                 == "allowance_exhausted", authority
         assert kb.get_task(conn, tid).status == "triage"
+
+
+def _nothing_filed(conn, tid):
+    assert park._row(conn, tid)[2] is None  # no ask written
+    assert park._events(conn, tid, stranded.EVENT) == []
+    assert conn.execute("SELECT COUNT(*) FROM task_chat_links WHERE task_id=? AND kind='shepherd'",
+                        (tid,)).fetchone()[0] == 0  # no desk link either
+    assert conn.execute("SELECT COUNT(*) FROM task_chat_links WHERE task_id=? AND chat_session='owner-chat' "
+                        "AND released=0", (tid,)).fetchone()[0] == 1
+
+
+def test_a_containment_hold_keeps_a_live_owned_human_only_stop_with_its_owner(kanban_home, own_gateway, monkeypatch):
+    """Contained: no release can be offered, so the live owner keeps it; no escalation, desk subscription or link."""
+    from hermes_cli import kanban_containment_connections as containment
+    for conn in (own_gateway,):
+        tid = _allowance_stop_with_live_owner(conn, kanban_home)
+        _board(monkeypatch, EXHAUSTED)
+        monkeypatch.setattr(containment, "held", lambda conn_, task_id: task_id == tid)
+        assert stranded.human_only_stop(conn, tid)
+        cfg = {"kanban": {"triage_owner_chat": park.DESK}}
+        assert park._sweep(conn, now=park._later(3), cfg=cfg) == []
+        _nothing_filed(conn, tid)
+
+
+def test_a_safety_restricted_live_owned_stop_gets_no_offerless_red_ask(kanban_home, own_gateway, monkeypatch):
+    """Restricted: the brief carries no release offer, so nothing is filed and the live owner keeps the card."""
+    for conn in (own_gateway,):
+        tid = _allowance_stop_with_live_owner(conn, kanban_home)
+        _board(monkeypatch, EXHAUSTED)
+        stop = decision.pending_episode(conn, tid)
+        assert stop is not None
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "decision_hold_restricted",
+                             {"cause": "safety_refusal", "episode": stop.get("uid") or str(stop["id"])})
+        assert kanban_release.offer(conn, tid) is None
+        assert stranded.human_only_stop(conn, tid)  # still human-only: only the missing offer stops the filing
+        cfg = {"kanban": {"triage_owner_chat": park.DESK}}
+        assert park._sweep(conn, now=park._later(3), cfg=cfg) == []
+        _nothing_filed(conn, tid)
