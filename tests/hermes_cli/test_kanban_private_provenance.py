@@ -37,6 +37,17 @@ def test_promoted_capability_names_original_source_owner_and_release(board, monk
     assert stacked.helpers.written(board, tid) == before
 
 
+def test_private_reason_default_preserves_classifier_return_type(board, monkeypatch):
+    from hermes_cli.kanban_actionability_sources import Reader, _private_reason
+
+    tid, old, _ = stacked.stacked(board, monkeypatch)
+    reader = Reader(board)
+    task = reader.task(tid)
+    assert _private_reason(board, task, reader) == 'card_in_triage'
+    details = _private_reason(board, task, reader, explain=True)
+    assert old in {row['source_uid'] for row in details}
+
+
 def test_exact_guarded_release_removes_resolved_private_provenance(board, monkeypatch):
     tid, old, _ = stacked.stacked(board, monkeypatch)
     assert stacked.helpers.run(board, tid, capability_episodes=[old])['outcome'] == 'released'
