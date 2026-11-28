@@ -124,6 +124,25 @@ function controlRowGridClass(singleColumn: boolean, stacked: boolean): string {
     : 'grid-cols-[auto_1fr_auto] items-center gap-(--composer-control-gap) [grid-template-areas:"menu_input_controls"]'
 }
 
+function useQueueAwareCancel(activeQueueSessionKeyRef: { current: null | string }, onCancel: ChatBarProps['onCancel']) {
+  return useCallback((origin?: StopOrigin) => {
+    parkQueuedPrompts(activeQueueSessionKeyRef.current)
+
+    return onCancel(origin)
+  }, [activeQueueSessionKeyRef, onCancel])
+}
+
+function useBlurCloseTimer() {
+  const timer = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current)
+    }
+  }, [])
+
+  return timer
+}
+
 export function ChatBar({
   busy,
   cwd,
@@ -249,16 +268,7 @@ export function ChatBar({
   // The blur-close timer must not outlive the composer: an unmounted editor's
   // deferred closeTrigger() would setState after teardown (vitest reported it as
   // an unhandled "window is not defined" from paste-url-is-text.test.tsx).
-  const blurCloseTimer = useRef<number | null>(null)
-
-  useEffect(
-    () => () => {
-      if (blurCloseTimer.current !== null) {
-        window.clearTimeout(blurCloseTimer.current)
-      }
-    },
-    []
-  )
+  const blurCloseTimer = useBlurCloseTimer()
 
   const { availableThemes, themeName } = useTheme()
   const at = useAtCompletions({ gateway: gateway ?? null, sessionId: sessionId ?? null, cwd: cwd ?? null })
@@ -388,11 +398,7 @@ export function ChatBar({
   // only trace). Interrupts that exist to advance the queue (send-now-while-
   // busy) call the raw onCancel and keep draining on settle. Parked entries
   // stay in the panel until resumed, sent, edited, or deleted.
-  const haltRun = useCallback((origin?: StopOrigin) => {
-    parkQueuedPrompts(activeQueueSessionKeyRef.current)
-
-    return onCancel(origin)
-  }, [activeQueueSessionKeyRef, onCancel])
+  const haltRun = useQueueAwareCancel(activeQueueSessionKeyRef, onCancel)
 
   const { compactPill, foldVoice, minimal, stacked, singleColumn } = useComposerMetrics({
     composerDockRef,

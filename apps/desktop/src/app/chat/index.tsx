@@ -483,10 +483,14 @@ export const ChatView = memo(function ChatView(props: ChatViewProps) {
   )
 })
 
-function useTranscriptStoredId(activeSessionId: null | string) {
-  return useStoreSelector($sessionStates, states =>
+function useTranscriptIds(view: ReturnType<typeof useSessionView>) {
+  const activeSessionId = useStore(view.$runtimeId)
+  const transcriptStoredSessionId = useStoreSelector($sessionStates, states =>
     activeSessionId ? (states[activeSessionId]?.storedSessionId ?? null) : null
   )
+  const storedId = useStore(view.$storedId)
+
+  return [activeSessionId, transcriptStoredSessionId, storedId] as const
 }
 
 const ChatViewContent = memo(function ChatViewContent({
@@ -533,11 +537,7 @@ const ChatViewContent = memo(function ChatViewContent({
   const isPrimary = view.kind === 'primary'
   const introHoldsThread = useStore($introHoldsThread) && isPrimary && isMainWindow()
   const guideStarted = useStoreSelector($introView, introView => introView === 'intro' || introView === 'ended')
-  const activeSessionId = useStore(view.$runtimeId)
-
-  const transcriptStoredSessionId = useTranscriptStoredId(activeSessionId)
-
-  const storedId = useStore(view.$storedId)
+  const [activeSessionId, transcriptStoredSessionId, storedId] = useTranscriptIds(view)
   const setupChat = useSetupChatView()
   // Multi-pane dimming: only the focused surface paints at full strength, so
   // two sessions side by side read as "this one, and that one over there".
