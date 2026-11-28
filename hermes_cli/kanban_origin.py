@@ -39,6 +39,8 @@ _REF_FORMS = (
     re.compile(rf"^(?P<gw>{_NAME})/(?P<profile>{_NAME})/(?P<session>{_NAME})$"),
     re.compile(rf"^(?P<gw>{_NAME}):(?P<session>{_NAME})$"),
 )
+# This-gateway form, as session links and cross_session write it: ``@session:<profile>/<id>``.
+_LOCAL_FORM = re.compile(rf"^@session:(?P<profile>{_NAME})/(?P<session>{_NAME})$")
 
 
 class OriginError(ValueError):
@@ -65,8 +67,12 @@ class Origin:
 
 
 def parse_origin(text: str) -> Origin:
-    """``@session:<profile>@<gw>/<id>``, ``<gw>/<profile>/<id>`` or ``<gw>:<id>`` (profile default)."""
+    """``@session:<profile>@<gw>/<id>``, ``<gw>/<profile>/<id>``, ``<gw>:<id>`` (profile default) or the
+    this-gateway ``@session:<profile>/<id>``."""
     raw = str(text or "").strip()
+    lm = _LOCAL_FORM.match(raw)
+    if lm:
+        return Origin(gateway_name() or "local", lm["profile"], lm["session"])
     for form in _REF_FORMS:
         m = form.match(raw)
         if m:
@@ -74,7 +80,7 @@ def parse_origin(text: str) -> Origin:
             return Origin(d["gw"], d.get("profile") or "default", d["session"])
     raise OriginError("origin_ref_invalid",
                       f"origin session {raw!r} is not @session:<profile>@<gateway>/<id>, "
-                      "<gateway>/<profile>/<id> or <gateway>:<id>")
+                      "<gateway>/<profile>/<id>, <gateway>:<id> or @session:<profile>/<id>")
 
 
 def ambient_origin_ref() -> str:
@@ -245,6 +251,8 @@ def resolve(explicit: Optional[str] = None) -> Optional[Origin]:
     could never be read back on the origin, which is exactly the silent failure this exists to stop."""
     raw = (explicit or "").strip() or ambient_origin_ref()
     if not raw:
+        return None
+    if _LOCAL_FORM.match(raw):  # names this very gateway: its chat already owns its cards
         return None
     origin = parse_origin(raw)
     me, known = gateway_names()

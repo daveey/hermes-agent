@@ -58,6 +58,10 @@ def test_parse_origin_forms_and_rejects_junk():
     assert ko.parse_origin(ORIGIN).chat_id == "macbook/default/20261022_204322_aaaaaa"
     assert ko.parse_origin("macbook/work/s1") == ko.Origin("macbook", "work", "s1")
     assert ko.parse_origin("macbook:s1") == ko.Origin("macbook", "default", "s1")
+    # headless ``local-<hash>`` ids parse too (they own nothing, which is creator resolution's call, not parsing's)
+    assert ko.parse_origin("@session:default/local-" + "ab" * 32).session == "local-" + "ab" * 32
+    local = ko.parse_origin("@session:default/20261122_233430_28d354")
+    assert (local.profile, local.session) == ("default", "20261122_233430_28d354")
     for bad in ("", "s1", "@session:a@b", "a/b/c/d", "mac book:s1"):
         with pytest.raises(ko.OriginError) as e:
             ko.parse_origin(bad)
@@ -145,3 +149,13 @@ def test_get_tool_definitions_registers_kanban_for_an_origin_session(hub_gateway
     model_tools.get_tool_definitions(enabled_toolsets=["terminal"], quiet_mode=True)
     # kanban_create may sit behind tool_search, but it is registered (pre-assembly selection)
     assert "kanban_create" in model_tools._last_resolved_tool_names
+
+
+@pytest.mark.parametrize("ref", ["@session:default/20261122_233430_28d354", "@session:default/20261127_202849_4c4281",
+                                 "@session:default/local-650ebae8a5567d9f1362794d8631d63cf99ee2892944f4f4322e17b11ff49512"])
+def test_this_gateway_session_link_is_accepted_as_origin(hub_gateway, ref):
+    from tools import kanban_tools as kt
+
+    res = json.loads(kt._handle_create({"title": "x", "assignee": "default", "origin_session": ref}))
+    assert res.get("ok"), res
+    assert _hub_subs(res["task_id"]) == [] and "origin_binding" not in res
