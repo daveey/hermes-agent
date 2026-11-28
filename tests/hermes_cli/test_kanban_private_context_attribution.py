@@ -49,7 +49,7 @@ def test_exact_renewal_keeps_verified_mandate_and_decision_requirements(verified
         {'id': 'fixture'}, reader, events[:2], frozenset({'scope'}), frozenset())] == ['scope']
 
 
-@pytest.mark.parametrize('covered', [['scope', None], ['scope', ''], 'scope', None, []])
+@pytest.mark.parametrize('covered', [['scope', None], ['scope', ''], ['scope', 1], 'scope', None, []])
 def test_malformed_targeted_renewal_is_never_valid_resolution(covered):
     events = [
         {'uid': 'scope', 'kind': 'spend_budget_triaged', 'ord': 1,
