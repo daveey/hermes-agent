@@ -63,8 +63,13 @@ class _Guard:
             self.expected[str(path.resolve())] = (compile(source, str(path), 'exec', dont_inherit=True), digest)
 
     def check(self, code, *, origin=None):
+        path = Path(code.co_filename if origin is None else origin)
+        # Dynamic code has no filesystem identity. Never infer one from the caller's
+        # cwd; real loader origins are checked separately, including relative origins.
+        if origin is None and not path.is_absolute():
+            return
         try:
-            path = Path(code.co_filename if origin is None else origin).resolve()
+            path = path.resolve()
             path.relative_to(self.root)
         except (ValueError, OSError):
             return
