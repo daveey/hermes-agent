@@ -232,9 +232,11 @@ def _subagent_items(db: Any, ids: list[str], since: float) -> tuple[list[dict], 
             tagged([i for i in every if i["id"] not in current]))
 
 
-def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
-                     concluding: frozenset[str] = frozenset()) -> dict[str, Any]:
-    """Collect one qualified snapshot for ``tip`` and reduce it against the stored envelope."""
+def collect_parts(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
+                  concluding: frozenset[str] = frozenset(), card_rows: bool = False) -> dict[str, Any]:
+    """I/O half of :func:`canonical_status`: every qualified reading for ``tip`` (a raising reader is an
+    ``errors`` entry, never empty evidence). ``card_rows`` keeps the raw listed card rows instead of their
+    reduced items, so a pure caller (SessionState v2) decides clock-derived card state at its own ``now``."""
     so = _so()
     prior = stored.get("status") if isinstance(stored, dict) else None
     prior = prior if isinstance(prior, dict) and prior.get("status_version") == STATUS_VERSION else None
@@ -261,20 +263,42 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
     live = read("turn", lambda: _live_tokens(db, tip) - concluding, set())
     kept = (prior.get("turn_evidence") or {}) if same_owner else {}
     turn, evidence = _turn(tail, live, concluding, trigger, kept, generation)
-    card_asks, card_waits = read("cards", lambda: so._card_items(ids), ([], []))
-    if any(w.get("state") == "source_unknown" for w in card_waits):
-        errors["cards"] = "card_status_unavailable"
-    control_asks, control_waits = read("controls", lambda: _control_items(tip), ([], []))
+    parts: dict[str, Any] = {"prior": prior, "ids": ids, "identity": identity, "generation": generation,
+                             "since": since, "started": bool(tail), "turn": turn, "evidence": evidence,
+                             "live": sorted(live), "muted": bool(row.get("muted")), "errors": errors}
+    if card_rows:
+        parts["card_rows"] = read("cards", lambda: so._read_card_rows(ids), [])
+    else:
+        parts["card_items"] = read("cards", lambda: so._card_items(ids), ([], []))
+    parts["control_asks"], parts["control_waits"] = read("controls", lambda: _control_items(tip), ([], []))
     subagents, lost_before = read("subagents", lambda: _subagent_items(db, ids, since), ([], []))
     from hermes_state_subagent_resolution import resolved_subagents
 
     resolved = read("subagents", lambda: resolved_subagents(db, ids, (prior or {}).get("failures") or []), set())
-    subagents = [s for s in subagents if s["state"] == "running" or s["id"] not in resolved]
-    lost_before = [s for s in lost_before if s["id"] not in resolved]
+    parts["subagents"] = [s for s in subagents if s["state"] == "running" or s["id"] not in resolved]
+    parts["lost_before"] = [s for s in lost_before if s["id"] not in resolved]
     processes = read("processes", lambda: _process_items(db, tip), [])
     acknowledged = resolved | {p["id"] for p in processes if p.get("acknowledged")}
-    processes = [p for p in processes if p["id"] not in acknowledged]
-    goals = read("goals", lambda: _goal_items(db, ids), [])
+    parts["processes"] = [p for p in processes if p["id"] not in acknowledged]
+    parts["acknowledged"] = acknowledged
+    parts["goals"] = read("goals", lambda: _goal_items(db, ids), [])
+    return parts
+
+
+def assemble(parts: dict[str, Any], *, now: float) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Pure half of :func:`canonical_status`: ``(snapshot, reducer base)`` for ``reduce_status`` from
+    :func:`collect_parts`' readings at clock ``now``. Never mutates ``parts``."""
+    errors = dict(parts["errors"])
+    identity, generation, since, prior = parts["identity"], parts["generation"], parts["since"], parts["prior"]
+    if "card_rows" in parts:
+        card_asks, card_waits = _so().card_items_from_rows(parts["card_rows"], now=now)
+    else:
+        card_asks, card_waits = parts["card_items"]
+    if any(w.get("state") == "source_unknown" for w in card_waits):
+        errors["cards"] = "card_status_unavailable"
+    control_asks, control_waits = parts["control_asks"], parts["control_waits"]
+    subagents, lost_before, processes = parts["subagents"], parts["lost_before"], parts["processes"]
+    goals, turn = parts["goals"], parts["turn"]
     # Work that failed before this generation's request is retained failure, cleared only by this
     # generation's own successful completion; it is not this generation's linked work.
     earlier = [p for p in processes if p["state"] == "failed" and 0 < p["at"] < since]
@@ -285,10 +309,10 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
                for w in control_waits]
             + [{"kind": "subagent", "id": s["id"], "state": s["state"]} for s in subagents]
             + [{"kind": "process", "id": p["id"], "state": p["state"]} for p in processes if p not in earlier]
-            + goals)
+            + deepcopy(goals))
     asks = control_asks + card_asks
     readings = {"cards": [card_asks, card_waits], "controls": [control_asks, control_waits],
-                "turn": [turn, sorted(live)], "subagents": [subagents, lost_before],
+                "turn": [turn, parts["live"]], "subagents": [subagents, lost_before],
                 "processes": processes, "goals": goals}
     sources = {}
     for name, items in readings.items():
@@ -299,21 +323,34 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
                             else {"coverage": "complete"})}
     base = deepcopy(prior) if prior is not None else {"status_version": STATUS_VERSION}
     # An acknowledged failed exit is handled work: it leaves the retained failures too.
-    base["failures"] = [f for f in base.get("failures") or () if f.get("id") not in acknowledged]
+    base["failures"] = [f for f in base.get("failures") or () if f.get("id") not in parts["acknowledged"]]
     known = {failure.get("id") for failure in base.get("failures") or ()}
     base["failures"] = list(base.get("failures") or ()) + [
         {"id": item["id"], "generation": max(0, generation - 1), "state": item["state"]}
         for item in [*earlier, *lost_before] if item["id"] not in known]
-    status = reduce_status({"identity": identity, "generation": generation, "started": bool(tail), "turn": turn,
-                            "sources": sources, "work": work, "asks": asks, "muted": bool(row.get("muted"))},
-                           previous=base)
-    # The revision is counted against what was actually published, not the failure-seeded reducer base.
+    snapshot = {"identity": identity, "generation": generation, "started": parts["started"], "turn": deepcopy(turn),
+                "sources": sources, "work": deepcopy(work), "asks": deepcopy(asks), "muted": parts["muted"]}
+    return snapshot, base
+
+
+def finish_status(status: dict[str, Any], parts: dict[str, Any]) -> dict[str, Any]:
+    """The revision is counted against what was actually published, not the failure-seeded reducer base."""
+    prior = parts["prior"]
     semantic = {key: value for key, value in status.items() if key != "revision"}
     unchanged = prior is not None and all(prior.get(key) == value for key, value in semantic.items())
     status["revision"] = int((prior or {}).get("revision") or 0) + (0 if unchanged else 1)
-    if evidence:
-        status["turn_evidence"] = evidence
+    if parts["evidence"]:
+        status["turn_evidence"] = parts["evidence"]
     return status
+
+
+def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
+                     concluding: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Collect one qualified snapshot for ``tip`` and reduce it against the stored envelope."""
+    parts = collect_parts(db, tip, stored, trigger=trigger, concluding=concluding)
+    snapshot, base = assemble(parts, now=time.time())
+    return finish_status(reduce_status(snapshot, previous=base), parts)
+
 
 
 def _publish(db: Any, tip: str, raw: Any, fence: int, outcome: dict) -> bool:

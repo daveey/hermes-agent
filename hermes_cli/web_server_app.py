@@ -323,8 +323,9 @@ async def app_lifespan(app: FastAPI):
     from hermes_cli.fact_tree_startup import lifespan as tree_lifespan
     from hermes_cli.fact_annotation_lifespan import lifespan as annotation_lifespan
     from hermes_cli.web_boot_services import services_lifespan
+    from hermes_cli.session_state_startup import lifespan as session_state_lifespan
     try:
-        async with links_lifespan(app), annotation_lifespan(app), sessions_lifespan(app), tree_lifespan(app), plugin_lifespan(app), services_lifespan(app, lifespan):
+        async with links_lifespan(app), annotation_lifespan(app), sessions_lifespan(app), tree_lifespan(app), plugin_lifespan(app), session_state_lifespan(app), services_lifespan(app, lifespan):
             yield
     finally:
         host_attach.enable_stale_while_revalidate(False)

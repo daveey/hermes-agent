@@ -173,6 +173,16 @@ including an already-overdue timer on an otherwise quiet board. Policy is scoped
 to the dispatcher configuration and captured for its asynchronous probe batch;
 it is not a synced exemption on the card.
 
+## Session state shadow store
+
+`session_state.enabled` (default `true`) runs the SessionState v2 store inside
+`hermes serve`: one status object per chat lineage, recomputed on board, replica,
+turn, process and user-steps events, persisted in state.db and served by
+`GET /api/session-state/<id>` and the `/api/session-state/ws` subscription. It is
+shadow mode: nothing renders from it yet, and disagreements with the stored v1
+status are logged to `logs/session-state-divergence.jsonl`. Set it to `false` to
+turn the store off; the routes then answer 503.
+
 ## Directory Structure
 
 ```text

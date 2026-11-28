@@ -1,0 +1,403 @@
+{
+  "$id": "urn:hermes:session-state:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "asks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "choices": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "question",
+          "card",
+          "choices",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "cards": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "block_episode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "blocked_on": {
+            "enum": [
+              "human",
+              "card",
+              "ci",
+              "clock",
+              "deploy",
+              "capacity",
+              "agent",
+              "unknown",
+              null
+            ]
+          },
+          "board": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "eta": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "gateway": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "lifecycle": {
+            "type": "string"
+          },
+          "linked": {
+            "type": "boolean"
+          },
+          "parents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "red": {
+            "type": "boolean"
+          },
+          "resolution": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "run": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "source": {
+            "properties": {
+              "freshness": {
+                "enum": [
+                  "live",
+                  "stale",
+                  "unknown"
+                ]
+              },
+              "synced_at": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "freshness",
+              "synced_at"
+            ],
+            "type": "object"
+          },
+          "title": {
+            "type": "string"
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "id",
+          "board",
+          "gateway",
+          "title",
+          "lifecycle",
+          "blocked_on",
+          "detail",
+          "parents",
+          "linked",
+          "via",
+          "run",
+          "source",
+          "block_episode",
+          "resolution",
+          "red",
+          "eta"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "computed_at": {
+      "type": "number"
+    },
+    "header": {
+      "additionalProperties": false,
+      "properties": {
+        "colour": {
+          "enum": [
+            "red",
+            "amber",
+            "blue",
+            "light_blue",
+            "purple",
+            "green",
+            "grey"
+          ]
+        },
+        "counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "pips": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        },
+        "stripe": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "colour",
+        "stripe",
+        "reason_codes",
+        "counts",
+        "pips"
+      ],
+      "type": "object"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "gateway": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "lineage": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "profile": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tip": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "gateway",
+        "profile",
+        "lineage",
+        "tip"
+      ],
+      "type": "object"
+    },
+    "legacy": {
+      "type": "object"
+    },
+    "next_change_at": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "resolutions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "unblock",
+              "answer",
+              "archive",
+              "release"
+            ]
+          },
+          "at": {
+            "type": "number"
+          },
+          "by": {
+            "type": "string"
+          },
+          "card": {
+            "type": "string"
+          },
+          "choice_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delivery": {
+            "enum": [
+              "committed",
+              "failed"
+            ]
+          },
+          "episode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "card",
+          "action",
+          "choice_id",
+          "label",
+          "by",
+          "at",
+          "delivery",
+          "episode"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "rev": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "session": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "running",
+            "idle",
+            "failed"
+          ]
+        },
+        "processes": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "subagents": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "turn": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "mode",
+        "turn",
+        "processes",
+        "subagents"
+      ],
+      "type": "object"
+    },
+    "sources": {
+      "additionalProperties": {
+        "properties": {
+          "coverage": {
+            "enum": [
+              "complete",
+              "unknown"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "coverage"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "version": {
+      "const": 2
+    }
+  },
+  "required": [
+    "version",
+    "identity",
+    "rev",
+    "computed_at",
+    "next_change_at",
+    "session",
+    "cards",
+    "asks",
+    "resolutions",
+    "header",
+    "sources",
+    "legacy"
+  ],
+  "title": "SessionState v2: one status object per session lineage",
+  "type": "object"
+}

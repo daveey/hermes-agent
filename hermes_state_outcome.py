@@ -401,10 +401,13 @@ def _deferred_refresh(db_path: Optional[Path], sid: str, trigger: str = "card_ch
 def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
-    from hermes_cli.kanban_open_asks import card_is_open_human_ask
+    return card_items_from_rows(_read_card_rows(ids), now=time.time())
+
+
+def _read_card_rows(ids: list[str]) -> list[dict]:
+    """[daveey] The listed card rows ``_read_card_items`` reduces (its I/O half; SessionState v2 reuses it)."""
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_outcome_tasks
 
-    decisions, waits = [], []
     cards = session_outcome_tasks(ids, LISTED_STATUSES, stale_ok=True)
     if not cards:
         # The display list may be a stale-empty projection while the sidebar counts
@@ -412,6 +415,14 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         active, blocked = _agreement_counts()
         if any(active.get(sid, 0) or blocked.get(sid, 0) for sid in ids):
             raise ValueError("kanban card list is empty but sidebar counts retain open work")
+    return cards
+
+
+def card_items_from_rows(cards: list[dict], *, now: float) -> tuple[list[dict], list[dict]]:
+    """[daveey] Pure half of ``_read_card_items``: (decision items, waits) of listed rows at clock ``now``."""
+    from hermes_cli.kanban_open_asks import card_is_open_human_ask
+
+    decisions, waits = [], []
     for card in cards:
         tid = str(card.get("id") or "")
         request = card.get("human_request")
@@ -441,7 +452,7 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         external = wait.get("external") if isinstance(wait.get("external"), dict) else {}
         display_state = status
         from hermes_cli.kanban_triage_attention import overdue
-        if overdue(card, now=time.time()):
+        if overdue(card, now=now):
             display_state = 'triage_overdue'
         if (status == "scheduled" and wait_kind != "clock"
                 and wait.get("wait_state") == "external_running" and external.get("job") == "running"):
@@ -1034,6 +1045,9 @@ def refresh_outcome(sid: str, trigger: str, *, db: Any = None,
     from hermes_state_session_status_snapshot import refresh
 
     with _db_scope(db) as handle:  # [daveey] also reduces and fence-publishes the canonical ``status`` envelope
+        from hermes_session_state_events import emit_session
+
+        emit_session(sid, trigger)  # [daveey] SessionState v2 shadow store: every outcome trigger is an event
         if _agreement_blocking.get():
             return refresh(handle, sid, trigger, frozenset(concluding_turn or ()))
         raw_path = getattr(handle, "db_path", None) if db is not None else None
