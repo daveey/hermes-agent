@@ -160,15 +160,38 @@ def _is_active(row: dict, now: float) -> bool:
 
 
 def _with_db(profile: Optional[str], fn: Callable, *, read_only: bool):
-    """Open the profile's session DB, run ``fn(db)``, always close."""
+    """Run ``fn(db)`` on the profile's session DB: a lent read-only handle (given back, never closed), or a
+    writable one that is always closed.
+
+    [daveey] Read-only: every ``GET /api/sessions/{id}/messages`` (and each ``after_id`` delta a
+    ``sessions.moved`` push triggers) opened a fresh ``SessionDB(read_only=True)``, whose first statement parses
+    the whole schema (49 triggers on the hub, 1.3-1.4 ms) before the read itself. ``lend`` reuses an idle handle
+    only while it reads the same file, WAL generation and ``schema_version`` it was opened on, so it is exactly
+    what a fresh open would return; a miss opens through ``_open_session_db_for_profile`` with its unchanged
+    checks (uninitialized store, declared-schema probe, browse drift catch-up, structured 503s)."""
+    if read_only:
+        from hermes_state_kept_reader import lend
+
+        opener = lambda: _open_session_db_for_profile(profile, read_only=True)
+        try:
+            db_path = _session_db_path_for_profile(profile)
+        except Exception:  # health: allow BLE001 -- the opener below raises the same refusal (unknown profile: 404)
+            db_path = None
+        if db_path is None:
+            db = opener()
+            try:
+                return fn(db)
+            finally:
+                db.close()
+        with lend(db_path, opener) as db:
+            return fn(db)
+
     def run():
-        db = _open_session_db_for_profile(profile, read_only=read_only)
+        db = _open_session_db_for_profile(profile, read_only=False)
         try:
             return fn(db)
         finally:
             db.close()
-    if read_only:
-        return run()
     from hermes_cli.web_server_sessions import _with_session_maintenance
     return _with_session_maintenance(profile, run)
 

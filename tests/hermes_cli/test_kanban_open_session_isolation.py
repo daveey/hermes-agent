@@ -99,6 +99,10 @@ def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http
         # Release that custody before asserting that all board handles are gone.
         activity._reset_cache_for_tests()
     assert not has_live_connection(board_path)
+    # Session reads legitimately keep idle lent read-only handles (hermes_state_kept_reader.lend); release
+    # that custody before asserting that no state.db connection is left behind.
+    import hermes_state_kept_reader
+    hermes_state_kept_reader.close_all_under(None)
     assert not has_live_connection(state_path)
     client.close()
 

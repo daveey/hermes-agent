@@ -163,9 +163,141 @@ def close_all_under(directory: Optional[str | Path] = None) -> int:
     with _lock:
         chosen = [k for p, k in _kept.items() if root is None or _path_is_under(p, root)]
         to_close = [k.db for k in chosen if _retire(k)]
+        lent_paths = [p for p in _lend_epoch if root is None or _path_is_under(p, root)]
+        for path in lent_paths:
+            # Lent handles out right now carry the old epoch and close at their give-back.
+            _lend_epoch[path] = _lend_epoch.get(path, 0) + 1
+            to_close.extend(lent.db for lent in _idle.pop(path, ()))
     for db in to_close:
         _close(db)
     return len(chosen)
 
 
-__all__ = ["close_all_under", "read_only", "stats"]
+# ── Exclusive lending (request readers) ──────────────────────────────────────────────────────────────────────────
+# [daveey] ``read_only`` above shares ONE handle among concurrent borrowers, which serialize on its connection lock:
+# right for a background pass, wrong for request handlers, where one long read (an FTS search, an export) would
+# stall every other request on that store. ``lend`` hands each borrower its own idle handle (opening one on a miss)
+# and takes it back afterwards, so a request no longer pays a fresh connection's schema parse (49 triggers, ~40 KB
+# of trigger SQL: 1.3-1.4 ms per open on the hub) for each ``GET /api/sessions/{id}/messages``.
+#
+# An idle handle is lent again only while a fresh open would see exactly what it sees: the same ``state.db`` file
+# identity, the same ``-wal``/``-shm`` identities, the same ``PRAGMA schema_version`` as when it was opened (so the
+# open-time FTS flags and the caller's schema probe still hold), no transaction left open, not closed, not
+# quarantined, and its profile not retired. Reads are autocommit, so each one starts a new snapshot and sees every
+# commit made before it: reuse is keyed on what the handle reads, never on a clock. Idle handles hold their profile
+# lease like any open SessionDB, and the profile retirement monitor closes them like any other owner, so a profile
+# delete is never blocked by a pooled handle.
+
+_LEND_IDLE_PER_PATH = 2
+_idle: dict[Path, list] = {}
+_lend_epoch: dict[Path, int] = {}
+lend_stats = {"opens": 0, "reuses": 0, "discards": 0}
+
+
+class _Lent:
+    __slots__ = ("db", "epoch", "identity", "path", "schema", "sidecars")
+
+    def __init__(self, path: Path, db, identity, sidecars, schema, epoch: int) -> None:
+        self.path = path
+        self.db = db
+        self.identity = identity
+        self.sidecars = sidecars
+        self.schema = schema
+        self.epoch = epoch
+
+
+def _schema_cookie(db) -> Optional[int]:
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    try:  # the caller holds the handle exclusively (a fresh open, or one taken out of the idle pool)
+        return conn.execute("PRAGMA schema_version").fetchone()[0]
+    except (sqlite3.Error, AttributeError, TypeError):
+        return None
+
+
+def _lendable(lent: _Lent) -> bool:
+    """True while *lent* reads exactly what a fresh open of its path would."""
+    db = lent.db
+    conn = getattr(db, "_conn", None)
+    if conn is None or getattr(db, "_db_corrupt", False) or lent.identity is None:
+        return False
+    try:
+        if conn.in_transaction:
+            return False
+    except sqlite3.Error:
+        return False
+    lease = db.__dict__.get("_profile_lease")
+    try:
+        if lease is not None and lease.retired():
+            return False
+    except OSError:
+        return False
+    if _stat_db_file_identity(lent.path) != lent.identity or _sidecars(lent.path) != lent.sidecars:
+        return False
+    return lent.schema is not None and _schema_cookie(db) == lent.schema
+
+
+def _take_idle(path: Path) -> Optional[_Lent]:
+    while True:
+        with _lock:
+            pool = _idle.get(path)
+            if not pool:
+                return None
+            lent = pool.pop()
+            if not pool:
+                del _idle[path]
+            current = lent.epoch == _lend_epoch.get(path, 0)
+        if current and _lendable(lent):
+            lend_stats["reuses"] += 1
+            return lent
+        lend_stats["discards"] += 1
+        _close(lent.db)
+
+
+def _put_back(lent: _Lent, *, broken: bool) -> None:
+    keep = not broken and _lendable(lent)
+    if keep:
+        with _lock:
+            if lent.epoch == _lend_epoch.get(lent.path, 0):
+                pool = _idle.setdefault(lent.path, [])
+                if len(pool) < _LEND_IDLE_PER_PATH:
+                    pool.append(lent)
+                    return
+    lend_stats["discards"] += 1
+    _close(lent.db)
+
+
+@contextlib.contextmanager
+def lend(db_path, opener) -> Iterator[SessionDB]:
+    """An exclusive read-only ``SessionDB`` for *db_path* for the ``with`` body: an idle lendable one, else
+    ``opener()`` (which must return a fresh ``SessionDB(read_only=True)`` for that path; its errors propagate and
+    nothing is pooled). Never write through it and never ``close()`` it: the give-back decides."""
+    path = _key(db_path)
+    lent = _take_idle(path)
+    if lent is None:
+        with _lock:
+            epoch = _lend_epoch.setdefault(path, 0)  # every lent path is known to ``close_all_under``
+        identity = _stat_db_file_identity(path)
+        db = opener()
+        try:
+            sidecars = _sidecars(path)
+            schema = _schema_cookie(db)
+            if _stat_db_file_identity(path) != identity:
+                identity = None  # replaced during the open: serve this borrow, never lend it again
+        except BaseException:
+            _close(db)
+            raise
+        lent = _Lent(path, db, identity, sidecars, schema, epoch)
+        lend_stats["opens"] += 1
+    broken = False
+    try:
+        yield lent.db
+    except sqlite3.DatabaseError:
+        broken = True
+        raise
+    finally:  # any other caller error says nothing about the handle; ``_lendable`` still checks it
+        _put_back(lent, broken=broken)
+
+
+__all__ = ["close_all_under", "lend", "lend_stats", "read_only", "stats"]
