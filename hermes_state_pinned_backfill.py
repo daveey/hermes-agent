@@ -57,11 +57,11 @@ def backfill_pins(db, sessions: list, select_head: str, prompt_join: str, clause
         if began:
             conn.execute("BEGIN")  # [daveey] Keep the probe and hydration on one snapshot.
         try:
+            if conn.execute(f"SELECT 1 {_PIN_FROM} {where_sql} LIMIT 1", params).fetchone() is None:
+                return []
             kept = _kept_rows(db, conn, select_head, prompt_join, where_sql, params)
             if kept is not None:
                 return kept
-            if conn.execute(f"SELECT 1 {_PIN_FROM} {where_sql} LIMIT 1", params).fetchone() is None:
-                return []
             return read_chunks(conn, _pinned_query(select_head, prompt_join, where_sql), params)
         finally:
             if began and conn.in_transaction:
@@ -85,8 +85,11 @@ def _kept_rows(db, conn, select_head: str, prompt_join: str, where_sql: str, par
     if (prompt_join or not path or preview_sql not in select_head or "s.transcript_revision" not in select_head
             or not (row_memo.ENABLED and recency.ENABLED and rank_memo.enabled())):
         return None
-    pins = conn.execute(f"SELECT s.id, s.started_at {_PIN_FROM} {where_sql} ORDER BY s.started_at DESC",
-                        params).fetchall()
+    from hermes_state_page_pack import read_chunks
+    # The wide read's pin-driven plan and chunked transport, narrowed to the ordered ids (types preserved).
+    pins = [(r["id"], r["started_at"]) for r in read_chunks(
+        conn, f"SELECT s.id AS id, s.started_at AS started_at {_PIN_FROM} {where_sql} ORDER BY s.started_at DESC",
+        params)]
     if not pins:
         return []
     if any(not isinstance(sid, str) for sid, _ in pins) or len({rank_memo._v(at) for _, at in pins}) < len(pins):
