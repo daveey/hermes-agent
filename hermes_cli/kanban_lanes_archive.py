@@ -54,7 +54,9 @@ def _p(name, created_by, key, informational=False):
 # not proof that a card is an expiring report rather than repair work. Named groups: ``subject`` (what a newer card
 # about the same thing shares), ``target`` (the card an alarm is about), ``day`` (a daily intake's date).
 PRODUCERS = (
-    _p("core-ship-backstop", "core-ship-backstop", r"^[0-9a-f]{40}$", informational=True),
+    # A per-merge sha (legacy) or one rolling retro card per repo per UTC day; either expires only after 7 days.
+    _p("core-ship-backstop", "core-ship-backstop",
+       r"^(?:[0-9a-f]{40}|core-ship-backstop:[^:\s]+/[^:\s]+:\d{4}-\d{2}-\d{2})$", informational=True),
     _p("model-capacity-watch", "model-capacity-watch", r"^model-capacity-pace:(?P<subject>[^:]+):\d+$",
        informational=True),
     _p("coach-ask-gate", "coach", r"^ask-gate-weekly:\d{4}-\d{2}-\d{2}$", informational=True),
@@ -84,10 +86,15 @@ def _chat_filed(conn, task_id) -> bool:
     row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' ORDER BY id LIMIT 1",
                        (task_id,)).fetchone()
     try:
-        source = (json.loads(row[0] or "{}") if row else {}).get("creator_source") or {}
+        payload = json.loads(row[0] or "{}") if row else {}
     except ValueError:
         return True  # unreadable provenance is not proof of an automation
-    return bool(source.get("session_id"))
+    if not isinstance(payload, dict):
+        return True
+    source = payload.get("creator_source")
+    if source is None:
+        return False
+    return not isinstance(source, dict) or bool(source.get("session_id"))
 
 
 def _home_board(conn) -> bool:
@@ -278,10 +285,19 @@ def plan_archive(conn, _pol, action, row, state) -> Optional[str]:
 
 
 def withdraw(conn, task_id, *, producer, reason) -> Optional[str]:
-    """A producer retires its own held card once its condition clears; same guard as the planner's archive."""
+    """A producer retires its own held card once its condition clears; same guard as the planner's archive.
+
+    Producers run unscoped. A Kanban worker scoped to a card (``HERMES_KANBAN_TASK``) meets the same archive-scope
+    wall as ``hermes kanban archive``: ``--producer`` is only what the caller says, so it never widens that wall.
+    """
+    from hermes_cli.kanban_archive_scope import worker_archive_scope
+
     row = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         return "no such card"
+    scoped, _via = worker_archive_scope(conn, task_id)
+    if scoped:
+        return scoped
     return archive(conn, {"basis": "producer_withdrawn", "producer": producer, "reason": reason}, row,
                    via=f"producer:{producer}")
 

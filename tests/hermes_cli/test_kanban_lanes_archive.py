@@ -66,6 +66,15 @@ def test_daily_flaky_intake_is_stale_after_its_day_only(conn, configured):
     assert result["rejected"][0]["why"] == "daily intake is from today"
 
 
+def test_daily_rolling_retro_card_expires_after_seven_days_not_its_day(conn, configured):
+    old = held(conn, key="core-ship-backstop:softmax-universe/daveey-hermes:2026-01-02", age=OLD)
+    young = held(conn, key="core-ship-backstop:softmax-universe/daveey-hermes:2026-01-03", age=86400)
+    result = plan.apply(conn, [{"action": "archive", "card": c, "basis": "stale", "reason": "old"}
+                               for c in (old, young)])
+    assert [a["card"] for a in result["applied"]] == [old]
+    assert "seven days" in result["rejected"][0]["why"]
+
+
 def test_target_done_archives_alarm_only_when_its_target_finished(conn, configured):
     target = kb.create_task(conn, title="work", assignee="default", created_by="user")
     card = held(conn, creator="scope-renewal-alarm", key=f"scope-renewal-loop:{target}:01a2", age=60)
@@ -170,7 +179,8 @@ def test_dry_run_reports_the_verdict_without_writing(conn, configured):
     assert status(conn, moot) == "triage" and archived_event(conn, moot) is None
 
 
-def test_producer_withdraw_is_own_cards_only_and_not_a_plan_basis(conn, configured):
+def test_producer_withdraw_is_own_cards_only_and_not_a_plan_basis(conn, configured, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)  # producers run unscoped
     card = held(conn, creator="ci-main-watch", key=f"ci-red:daveey/hermes:{SHA}", age=60)
     assert archive(conn, card, basis="producer_withdrawn", producer="ci-main-watch")["rejected"]
     assert arc.withdraw(conn, card, producer="worker-core-rollout", reason="x") == \
@@ -241,3 +251,61 @@ def test_archive_refuses_protected_or_unproved_cards(conn, configured, guard, mo
     assert status(conn, card) == before
     assert archived_event(conn, card) is None
     assert not archive(conn, card, dry_run=True, **extra)["applied"]
+
+
+def test_scoped_worker_cannot_withdraw_a_foreign_card(conn, configured, monkeypatch):
+    card = held(conn, creator="ci-main-watch", key=f"ci-red:daveey/hermes:{SHA}", age=60)
+    other = kb.create_task(conn, title="unrelated work", assignee="default", created_by="user")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", other)  # --producer is only the caller's claim
+    why = arc.withdraw(conn, card, producer="ci-main-watch", reason="no proof")
+    assert why and "worker is scoped to task" in why, why
+    assert status(conn, card) == "triage" and archived_event(conn, card) is None
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    assert arc.withdraw(conn, card, producer="ci-main-watch", reason="main green twice") is None
+
+
+def test_superseded_refuses_a_newer_card_that_is_no_longer_open(conn, configured):
+    older = held(conn, creator="worker-core-rollout", key="worker-core-rollout:lag:worker-1:20261119", age=OLD)
+    newer = held(conn, creator="worker-core-rollout", key="worker-core-rollout:lag:worker-1:20261127", age=60)
+    for gone in ("done", "archived"):
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (gone, newer))
+        conn.commit()
+        assert archive(conn, older, basis="superseded", by=newer)["rejected"][0]["why"] == \
+            "the newer card is not open"
+        assert status(conn, older) == "triage"
+
+
+def test_target_done_refuses_an_alarm_whose_target_is_not_on_this_board(conn, configured):
+    card = held(conn, creator="scope-renewal-alarm", key="scope-renewal-loop:t_0123456789abcdef:01a2", age=60)
+    result = archive(conn, card, basis="target_done")
+    assert result["rejected"][0]["why"] == "target card t_0123456789abcdef is not on this board", result
+    assert status(conn, card) == "triage"
+
+
+@pytest.mark.parametrize("payload", ["not json", "[1, 2]", '{"creator_source": "chat"}'])
+def test_unreadable_creation_provenance_is_not_proof_of_an_automation(conn, configured, payload):
+    card = held(conn)
+    conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='created'", (payload, card))
+    conn.commit()
+    result = archive(conn, card)
+    assert result["rejected"][0]["why"] == "card was filed from a chat session", result
+    assert status(conn, card) == "triage"
+
+
+def test_condition_check_printing_non_object_json_refuses_one_action(conn, configured, tmp_path):
+    card = held(conn, creator="ci-main-watch", key=f"ci-red:daveey/hermes:{SHA}", age=60)
+    script = tmp_path / "check_list.py"
+    script.write_text("print('[\"clear\"]')\n")
+    configured(archive_checks={"ci-main-watch": [sys.executable, str(script)]})
+    result = archive(conn, card, basis="condition_cleared")
+    assert result["rejected"][0]["why"] == "condition is unknown: condition check printed no JSON object", result
+    assert status(conn, card) == "triage"
+
+
+def test_condition_check_with_non_string_argv_is_unregistered(conn, configured):
+    card = held(conn, creator="ci-main-watch", key=f"ci-red:daveey/hermes:{SHA}", age=60)
+    configured(archive_checks={"ci-main-watch": [sys.executable, 5]})
+    result = archive(conn, card, basis="condition_cleared")
+    assert result["rejected"][0]["why"] == \
+        "condition is unknown: no condition check is registered for ci-main-watch", result
+    assert status(conn, card) == "triage"
