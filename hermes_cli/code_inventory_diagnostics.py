@@ -113,15 +113,19 @@ def inventory_modules(ledger, *, deadline=None, diagnostics=None, prepared=None)
                 diagnostics.enabled = False
     completed = False
     try:
-        # Recheck every mutable filename and freshly resolve every path, including
-        # unchanged module identities. This is timing, not a cache or trust shortcut.
+        # Retain the initial observations too: a removed/replaced module or an
+        # overwritten filename must not erase evidence seen during preparation.
+        entries = [(name, item[0], item[1], item) for (name, _), item in (prepared or {}).items()]
         for name, module in ledger._module_snapshot():
+            filename = getattr(module, '__file__', None)
+            item = prepared.get((name, id(module))) if prepared is not None else None
+            if item is None or item[0] is not module or item[1] != filename:
+                entries.append((name, module, filename, None))
+        for name, module, filename, item in entries:
             _check_inventory_deadline(deadline)
             if diagnostics is not None:
                 diagnostics.count += 1
-            filename = getattr(module, '__file__', None)
-            item = prepared.get((name, id(module))) if prepared is not None else None
-            if item is not None and item[0] is module and item[1] == filename:
+            if item is not None:
                 if filename:
                     ledger._resolved_module_file(name, filename, item[2], diagnostics=diagnostics)
             else:

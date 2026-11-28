@@ -93,10 +93,10 @@ def test_changed_snapshot_never_uses_stale_prepared_path(tmp_path, monkeypatch, 
     monkeypatch.setattr(Path, 'resolve', resolve)
     monkeypatch.setattr(ledger, '_classify_module_file', classify)
     ledger.integrity_observation()
-    expected = {'filename': [('a', str(second), second)],
-                'replacement': [('a', str(second), second)],
+    expected = {'filename': [('a', str(first), first), ('a', str(second), second)],
+                'replacement': [('a', str(first), first), ('a', str(second), second)],
                 'addition': [('a', str(first), first), ('b', str(second), second)],
-                'removal': []}
+                'removal': [('a', str(first), first)]}
     assert classified == expected[change]
 
 
@@ -239,3 +239,29 @@ def test_native_ticket_socket_progresses_during_fresh_resolution(tmp_path, monke
         assert mint_before_release == [True], 'native grant waited for inventory filesystem work'
 
     asyncio.run(scenario())
+
+
+def test_removed_unrooted_module_still_latches_observed_unknown(tmp_path, monkeypatch):
+    ledger = ledger_fixture(tmp_path)
+    module = ModuleType('initial_unrooted')
+    source = tmp_path / 'untrusted' / 'source.py'
+    source.parent.mkdir()
+    source.write_text('value = 1\n')
+    # A distinct stdlib root ensures the real classifier cannot trust this file.
+    ledger._stdlib = tmp_path / 'stdlib'
+    module.__file__ = str(source)
+    modules = [('initial_unrooted', module)]
+    monkeypatch.setattr(ledger, '_module_snapshot', lambda: tuple(modules))
+    monkeypatch.setattr(ledger, '_dependency_module_path', lambda *args: False)
+    real = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        result = real(path, *args, **kwargs)
+        if path == source:
+            modules.clear()
+        return result
+
+    monkeypatch.setattr(Path, 'resolve', resolve)
+    observed = ledger.integrity_observation()
+    assert 'unrooted-module:initial_unrooted' in observed['unknowns']
+    assert ('initial_unrooted', id(module)) in ledger._modules

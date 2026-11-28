@@ -14,9 +14,10 @@ resolve/owner/classify boundary and the retained incident phase counters.
 Root (happened): slow external filesystem work and ledger mutation shared one long
 critical section. This patch moves only fresh resolution outside it. Ownership,
 classification, module bookkeeping, settlement and plugin verification remain
-locked. A new/current module snapshot is taken after reacquisition: only the same
-module object and filename can use its per-call prepared path; deltas resolve via
-the original locked path. Nested readers retain the original lock discipline.
+locked. Initial observations are retained even when a module is removed, replaced
+or its filename overwritten. A new/current snapshot is taken after reacquisition;
+new identities and filename deltas resolve via the original locked path. No initial
+evidence is erased by the off-lock window. Nested readers retain the original lock discipline.
 Root (not caught): existing tests covered optional logging lock inversion and
 inventory expiry, but did not require ordinary audit ingress to progress while
 fresh module filenames resolve. The new test fails on the unmodified parent.

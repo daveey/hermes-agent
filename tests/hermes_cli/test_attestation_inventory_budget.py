@@ -23,13 +23,14 @@ def test_inventory_expiry_stops_scan_releases_lock_and_never_returns_positive(mo
     a = ledger()
     clock = [10.0]
     monkeypatch.setattr(ca.time, 'monotonic', lambda: clock[0])
-    monkeypatch.setattr(a, '_module_snapshot', lambda: [('first', SimpleNamespace(__file__='one.py')),
-                                                       ('second', SimpleNamespace(__file__='two.py'))])
+    modules = [('first', SimpleNamespace(__file__='one.py')),
+               ('second', SimpleNamespace(__file__='two.py'))]
+    monkeypatch.setattr(a, '_module_snapshot', lambda: modules)
     seen = []
-    def inspect(name, filename, *, diagnostics=None):
+    def inspect(name, filename, path, *, diagnostics=None):
         seen.append((name, filename))
         clock[0] += 1
-    monkeypatch.setattr(a, '_module_file', inspect)
+    monkeypatch.setattr(a, '_resolved_module_file', inspect)
     with pytest.raises(TimeoutError):
         a.integrity_observation(deadline=10.5)
     assert seen == [('first', 'one.py')]
@@ -68,8 +69,9 @@ def test_inventory_expiry_after_final_item_refuses_partial_positive(monkeypatch)
                         lambda current: pytest.fail('plugin scan started after inventory expiry'))
     clock = [10.0]
     monkeypatch.setattr(ca.time, 'monotonic', lambda: clock[0])
-    monkeypatch.setattr(a, '_module_snapshot', lambda: [('only', SimpleNamespace(__file__='one.py'))])
-    monkeypatch.setattr(a, '_module_file', lambda *args, **kwargs: clock.__setitem__(0, 12.0))
+    modules = [('only', SimpleNamespace(__file__='one.py'))]
+    monkeypatch.setattr(a, '_module_snapshot', lambda: modules)
+    monkeypatch.setattr(a, '_resolved_module_file', lambda *args, **kwargs: clock.__setitem__(0, 12.0))
     with pytest.raises(TimeoutError):
         a.integrity_observation(deadline=11.0)
 
