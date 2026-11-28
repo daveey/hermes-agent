@@ -29,6 +29,8 @@ ask leaves `asks`; a later re-block starts a new episode and is red again. An an
 `block_episode` is `evt:<id>` of the lifecycle event that began the current blocked/triage span, suffixed
 `/ask:<digest>` (the first 16 hex of `kanban_release.ask_digest` of the stored `human_request`) when the card has an
 ask: a new or changed ask filed while the card stays blocked/triage is a new episode, red again and fenced apart.
+The probe-drop markers `kanban_ask_resolved.mark_dropped` writes into the stored ask (`resolved_check_dropped_at`,
+`resolved_check_drop_reason`) are not part of it: a dropped probe keeps the episode and its resolution.
 
 ## Reducer (pluggable, pure)
 

@@ -63,7 +63,10 @@ def _rows(conn: sqlite3.Connection, ids: set[str]) -> dict[str, dict[str, Any]]:
 
 
 def _ask_digests(conn: sqlite3.Connection, ids: set[str]) -> dict[str, str]:
-    """``task id -> kanban_release.ask_digest`` of each card's stored ``human_request`` (cards with one only)."""
+    """``task id -> kanban_release.ask_digest`` of each card's stored ``human_request`` (cards with one only).
+    The probe-drop markers ``kanban_ask_resolved.mark_dropped`` writes in place are probe custody, not the ask: a
+    dropped resolved_check leaves the same ask, the same episode and its resolution standing."""
+    from hermes_cli.kanban_ask_resolved import without_drop_markers
     from hermes_cli.kanban_release import ask_digest
     from hermes_cli.kanban_table_columns import table_columns
 
@@ -76,6 +79,8 @@ def _ask_digests(conn: sqlite3.Connection, ids: set[str]) -> dict[str, str]:
             ask = json.loads(raw)
         except (TypeError, ValueError):
             ask = raw  # unparseable text is still an identity: a changed string is a different ask
+        if isinstance(ask, dict):
+            ask = without_drop_markers(ask)
         if ask is not None:
             out[str(tid)] = ask_digest(ask)[:16]
     return out

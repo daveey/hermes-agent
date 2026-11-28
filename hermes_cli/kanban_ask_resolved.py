@@ -237,12 +237,19 @@ def store_request(conn: sqlite3.Connection, task_id: str, human_request: Optiona
     sync_row(conn, task_id)
 
 
+DROP_MARKERS = ("resolved_check_dropped_at", "resolved_check_drop_reason")  # probe custody, not part of the ask
+
+
+def without_drop_markers(human_request: dict) -> dict:
+    """The ask itself: ``human_request`` without the probe-drop markers :func:`mark_dropped` writes in place."""
+    return {k: v for k, v in human_request.items() if k not in DROP_MARKERS}
+
+
 def request_json(human_request: Optional[dict]) -> Optional[str]:
     """The stored form of an ask (drop markers stripped); None for no ask."""
     if not human_request:
         return None
-    return json.dumps({k: v for k, v in human_request.items()
-                       if k not in ("resolved_check_dropped_at", "resolved_check_drop_reason")})
+    return json.dumps(without_drop_markers(human_request))
 
 
 def sync_row(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None, due_now: bool = False) -> None:

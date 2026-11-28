@@ -363,6 +363,32 @@ def test_unblock_is_refused_when_a_different_ask_replaced_the_shown_one(store, b
     assert reply.status_code == 200 and kb.get_task(board, task).status != "blocked"
 
 
+def test_a_dropped_resolved_check_keeps_the_ask_its_episode_and_its_resolution(store, board, client):
+    """``mark_dropped`` writes probe-custody markers into the stored human_request in place. They are not the ask:
+    an answered ask stays answered (same episode, not red) and a click on the shown state is not stale."""
+    from hermes_cli import kanban_ask_resolved as kar
+    from hermes_session_state_actions import register_answer_handler
+
+    task = kb.create_task(board, title="Deploy", assignee="worker", session_id="chat")
+    assert kb.block_task(board, task, kind="needs_input",
+                         human_request={**HUMAN_REQUEST, "resolved_check": "exit 1"})
+    shown = store.recompute("chat")["cards"][f"default/{task}"]["block_episode"]
+    assert "/ask:" in shown
+    register_answer_handler(lambda request: {"ok": True})
+    try:
+        assert _post(client, "answer", task, shown, request_id="answered", choice_id="a").status_code == 200
+    finally:
+        register_answer_handler(None)
+    with kb.write_txn(board):
+        kar.mark_dropped(board, task, "broken", int(time.time()))
+    assert "resolved_check_dropped_at" in board.execute(
+        "SELECT human_request FROM tasks WHERE id=?", (task,)).fetchone()[0]  # the markers really landed
+    card = store.recompute("chat")["cards"][f"default/{task}"]
+    assert card["block_episode"] == shown and card["red"] is False and card["resolution"] is not None
+    reply = _post(client, "unblock", task, shown, request_id="after-drop")
+    assert reply.status_code == 200, reply.json()
+
+
 def test_routes_answer_503_without_a_store(monkeypatch):
     from hermes_session_state_store import install
 
