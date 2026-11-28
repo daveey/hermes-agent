@@ -405,6 +405,27 @@
       "__init__.py": "f932acb0256f459ac7eee67c1d6aa1717051e874d739e4b1015e876c532a4aa3",
       "plugin.yaml": "9de341e0a744a4ffed626eadf5ab038afc52110853acf642ac2344d80ceec25a",
       "tests/test_kanban_db_hint.py": "5d4ea742799a74706878a28719b1f977573fbb4a962a34d4b8aea9ee65722bb9"
+    },
+    "backend-restart-guard": {
+      "README.md": "34f0a88693c9962ddfc4a15bcf07890f881ef23ade79249643cda9fe389eab77",
+      "__init__.py": "5f575cff642e7d4d69640c54b1ecce405f3d295c3927558781cac5f5aba0549a",
+      "claude_hook.py": "9161b22e41dbaa5b194b93a7322e0c61115963f27ef9ba1f68a91eac5cb90168",
+      "plugin.yaml": "b9c0089856c730fde8eb4c99d522ed8f454f8605781eac9accf6be00668f692c",
+      "tests/test_broadcast.py": "654a74a78c0adeabde70a0b17ba03c9af79b3f0553591582274da759080de9a9",
+      "tests/test_claude_hook.py": "7c5924186f5e909cccc2a9f0c86ded81d2a6466def1f4e11a526c3a66c22779d",
+      "tests/test_guard.py": "efabe31c84ab4828eccc28bdb91ea41f2389404a7d021e7b607980517fe87b21",
+      "tests/test_pool_provenance.py": "16e3d302331c6b6ca24941670757c56f16da2acf16d1a4103d80059e343b4cd0",
+      "tests/test_signals.py": "e4dc8525efdeb2e2cabac6e5e236191ce9a4b72797542046fd6084618ea66548",
+      "tests/test_ssh_destination.py": "e5f444a6df764cdbd23fb61ee064e5103cebbe57f56eb719d68ea13f1fe8068e"
+    },
+    "mcp-file-access": {
+      "README.md": "d5fd1c67bc05c5af2122df2fe48f90bfe2c52d41c6f435212ce5ea36d987bb1f",
+      "__init__.py": "585388febf16ea71694ffda9d02d9923d8331492f37a840234093c119c2072f2",
+      "core.py": "afe91e98d766c1a08c7b41a7d28f127b8f3f2e27687d8c97a2852ce8b506f973",
+      "plugin.yaml": "7208bf28318b5764656a5bee0d0ce5d8458bc972f61952fb982010c64403d5d0",
+      "tests/test_core.py": "a826e37f26438816c593f801fe84c789b47a8e216aa139ec5c13f674c79689ad",
+      "tests/test_review_regressions.py": "d472de0d0c10131753a7c087133db07c0e93b01208c864881b02dd7ee92ad482",
+      "tests/test_safety.py": "90377d65a6150ea416136a75d27518fac071c2a0bddc44b7dfb1219ff4a12c17"
     }
   }
 }
