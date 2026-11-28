@@ -112,6 +112,8 @@ class ParityHome:
             # (hermes_state_guard) would refuse it. This is the guard's documented
             # child-process escape hatch; the path is tmp_path by construction.
             "HERMES_STATE_DB_GUARD_BYPASS": "1",
+            # Fresh fixture homes must not start detached plugin downloads.
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
         })
         env.update(extra or {})
         return env

@@ -58,6 +58,8 @@ class FakeHome:
             TAG_VAR: self.tag,
             # The child's ~/.hermes/state.db IS the tmp home's db; see parity/_helpers.py.
             "HERMES_STATE_DB_GUARD_BYPASS": "1",
+            # Preserve offline isolation despite the allowlisted child environment.
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
         })
         env.update(extra or {})
         return env
