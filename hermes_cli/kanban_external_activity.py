@@ -154,7 +154,16 @@ def stamp_rows(rows: list[dict[str, Any]], by_session: dict[str, dict[str, Any]]
 # request before any read; an unchanged one proves no commit since, so the stored contribution is the answer and
 # the board is not opened. ``clocked``: the board has a scheduled parked card, whose derived state also moves with
 # the reader's clock; such a contribution keeps the ``_TTL_S`` bound ``session_external`` already gave it.
-_boards: dict[str, tuple[str, bool, float, dict]] = {}
+# ``coverage``: the session ids the contribution was read for, ``None`` = every parked session on the board. A
+# session's slot reads only its own parked pairs (cards, wait rows, ETA history), so a contribution answers exactly
+# for any session it covers (t_01a21ab4eb964866: on the hub's board, which commits every 1-2 s, reading every
+# parked card's external state and ETA history for a one-session detail or one sidebar was a third of the AnyIO
+# pool's busy samples).
+_boards: dict[str, tuple[str, bool, float, dict, Optional[frozenset]]] = {}
+
+
+def _covers(coverage: Optional[frozenset], wanted: Optional[frozenset]) -> bool:
+    return coverage is None or (wanted is not None and wanted <= coverage)
 
 
 def board_signature(path) -> Optional[str]:
@@ -181,12 +190,13 @@ def _clocked(conn: sqlite3.Connection, pairs) -> bool:
     return False
 
 
-def _board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict[str, dict[str, Any]]:
+def _board_external(path, open_ro, parked_pairs, signature, wall: float,
+                    wanted: Optional[frozenset] = None) -> dict[str, dict[str, Any]]:
     """Recheck the change signal after waiting for any overlapping capture of this board."""
     from hermes_cli.kanban_external_refresh import board_refresh
 
     with board_refresh(path):
-        return _read_board_external(path, open_ro, parked_pairs, signature, wall)
+        return _read_board_external(path, open_ro, parked_pairs, signature, wall, wanted)
 
 
 # [daveey] Set by ``one_board_read``: ``path -> contribution`` of the boards this block already read. Boards are
@@ -204,25 +214,42 @@ def one_board_read() -> Iterator[None]:
         yield
         return
     _block.reads = {}
+    _block.wanted = None
     try:
         yield
     finally:
-        _block.reads = None
+        _block.reads = _block.wanted = None
 
 
-def _read_board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict[str, dict[str, Any]]:
-    """One board's stored contribution while unchanged, otherwise one short-lived read."""
+def declare_sessions(ids: Iterable[str]) -> None:
+    """Inside ``one_board_read``: every stamp in the block is for rows of these session ids (a superset is fine),
+    so the block's reads of each board need cover only them. A stamp whose rows fall outside reads every parked
+    session. No-op outside a block."""
+    if getattr(_block, "reads", None) is None:
+        return
+    _block.wanted = frozenset(str(s) for s in ids)
+
+
+def _read_board_external(path, open_ro, parked_pairs, signature, wall: float,
+                         wanted: Optional[frozenset] = None) -> dict[str, dict[str, Any]]:
+    """One board's stored contribution while unchanged, otherwise one short-lived read. ``wanted``: the session ids
+    the caller stamps (``None`` = all)."""
     key = str(path)
     shared = getattr(_block, "reads", None)
-    if shared is not None and key in shared:
-        return shared[key]
-    found = _read_board_external_once(path, open_ro, parked_pairs, signature, wall)
+    if shared is not None:
+        if key in shared and _covers(shared[key][1], wanted):
+            return shared[key][0]
+        declared = getattr(_block, "wanted", None)
+        # In a block, read for the declared sessions (or all of them) once, so later stamps share it.
+        wanted = declared if declared is not None and _covers(declared, wanted) else None
+    found = _read_board_external_once(path, open_ro, parked_pairs, signature, wall, wanted)
     if shared is not None and found is not None:
-        shared[key] = found
+        shared[key] = (found, wanted)
     return {} if found is None else found
 
 
-def _read_board_external_once(path, open_ro, parked_pairs, signature, wall: float):
+def _read_board_external_once(path, open_ro, parked_pairs, signature, wall: float,
+                              wanted: Optional[frozenset] = None):
     """``_read_board_external`` outside a block; None = the read failed."""
     key = str(path)
     sig = signature(path) if signature is not None else None
@@ -230,16 +257,23 @@ def _read_board_external_once(path, open_ro, parked_pairs, signature, wall: floa
         with _lock:
             hit = _boards.get(key)
         if hit is not None and hit[0] == sig and (not hit[1] or 0 <= wall - hit[2] < _TTL_S):
-            return hit[3]
+            if _covers(hit[4], wanted):
+                return hit[3]
+            # An unchanged board asked about other sessions: read it whole once, so the next asks are hits.
+            wanted = None
     try:
         conn = open_ro(path)
     except sqlite3.Error:
         return None
     try:
         pairs = parked_pairs(conn)
+        if wanted is not None:
+            pairs = {(sid, tid) for sid, tid in pairs if str(sid) in wanted}
         # With a signature the stored contribution is the only memo: ``session_external``'s own ``_TTL_S`` memo
         # would hand back the answer from before the commit that moved the signature, to be kept under the new one.
-        found = session_external(conn, pairs, key=key if sig is None else "", now=wall) if pairs else {}
+        # A narrowed read is never kept there either: that memo is per board, not per session set.
+        memo = key if sig is None and wanted is None else ""
+        found = session_external(conn, pairs, key=memo, now=wall) if pairs else {}
         clocked = bool(pairs) and _clocked(conn, pairs)
     except sqlite3.Error:
         logger.debug("kanban external read failed for %s", path, exc_info=True)
@@ -248,7 +282,7 @@ def _read_board_external_once(path, open_ro, parked_pairs, signature, wall: floa
         conn.close()
     if sig is not None:  # taken before the read: a commit racing it moves the next request's signature
         with _lock:
-            _boards[key] = (sig, clocked, wall, found)
+            _boards[key] = (sig, clocked, wall, found, wanted)
     return found
 
 
@@ -261,8 +295,9 @@ def stamp_boards(rows: list[dict[str, Any]], board_paths, open_ro, parked_pairs,
     try:
         wall = time.time()
         paths = list(board_paths())
+        wanted = frozenset(str(sid) for row in rows for sid in row_ids(row))
         for path in paths:
-            for sid, slot in _board_external(path, open_ro, parked_pairs, signature, wall).items():
+            for sid, slot in _board_external(path, open_ro, parked_pairs, signature, wall, wanted).items():
                 mine = by_session.setdefault(sid, {"counts": [0, 0, 0], "cards": []})
                 mine["counts"] = [a + b for a, b in zip(mine["counts"], slot["counts"])]
                 mine["cards"] += slot["cards"]

@@ -683,8 +683,7 @@ def get_profiles_sessions_sidebar(
             rows[key].extend(stamp_automated(
                 _tag_rows(slices[key], name, now), automated_sources=automated))
 
-    def _window(key: str) -> list[dict[str, Any]]:
-        win = sessions_projection.select_sidebar_window(rows[key], cap[key])
+    def _window(win: list[dict[str, Any]]) -> list[dict[str, Any]]:
         annotate_subagent_activity(win)
         return annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
             annotate_goal_activity(annotate_kanban_activity(win, display=True))))))
@@ -695,8 +694,15 @@ def get_profiles_sessions_sidebar(
     windows = {}
     if not sessions_projection.sidebar_failed(
             recents_scope, retryable, storage, scanned_names, contributed):
+        from hermes_cli import kanban_activity_identity, kanban_external_activity
+
         with one_annotation_snapshot():
-            windows = {key: _window(key) for key in sessions_projection.SIDEBAR_SLICES}
+            selected = {key: sessions_projection.select_sidebar_window(rows[key], cap[key])
+                        for key in sessions_projection.SIDEBAR_SLICES}
+            # [daveey] The slices' one board read need cover only these sessions (t_01a21ab4eb964866).
+            kanban_external_activity.declare_sessions(
+                sid for win in selected.values() for row in win for sid in kanban_activity_identity.row_ids(row))
+            windows = {key: _window(win) for key, win in selected.items()}
     return sessions_projection.assemble_sidebar(
         windows, recents_scope=recents_scope, errors=errors, retryable=retryable,
         storage=storage, scanned=scanned_names, contributed=contributed,

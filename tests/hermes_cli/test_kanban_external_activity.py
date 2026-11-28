@@ -340,3 +340,143 @@ def test_projects_tree_reads_each_board_once_for_all_profiles(profiles_on_disk, 
     profiles.get_profiles_projects_tree()
     assert len(profiles_on_disk) > 1
     assert reads == [board], "every profile's annotation in one tree response shares one read of the board"
+
+
+# --- a stamp reads only the sessions it stamps (t_01a21ab4eb964866) -----------------------------------------------
+
+def _external_board(conn, gh, clock, monkeypatch, sessions=("s1", "s2", "s3")):
+    """One scheduled external card and one blocked card per session; returns (stamp, opens, read pairs)."""
+    for i, sid in enumerate(sessions):
+        a = park(conn, 9300 + i)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id=? WHERE id=?", (sid, a))
+        _session_card(conn, sid)
+    tick(conn, gh, clock, 0)
+    stamp, opens = _counting(monkeypatch, conn)
+    read: list[set] = []
+    real = kea.session_external
+
+    def spy(c, pairs, **kw):
+        read.append({sid for sid, _t in pairs})
+        return real(c, pairs, **kw)
+    monkeypatch.setattr(kea, "session_external", spy)
+    return stamp, opens, read
+
+
+def test_a_one_session_stamp_reads_only_that_sessions_cards(kanban_home, gh, clock, monkeypatch):
+    with kbc.connect_closing() as conn:
+        stamp, opens, read = _external_board(conn, gh, clock, monkeypatch)
+        got = stamp([{"id": "s2", "kanban_parked": 2}])
+        assert read == [{"s2"}], "a session detail must not read every parked session's external state"
+        assert len(opens) == 1
+        assert got[0]["kanban_external"] == 1
+        assert got == _fresh_stamp(conn, [{"id": "s2", "kanban_parked": 2}])
+
+
+def test_lineage_ids_are_read_and_rows_match_a_whole_board_read(kanban_home, gh, clock, monkeypatch):
+    with kbc.connect_closing() as conn:
+        stamp, _opens, read = _external_board(conn, gh, clock, monkeypatch)
+        rows = lambda: [{"id": "tip", "_lineage_root_id": "s1", "_lineage_ids": ["s3"]}, {"id": "s9"}]
+        got = stamp(rows())
+        assert read == [{"s1", "s3"}]
+        assert got[0]["kanban_external"] == 2 and "kanban_external" not in got[1]
+        assert got == _fresh_stamp(conn, rows())
+
+
+def test_a_narrow_read_never_answers_another_session(kanban_home, gh, clock, monkeypatch):
+    """The stored contribution covers only the sessions it was read for: an unchanged board asked about another
+    session reads it (once, whole), never answers from the narrow one (that would drop its cards)."""
+    with kbc.connect_closing() as conn:
+        stamp, opens, read = _external_board(conn, gh, clock, monkeypatch)
+        stamp([{"id": "s1"}])
+        got = stamp([{"id": "s2", "kanban_parked": 2}])
+        assert got[0]["kanban_external"] == 1
+        assert read == [{"s1"}, {"s1", "s2", "s3"}] and len(opens) == 2
+        assert stamp([{"id": "s3"}])[0]["kanban_external"] == 1
+        assert stamp([{"id": "s1"}, {"id": "s2"}])[1]["kanban_external"] == 1
+        assert len(opens) == 2, "the whole read answers every later session until the board commits"
+        assert got == _fresh_stamp(conn, [{"id": "s2", "kanban_parked": 2}])
+
+
+def test_a_commit_after_a_narrow_read_is_seen_by_the_next_stamp(kanban_home, gh, clock, monkeypatch):
+    with kbc.connect_closing() as conn:
+        stamp, opens, _read = _external_board(conn, gh, clock, monkeypatch)
+        assert stamp([{"id": "s1"}])[0]["kanban_external"] == 1
+        assert stamp([{"id": "s1"}])[0]["kanban_external"] == 1
+        assert len(opens) == 1
+        b = park(conn, 9400)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id='s1' WHERE id=?", (b,))
+        tick(conn, gh, clock, 1)
+        row = stamp([{"id": "s1"}])[0]  # notification loss would keep the narrow answer from before the commit
+        assert row["kanban_external"] == 2
+        assert row == _fresh_stamp(conn, [{"id": "s1"}])[0]
+
+
+def test_a_block_reads_its_declared_sessions_once_and_reads_whole_for_others(kanban_home, gh, clock, monkeypatch):
+    with kbc.connect_closing() as conn:
+        stamp, opens, read = _external_board(conn, gh, clock, monkeypatch)
+        with kea.one_board_read():
+            kea.declare_sessions(["s1", "s2"])
+            one = stamp([{"id": "s1"}])
+            two = stamp([{"id": "s2"}, {"id": "s1"}])
+            assert read == [{"s1", "s2"}] and len(opens) == 1
+            three = stamp([{"id": "s3"}])  # outside the declaration: never answered from it
+            assert read[-1] == {"s1", "s2", "s3"} and three[0]["kanban_external"] == 1
+        assert one == _fresh_stamp(conn, [{"id": "s1"}])
+        assert two == _fresh_stamp(conn, [{"id": "s2"}, {"id": "s1"}])
+
+
+def test_a_whole_read_in_a_block_answers_later_declared_stamps_and_declaring_outside_a_block_is_a_no_op(
+        kanban_home, gh, clock, monkeypatch):
+    with kbc.connect_closing() as conn:
+        stamp, opens, read = _external_board(conn, gh, clock, monkeypatch)
+        with kea.one_board_read():
+            stamp([{"id": "s3"}])
+            kea.declare_sessions(["s1", "s2"])
+            assert stamp([{"id": "s2"}])[0]["kanban_external"] == 1
+        assert read == [{"s1", "s2", "s3"}] and len(opens) == 1
+    kea.declare_sessions(["s1"])
+    assert getattr(kea._block, "wanted", None) is None
+
+
+def test_without_a_signature_a_narrow_read_is_not_kept_for_another_session(kanban_home, gh, clock, monkeypatch):
+    """``session_external``'s per-board ``_TTL_S`` memo (the unknown-signature path) must never keep a narrow read:
+    the next session's stamp would get the first one's answer."""
+    with kbc.connect_closing() as conn:
+        _stamp, _opens, _read = _external_board(conn, gh, clock, monkeypatch)
+        path = Path(str(kbc._main_db_file(conn)))
+
+        def stamp(rows):
+            return kea.stamp_boards(rows, lambda: [path], ksa._open_ro, ksa._parked_pairs, ksa._identity.row_ids,
+                                    signature=lambda p: None)
+        assert stamp([{"id": "s1"}])[0]["kanban_external"] == 1
+        assert stamp([{"id": "s2"}])[0]["kanban_external"] == 1
+        assert stamp([{"id": "s1"}, {"id": "s3"}])[1]["kanban_external"] == 1
+
+
+def test_sidebar_reads_each_board_once_for_its_window_sessions(profiles_on_disk, monkeypatch, tmp_path):
+    from hermes_cli.web_routers import profiles
+
+    for name, home in profiles_on_disk.items():
+        sidebar._seed_session(home, name + "-chat", source="cli", cwd="/fixture/repo")
+    board = tmp_path / "board" / "kanban.db"
+    reads = []
+
+    def once(path, _open_ro, _pairs, _sig, _wall, wanted=None):
+        reads.append((path, wanted))
+        return {}
+
+    def annotate(rows, **_kw):
+        return kea.stamp_boards(rows, lambda: [board], ksa._open_ro, ksa._parked_pairs, ksa._identity.row_ids)
+
+    monkeypatch.setattr(profiles, "_SIDEBAR_CACHE_TTL_SECONDS", 0)
+    monkeypatch.setattr(profiles, "annotate_kanban_activity", annotate, raising=False)
+    monkeypatch.setattr(ksa, "annotate_kanban_activity", annotate)
+    monkeypatch.setattr(kea, "_read_board_external_once", once)
+    got = profiles.get_profiles_sessions_sidebar()
+    ids = {row["id"] for key in ("recents", "cron", "messaging")
+           for row in (got.get(key) or {}).get("sessions") or ()}
+    assert ids, got
+    assert len(reads) == 1 and reads[0][0] == board
+    assert reads[0][1] is not None and ids <= reads[0][1], "the sidebar's one read covers its window sessions only"
