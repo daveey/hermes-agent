@@ -114,7 +114,8 @@ def _observe_prefetched(conn, binding: dict, read: dict, *, now: float, explicit
         'markers': [json.loads(raw) for raw in read['markers'].get(task_id, ())],
         'event': event, 'run': read['runs'].get(task_id),
         'archived': read['archived'].get(task_id) if row['status'] == 'archived' and event else None,
-        'withdrawn': read['withdrawn'].get(task_id), 'upstream': read['upstream'][task_id]})
+        'withdrawn': read['withdrawn'].get(task_id), 'upstream': read['upstream'][task_id],
+        'wait_info': read.get('wait_info')})
 
 
 def observe_local_bindings(bindings: list[dict], *, profile: str, now: float, home=None) -> list[dict | None]:
@@ -150,6 +151,11 @@ def observe_local_bindings(bindings: list[dict], *, profile: str, now: float, ho
                     _add_blocked_upstream(conn, cards)
                 read['upstream'] = {tid: {k: card[k] for k in ('blocked_upstream', 'upstream') if k in card}
                                     for tid, card in cards.items()}
+                # One wait read for every parked card in this snapshot (each alone cost ~10 statements).
+                from hermes_cli.kanban_session_activity import _local_wait_info
+                parked = sorted(tid for tid, row in read['tasks'].items() if row['status'] in ('scheduled', 'blocked'))
+                read['wait_info'] = {'ids': frozenset(parked),
+                                     'info': _local_wait_info(conn, parked, now=now) if parked else {}}
                 while alone:
                     try:
                         out[alone[0]] = _observe_prefetched(conn, bindings[alone[0]], read, now=now,

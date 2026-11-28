@@ -96,11 +96,17 @@ def orphan_reason(task):
     return None
 
 
-def observe_wait(conn, target, *, now):
-    """Owner-only evidence collected in the same snapshot as the task row."""
+def observe_wait(conn, target, *, now, infos=None):
+    """Owner-only evidence collected in the same snapshot as the task row.
+
+    ``infos`` is ``_local_wait_info`` already read in this same snapshot for a set of cards including ``target``
+    (``kanban_origin_local.observe_local_bindings``): one batched read instead of ~10 statements per parked card.
+    """
     from hermes_cli.kanban_awaiting import card_orphan_reason
-    from hermes_cli.kanban_session_activity import _local_wait_info
-    info = _local_wait_info(conn, [target], now=now).get(target) or {}
+    if infos is None:
+        from hermes_cli.kanban_session_activity import _local_wait_info
+        infos = _local_wait_info(conn, [target], now=now)
+    info = infos.get(target) or {}
     orphan = card_orphan_reason(conn, target)
     return {"orphan_reason": orphan,
             "parked_agent": bool(orphan or (info.get("agent_owned") and

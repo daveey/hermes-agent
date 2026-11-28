@@ -103,6 +103,23 @@ def test_batched_pass_matches_single_card_reads_for_every_state(world, board, mo
     assert by_state['archived']['closed_uncompleted'] and by_state['goal_done']['unfinished']
 
 
+@pytest.mark.parametrize('state', ['blocked', 'scheduled'])
+def test_parked_cards_share_one_wait_read(world, board, monkeypatch, state):
+    """Each parked card's wait read alone cost 9-13 statements (hub links projection, 2026-11-28)."""
+    seed(world, monkeypatch, (state,) * 16)
+    seen = count_board_statements(monkeypatch)
+    single = project(world, monkeypatch, '0')
+    del seen[:]
+    batched = project(world, monkeypatch, '1')
+    assert json.dumps(batched, sort_keys=True) == json.dumps(single, sort_keys=True) and len(batched) == 16
+    assert all(row['status'] == state for row in batched)
+    wait_reads = [s for s in seen if "status IN ('scheduled', 'blocked', 'triage', 'todo')" in s]
+    assert len(wait_reads) == 1, len(wait_reads)
+    # Remaining per-card reads (orphan reason, published park, block actor, ask) stay bounded by 8 per card;
+    # before the shared wait read: 182 (blocked) and 313 (scheduled) for these 16 cards.
+    assert len(seen) <= 16 * 8, len(seen)
+
+
 def test_batched_pass_statement_count_does_not_grow_with_cards(world, board, monkeypatch):
     seed(world, monkeypatch, ('done', 'done_archived', 'archived', 'withdrawn') * 4)
     seen = count_board_statements(monkeypatch)
