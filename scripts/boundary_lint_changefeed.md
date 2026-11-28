@@ -22,3 +22,15 @@ No wildcard exemption or aggregate ceiling is added.
 These are file-and-target-specific allowances for the bundled board's existing
 canonical store/host integration. Third-party plugins still receive the private
 import warning; the public API manifest and lint enforcement are unchanged.
+
+## Retained run bookkeeping (board_run_history)
+
+- `board_run_history.py` → `kanban_unused_grant.UNUSED_GRANT_BOOKKEEPING` and
+  `kanban_unused_grant.unused_grant_candidate`: the board's retained-run overlay
+  re-signs exactly the bookkeeping columns, and only for the runs, that the one
+  diagnostic bookkeeping reader (`unused_grant_run`) consults. Importing that
+  reader's read set and candidate predicate is what keeps the overlay from
+  drifting from it; a copied column list or predicate would silently serve stale
+  diagnostics after the next reader change. Same class as the existing
+  `board_incremental.py` → `kanban_activity_revision.BOOKKEEPING_COLUMNS` entry.
+  Two exact sites; no wildcard, no public API change.

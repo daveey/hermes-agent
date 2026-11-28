@@ -199,6 +199,8 @@
     "plugins/kanban/dashboard/board_rows.py hermes_cli.kanban_task_change": 2,
     "plugins/kanban/dashboard/board_rows.py hermes_cli.loop_accounting": 1,
     "plugins/kanban/dashboard/board_rows.py hermes_state_guard.ensure_kanban_test_isolation": 1,
+    "plugins/kanban/dashboard/board_run_history.py hermes_cli.kanban_unused_grant.UNUSED_GRANT_BOOKKEEPING": 1,
+    "plugins/kanban/dashboard/board_run_history.py hermes_cli.kanban_unused_grant.unused_grant_candidate": 1,
     "plugins/kanban/dashboard/board_shadow.py hermes_cli.kanban_db": 1,
     "plugins/kanban/dashboard/board_shadow.py hermes_cli.kanban_shadow_view": 1,
     "plugins/kanban/dashboard/plugin_api.py agent.auxiliary_client.call_llm": 1,
