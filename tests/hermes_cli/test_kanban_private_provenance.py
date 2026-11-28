@@ -150,6 +150,16 @@ def test_recorded_chat_is_independent_unknown_fact(monkeypatch, admin, expected)
     assert row['administrative_owner'] == admin
 
 
+@pytest.mark.parametrize('payload', [{}, 'not-json'])
+def test_nonstop_context_never_becomes_restriction_source(payload):
+    from types import SimpleNamespace
+    from hermes_cli.kanban_actionability_restrictions import details
+
+    reader = SimpleNamespace(synced=False, events=lambda _tid: [])
+    events = [{'uid': 'renewal', 'kind': 'scope_renewed', 'ord': 1, 'payload': payload}]
+    assert details({'id': 'fixture'}, reader, events, frozenset(), frozenset()) == []
+
+
 def test_details_excludes_resolved_sources_and_nonstop_context():
     from types import SimpleNamespace
     from hermes_cli.kanban_actionability_restrictions import details
