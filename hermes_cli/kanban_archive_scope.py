@@ -76,7 +76,9 @@ def worker_archive_scope(conn, task_id: str) -> tuple[Optional[str], Optional[st
     ``refusal`` is None when allowed. ``via`` is set when the archive is allowed only
     as a stranded-``runs_on`` sweep of a foreign card; record it on the archived event.
     """
-    return archive_scope_for(conn, task_id, os.environ.get("HERMES_KANBAN_TASK"))
+    # Terminal children retain the worker marker rather than the tool-only task marker.
+    worker_task = os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK")
+    return archive_scope_for(conn, task_id, worker_task)
 
 
 def archive_scope_for(conn, task_id: str, env_tid: Optional[str]) -> tuple[Optional[str], Optional[str]]:

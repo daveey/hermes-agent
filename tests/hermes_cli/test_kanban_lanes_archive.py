@@ -265,6 +265,26 @@ def test_scoped_worker_cannot_withdraw_a_foreign_card(conn, configured, monkeypa
     assert arc.withdraw(conn, card, producer="ci-main-watch", reason="main green twice") is None
 
 
+@pytest.mark.parametrize("marker", ["HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK"])
+def test_withdraw_cli_preserves_worker_scope(conn, configured, monkeypatch, marker):
+    from argparse import Namespace
+    from contextlib import nullcontext
+    from hermes_cli import kanban_lanes_cli as cli
+
+    card = held(conn, creator="ci-main-watch", key=f"ci-red:daveey/hermes:{SHA}", age=60)
+    other = kb.create_task(conn, title="unrelated work", assignee="default", created_by="user")
+    for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(marker, other)
+    monkeypatch.setattr(cli.kbc, "connect_closing", lambda: nullcontext(conn))
+    args = Namespace(task_id=card, producer="ci-main-watch", reason="no proof", json=True)
+    assert cli._withdraw(args) == 1
+    assert status(conn, card) == "triage" and archived_event(conn, card) is None
+    monkeypatch.delenv(marker)
+    assert cli._withdraw(args) == 0
+    assert status(conn, card) == "archived"
+
+
 def test_superseded_refuses_a_newer_card_that_is_no_longer_open(conn, configured):
     older = held(conn, creator="worker-core-rollout", key="worker-core-rollout:lag:worker-1:20261119", age=OLD)
     newer = held(conn, creator="worker-core-rollout", key="worker-core-rollout:lag:worker-1:20261127", age=60)
