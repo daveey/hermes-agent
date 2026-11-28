@@ -145,6 +145,12 @@ def _refusal(conn: sqlite3.Connection, task_id: str) -> Optional[OfferRefused]:
         return OfferRefused("safety_restricted", execution_refusal(conn, stopped) or "Provider safety restriction")
     if kanban_release.offer(conn, task_id) is None:
         return OfferRefused("not_held", f"{task_id} waits on no spend or scope stop a release could end")
+    from hermes_cli.kanban_release_reserved import reconcile
+    try:
+        if reconcile(conn, task_id, for_filing=True):
+            return OfferRefused("application_pending", "An approval is reserved; recover its application, do not ask again")
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, AttributeError):
+        return OfferRefused("application_unreadable", "Cannot establish reserved application custody; no offer filed")
     return None
 
 

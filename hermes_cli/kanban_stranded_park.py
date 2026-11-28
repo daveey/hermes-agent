@@ -477,6 +477,9 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
         if fresh is None:
             return False
         fresh = dict(fresh)
+        from hermes_cli.kanban_release_reserved import reconcile
+        if reconcile(conn, tid, for_filing=True):
+            return False
         if (fresh["status"] not in PARKED or _excluded(conn, _gated(conn, fresh), now, age=age, defer=defer)
                 or _escalated(conn, tid, entry)):
             return False
@@ -647,6 +650,9 @@ def _refile(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: 
             return False
         fresh = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
         fresh = dict(fresh) if fresh is not None else None
+        from hermes_cli.kanban_release_reserved import reconcile
+        if reconcile(conn, tid, for_filing=True):
+            return False
         if (fresh is None or fresh["status"] not in PARKED or _leased(fresh, now)
                 or not _repairable(conn, fresh, entry)):
             return False
@@ -725,6 +731,13 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
             if tid in copies or frozen(conn, tid):
                 continue
             entry = park_entry(conn, tid)
+            from hermes_cli.kanban_release_reserved import reconcile
+            try:
+                if reconcile(conn, tid):
+                    continue
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, AttributeError):
+                logger.warning("kanban: release application custody unreadable for %s; deferring offer", tid)
+                continue
             start = entry["created_at"] if entry else int(row.get("created_at") or 0)
             age = now - start
             if _repairable(conn, row, entry):
